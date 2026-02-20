@@ -1,0 +1,39 @@
+CREATE TABLE IF NOT EXISTS Site (
+  id TEXT PRIMARY KEY DEFAULT random_uuid(),
+  name TEXT NOT NULL,
+  domain TEXT UNIQUE NOT NULL,
+  cdnScriptId TEXT UNIQUE NOT NULL DEFAULT random_uuid(),
+  apiKey TEXT UNIQUE NOT NULL DEFAULT random_uuid(),
+  createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS Script (
+  id TEXT PRIMARY KEY DEFAULT random_uuid(),
+  siteId TEXT NOT NULL,
+  scriptUrl TEXT NOT NULL,
+  scriptType TEXT NOT NULL,
+  category TEXT NOT NULL,
+  provider TEXT,
+  description TEXT,
+  detected BOOLEAN DEFAULT 0,
+  blocked BOOLEAN DEFAULT 1,
+  createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (siteId) REFERENCES Site(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS Consent (
+  id TEXT PRIMARY KEY DEFAULT random_uuid(),
+  siteId TEXT NOT NULL,
+  ipAddress TEXT,
+  userAgent TEXT,
+  necessary BOOLEAN DEFAULT 1,
+  analytics BOOLEAN DEFAULT 0,
+  marketing BOOLEAN DEFAULT 0,
+  functional BOOLEAN DEFAULT 0,
+  social BOOLEAN DEFAULT 0,
+  consentMethod TEXT NOT NULL,
+  createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+  expiresAt DATETIME NOT NULL,
+  FOREIGN KEY (siteId) REFERENCES Site(id) ON DELETE CASCADE
+);
