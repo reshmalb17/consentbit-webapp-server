@@ -324,6 +324,43 @@ export async function ensureSchema(db) {
   try {
     await db.prepare(`ALTER TABLE Subscription ADD COLUMN licenseKeySites TEXT`).run();
   } catch (e) {}
+  try {
+    await db.prepare(`ALTER TABLE Subscription ADD COLUMN planId TEXT`).run();
+  } catch (e) {}
+
+  // Plan: pricing tiers for Upgrade tab (Free, Basic, Essential, Growth)
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS Plan (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      monthlyAmountCents INTEGER NOT NULL,
+      yearlyAmountCents INTEGER NOT NULL,
+      yearlyTotalCents INTEGER NOT NULL,
+      domainsIncluded INTEGER NOT NULL,
+      scansIncluded INTEGER NOT NULL,
+      pageviewsIncluded INTEGER NOT NULL,
+      extraScansPriceCentsPerUnit INTEGER,
+      extraPageviewsPriceCentsPerUnit INTEGER,
+      trialDays INTEGER DEFAULT 0,
+      hasIabTcf INTEGER DEFAULT 0,
+      active INTEGER DEFAULT 1,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  // PageviewUsage: monthly pageview counts per site
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS PageviewUsage (
+      id TEXT PRIMARY KEY,
+      siteId TEXT NOT NULL,
+      yearMonth TEXT NOT NULL,
+      pageviewCount INTEGER NOT NULL DEFAULT 0,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(siteId, yearMonth)
+    )
+  `).run();
 
   // LicenseActivation: maps license key to site (for quantity plan keys activated via add-site flow)
   await db.prepare(`
@@ -381,6 +418,9 @@ export async function ensureSchema(db) {
     )
   `).run();
 
+  // Seed default Upgrade plans
+  await ensureDefaultPlans(db);
+
   // User: id, email, name, passwordHash (salted PBKDF2)
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS User (
@@ -392,11 +432,22 @@ export async function ensureSchema(db) {
       updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `).run();
+  // Backwards-compatible migrations for auth columns
   try {
     await db.prepare('ALTER TABLE User ADD COLUMN name TEXT').run();
   } catch (e) {}
   try {
     await db.prepare('ALTER TABLE User ADD COLUMN passwordHash TEXT').run();
+  } catch (e) {}
+  // Some earlier schemas used snake_case password_hash with NOT NULL constraint.
+  // Ensure the column exists and is kept in sync with passwordHash so inserts don't fail.
+  try {
+    await db.prepare('ALTER TABLE User ADD COLUMN password_hash TEXT').run();
+  } catch (e) {}
+  try {
+    await db
+      .prepare('UPDATE User SET password_hash = passwordHash WHERE password_hash IS NULL AND passwordHash IS NOT NULL')
+      .run();
   } catch (e) {}
 
   // Session: for auth cookie
@@ -409,6 +460,27 @@ export async function ensureSchema(db) {
       FOREIGN KEY (userId) REFERENCES User(id)
     )
   `).run();
+
+  // One-time email verification codes (passwordless login/signup)
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS EmailVerificationCode (
+      id TEXT PRIMARY KEY,
+      email TEXT NOT NULL,
+      purpose TEXT NOT NULL, -- 'login' | 'signup'
+      codeHash TEXT NOT NULL,
+      name TEXT, -- only for signup
+      attempts INTEGER DEFAULT 0,
+      consumedAt DATETIME,
+      expiresAt DATETIME NOT NULL,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_evc_email_purpose_created ON EmailVerificationCode(email, purpose, createdAt)`).run();
+  } catch (e) {}
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_evc_expires ON EmailVerificationCode(expiresAt)`).run();
+  } catch (e) {}
 
   // Organization + OrganizationMember
   await db.prepare(`
@@ -431,6 +503,57 @@ export async function ensureSchema(db) {
       FOREIGN KEY (userId) REFERENCES User(id)
     )
   `).run();
+}
+
+export async function createEmailVerificationCode(
+  db,
+  { email, purpose, codeHash, name, ttlMinutes = 10 } = {},
+) {
+  await ensureSchema(db);
+  const id = crypto.randomUUID();
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000).toISOString();
+  await db
+    .prepare(
+      `INSERT INTO EmailVerificationCode (id, email, purpose, codeHash, name, attempts, consumedAt, expiresAt, createdAt)
+       VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, ?6, ?7)`,
+    )
+    .bind(id, email.trim().toLowerCase(), purpose, codeHash, name || null, expiresAt, now.toISOString())
+    .run();
+  return { id, expiresAt };
+}
+
+export async function getLatestValidEmailVerificationCode(db, { email, purpose } = {}) {
+  await ensureSchema(db);
+  const row = await db
+    .prepare(
+      `SELECT *
+       FROM EmailVerificationCode
+       WHERE email = ?1 AND purpose = ?2
+         AND consumedAt IS NULL
+         AND expiresAt > datetime('now')
+       ORDER BY createdAt DESC
+       LIMIT 1`,
+    )
+    .bind((email || '').trim().toLowerCase(), purpose)
+    .first();
+  return row || null;
+}
+
+export async function incrementEmailVerificationAttempts(db, id) {
+  await ensureSchema(db);
+  await db
+    .prepare(`UPDATE EmailVerificationCode SET attempts = COALESCE(attempts, 0) + 1 WHERE id = ?1`)
+    .bind(id)
+    .run();
+}
+
+export async function consumeEmailVerificationCode(db, id) {
+  await ensureSchema(db);
+  await db
+    .prepare(`UPDATE EmailVerificationCode SET consumedAt = datetime('now') WHERE id = ?1`)
+    .bind(id)
+    .run();
 }
 
 // --- Promo helpers ---
@@ -477,6 +600,165 @@ export async function incrementPromoRedemption(db, promoId) {
     .run();
 }
 
+// --- Plan helpers ---
+export async function ensureDefaultPlans(db) {
+  const now = new Date().toISOString();
+  const plans = [
+    {
+      id: 'free',
+      name: 'Free plan',
+      monthlyAmountCents: 0,
+      yearlyAmountCents: 0,
+      yearlyTotalCents: 0,
+      domainsIncluded: 1,
+      scansIncluded: 100,
+      pageviewsIncluded: 7500,
+      extraScansPriceCentsPerUnit: null,
+      extraPageviewsPriceCentsPerUnit: null,
+      trialDays: 0,
+      hasIabTcf: 0,
+    },
+    {
+      id: 'basic',
+      name: 'Basic plan',
+      monthlyAmountCents: 900,
+      yearlyAmountCents: 800,
+      yearlyTotalCents: 9600,
+      domainsIncluded: 1,
+      scansIncluded: 750,
+      pageviewsIncluded: 100000,
+      extraScansPriceCentsPerUnit: null,
+      extraPageviewsPriceCentsPerUnit: null,
+      trialDays: 14,
+      hasIabTcf: 0,
+    },
+    {
+      id: 'essential',
+      name: 'Essential plan',
+      monthlyAmountCents: 2000,
+      yearlyAmountCents: 1600,
+      yearlyTotalCents: 19200,
+      domainsIncluded: 1,
+      scansIncluded: 5000,
+      pageviewsIncluded: 500000,
+      extraScansPriceCentsPerUnit: 49, // $0.49 per 10k scans/pageviews step (stored as cents)
+      extraPageviewsPriceCentsPerUnit: 49,
+      trialDays: 14,
+      hasIabTcf: 1,
+    },
+    {
+      id: 'growth',
+      name: 'Growth plan',
+      monthlyAmountCents: 5600,
+      yearlyAmountCents: 4200,
+      yearlyTotalCents: 50400,
+      domainsIncluded: 1,
+      scansIncluded: 10000,
+      pageviewsIncluded: 2000000,
+      extraScansPriceCentsPerUnit: 49, // $0.49 per 100 scans step
+      extraPageviewsPriceCentsPerUnit: 39, // $0.39 per 10k pageviews step
+      trialDays: 14,
+      hasIabTcf: 1,
+    },
+  ];
+
+  for (const p of plans) {
+    await db
+      .prepare(
+        `INSERT INTO Plan (id, name, monthlyAmountCents, yearlyAmountCents, yearlyTotalCents, domainsIncluded, scansIncluded, pageviewsIncluded, extraScansPriceCentsPerUnit, extraPageviewsPriceCentsPerUnit, trialDays, hasIabTcf, createdAt, updatedAt)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           monthlyAmountCents = excluded.monthlyAmountCents,
+           yearlyAmountCents = excluded.yearlyAmountCents,
+           yearlyTotalCents = excluded.yearlyTotalCents,
+           domainsIncluded = excluded.domainsIncluded,
+           scansIncluded = excluded.scansIncluded,
+           pageviewsIncluded = excluded.pageviewsIncluded,
+           extraScansPriceCentsPerUnit = excluded.extraScansPriceCentsPerUnit,
+           extraPageviewsPriceCentsPerUnit = excluded.extraPageviewsPriceCentsPerUnit,
+           trialDays = excluded.trialDays,
+           hasIabTcf = excluded.hasIabTcf,
+           updatedAt = excluded.updatedAt`
+      )
+      .bind(
+        p.id,
+        p.name,
+        p.monthlyAmountCents,
+        p.yearlyAmountCents,
+        p.yearlyTotalCents,
+        p.domainsIncluded,
+        p.scansIncluded,
+        p.pageviewsIncluded,
+        p.extraScansPriceCentsPerUnit,
+        p.extraPageviewsPriceCentsPerUnit,
+        p.trialDays,
+        p.hasIabTcf,
+        now
+      )
+      .run();
+  }
+}
+
+// --- Pageview helpers ---
+export async function incrementPageviewUsage(db, siteId, date = new Date()) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const yearMonth = `${year}-${month}`;
+  const id = `pv_${siteId}_${yearMonth}`;
+  const now = date.toISOString();
+
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO PageviewUsage (id, siteId, yearMonth, pageviewCount, createdAt, updatedAt)
+       VALUES (?1, ?2, ?3, 0, ?4, ?4)`
+    )
+    .bind(id, siteId, yearMonth, now)
+    .run();
+
+  await db
+    .prepare(
+      `UPDATE PageviewUsage
+       SET pageviewCount = pageviewCount + 1,
+           updatedAt = ?2
+       WHERE id = ?1`
+    )
+    .bind(id, now)
+    .run();
+
+  // Avoid extra SELECT per pageview; billing can read totals when needed.
+  return { siteId, yearMonth };
+}
+
+/** Total pageview count for an organization for a given month (default current month). */
+export async function getPageviewUsageForOrganization(db, organizationId, date = new Date()) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const yearMonth = `${year}-${month}`;
+  const sitesRes = await db.prepare('SELECT id FROM Site WHERE organizationId = ?1').bind(organizationId).all();
+  const siteIds = (sitesRes.results || []).map((r) => r.id).filter(Boolean);
+  if (siteIds.length === 0) return { yearMonth, pageviewCount: 0, siteCount: 0 };
+  const placeholders = siteIds.map(() => '?').join(',');
+  const sumRes = await db
+    .prepare(
+      `SELECT COALESCE(SUM(pageviewCount), 0) AS total FROM PageviewUsage WHERE siteId IN (${placeholders}) AND yearMonth = ?`
+    )
+    .bind(...siteIds, yearMonth)
+    .first();
+  return {
+    yearMonth,
+    pageviewCount: Number(sumRes?.total ?? 0),
+    siteCount: siteIds.length,
+  };
+}
+
+/** Get plan by id (free, basic, essential, growth). */
+export async function getPlanById(db, planId) {
+  if (!planId) return null;
+  const row = await db.prepare('SELECT * FROM Plan WHERE id = ?1').bind(planId).first();
+  return row || null;
+}
+
 // --- Subscription helpers ---
 export async function saveSubscription(db, data) {
   let id = data.id;
@@ -491,13 +773,14 @@ export async function saveSubscription(db, data) {
   const quantityVal = data.quantity ?? null;
   const cancelledLicenseKeysJson = Array.isArray(data.cancelledLicenseKeys) ? JSON.stringify(data.cancelledLicenseKeys) : (data.cancelledLicenseKeys || null);
 
+  const planId = data.planId || null;
   await db
     .prepare(
-      `INSERT INTO Subscription (id, organizationId, siteId, stripeSubscriptionId, stripeCustomerId, stripePriceId, planType, interval, status, currentPeriodStart, currentPeriodEnd, cancelAtPeriodEnd, promoCodeId, amountCents, licenseKey, licenseKeys, quantity, cancelledLicenseKeys, createdAt, updatedAt)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+      `INSERT INTO Subscription (id, organizationId, siteId, stripeSubscriptionId, stripeCustomerId, stripePriceId, planType, planId, interval, status, currentPeriodStart, currentPeriodEnd, cancelAtPeriodEnd, promoCodeId, amountCents, licenseKey, licenseKeys, quantity, cancelledLicenseKeys, createdAt, updatedAt)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
        ON CONFLICT(id) DO UPDATE SET
-         siteId = ?3, stripeSubscriptionId = ?4, stripeCustomerId = ?5, stripePriceId = ?6, planType = ?7, status = ?9,
-         currentPeriodStart = ?10, currentPeriodEnd = ?11, cancelAtPeriodEnd = ?12, licenseKey = ?15, licenseKeys = ?16, quantity = ?17, cancelledLicenseKeys = ?18, updatedAt = ?20`
+         siteId = ?3, stripeSubscriptionId = ?4, stripeCustomerId = ?5, stripePriceId = ?6, planType = ?7, planId = ?8, status = ?10,
+         currentPeriodStart = ?11, currentPeriodEnd = ?12, cancelAtPeriodEnd = ?13, licenseKey = ?16, licenseKeys = ?17, quantity = ?18, cancelledLicenseKeys = ?19, updatedAt = ?21`
     )
     .bind(
       id,
@@ -507,6 +790,7 @@ export async function saveSubscription(db, data) {
       data.stripeCustomerId || null,
       data.stripePriceId || null,
       data.planType || 'single',
+      planId,
       data.interval || 'monthly',
       data.status || 'active',
       data.currentPeriodStart || null,
@@ -544,11 +828,61 @@ export async function getSubscriptionById(db, id) {
 }
 
 export async function getSubscriptionByOrganization(db, organizationId) {
+  if (!organizationId) return null;
+  // Prefer active/trialing so a new purchase shows instead of an old canceled one
   const row = await db
+    .prepare(
+      `SELECT * FROM Subscription WHERE organizationId = ?1 AND (status = 'active' OR status = 'trialing') ORDER BY updatedAt DESC LIMIT 1`
+    )
+    .bind(organizationId)
+    .first();
+  if (row) return row;
+  // Fallback: any subscription for org (e.g. canceled but still show history)
+  const fallback = await db
     .prepare('SELECT * FROM Subscription WHERE organizationId = ?1 ORDER BY updatedAt DESC LIMIT 1')
     .bind(organizationId)
     .first();
-  return row || null;
+  return fallback || null;
+}
+
+/** Effective plan for an org: from active subscription or 'free'. Returns { planId, plan, subscription }. */
+export async function getEffectivePlanForOrganization(db, organizationId) {
+  const sub = await getSubscriptionByOrganization(db, organizationId);
+  const planId = sub ? (sub.planId ?? sub.planid ?? null) : null;
+  const effectivePlanId = planId && ['basic', 'essential', 'growth'].includes(planId) ? planId : 'free';
+  const plan = await getPlanById(db, effectivePlanId);
+  return { planId: effectivePlanId, plan, subscription: sub };
+}
+
+/** Scan count for an organization in a given month (default current). */
+export async function getScanUsageForOrganization(db, organizationId, date = new Date()) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const yearMonth = `${year}-${month}`;
+  const start = `${yearMonth}-01T00:00:00.000Z`;
+  const end = date.getUTCMonth() === 11
+    ? `${year + 1}-01-01T00:00:00.000Z`
+    : `${year}-${String(date.getUTCMonth() + 2).padStart(2, '0')}-01T00:00:00.000Z`;
+  const sitesRes = await db.prepare('SELECT id FROM Site WHERE organizationId = ?1').bind(organizationId).all();
+  const siteIds = (sitesRes.results || []).map((r) => r.id).filter(Boolean);
+  if (siteIds.length === 0) return { yearMonth, scanCount: 0 };
+  const placeholders = siteIds.map(() => '?').join(',');
+  const sumRes = await db
+    .prepare(
+      `SELECT COUNT(*) AS cnt FROM ScanHistory WHERE siteId IN (${placeholders}) AND createdAt >= ? AND createdAt < ?`
+    )
+    .bind(...siteIds, start, end)
+    .first();
+  return { yearMonth, scanCount: Number(sumRes?.cnt ?? 0) };
+}
+
+/** Number of sites for an organization. */
+export async function getSitesCountByOrganization(db, organizationId) {
+  const row = await db
+    .prepare('SELECT COUNT(*) AS cnt FROM Site WHERE organizationId = ?1')
+    .bind(organizationId)
+    .first();
+  return Number(row?.cnt ?? 0);
 }
 
 /** All subscriptions for an organization (for licenses tab). */
@@ -556,6 +890,19 @@ export async function getSubscriptionsByOrganization(db, organizationId) {
   const { results } = await db
     .prepare('SELECT * FROM Subscription WHERE organizationId = ?1 ORDER BY createdAt DESC')
     .bind(organizationId)
+    .all();
+  return results || [];
+}
+
+/** Active subscriptions that have a Stripe subscription ID (for metered usage reporting). */
+export async function getActiveSubscriptionsForMeteredReporting(db) {
+  const { results } = await db
+    .prepare(
+      `SELECT id, organizationId, stripeSubscriptionId
+       FROM Subscription
+       WHERE (status = 'active' OR status = 'trialing')
+         AND stripeSubscriptionId IS NOT NULL AND stripeSubscriptionId != ''`
+    )
     .all();
   return results || [];
 }
@@ -1046,19 +1393,39 @@ export async function getUserByEmail(db, email) {
 export async function createUser(db, { email, name, passwordHash }) {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
-  await db
-    .prepare(
-      `INSERT INTO User (id, email, name, passwordHash, createdAt, updatedAt)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?5)`
-    )
-    .bind(
-      id,
-      email.trim().toLowerCase(),
-      (name || '').trim() || null,
-      passwordHash,
-      now
-    )
-    .run();
+
+  // Insert into both camelCase and snake_case password columns for compatibility
+  try {
+    await db
+      .prepare(
+        `INSERT INTO User (id, email, name, passwordHash, password_hash, createdAt, updatedAt)
+         VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?5)`
+      )
+      .bind(
+        id,
+        email.trim().toLowerCase(),
+        (name || '').trim() || null,
+        passwordHash,
+        now
+      )
+      .run();
+  } catch (e) {
+    // Fallback for environments where password_hash column does not exist
+    await db
+      .prepare(
+        `INSERT INTO User (id, email, name, passwordHash, createdAt, updatedAt)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)`
+      )
+      .bind(
+        id,
+        email.trim().toLowerCase(),
+        (name || '').trim() || null,
+        passwordHash,
+        now
+      )
+      .run();
+  }
+
   return { id, email: email.trim().toLowerCase(), name: (name || '').trim() || null };
 }
 
@@ -1151,6 +1518,34 @@ export async function addOrganizationMember(
     .run();
 }
 
+/**
+ * New app convention: one Organization per user.
+ * Creates the org on-demand (no explicit user prompt) and ensures membership exists.
+ */
+export async function getOrCreateOrganizationForUser(
+  db,
+  { userId, organizationName } = {},
+) {
+  await ensureSchema(db);
+  if (!userId) return null;
+
+  const existing = await db
+    .prepare('SELECT * FROM Organization WHERE ownerUserId = ?1 ORDER BY createdAt ASC LIMIT 1')
+    .bind(userId)
+    .first();
+
+  if (existing?.id) {
+    // Make sure owner membership exists (idempotent).
+    await addOrganizationMember(db, { organizationId: existing.id, userId, role: 'owner' });
+    return existing;
+  }
+
+  const name = (organizationName || '').trim() || 'My Organization';
+  const org = await createOrganization(db, { ownerUserId: userId, name });
+  await addOrganizationMember(db, { organizationId: org.id, userId, role: 'owner' });
+  return org;
+}
+
 export async function getOrganizationsForUser(db, userId) {
   const { results } = await db
     .prepare(
@@ -1162,6 +1557,15 @@ export async function getOrganizationsForUser(db, userId) {
     .bind(userId)
     .all();
   return results || [];
+}
+
+export async function getOrganizationMember(db, userId, organizationId) {
+  if (!userId || !organizationId) return null;
+  const row = await db
+    .prepare('SELECT * FROM OrganizationMember WHERE userId = ?1 AND organizationId = ?2')
+    .bind(userId, organizationId)
+    .first();
+  return row || null;
 }
 
 // --- Scan-related database operations ---

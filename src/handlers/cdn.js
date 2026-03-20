@@ -298,6 +298,27 @@ ${inlineConfig}
     }
   }
 
+  // Send anonymous pageview to backend for billing/usage
+  function sendPageviewToServer() {
+    if (!SITE_ID || !API_BASE) return;
+    try {
+      var payload = {
+        siteId: SITE_ID,
+        pageUrl: (typeof window !== 'undefined' && window.location) ? window.location.href : null
+      };
+      fetch(API_BASE + '/api/pageview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        keepalive: true
+      }).catch(function (e) {
+        console.warn('[ConsentBit] /api/pageview failed', e);
+      });
+    } catch (e) {
+      console.warn('[ConsentBit] /api/pageview threw', e);
+    }
+  }
+
   // Collect cookies from document.cookie and send to backend (no categorization in client)
   function getDocumentCookies() {
     try {
@@ -1492,6 +1513,13 @@ ${inlineConfig}
       showBanner();
     } else {
       console.log('[ConsentBit] Banner not shown - consent already accepted');
+    }
+
+    // Track a pageview for this site (used for billing/usage)
+    try {
+      sendPageviewToServer();
+    } catch (e) {
+      console.warn('[ConsentBit] sendPageviewToServer threw', e);
     }
 
     // Listen for footer link clicks using data attribute
