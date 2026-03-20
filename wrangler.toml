@@ -1,0 +1,45 @@
+name = "consent-webapp-manager"
+main = "src/index.js"
+compatibility_date = "2026-02-02"
+
+[[d1_databases]]
+binding = "CONSENT_WEBAPP"
+database_name = "consent-webapp"
+database_id = "bc37fa30-5060-491d-b19c-f3eeb7b1fd00"
+
+[vars]
+JWT_SECRET="x7K9pL2mQ5vR8tY1nB4jH7uF0zA3eD6cK9pL2mQ5vR8tY1nB4jH7uF0zA3eD6cK9p"
+
+CDN_BASE_URL = "https://consent-webapp-manager.YOUR-ACCOUNT.workers.dev"
+STRIPE_PRICE_BASIC_MONTHLY = "price_1T7doaJwcuG9163M3fNkG77K" 
+STRIPE_PRICE_BASIC_YEARLY = "price_1T7dqFJwcuG9163MlGnV7DRn"
+STRIPE_PRICE_ESSENTIAL_MONTHLY = "price_1T7drWJwcuG9163MSZepvR2S"
+STRIPE_PRICE_ESSENTIAL_YEARLY = "price_1T7drnJwcuG9163MQ03txwwC"
+STRIPE_PRICE_GROWTH_MONTHLY = "price_1T7dsaJwcuG9163MIcICCuWk"
+STRIPE_PRICE_GROWTH_YEARLY = "price_1T7dt2JwcuG9163M9xaqMCk6"
+
+
+# Single plan: recurring subscription prices (promo applies to initial; renewals use these)
+STRIPE_PRICE_MONTHLY = "price_1RMxWNJwcuG9163MoH33aEjh"
+STRIPE_PRODUCT_MONTHLY = "prod_SHWZdF20XLXtn9"
+STRIPE_PRICE_YEARLY = "price_1Sz1ehJwcuG9163Mt7yNlrD6"
+STRIPE_PRODUCT_YEARLY = "prod_TwvVRX1MaDL7wV"
+
+# Metered usage (Workflow A cron): set these to your Stripe metered price IDs so we report pageview/scan usage.
+# STRIPE_PRICE_ESSENTIAL_PAGEVIEWS_METERED = "price_xxx"
+# STRIPE_PRICE_ESSENTIAL_SCANS_METERED = "price_xxx"
+# STRIPE_PRICE_GROWTH_PAGEVIEWS_METERED = "price_xxx"
+# STRIPE_PRICE_GROWTH_SCANS_METERED = "price_xxx"
+
+# Bulk purchase: one-time (non-recurring) Stripe prices for initial payment
+STRIPE_ONE_TIME_PRICE_MONTHLY = "price_1SpSusJwcuG9163MHGK38FfW"
+STRIPE_ONE_TIME_PRICE_YEARLY = "price_1SpSw0JwcuG9163MLkRgIPmD"
+STRIPE_ONE_TIME_PRODUCT_MONTHLY = "prod_Tn30iMTLmnS6Yz"
+STRIPE_ONE_TIME_PRODUCT_YEARLY = "prod_Tn329EHlZLyLtR"
+
+# Cron trigger to execute scheduled scans every minute
+[triggers]
+crons = ["*/1 * * * *"]
+
+
+
