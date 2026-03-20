@@ -286,7 +286,8 @@ export async function handleStripeWebhook(request, env) {
           siteId: siteId || null,
           stripeSubscriptionId: subId,
           stripeCustomerId: session.customer,
-          planType: 'single',
+          planType: planTypeMeta === 'tier' ? 'tier' : 'single',
+          planId: subMeta.planId || null,
           interval,
           status: 'active',
           currentPeriodStart,
@@ -322,6 +323,7 @@ export async function handleStripeWebhook(request, env) {
       }
 
       const existingPlanType = existing?.planType ?? existing?.plantype ?? 'single';
+      const planIdFromMeta = sub.metadata?.planId ?? existing?.planId ?? existing?.planid ?? null;
       const intervalFromSub = sub.items?.data?.[0]?.plan?.interval === 'year' ? 'yearly' : 'monthly';
       await saveSubscription(db, {
         id: existing?.id,
@@ -331,6 +333,7 @@ export async function handleStripeWebhook(request, env) {
         stripeCustomerId: sub.customer,
         stripePriceId: sub.items?.data?.[0]?.price?.id,
         planType: existingPlanType,
+        planId: planIdFromMeta,
         interval: intervalFromSub,
         status,
         currentPeriodStart: toTimestamp(sub.current_period_start),

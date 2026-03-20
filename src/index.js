@@ -16,13 +16,19 @@ import { handleConsentLogs } from './handlers/consentLogs.js';
 import { handleValidatePromo } from './handlers/validatePromo.js';
 import { handleCreateCheckoutSession } from './handlers/createCheckoutSession.js';
 import { handleStripeWebhook } from './handlers/stripeWebhook.js';
+import { reportStripeMeteredUsage } from './handlers/reportStripeUsage.js';
 import { handleLicenses } from './handlers/licenses.js';
 import { handleActivateLicense } from './handlers/activateLicense.js';
 import { handleCancelSubscription } from './handlers/cancelSubscription.js';
+import { handleDebugSchema } from './handlers/debugSchema.js';
+import { handleBillingSummary, handleBillingPortal, handleBillingInvoices, handleBillingUsage } from './handlers/billing.js';
 
 import { handleAuthLogin } from './handlers/authLogin.js';
 import { handleAuthSignup } from './handlers/authSignup.js';
 import { handleAuthMe } from './handlers/authMe.js';
+import { handleAuthRequestCode } from './handlers/authRequestCode.js';
+import { handleAuthVerifyCode } from './handlers/authVerifyCode.js';
+import { handleAuthLogout } from './handlers/authLogout.js';
 import { handleOnboardingFirstSetup } from './handlers/onboardingFirstSetup.js';
 
 import { handleOptions, withCors, withPublicCors } from './utils/cors.js';
@@ -172,7 +178,13 @@ async function processSubscriptionQueue(env) {
 export default {
   // Cron trigger handler - runs every minute
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(Promise.all([executeScheduledScans(env), processSubscriptionQueue(env)]));
+    ctx.waitUntil(
+      Promise.all([
+        executeScheduledScans(env),
+        processSubscriptionQueue(env),
+        reportStripeMeteredUsage(env),
+      ])
+    );
   },
 
   async fetch(request, env, ctx) {
@@ -184,7 +196,9 @@ export default {
     }
 
     // 2) CDN script (no CORS)
-    if (url.pathname.startsWith('/client_data/')) {
+    // Backward compatible: keep /client_data/ working for existing installs.
+    // New production path: /consentbit/
+    if (url.pathname.startsWith('/client_data/') || url.pathname.startsWith('/consentbit/')) {
       return handleCDNScript(request, env, url);
     }
 
@@ -223,6 +237,15 @@ export default {
     } else if (url.pathname === '/api/auth/signup') {
       response = await handleAuthSignup(request, env);
       return withCors(response, request);
+    } else if (url.pathname === '/api/auth/request-code') {
+      response = await handleAuthRequestCode(request, env);
+      return withCors(response, request);
+    } else if (url.pathname === '/api/auth/verify-code') {
+      response = await handleAuthVerifyCode(request, env);
+      return withCors(response, request);
+    } else if (url.pathname === '/api/auth/logout') {
+      response = await handleAuthLogout(request, env);
+      return withCors(response, request);
     } else if (url.pathname === '/api/auth/me') {
       response = await handleAuthMe(request, env);
       return withCors(response, request);
@@ -246,8 +269,17 @@ export default {
       response = await handleCancelSubscription(request, env);
     } else if (url.pathname === '/api/webhooks/stripe') {
       response = await handleStripeWebhook(request, env);
-    }
-     else {
+    } else if (url.pathname === '/api/debug/schema') {
+      response = await handleDebugSchema(request, env);
+    } else if (url.pathname === '/api/billing/summary') {
+      response = await handleBillingSummary(request, env);
+    } else if (url.pathname === '/api/billing/portal') {
+      response = await handleBillingPortal(request, env);
+    } else if (url.pathname === '/api/billing/invoices') {
+      response = await handleBillingInvoices(request, env);
+    } else if (url.pathname === '/api/billing/usage') {
+      response = await handleBillingUsage(request, env);
+    } else {
       response = Response.json({ success: false, error: 'Not Found' }, { status: 404 });
     }
 

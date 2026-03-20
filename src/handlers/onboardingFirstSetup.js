@@ -2,8 +2,7 @@
 import {
   getSessionById,
   getUserById,
-  createOrganization,
-  addOrganizationMember,
+  getOrCreateOrganizationForUser,
   createSite,
 } from '../services/db.js';
 
@@ -48,9 +47,9 @@ export async function handleOnboardingFirstSetup(request, env) {
   const organizationName = (body.organizationName || '').trim();
   const websiteUrl = (body.websiteUrl || '').trim();
 
-  if (!organizationName || !websiteUrl) {
+  if (!websiteUrl) {
     return Response.json(
-      { success: false, error: 'organizationName and websiteUrl are required' },
+      { success: false, error: 'websiteUrl is required' },
       { status: 400 },
     );
   }
@@ -61,16 +60,11 @@ export async function handleOnboardingFirstSetup(request, env) {
   // Keep the full domain/subdomain as the name (e.g., "valuable-tenets-951054.framer.app")
   const siteName = websiteUrl.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
 
-  const org = await createOrganization(db, {
-    ownerUserId: user.id,
-    name: organizationName,
-  });
-
-  await addOrganizationMember(db, {
-    organizationId: org.id,
-    userId: user.id,
-    role: 'owner',
-  });
+  const defaultOrgName = organizationName || (user?.name ? `${user.name}'s Organization` : 'My Organization');
+  const org = await getOrCreateOrganizationForUser(db, { userId: user.id, organizationName: defaultOrgName });
+  if (!org?.id) {
+    return Response.json({ success: false, error: 'Failed to initialize organization' }, { status: 500 });
+  }
 
   const url = new URL(request.url);
   const site = await createSite(db, {
@@ -79,14 +73,20 @@ export async function handleOnboardingFirstSetup(request, env) {
     domain,
     origin: url.origin,
     bannerType: 'gdpr',
+    // Default: GDPR only until user customizes
     regionMode: 'gdpr',
   });
 
+  // CDN script is served by cdnScriptId (not site.id)
+  // Use production-friendly path (/consentbit/) while keeping /client_data/ for backward compat.
+  const scriptUrl = `${url.origin}/consentbit/${site.cdnScriptId}/script.js`;
   return Response.json(
     {
       success: true,
       organization: org,
+      organizationId: org.id,
       site,
+      scriptUrl,
     },
     { status: 200 }
   );

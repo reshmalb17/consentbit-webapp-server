@@ -99,6 +99,7 @@ export async function handleCreateCheckoutSession(request, env) {
   }
 
   const organizationId = (body.organizationId || '').trim();
+  const planId = (body.planId && ['basic', 'essential', 'growth'].includes(body.planId)) ? body.planId : null;
   const planType = body.planType === 'quantity' ? 'quantity' : body.planType === 'bulk' ? 'bulk' : 'single';
   const interval = body.interval === 'yearly' ? 'yearly' : 'monthly';
   const quantity = planType === 'bulk'
@@ -117,6 +118,36 @@ export async function handleCreateCheckoutSession(request, env) {
 
   if (!organizationId) {
     return Response.json({ success: false, error: 'organizationId required' }, { status: 400 });
+  }
+
+  // Tier plans (Basic/Essential/Growth): subscription with 14-day trial and tier price
+  const tierPriceMap = {
+    basic: { monthly: env.STRIPE_PRICE_BASIC_MONTHLY, yearly: env.STRIPE_PRICE_BASIC_YEARLY },
+    essential: { monthly: env.STRIPE_PRICE_ESSENTIAL_MONTHLY, yearly: env.STRIPE_PRICE_ESSENTIAL_YEARLY },
+    growth: { monthly: env.STRIPE_PRICE_GROWTH_MONTHLY, yearly: env.STRIPE_PRICE_GROWTH_YEARLY },
+  };
+  const useTierPlan = planId && tierPriceMap[planId];
+  const tierPrice = useTierPlan ? (tierPriceMap[planId][interval] || tierPriceMap[planId].monthly) : null;
+
+  if (useTierPlan) {
+    if (!tierPrice) {
+      return Response.json({ success: false, error: `Stripe price not configured for plan ${planId} (${interval}).` }, { status: 503 });
+    }
+    const hasExisting = siteId && siteId.length > 0;
+    const hasNewDetails = siteName && siteName.length > 0 && siteDomain && siteDomain.length > 0;
+    if (!hasExisting && !hasNewDetails) {
+      return Response.json({ success: false, error: 'Select an existing site or enter new site name and domain.' }, { status: 400 });
+    }
+    if (hasExisting && db) {
+      const site = await db.prepare('SELECT id, organizationId, name, domain FROM Site WHERE id = ?1').bind(siteId).first();
+      if (!site) {
+        return Response.json({ success: false, error: 'Site not found' }, { status: 404 });
+      }
+      const siteOrgId = site.organizationId ?? site.organizationid;
+      if (siteOrgId !== organizationId) {
+        return Response.json({ success: false, error: 'Site does not belong to this organization' }, { status: 403 });
+      }
+    }
   }
 
   if (planType === 'quantity') {
@@ -161,12 +192,30 @@ export async function handleCreateCheckoutSession(request, env) {
   params.set('cancel_url', cancelUrl);
   params.set('client_reference_id', organizationId);
   params.set('customer', stripeCustomerId);
-  params.set('line_items[0][price]', planType === 'bulk'
-    ? (interval === 'yearly' ? oneTimePriceYearly : oneTimePriceMonthly)
-    : (interval === 'yearly' ? priceYearly : priceMonthly));
-  params.set('line_items[0][quantity]', String(quantity));
 
-  if (planType === 'quantity') {
+  if (useTierPlan) {
+    params.set('line_items[0][price]', tierPrice);
+    params.set('line_items[0][quantity]', '1');
+    params.set('mode', 'subscription');
+    params.set('subscription_data[metadata][organizationId]', organizationId);
+    params.set('subscription_data[metadata][planId]', planId);
+    params.set('subscription_data[metadata][planType]', 'tier');
+    params.set('subscription_data[metadata][interval]', interval);
+    params.set('subscription_data[metadata][siteId]', siteId || '');
+    if (siteName) params.set('subscription_data[metadata][siteName]', siteName);
+    if (body.siteDomain && typeof body.siteDomain === 'string') {
+      const domainNorm = String(body.siteDomain).trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+      if (domainNorm) params.set('subscription_data[metadata][siteDomain]', domainNorm);
+    }
+    params.set('subscription_data[trial_period_days]', '14');
+  } else {
+    params.set('line_items[0][price]', planType === 'bulk'
+      ? (interval === 'yearly' ? oneTimePriceYearly : oneTimePriceMonthly)
+      : (interval === 'yearly' ? priceYearly : priceMonthly));
+    params.set('line_items[0][quantity]', String(quantity));
+  }
+
+  if (planType === 'quantity' && !useTierPlan) {
     if (!priceMonthly || !priceYearly) {
       return Response.json({
         success: false,
@@ -199,8 +248,8 @@ export async function handleCreateCheckoutSession(request, env) {
     params.set('payment_intent_data[metadata][tempLicenseKeys]', tempLicenseKeys.join(','));
     params.set('payment_intent_data[metadata][email]', email);
     params.set('payment_intent_data[setup_future_usage]', 'off_session');
-  } else {
-    // single
+  } else if (!useTierPlan) {
+    // single (legacy)
     if (!priceMonthly || !priceYearly) {
       return Response.json({
         success: false,

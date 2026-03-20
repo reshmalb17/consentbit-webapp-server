@@ -1,19 +1,16 @@
-import { createSite, listSites, getSubscriptionByOrganization } from '../services/db.js';
+import {
+  createSite,
+  listSites,
+  getEffectivePlanForOrganization,
+  getSessionById,
+  getUserById,
+  getOrCreateOrganizationForUser,
+} from '../services/db.js';
 
-/** Only 1 site allowed without payment on staging/production. More allowed on localhost for dev. */
-const FREE_SITE_LIMIT_STAGING_PROD = 1;
-const FREE_SITE_LIMIT_DEV = 5;
-
-function isStagingOrProduction(request) {
-  try {
-    const url = new URL(request.url);
-    const host = (url.hostname || '').toLowerCase();
-    return !host || host === 'localhost' || host === '127.0.0.1' || host.startsWith('192.168.')
-      ? false
-      : true;
-  } catch (_) {
-    return true; // assume staging/prod if we can't parse
-  }
+function getSessionIdFromCookie(request) {
+  const cookie = request.headers.get('Cookie') || '';
+  const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
+  return match ? match[1].trim() : null;
 }
 
 export async function handleSites(request, env) {
@@ -21,6 +18,21 @@ export async function handleSites(request, env) {
   const url = new URL(request.url);
 
   if (request.method === 'POST') {
+    // New app: infer organizationId from authenticated user (one-org-per-user)
+    const sid = getSessionIdFromCookie(request);
+    if (!sid) {
+      return Response.json({ success: false, error: 'Not authenticated' }, { status: 401 });
+    }
+    const session = await getSessionById(db, sid);
+    if (!session) {
+      return Response.json({ success: false, error: 'Not authenticated' }, { status: 401 });
+    }
+    const userId = session.userId ?? session.user_id;
+    const user = await getUserById(db, userId);
+    if (!user) {
+      return Response.json({ success: false, error: 'Not authenticated' }, { status: 401 });
+    }
+
     let body;
     try {
       body = await request.json();
@@ -35,31 +47,28 @@ export async function handleSites(request, env) {
     const domain = (body.domain || '').trim();
     const bannerTypeRaw = body.bannerType || 'gdpr';
     const regionModeRaw = body.regionMode || 'gdpr'; // 'gdpr' | 'ccpa' | 'both'
-    const organizationId = (body.organizationId || '').trim(); // from dashboard / session
+    const orgName = user?.name ? `${user.name}'s Organization` : 'My Organization';
+    const org = await getOrCreateOrganizationForUser(db, { userId: user.id, organizationName: orgName });
+    const organizationId = (org?.id || '').trim();
 
     if (!name || !domain || !organizationId) {
       return Response.json(
-        { success: false, error: 'name, domain, organizationId required' },
+        { success: false, error: 'name and domain required' },
         { status: 400 },
       );
     }
 
-    // On staging/production: only 1 site allowed without payment. On localhost: more for dev.
     const existingSites = await listSites(db, { organizationId });
     const isUpdate = existingSites.some((s) => (s.domain || '').trim().toLowerCase() === domain.toLowerCase());
     if (!isUpdate) {
-      const subscription = await getSubscriptionByOrganization(db, organizationId);
-      const status = (subscription && subscription.status) || (subscription && subscription.Status) || '';
-      const hasPaidSubscription = ['active', 'trialing'].includes(String(status).toLowerCase());
-      const freeLimit = isStagingOrProduction(request) ? FREE_SITE_LIMIT_STAGING_PROD : FREE_SITE_LIMIT_DEV;
-      const siteLimit = hasPaidSubscription ? 999 : freeLimit;
-      if (existingSites.length >= siteLimit) {
+      const { planId: effectivePlanId, plan } = await getEffectivePlanForOrganization(db, organizationId);
+      const sitesLimit = plan ? (plan.domainsIncluded ?? plan.domainsincluded ?? 1) : 1;
+      if (existingSites.length >= sitesLimit) {
+        const message = effectivePlanId === 'free'
+          ? 'Free plan allows only 1 site. Upgrade to add more sites.'
+          : `Your plan allows ${sitesLimit} site(s). Upgrade to add more.`;
         return Response.json(
-          {
-            success: false,
-            error: 'Only one site is included without a Pro plan. Upgrade to Pro to add more sites.',
-            code: 'SITE_LIMIT_REACHED',
-          },
+          { success: false, error: message, code: 'SITE_LIMIT_REACHED' },
           { status: 403 },
         );
       }
@@ -91,11 +100,27 @@ export async function handleSites(request, env) {
   }
 
   if (request.method === 'GET') {
-    // optional filter: ?organizationId=...
-    const organizationId = url.searchParams.get('organizationId') || null;
+    // New app: default to the authenticated user's org sites.
+    // Old dashboard can still pass ?organizationId=... for admin/backcompat.
+    let organizationId = url.searchParams.get('organizationId') || null;
+    if (!organizationId) {
+      const sid = getSessionIdFromCookie(request);
+      if (sid) {
+        const session = await getSessionById(db, sid);
+        const userId = session?.userId ?? session?.user_id;
+        const user = userId ? await getUserById(db, userId) : null;
+        if (user?.id) {
+          const orgName = user?.name ? `${user.name}'s Organization` : 'My Organization';
+          const org = await getOrCreateOrganizationForUser(db, { userId: user.id, organizationName: orgName });
+          organizationId = org?.id || null;
+        }
+      }
+    }
 
-    const sites = await listSites(db, { organizationId });
-    return Response.json({ success: true, sites });
+    const sites = await listSites(db, { organizationId: organizationId || undefined });
+    // Include effective plan so UI can restrict features (e.g., GDPR+CCPA only for paid plans)
+    const { planId: effectivePlanId } = await getEffectivePlanForOrganization(db, organizationId);
+    return Response.json({ success: true, sites, effectivePlanId });
   }
 
   return new Response('Method Not Allowed', { status: 405 });
