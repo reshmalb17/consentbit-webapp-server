@@ -1,4 +1,11 @@
 // handlers/pageview.js
+import {
+  ensureSchema,
+  incrementPageviewUsage,
+  getSiteById,
+  getEffectivePlanForOrganization,
+  getPageviewUsageForOrganization,
+} from '../services/db.js';
 
 export async function handlePageview(request, env) {
   const db = env.CONSENT_WEBAPP;
@@ -21,10 +28,37 @@ export async function handlePageview(request, env) {
     return Response.json({ success: false, error: 'siteId is required' }, { status: 400 });
   }
 
-  // Log pageview (you can extend this to store in database if needed)
-  console.log('[Pageview]', { siteId, pageUrl, timestamp: new Date().toISOString() });
+  await ensureSchema(db);
 
-  // For now, just return success
-  // In the future, you might want to store pageviews in a database
-  return Response.json({ success: true }, { status: 200 });
+  const site = await getSiteById(db, siteId);
+  const organizationId = site ? (site.organizationId ?? site.organizationid) : null;
+
+  const usage = await incrementPageviewUsage(db, siteId);
+
+  let overLimit = false;
+  if (organizationId) {
+    const orgUsage = await getPageviewUsageForOrganization(db, organizationId);
+    const { plan } = await getEffectivePlanForOrganization(db, organizationId);
+    const limit = plan ? (plan.pageviewsIncluded ?? plan.pageviewsincluded ?? 7500) : 7500;
+    overLimit = orgUsage.pageviewCount >= limit;
+  }
+
+  console.log('[Pageview]', {
+    siteId,
+    pageUrl,
+    yearMonth: usage.yearMonth,
+    pageviewCount: usage.pageviewCount,
+    overLimit,
+    timestamp: new Date().toISOString(),
+  });
+
+  return Response.json(
+    {
+      success: true,
+      yearMonth: usage.yearMonth,
+      pageviewCount: usage.pageviewCount,
+      overLimit,
+    },
+    { status: 200 }
+  );
 }

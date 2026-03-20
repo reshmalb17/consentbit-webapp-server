@@ -4,8 +4,11 @@ import { mergeTranslations } from '../data/defaultTranslations.js';
 
 export async function handleCDNScript(request, env, url) {
   const parts = url.pathname.split('/');
-  // Extract script ID: /client_data/{cdnScriptId}/script.js -> {cdnScriptId}
-  // or /client_data/{cdnScriptId} -> {cdnScriptId}
+  // Extract script ID:
+  // - /client_data/{cdnScriptId}/script.js -> {cdnScriptId}
+  // - /consentbit/{cdnScriptId}/script.js  -> {cdnScriptId}
+  // - /client_data/{cdnScriptId}           -> {cdnScriptId}
+  // - /consentbit/{cdnScriptId}            -> {cdnScriptId}
   let cdnScriptId = parts[parts.length - 1];
   // If last part is "script.js", get the one before it
   if (cdnScriptId === 'script.js' && parts.length > 2) {
@@ -25,7 +28,20 @@ export async function handleCDNScript(request, env, url) {
     .bind(cdnScriptId)
     .first();
 
-  if (!site) {
+  // Backward compatibility:
+  // - Some older installs used Site.id in the script URL instead of cdnScriptId.
+  // - Also guards against historical data issues where cdnScriptId was not stable.
+  let resolvedSite = site;
+  if (!resolvedSite) {
+    resolvedSite = await db
+      .prepare(
+        'SELECT id, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id FROM Site WHERE id = ?1'
+      )
+      .bind(cdnScriptId)
+      .first();
+  }
+
+  if (!resolvedSite) {
     return new Response('// Unknown site script', {
       status: 404,
       headers: { 'Content-Type': 'application/javascript' },
@@ -33,21 +49,21 @@ export async function handleCDNScript(request, env, url) {
   }
 
   // Load banner customization
-  const customization = await getBannerCustomization(db, site.id);
+  const customization = await getBannerCustomization(db, resolvedSite.id);
 
   const apiBase =
     env.API_BASE_URL ||
     'https://consent-webapp-manager.web-8fb.workers.dev';
 
-  const GA_ID = site.ga_measurement_id || '';
+  const GA_ID = resolvedSite.ga_measurement_id || '';
 
   // Geo info from Cloudflare
   const cf = request.cf || {};
   const country = cf.country || null;          // e.g. "US"
   const isEU = cf.isEUCountry === '1';         // "1" for EU members
 
-  const regionMode = site.region_mode || 'gdpr';           // 'gdpr' | 'ccpa' | 'both'
-  let effectiveBannerType = site.banner_type || 'gdpr';    // base type
+  const regionMode = resolvedSite.region_mode || 'gdpr';           // 'gdpr' | 'ccpa' | 'both'
+  let effectiveBannerType = resolvedSite.banner_type || 'gdpr';    // base type
 
   // If site is configured for both, decide by location:
   // EU -> GDPR, US -> CCPA, others -> GDPR (tweak as needed)
@@ -59,6 +75,9 @@ export async function handleCDNScript(request, env, url) {
     } else {
       effectiveBannerType = 'gdpr';
     }
+  } else if (regionMode === 'ccpa') {
+    // Simplified mode: "CCPA" means show CCPA everywhere.
+    effectiveBannerType = 'ccpa';
   }
 
   // Generate custom CSS styles from customization
@@ -166,7 +185,7 @@ export async function handleCDNScript(request, env, url) {
 
   const inlineConfig = `
     window.__CONSENT_SITE__ = {
-      id: ${JSON.stringify(site.id)},
+      id: ${JSON.stringify(resolvedSite.id)},
       bannerType: ${JSON.stringify(effectiveBannerType)},
       apiBase: ${JSON.stringify(apiBase)},
       gaId: ${JSON.stringify(GA_ID)},
@@ -295,6 +314,27 @@ ${inlineConfig}
       });
     } catch (e) {
       console.warn('[ConsentBit] /api/consent threw', e);
+    }
+  }
+
+  // Send anonymous pageview to backend for billing/usage
+  function sendPageviewToServer() {
+    if (!SITE_ID || !API_BASE) return;
+    try {
+      var payload = {
+        siteId: SITE_ID,
+        pageUrl: (typeof window !== 'undefined' && window.location) ? window.location.href : null
+      };
+      fetch(API_BASE + '/api/pageview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        keepalive: true
+      }).catch(function (e) {
+        console.warn('[ConsentBit] /api/pageview failed', e);
+      });
+    } catch (e) {
+      console.warn('[ConsentBit] /api/pageview threw', e);
     }
   }
 
@@ -1492,6 +1532,13 @@ ${inlineConfig}
       showBanner();
     } else {
       console.log('[ConsentBit] Banner not shown - consent already accepted');
+    }
+
+    // Track a pageview for this site (used for billing/usage)
+    try {
+      sendPageviewToServer();
+    } catch (e) {
+      console.warn('[ConsentBit] sendPageviewToServer threw', e);
     }
 
     // Listen for footer link clicks using data attribute
