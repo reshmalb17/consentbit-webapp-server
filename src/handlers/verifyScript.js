@@ -41,10 +41,10 @@ export async function handleVerifyScript(request, env) {
     const html = await resp.text();
     const htmlLower = html.toLowerCase(); // Case-insensitive search
     
-    // Extract siteId from scriptUrl if not provided (e.g., from /client_data/{siteId}/script.js)
+    // Extract cdnScriptId from scriptUrl if not provided (e.g., from /client_data/{id}/script.js or /consentbit/{id}/script.js)
     let extractedSiteId = siteId;
-    if (!extractedSiteId && scriptUrl.includes('/client_data/')) {
-      const match = scriptUrl.match(/\/client_data\/([^\/]+)\/script\.js/);
+    if (!extractedSiteId && (scriptUrl.includes('/client_data/') || scriptUrl.includes('/consentbit/'))) {
+      const match = scriptUrl.match(/\/(?:client_data|consentbit)\/([^\/]+)\/script\.js/);
       if (match) {
         extractedSiteId = match[1];
       }
@@ -69,15 +69,19 @@ export async function handleVerifyScript(request, env) {
                         htmlLower.includes(scriptUrlNoProtocol) ||
                         htmlLower.includes(scriptDomainAndPath);
     
-    // 2. Check for the script path pattern (e.g., /client_data/{siteId}/script.js)
+    // 2. Check for the script path pattern (e.g., /client_data/{id}/script.js or /consentbit/{id}/script.js)
     let hasScriptPath = false;
     if (extractedSiteId) {
       const scriptPathPattern = `/client_data/${extractedSiteId}/script.js`.toLowerCase();
+      const scriptPathPatternAlt = `/consentbit/${extractedSiteId}/script.js`.toLowerCase();
       // Also check without leading slash and with different separators
       const scriptPathPattern2 = `client_data/${extractedSiteId}/script.js`.toLowerCase();
+      const scriptPathPatternAlt2 = `consentbit/${extractedSiteId}/script.js`.toLowerCase();
       const scriptPathPattern3 = `client_data\\/${extractedSiteId}\\/script\\.js`.toLowerCase();
       hasScriptPath = htmlLower.includes(scriptPathPattern) ||
+                     htmlLower.includes(scriptPathPatternAlt) ||
                      htmlLower.includes(scriptPathPattern2) ||
+                     htmlLower.includes(scriptPathPatternAlt2) ||
                      htmlLower.includes(scriptPathPattern3);
     }
     
@@ -92,7 +96,7 @@ export async function handleVerifyScript(request, env) {
     
     // 4. Check for ConsentBit script tag with the script URL path
     const hasConsentBitWithPath = htmlLower.includes('consentbit') && 
-                                  (htmlLower.includes('client_data') || hasScriptPath);
+                                  ((htmlLower.includes('client_data') || htmlLower.includes('consentbit')) || hasScriptPath);
     
     // 5. Check for script src containing the domain/path (handles custom code sections)
     const scriptSrcPattern = new RegExp(`<script[^>]*src=["'][^"']*${scriptUrlParts.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^"']*["']`, 'i');

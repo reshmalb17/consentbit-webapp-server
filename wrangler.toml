@@ -11,6 +11,8 @@ database_id = "bc37fa30-5060-491d-b19c-f3eeb7b1fd00"
 JWT_SECRET="x7K9pL2mQ5vR8tY1nB4jH7uF0zA3eD6cK9pL2mQ5vR8tY1nB4jH7uF0zA3eD6cK9p"
 
 CDN_BASE_URL = "https://consent-webapp-manager.YOUR-ACCOUNT.workers.dev"
+# Public origin of your Next.js app (no trailing slash). If set, embed tries https://<WEBAPP>/asset/logo.webp first; on failure it loads /embed/floating-logo.svg from this Worker. If empty, the Worker SVG is used directly.
+WEBAPP_PUBLIC_URL = ""
 STRIPE_PRICE_BASIC_MONTHLY = "price_1T7doaJwcuG9163M3fNkG77K" 
 STRIPE_PRICE_BASIC_YEARLY = "price_1T7dqFJwcuG9163MlGnV7DRn"
 STRIPE_PRICE_ESSENTIAL_MONTHLY = "price_1T7drWJwcuG9163MSZepvR2S"

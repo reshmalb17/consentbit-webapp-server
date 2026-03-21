@@ -1,5 +1,11 @@
 // handlers/pageview.js
-import { ensureSchema, incrementPageviewUsage } from '../services/db.js';
+import {
+  ensureSchema,
+  incrementPageviewUsage,
+  getSiteById,
+  getEffectivePlanForOrganization,
+  getPageviewUsageForOrganization,
+} from '../services/db.js';
 
 export async function handlePageview(request, env) {
   const db = env.CONSENT_WEBAPP;
@@ -33,25 +39,37 @@ export async function handlePageview(request, env) {
     );
   }
 
-  try {
-    await ensureSchema(db);
-    // Increment monthly counter for this site.
-    const result = await incrementPageviewUsage(db, siteId, new Date());
+  await ensureSchema(db);
 
-    // Keep console logs minimal to avoid noise in production.
-    console.log('[Pageview]', {
-      siteId,
-      yearMonth: result?.yearMonth,
-      // pageUrl intentionally omitted from log
-    });
+  const site = await getSiteById(db, siteId);
+  const organizationId = site ? (site.organizationId ?? site.organizationid) : null;
 
-    return Response.json({ success: true, ...result }, { status: 200 });
-  } catch (e) {
-    console.error('[Pageview] failed', e);
-    // Do not block banner rendering; just report failure.
-    return Response.json(
-      { success: false, error: e?.message || 'Failed to track pageview' },
-      { status: 500 },
-    );
+  const usage = await incrementPageviewUsage(db, siteId);
+
+  let overLimit = false;
+  if (organizationId) {
+    const orgUsage = await getPageviewUsageForOrganization(db, organizationId);
+    const { plan } = await getEffectivePlanForOrganization(db, organizationId);
+    const limit = plan ? (plan.pageviewsIncluded ?? plan.pageviewsincluded ?? 7500) : 7500;
+    overLimit = orgUsage.pageviewCount >= limit;
   }
+
+  console.log('[Pageview]', {
+    siteId,
+    pageUrl,
+    yearMonth: usage.yearMonth,
+    pageviewCount: usage.pageviewCount,
+    overLimit,
+    timestamp: new Date().toISOString(),
+  });
+
+  return Response.json(
+    {
+      success: true,
+      yearMonth: usage.yearMonth,
+      pageviewCount: usage.pageviewCount,
+      overLimit,
+    },
+    { status: 200 }
+  );
 }

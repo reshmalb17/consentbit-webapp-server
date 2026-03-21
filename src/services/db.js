@@ -154,8 +154,8 @@ export async function ensureSchema(db) {
       stopScroll INTEGER DEFAULT 0,
       footerLink INTEGER DEFAULT 0,
       animationEnabled INTEGER DEFAULT 1,
-      preferencePosition TEXT DEFAULT 'right',
-      centerAnimationDirection TEXT DEFAULT 'bottom',
+      preferencePosition TEXT DEFAULT 'center',
+      centerAnimationDirection TEXT DEFAULT 'fade',
       language TEXT DEFAULT 'en',
       autoDetectLanguage INTEGER DEFAULT 0,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -324,6 +324,43 @@ export async function ensureSchema(db) {
   try {
     await db.prepare(`ALTER TABLE Subscription ADD COLUMN licenseKeySites TEXT`).run();
   } catch (e) {}
+  try {
+    await db.prepare(`ALTER TABLE Subscription ADD COLUMN planId TEXT`).run();
+  } catch (e) {}
+
+  // Plan: pricing tiers for Upgrade tab (Free, Basic, Essential, Growth)
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS Plan (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      monthlyAmountCents INTEGER NOT NULL,
+      yearlyAmountCents INTEGER NOT NULL,
+      yearlyTotalCents INTEGER NOT NULL,
+      domainsIncluded INTEGER NOT NULL,
+      scansIncluded INTEGER NOT NULL,
+      pageviewsIncluded INTEGER NOT NULL,
+      extraScansPriceCentsPerUnit INTEGER,
+      extraPageviewsPriceCentsPerUnit INTEGER,
+      trialDays INTEGER DEFAULT 0,
+      hasIabTcf INTEGER DEFAULT 0,
+      active INTEGER DEFAULT 1,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  // PageviewUsage: monthly pageview counts per site
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS PageviewUsage (
+      id TEXT PRIMARY KEY,
+      siteId TEXT NOT NULL,
+      yearMonth TEXT NOT NULL,
+      pageviewCount INTEGER NOT NULL DEFAULT 0,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(siteId, yearMonth)
+    )
+  `).run();
   try {
     await db.prepare(`ALTER TABLE Subscription ADD COLUMN planId TEXT`).run();
   } catch (e) {}
@@ -726,8 +763,18 @@ export async function incrementPageviewUsage(db, siteId, date = new Date()) {
     .bind(id, now)
     .run();
 
-  // Avoid extra SELECT per pageview; billing can read totals when needed.
-  return { siteId, yearMonth };
+  const row = await db
+    .prepare(
+      `SELECT pageviewCount FROM PageviewUsage WHERE id = ?1`
+    )
+    .bind(id)
+    .first();
+
+  return {
+    siteId,
+    yearMonth,
+    pageviewCount: row?.pageviewCount ?? 0,
+  };
 }
 
 /** Total pageview count for an organization for a given month (default current month). */
@@ -1446,12 +1493,11 @@ export async function markSiteVerified(db, siteId, scriptUrl) {
       `
       UPDATE Site
       SET verified = 1,
-          verified_at = datetime('now'),
-          cdnScriptId = ?2
+          verified_at = datetime('now')
       WHERE id = ?1
     `,
     )
-    .bind(siteId, scriptUrl)
+    .bind(siteId)
     .run();
 }
 
@@ -1483,6 +1529,12 @@ export async function getSessionById(db, id) {
     .bind(id)
     .first();
   return session || null;
+}
+
+export async function deleteSessionById(db, id) {
+  if (!id) return { deleted: false };
+  await db.prepare(`DELETE FROM Session WHERE id = ?1`).bind(id).run();
+  return { deleted: true };
 }
 
 // --- Organizations ---
@@ -2119,8 +2171,8 @@ export async function saveBannerCustomization(db, siteId, customization) {
         customization.stopScroll ? 1 : 0,
         customization.footerLink ? 1 : 0,
         customization.animationEnabled !== undefined ? (customization.animationEnabled ? 1 : 0) : 1,
-        customization.preferencePosition || 'right',
-        customization.centerAnimationDirection || 'bottom',
+        customization.preferencePosition || 'center',
+        customization.centerAnimationDirection || 'fade',
         customization.language || 'en',
         customization.autoDetectLanguage ? 1 : 0,
         translationsJson,

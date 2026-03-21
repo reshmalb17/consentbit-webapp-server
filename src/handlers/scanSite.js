@@ -3,7 +3,9 @@ import {
   getSiteById, 
   createScanHistory, 
   upsertCookies, 
-  upsertScripts 
+  upsertScripts,
+  getEffectivePlanForOrganization,
+  getScanUsageForOrganization,
 } from '../services/db.js';
 import { 
   categorizeCookie, 
@@ -83,6 +85,23 @@ export async function handleScanSite(request, env) {
         { success: false, error: 'Site not found' },
         { status: 404 },
       );
+    }
+
+    const organizationId = site.organizationId ?? site.organizationid ?? null;
+    if (organizationId) {
+      const { plan } = await getEffectivePlanForOrganization(db, organizationId);
+      const scansLimit = plan ? (plan.scansIncluded ?? plan.scansincluded ?? 100) : 100;
+      const scanUsage = await getScanUsageForOrganization(db, organizationId);
+      if (scanUsage.scanCount >= scansLimit) {
+        return Response.json(
+          {
+            success: false,
+            error: `Scan limit reached (${scansLimit} scans per month). Upgrade your plan for more scans.`,
+            code: 'SCAN_LIMIT_REACHED',
+          },
+          { status: 402 },
+        );
+      }
     }
 
     const scanUrl = site.domain.startsWith('http') ? site.domain : `https://${site.domain}`;

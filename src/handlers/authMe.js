@@ -3,6 +3,7 @@ import {
   getSessionById,
   getUserById,
   getOrganizationsForUser,
+  getOrCreateOrganizationForUser,
 } from '../services/db.js';
 
 function getSessionIdFromCookie(request) {
@@ -30,6 +31,10 @@ export async function handleAuthMe(request, env) {
     return Response.json({ authenticated: false }, { status: 200 });
   }
 
+  // New app convention: one organization per user.
+  // Ensure it exists so frontend always has a stable organizationId.
+  const defaultOrgName = user?.name ? `${user.name}'s Organization` : 'My Organization';
+  await getOrCreateOrganizationForUser(db, { userId: user.id, organizationName: defaultOrgName });
   const orgs = await getOrganizationsForUser(db, user.id);
   return Response.json(
     {
