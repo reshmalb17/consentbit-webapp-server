@@ -68,7 +68,7 @@ export async function handleBillingSummary(request, env) {
   await ensureSchema(db);
   const sub = await getSubscriptionByOrganization(db, organizationId);
   if (!sub) {
-    const { plan } = await getEffectivePlanForOrganization(db, organizationId);
+    const { plan } = await getEffectivePlanForOrganization(db, organizationId, env);
     return Response.json({
       planName: 'Free',
       planId: 'free',
@@ -147,11 +147,11 @@ export async function handleBillingSummary(request, env) {
   }
   if (licenseCount === 0 && sub) licenseCount = 1;
 
-  const { plan } = await getEffectivePlanForOrganization(db, organizationId);
+  const { plan, planId: effectivePlanId } = await getEffectivePlanForOrganization(db, organizationId, env);
   const domainsLimit = plan ? (plan.domainsIncluded ?? plan.domainsincluded ?? 1) : 1;
   return Response.json({
-    planName: planDisplayName(planType, planId),
-    planId: planId || null,
+    planName: planDisplayName(planType, effectivePlanId !== 'free' ? effectivePlanId : planId),
+    planId: effectivePlanId,
     planType,
     interval,
     licenseCount,
@@ -282,7 +282,7 @@ export async function handleBillingUsage(request, env) {
   const usage = await getPageviewUsageForOrganization(db, organizationId);
   const scanUsage = await getScanUsageForOrganization(db, organizationId);
   const sitesCount = await getSitesCountByOrganization(db, organizationId);
-  const { planId, plan } = await getEffectivePlanForOrganization(db, organizationId);
+  const { planId, plan } = await getEffectivePlanForOrganization(db, organizationId, env);
   const pageviewsIncluded = plan ? (plan.pageviewsIncluded ?? plan.pageviewsincluded ?? 0) : 7500;
   const scansIncluded = plan ? (plan.scansIncluded ?? plan.scansincluded ?? 0) : 100;
   const domainsIncluded = plan ? (plan.domainsIncluded ?? plan.domainsincluded ?? 1) : 1;

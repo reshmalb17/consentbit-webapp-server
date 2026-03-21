@@ -1,11 +1,11 @@
 // POST /api/create-checkout-session
 // Requires logged-in user (session cookie sid). No guest checkout.
-// Body: { organizationId, planType: 'single'|'bulk', interval, quantity?, siteId?, siteName?, siteDomain?, stripeCouponId?, successUrl, cancelUrl }
-// Single: siteId (existing site) or siteName+siteDomain (new site). Bulk: quantity.
-// Creates or finds Stripe customer by login email and attaches to checkout session.
+// Body: { organizationId, planId?: 'basic'|'essential'|'growth', interval, siteId?, siteName?, siteDomain?, stripeCouponId?, successUrl, cancelUrl }
+// Per-site only: tier subscription (planId) or legacy single-site subscription. Bulk / multi-seat quantity checkout is not enabled.
+// Checkout uses `customer_email` from the logged-in user; Stripe creates the Customer on completion.
 // Returns { success, sessionId, url }
 
-import { getSessionById, getUserById, generateTempLicenseKeys } from '../services/db.js';
+import { getSessionById, getUserById } from '../services/db.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -13,36 +13,53 @@ function getSessionIdFromCookie(request) {
   return match ? match[1].trim() : null;
 }
 
-/** Find existing Stripe customer by email, or create one. */
-async function findOrCreateStripeCustomerByEmail(env, email) {
-  const secret = env.STRIPE_SECRET_KEY;
-  if (!secret || !email || !email.includes('@')) return null;
-  const normalized = email.trim().toLowerCase();
+/** Cloudflare [vars] / secrets sometimes pick up trailing spaces from copy-paste. */
+function trimEnv(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s || null;
+}
+
+/** Subscription Checkout requires `price` ids with type=recurring (not one-time). */
+async function validatePriceIsRecurring(secret, priceId, label) {
+  const tag = label ? ` [${label}]` : '';
+  if (!priceId || typeof priceId !== 'string' || !String(priceId).startsWith('price_')) {
+    return { ok: false, error: `Invalid or missing Stripe price id${tag} (expected price_...).` };
+  }
   try {
-    const query = encodeURIComponent(`email:'${normalized}'`);
-    const searchRes = await fetch(`https://api.stripe.com/v1/customers/search?query=${query}&limit=1`, {
-      headers: { Authorization: `Bearer ${secret}` },
-    });
-    const searchData = await searchRes.json();
-    if (searchData.data && searchData.data.length > 0 && searchData.data[0].id) {
-      return searchData.data[0].id;
+    const res = await fetch(
+      `https://api.stripe.com/v1/prices/${encodeURIComponent(String(priceId).trim())}`,
+      { headers: { Authorization: `Bearer ${secret}` } },
+    );
+    const p = await res.json();
+    if (p.error) {
+      return {
+        ok: false,
+        error: `${p.error.message || 'Stripe price lookup failed'}${tag}. Check this price id exists in the same Stripe mode (test/live) as STRIPE_SECRET_KEY.`,
+      };
     }
-    const createParams = new URLSearchParams();
-    createParams.set('email', normalized);
-    const createRes = await fetch('https://api.stripe.com/v1/customers', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${secret}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: createParams.toString(),
-    });
-    const createData = await createRes.json();
-    if (createData.id) return createData.id;
-    return null;
+    if (p.type !== 'recurring') {
+      return {
+        ok: false,
+        error:
+          `Price ${priceId}${tag} is one-time (type=${p.type}). In Stripe → Products → open this tier → Pricing → add a **Subscription** price (monthly/yearly), copy its price_ id into the Worker env (e.g. STRIPE_PRICE_BASIC_MONTHLY).`,
+      };
+    }
+    if (!p.recurring || !p.recurring.interval) {
+      return {
+        ok: false,
+        error: `Price ${priceId}${tag} is missing recurring billing details. Recreate it as a standard subscription price in Stripe.`,
+      };
+    }
+    if (p.active === false) {
+      return {
+        ok: false,
+        error: `Price ${priceId}${tag} is archived/inactive. In Stripe activate the price or copy a new active recurring price_ id into the Worker.`,
+      };
+    }
+    return { ok: true };
   } catch (e) {
-    console.warn('[CreateCheckoutSession] findOrCreateStripeCustomerByEmail failed', e.message);
-    return null;
+    return { ok: false, error: e.message || 'Price validation failed' };
   }
 }
 
@@ -54,8 +71,6 @@ export async function handleCreateCheckoutSession(request, env) {
   const db = env.CONSENT_WEBAPP;
   const priceMonthly = env.STRIPE_PRICE_MONTHLY;
   const priceYearly = env.STRIPE_PRICE_YEARLY;
-  const oneTimePriceMonthly = env.STRIPE_ONE_TIME_PRICE_MONTHLY || 'price_1SpSusJwcuG9163MHGK38FfW';
-  const oneTimePriceYearly = env.STRIPE_ONE_TIME_PRICE_YEARLY || 'price_1SpSw0JwcuG9163MLkRgIPmD';
 
   if (!secret) {
     return Response.json({
@@ -93,20 +108,28 @@ export async function handleCreateCheckoutSession(request, env) {
     return Response.json({ success: false, error: 'Login required' }, { status: 401 });
   }
 
-  const stripeCustomerId = await findOrCreateStripeCustomerByEmail(env, email);
-  if (!stripeCustomerId) {
-    return Response.json({ success: false, error: 'Could not create Stripe customer' }, { status: 503 });
-  }
+  /**
+   * Do not pre-create / search Customers. Checkout Sessions accept `customer_email` alone;
+   * Stripe creates (or links) the Customer when the user completes checkout. Pre-flight
+   * Customer Search/Create was failing for some keys/accounts and surfaced as checkout errors.
+   */
 
   const organizationId = (body.organizationId || '').trim();
   const planId = (body.planId && ['basic', 'essential', 'growth'].includes(body.planId)) ? body.planId : null;
-  const planType = body.planType === 'quantity' ? 'quantity' : body.planType === 'bulk' ? 'bulk' : 'single';
+  const rawPlanType = body.planType === 'quantity' ? 'quantity' : body.planType === 'bulk' ? 'bulk' : 'single';
+  if (rawPlanType === 'bulk' || rawPlanType === 'quantity') {
+    return Response.json(
+      {
+        success: false,
+        error:
+          'Bulk and quantity checkout are not available. Use a per-site plan: pass planId (basic, essential, or growth) with a site, or legacy single-site checkout without planId.',
+      },
+      { status: 400 },
+    );
+  }
+  const planType = 'single';
   const interval = body.interval === 'yearly' ? 'yearly' : 'monthly';
-  const quantity = planType === 'bulk'
-    ? Math.max(2, Math.min(1000, parseInt(body.quantity, 10) || 2))
-    : planType === 'quantity'
-      ? Math.max(10, Math.min(100, parseInt(body.quantity, 10) || 10))
-      : 1;
+  const quantity = 1;
   const siteId = (body.siteId && typeof body.siteId === 'string') ? body.siteId.trim() : null;
   const siteName = (body.siteName && typeof body.siteName === 'string') ? body.siteName.trim() : null;
   const siteDomain = (body.siteDomain && typeof body.siteDomain === 'string') ? body.siteDomain.trim() : null;
@@ -114,24 +137,52 @@ export async function handleCreateCheckoutSession(request, env) {
   const cancelUrl = body.cancelUrl || `${request.url.replace(/\/api\/.*$/, '')}/pro-plan?canceled=true`;
   const stripeCouponId = body.stripeCouponId && body.stripeCouponId.trim() ? body.stripeCouponId.trim() : null;
 
-  console.log('[CREATE CHECK OUT SESSION]:', organizationId, planType, interval, quantity, siteId, successUrl, stripeCouponId, email);
+  console.log(
+    '[CREATE CHECK OUT SESSION]:',
+    organizationId,
+    planType,
+    interval,
+    quantity,
+    siteId,
+    successUrl,
+    stripeCouponId,
+    email,
+    body.planId || '(no planId)',
+  );
 
   if (!organizationId) {
     return Response.json({ success: false, error: 'organizationId required' }, { status: 400 });
   }
 
-  // Tier plans (Basic/Essential/Growth): subscription with 14-day trial and tier price
+  // Tier plans: one Stripe subscription per checkout = one recurring `line_items[0].price` (selected plan + monthly|yearly).
   const tierPriceMap = {
-    basic: { monthly: env.STRIPE_PRICE_BASIC_MONTHLY, yearly: env.STRIPE_PRICE_BASIC_YEARLY },
-    essential: { monthly: env.STRIPE_PRICE_ESSENTIAL_MONTHLY, yearly: env.STRIPE_PRICE_ESSENTIAL_YEARLY },
-    growth: { monthly: env.STRIPE_PRICE_GROWTH_MONTHLY, yearly: env.STRIPE_PRICE_GROWTH_YEARLY },
+    basic: {
+      monthly: trimEnv(env.STRIPE_PRICE_BASIC_MONTHLY),
+      yearly: trimEnv(env.STRIPE_PRICE_BASIC_YEARLY),
+    },
+    essential: {
+      monthly: trimEnv(env.STRIPE_PRICE_ESSENTIAL_MONTHLY),
+      yearly: trimEnv(env.STRIPE_PRICE_ESSENTIAL_YEARLY),
+    },
+    growth: {
+      monthly: trimEnv(env.STRIPE_PRICE_GROWTH_MONTHLY),
+      yearly: trimEnv(env.STRIPE_PRICE_GROWTH_YEARLY),
+    },
   };
+  const tierEnvKey = (p, inv) =>
+    `STRIPE_PRICE_${String(p).toUpperCase()}_${inv === 'yearly' ? 'YEARLY' : 'MONTHLY'}`;
   const useTierPlan = planId && tierPriceMap[planId];
   const tierPrice = useTierPlan ? (tierPriceMap[planId][interval] || tierPriceMap[planId].monthly) : null;
 
   if (useTierPlan) {
     if (!tierPrice) {
-      return Response.json({ success: false, error: `Stripe price not configured for plan ${planId} (${interval}).` }, { status: 503 });
+      return Response.json(
+        {
+          success: false,
+          error: `Missing env ${tierEnvKey(planId, interval)} (plan=${planId}, interval=${interval}). Set it on the Worker to the recurring price_ id for that tier.`,
+        },
+        { status: 503 },
+      );
     }
     const hasExisting = siteId && siteId.length > 0;
     const hasNewDetails = siteName && siteName.length > 0 && siteDomain && siteDomain.length > 0;
@@ -148,12 +199,14 @@ export async function handleCreateCheckoutSession(request, env) {
         return Response.json({ success: false, error: 'Site does not belong to this organization' }, { status: 403 });
       }
     }
-  }
 
-  if (planType === 'quantity') {
-    const validQty = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
-    if (!validQty.includes(quantity)) {
-      return Response.json({ success: false, error: 'Quantity must be 10, 20, 30, 40, 50, 60, 70, 80, 90, or 100.' }, { status: 400 });
+    const priceCheck = await validatePriceIsRecurring(
+      secret,
+      tierPrice,
+      `plan=${planId} interval=${interval} env=${tierEnvKey(planId, interval)}`,
+    );
+    if (!priceCheck.ok) {
+      return Response.json({ success: false, error: priceCheck.error }, { status: 400 });
     }
   }
 
@@ -191,7 +244,7 @@ export async function handleCreateCheckoutSession(request, env) {
   params.set('success_url', successUrl);
   params.set('cancel_url', cancelUrl);
   params.set('client_reference_id', organizationId);
-  params.set('customer', stripeCustomerId);
+  params.set('customer_email', email);
 
   if (useTierPlan) {
     params.set('line_items[0][price]', tierPrice);
@@ -209,46 +262,11 @@ export async function handleCreateCheckoutSession(request, env) {
     }
     params.set('subscription_data[trial_period_days]', '14');
   } else {
-    params.set('line_items[0][price]', planType === 'bulk'
-      ? (interval === 'yearly' ? oneTimePriceYearly : oneTimePriceMonthly)
-      : (interval === 'yearly' ? priceYearly : priceMonthly));
+    params.set('line_items[0][price]', interval === 'yearly' ? priceYearly : priceMonthly);
     params.set('line_items[0][quantity]', String(quantity));
   }
 
-  if (planType === 'quantity' && !useTierPlan) {
-    if (!priceMonthly || !priceYearly) {
-      return Response.json({
-        success: false,
-        error: 'Stripe subscription prices not configured. Set STRIPE_PRICE_MONTHLY, STRIPE_PRICE_YEARLY.',
-      }, { status: 503 });
-    }
-    params.set('mode', 'subscription');
-    params.set('subscription_data[metadata][organizationId]', organizationId);
-    params.set('subscription_data[metadata][planType]', 'quantity');
-    params.set('subscription_data[metadata][quantity]', String(quantity));
-    params.set('subscription_data[metadata][interval]', interval);
-  } else if (planType === 'bulk') {
-    if (!oneTimePriceMonthly || !oneTimePriceYearly) {
-      return Response.json({
-        success: false,
-        error: 'Bulk one-time prices not configured. Set STRIPE_ONE_TIME_PRICE_MONTHLY and STRIPE_ONE_TIME_PRICE_YEARLY.',
-      }, { status: 503 });
-    }
-    const tempLicenseKeys = generateTempLicenseKeys(quantity);
-    params.set('mode', 'payment');
-    params.set('metadata[organizationId]', organizationId);
-    params.set('metadata[planType]', 'bulk');
-    params.set('metadata[quantity]', String(quantity));
-    params.set('metadata[interval]', interval);
-    params.set('metadata[tempLicenseKeys]', tempLicenseKeys.join(','));
-    params.set('payment_intent_data[metadata][organizationId]', organizationId);
-    params.set('payment_intent_data[metadata][planType]', 'bulk');
-    params.set('payment_intent_data[metadata][quantity]', String(quantity));
-    params.set('payment_intent_data[metadata][interval]', interval);
-    params.set('payment_intent_data[metadata][tempLicenseKeys]', tempLicenseKeys.join(','));
-    params.set('payment_intent_data[metadata][email]', email);
-    params.set('payment_intent_data[setup_future_usage]', 'off_session');
-  } else if (!useTierPlan) {
+  if (!useTierPlan) {
     // single (legacy)
     if (!priceMonthly || !priceYearly) {
       return Response.json({
@@ -284,7 +302,12 @@ export async function handleCreateCheckoutSession(request, env) {
 
   const data = await res.json();
   if (data.error) {
-    return Response.json({ success: false, error: data.error.message || 'Stripe error' }, { status: 400 });
+    let msg = data.error.message || 'Stripe error';
+    if (typeof msg === 'string' && msg.toLowerCase().includes('recurring')) {
+      msg +=
+        ' The price id in Worker env for this plan must be a **Subscription (recurring)** price in Stripe (Products → tier → Pricing), not one-time. For Basic, set STRIPE_PRICE_BASIC_MONTHLY / STRIPE_PRICE_BASIC_YEARLY to those recurring price_ ids.';
+    }
+    return Response.json({ success: false, error: msg }, { status: 400 });
   }
   if (!data.id || !data.url) {
     return Response.json({ success: false, error: 'No session URL returned' }, { status: 502 });

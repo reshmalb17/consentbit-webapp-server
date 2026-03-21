@@ -89,7 +89,7 @@ export async function handleScanSite(request, env) {
 
     const organizationId = site.organizationId ?? site.organizationid ?? null;
     if (organizationId) {
-      const { plan } = await getEffectivePlanForOrganization(db, organizationId);
+      const { plan } = await getEffectivePlanForOrganization(db, organizationId, env);
       const scansLimit = plan ? (plan.scansIncluded ?? plan.scansincluded ?? 100) : 100;
       const scanUsage = await getScanUsageForOrganization(db, organizationId);
       if (scanUsage.scanCount >= scansLimit) {

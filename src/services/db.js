@@ -892,10 +892,33 @@ export async function getSubscriptionByOrganization(db, organizationId) {
   return fallback || null;
 }
 
-/** Effective plan for an org: from active subscription or 'free'. Returns { planId, plan, subscription }. */
-export async function getEffectivePlanForOrganization(db, organizationId) {
+/**
+ * Map Stripe recurring price id → tier (matches wrangler STRIPE_PRICE_* tier vars).
+ * Used when Subscription.planId was not stored but stripePriceId is present.
+ */
+export function inferTierPlanIdFromStripePriceId(env, priceId) {
+  if (!env || !priceId) return null;
+  const id = String(priceId).trim();
+  const eq = (k) => {
+    const v = env[k];
+    return v != null && String(v).trim() === id;
+  };
+  if (eq('STRIPE_PRICE_BASIC_MONTHLY') || eq('STRIPE_PRICE_BASIC_YEARLY')) return 'basic';
+  if (eq('STRIPE_PRICE_ESSENTIAL_MONTHLY') || eq('STRIPE_PRICE_ESSENTIAL_YEARLY')) return 'essential';
+  if (eq('STRIPE_PRICE_GROWTH_MONTHLY') || eq('STRIPE_PRICE_GROWTH_YEARLY')) return 'growth';
+  return null;
+}
+
+/** Effective plan for an org: from active subscription or 'free'. Pass `env` so tier can be inferred from stripePriceId. */
+export async function getEffectivePlanForOrganization(db, organizationId, env = null) {
   const sub = await getSubscriptionByOrganization(db, organizationId);
-  const planId = sub ? (sub.planId ?? sub.planid ?? null) : null;
+  let planId = sub ? (sub.planId ?? sub.planid ?? null) : null;
+  if (planId) planId = String(planId).toLowerCase();
+  if ((!planId || !['basic', 'essential', 'growth'].includes(planId)) && env && sub) {
+    const pid = sub.stripePriceId ?? sub.stripepriceid ?? null;
+    const inferred = inferTierPlanIdFromStripePriceId(env, pid);
+    if (inferred) planId = inferred;
+  }
   const effectivePlanId = planId && ['basic', 'essential', 'growth'].includes(planId) ? planId : 'free';
   const plan = await getPlanById(db, effectivePlanId);
   return { planId: effectivePlanId, plan, subscription: sub };

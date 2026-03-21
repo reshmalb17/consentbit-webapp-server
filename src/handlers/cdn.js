@@ -415,6 +415,41 @@ ${inlineConfig}
     }
   }
 
+  /** First path segment before /, ?, # — no RegExp (loader is embedded in a template literal). */
+  function privacyPolicyFirstSegment(u) {
+    var s = u;
+    var cut = s.indexOf('#');
+    if (cut >= 0) s = s.slice(0, cut);
+    cut = s.indexOf('?');
+    if (cut >= 0) s = s.slice(0, cut);
+    cut = s.indexOf('/');
+    if (cut >= 0) s = s.slice(0, cut);
+    return s.trim();
+  }
+
+  function privacyPolicyLooksLikeStaticFile(firstSeg) {
+    var dot = firstSeg.lastIndexOf('.');
+    if (dot < 0) return false;
+    var ext = firstSeg.slice(dot).toLowerCase();
+    return (
+      ext === '.js' ||
+      ext === '.mjs' ||
+      ext === '.css' ||
+      ext === '.png' ||
+      ext === '.jpg' ||
+      ext === '.jpeg' ||
+      ext === '.gif' ||
+      ext === '.svg' ||
+      ext === '.webp' ||
+      ext === '.pdf' ||
+      ext === '.json' ||
+      ext === '.xml' ||
+      ext === '.ico' ||
+      ext === '.woff' ||
+      ext === '.woff2'
+    );
+  }
+
   /** Turn stored policy URL into an absolute href (relative paths use the page URL as base). */
   function resolvePrivacyPolicyHref(raw) {
     if (!raw || typeof raw !== 'string') return '';
@@ -424,6 +459,28 @@ ${inlineConfig}
     if (lower.indexOf('mailto:') === 0 || lower.indexOf('tel:') === 0) return u;
     if (lower.indexOf('http://') === 0 || lower.indexOf('https://') === 0) return u;
     if (u.indexOf('//') === 0) return 'https:' + u;
+    // Relative paths only — resolve on the host page
+    if (
+      u.charAt(0) === '/' ||
+      u.indexOf('./') === 0 ||
+      u.indexOf('../') === 0
+    ) {
+      try {
+        if (typeof window !== 'undefined' && window.location) {
+          return new URL(u, window.location.href).href;
+        }
+      } catch (e0) {}
+      return u;
+    }
+    // Bare hostname (e.g. www.consentbit.com) — must NOT use URL(base) or it becomes
+    // https://embed-host/www.consentbit.com
+    var firstSeg = privacyPolicyFirstSegment(u);
+    if (firstSeg.indexOf('.') > 0) {
+      if (!privacyPolicyLooksLikeStaticFile(firstSeg)) {
+        while (u.length > 0 && u.charAt(0) === '/') u = u.slice(1);
+        return 'https://' + u;
+      }
+    }
     try {
       if (typeof window !== 'undefined' && window.location) {
         return new URL(u, window.location.href).href;

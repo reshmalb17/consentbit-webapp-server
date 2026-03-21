@@ -6,7 +6,18 @@
 //   checkout.session.completed - single: save subscription from session (per-site license); bulk: audit only (licenses enqueued from payment_intent.succeeded)
 //   customer.subscription.updated / .deleted / invoice.payment_failed - sync Subscription table
 
-import { ensureSchema, saveSubscription, getSubscriptionByStripeId, savePaymentEvent, enqueueBulkLicenseJobs, markPaymentIntentProcessed, generateUniqueLicenseKey, generateLicenseKeys, createSite } from '../services/db.js';
+import {
+  ensureSchema,
+  saveSubscription,
+  getSubscriptionByStripeId,
+  savePaymentEvent,
+  enqueueBulkLicenseJobs,
+  markPaymentIntentProcessed,
+  generateUniqueLicenseKey,
+  generateLicenseKeys,
+  createSite,
+  inferTierPlanIdFromStripePriceId,
+} from '../services/db.js';
 
 /** Find existing Stripe customer by email, or create one (Use Case 3 / bulk guest checkout). */
 async function findOrCreateStripeCustomerByEmail(env, email) {
@@ -199,6 +210,8 @@ export async function handleStripeWebhook(request, env) {
 
       let planTypeMeta = sessionMeta.planType || 'single';
       let subMeta = {};
+      let stripePriceFromSub = null;
+      let subscriptionStatus = 'active';
 
       // Metadata is on the Subscription, not Session — fetch subscription to get siteId/siteName/siteDomain
       if (subId && env.STRIPE_SECRET_KEY) {
@@ -208,6 +221,9 @@ export async function handleStripeWebhook(request, env) {
           });
           const subData = await subRes.json();
           subMeta = subData.metadata || {};
+          if (subData.status === 'trialing' || subData.status === 'active') {
+            subscriptionStatus = subData.status;
+          }
           if (subMeta.planType) planTypeMeta = subMeta.planType;
           if (subMeta.interval) interval = subMeta.interval;
           if (subData.current_period_start) currentPeriodStart = toTimestamp(subData.current_period_start);
@@ -216,6 +232,11 @@ export async function handleStripeWebhook(request, env) {
           if (!siteId && subMeta.siteId) siteId = String(subMeta.siteId).trim() || null;
           if (!siteNameMeta && subMeta.siteName) siteNameMeta = String(subMeta.siteName).trim() || null;
           if (!siteDomainMeta && subMeta.siteDomain) siteDomainMeta = String(subMeta.siteDomain).trim() || null;
+          stripePriceFromSub = subData.items?.data?.[0]?.price?.id || null;
+          if (!subMeta.planId && stripePriceFromSub) {
+            const inferred = inferTierPlanIdFromStripePriceId(env, stripePriceFromSub);
+            if (inferred) subMeta = { ...subMeta, planId: inferred };
+          }
           console.log('[StripeWebhook] checkout.session.completed: sub metadata', { planType: planTypeMeta, siteId, siteNameMeta, siteDomainMeta, orgId });
         } catch (e) {
           console.warn('[StripeWebhook] Could not fetch subscription', e.message);
@@ -286,10 +307,11 @@ export async function handleStripeWebhook(request, env) {
           siteId: siteId || null,
           stripeSubscriptionId: subId,
           stripeCustomerId: session.customer,
+          stripePriceId: stripePriceFromSub,
           planType: planTypeMeta === 'tier' ? 'tier' : 'single',
           planId: subMeta.planId || null,
           interval,
-          status: 'active',
+          status: subscriptionStatus,
           currentPeriodStart,
           currentPeriodEnd,
           licenseKey,
@@ -323,7 +345,16 @@ export async function handleStripeWebhook(request, env) {
       }
 
       const existingPlanType = existing?.planType ?? existing?.plantype ?? 'single';
-      const planIdFromMeta = sub.metadata?.planId ?? existing?.planId ?? existing?.planid ?? null;
+      let planIdFromMeta = sub.metadata?.planId ?? existing?.planId ?? existing?.planid ?? null;
+      const priceIdFromSub = sub.items?.data?.[0]?.price?.id ?? null;
+      if (!planIdFromMeta || !['basic', 'essential', 'growth'].includes(String(planIdFromMeta))) {
+        const inferred = inferTierPlanIdFromStripePriceId(env, priceIdFromSub);
+        if (inferred) planIdFromMeta = inferred;
+      }
+      const planTypeToSave =
+        planIdFromMeta && ['basic', 'essential', 'growth'].includes(String(planIdFromMeta))
+          ? 'tier'
+          : existingPlanType;
       const intervalFromSub = sub.items?.data?.[0]?.plan?.interval === 'year' ? 'yearly' : 'monthly';
       await saveSubscription(db, {
         id: existing?.id,
@@ -332,7 +363,7 @@ export async function handleStripeWebhook(request, env) {
         stripeSubscriptionId: sub.id,
         stripeCustomerId: sub.customer,
         stripePriceId: sub.items?.data?.[0]?.price?.id,
-        planType: existingPlanType,
+        planType: planTypeToSave,
         planId: planIdFromMeta,
         interval: intervalFromSub,
         status,

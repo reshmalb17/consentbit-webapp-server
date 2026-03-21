@@ -61,7 +61,7 @@ export async function handleSites(request, env) {
     const existingSites = await listSites(db, { organizationId });
     const isUpdate = existingSites.some((s) => (s.domain || '').trim().toLowerCase() === domain.toLowerCase());
     if (!isUpdate) {
-      const { planId: effectivePlanId, plan } = await getEffectivePlanForOrganization(db, organizationId);
+      const { planId: effectivePlanId, plan } = await getEffectivePlanForOrganization(db, organizationId, env);
       const sitesLimit = plan ? (plan.domainsIncluded ?? plan.domainsincluded ?? 1) : 1;
       if (existingSites.length >= sitesLimit) {
         const message = effectivePlanId === 'free'
@@ -119,7 +119,7 @@ export async function handleSites(request, env) {
 
     const sites = await listSites(db, { organizationId: organizationId || undefined });
     // Include effective plan so UI can restrict features (e.g., GDPR+CCPA only for paid plans)
-    const { planId: effectivePlanId } = await getEffectivePlanForOrganization(db, organizationId);
+    const { planId: effectivePlanId } = await getEffectivePlanForOrganization(db, organizationId, env);
     return Response.json({ success: true, sites, effectivePlanId });
   }
 

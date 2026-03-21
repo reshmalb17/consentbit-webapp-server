@@ -13,6 +13,11 @@ JWT_SECRET="x7K9pL2mQ5vR8tY1nB4jH7uF0zA3eD6cK9pL2mQ5vR8tY1nB4jH7uF0zA3eD6cK9p"
 CDN_BASE_URL = "https://consent-webapp-manager.YOUR-ACCOUNT.workers.dev"
 # Public origin of your Next.js app (no trailing slash). If set, embed tries https://<WEBAPP>/asset/logo.webp first; on failure it loads /embed/floating-logo.svg from this Worker. If empty, the Worker SVG is used directly.
 WEBAPP_PUBLIC_URL = ""
+# --- Tier plans (Basic / Essential / Growth) — one Stripe *subscription* per checkout, one recurring price per line item ---
+# In Stripe Dashboard: create **3 products** (one per tier). Each product has **2 recurring prices** (month + year).
+# Map those six price_ ids here. Checkout uses exactly one price → one subscription for the chosen plan + billing interval.
+# Tier Basic/Essential/Growth: must be **Recurring** Stripe prices (subscription), not one-time — or Checkout returns "recurring price" errors.
+# If only Basic fails: open the Basic product in Stripe → each price must say "Recurring" / subscription. One-time prices will not work.
 STRIPE_PRICE_BASIC_MONTHLY = "price_1T7doaJwcuG9163M3fNkG77K" 
 STRIPE_PRICE_BASIC_YEARLY = "price_1T7dqFJwcuG9163MlGnV7DRn"
 STRIPE_PRICE_ESSENTIAL_MONTHLY = "price_1T7drWJwcuG9163MSZepvR2S"
@@ -33,11 +38,11 @@ STRIPE_PRODUCT_YEARLY = "prod_TwvVRX1MaDL7wV"
 # STRIPE_PRICE_GROWTH_PAGEVIEWS_METERED = "price_xxx"
 # STRIPE_PRICE_GROWTH_SCANS_METERED = "price_xxx"
 
-# Bulk purchase: one-time (non-recurring) Stripe prices for initial payment
-STRIPE_ONE_TIME_PRICE_MONTHLY = "price_1SpSusJwcuG9163MHGK38FfW"
-STRIPE_ONE_TIME_PRICE_YEARLY = "price_1SpSw0JwcuG9163MLkRgIPmD"
-STRIPE_ONE_TIME_PRODUCT_MONTHLY = "prod_Tn30iMTLmnS6Yz"
-STRIPE_ONE_TIME_PRODUCT_YEARLY = "prod_Tn329EHlZLyLtR"
+# Bulk purchase (not used — create-checkout-session rejects bulk/quantity; per-site tier / legacy single only).
+# STRIPE_ONE_TIME_PRICE_MONTHLY = "price_1SpSusJwcuG9163MHGK38FfW"
+# STRIPE_ONE_TIME_PRICE_YEARLY = "price_1SpSw0JwcuG9163MLkRgIPmD"
+# STRIPE_ONE_TIME_PRODUCT_MONTHLY = "prod_Tn30iMTLmnS6Yz"
+# STRIPE_ONE_TIME_PRODUCT_YEARLY = "prod_Tn329EHlZLyLtR"
 
 # Cron trigger to execute scheduled scans every minute
 [triggers]

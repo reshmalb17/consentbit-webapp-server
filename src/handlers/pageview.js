@@ -49,7 +49,7 @@ export async function handlePageview(request, env) {
   let overLimit = false;
   if (organizationId) {
     const orgUsage = await getPageviewUsageForOrganization(db, organizationId);
-    const { plan } = await getEffectivePlanForOrganization(db, organizationId);
+    const { plan } = await getEffectivePlanForOrganization(db, organizationId, env);
     const limit = plan ? (plan.pageviewsIncluded ?? plan.pageviewsincluded ?? 7500) : 7500;
     overLimit = orgUsage.pageviewCount >= limit;
   }
