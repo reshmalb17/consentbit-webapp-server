@@ -10,6 +10,39 @@ import {
   getCookieProvider 
 } from '../data/cookieDatabase.js';
 
+async function getUserDefinedCookieRule(db, siteId, name, domain) {
+  if (!siteId || !name) return null;
+  const normalizedDomain = domain ? String(domain).trim().toLowerCase() : null;
+  const exact = await db
+    .prepare(
+      `SELECT category, provider, description
+       FROM Cookie
+       WHERE siteId = ?1
+         AND isExpected = 1
+         AND lower(name) = lower(?2)
+         AND lower(COALESCE(domain, '')) = lower(COALESCE(?3, ''))
+       ORDER BY lastSeenAt DESC
+       LIMIT 1`,
+    )
+    .bind(siteId, name, normalizedDomain)
+    .first();
+  if (exact) return exact;
+  const fallback = await db
+    .prepare(
+      `SELECT category, provider, description
+       FROM Cookie
+       WHERE siteId = ?1
+         AND isExpected = 1
+         AND lower(name) = lower(?2)
+         AND (domain IS NULL OR trim(domain) = '')
+       ORDER BY lastSeenAt DESC
+       LIMIT 1`,
+    )
+    .bind(siteId, name)
+    .first();
+  return fallback || null;
+}
+
 function parseCookieFromDocumentCookie(cookieString) {
   // Parse simple "name=value" format from document.cookie
   const parts = cookieString.split(';').map((p) => p.trim());
@@ -210,9 +243,18 @@ export async function handleScanCookies(request, env) {
           continue; // Skip invalid cookies
         }
 
-        // Categorize cookie
-        const provider = getCookieProvider(parsedCookie.name, parsedCookie.domain);
-        const category = categorizeCookie(parsedCookie.name, parsedCookie.domain, provider);
+        // Categorize cookie (auto + user-defined override)
+        const autoProvider = getCookieProvider(parsedCookie.name, parsedCookie.domain);
+        const autoCategory = categorizeCookie(parsedCookie.name, parsedCookie.domain, autoProvider);
+        const rule = await getUserDefinedCookieRule(db, siteId, parsedCookie.name, parsedCookie.domain);
+        const provider = String(rule?.provider || autoProvider || '').trim() || null;
+        const category = String(rule?.category || autoCategory || 'uncategorized').toLowerCase();
+        const description = String(rule?.description || '').trim() || null;
+        const baseSource =
+          typeof cookieData === 'string'
+            ? 'document.cookie'
+            : String(cookieData?.source || 'document.cookie');
+        const source = rule ? `user-rule:${baseSource}` : baseSource;
 
         const cookiePayload = {
           siteId: siteId,
@@ -224,11 +266,13 @@ export async function handleScanCookies(request, env) {
             path: parsedCookie.path,
             category,
             provider,
-            description: null,
+            description,
             expires: parsedCookie.expires,
             httpOnly: parsedCookie.httpOnly,
             secure: parsedCookie.secure,
             sameSite: parsedCookie.sameSite,
+            source,
+            isExpected: false,
           },
         };
         // Log every field to find undefined (D1 rejects undefined)

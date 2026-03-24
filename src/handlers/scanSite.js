@@ -13,6 +13,39 @@ import {
   getCookiesByConsentState
 } from '../data/cookieDatabase.js';
 
+async function getUserDefinedCookieRule(db, siteId, name, domain) {
+  if (!siteId || !name) return null;
+  const normalizedDomain = domain ? String(domain).trim().toLowerCase() : null;
+  const exact = await db
+    .prepare(
+      `SELECT category, provider, description
+       FROM Cookie
+       WHERE siteId = ?1
+         AND isExpected = 1
+         AND lower(name) = lower(?2)
+         AND lower(COALESCE(domain, '')) = lower(COALESCE(?3, ''))
+       ORDER BY lastSeenAt DESC
+       LIMIT 1`,
+    )
+    .bind(siteId, name, normalizedDomain)
+    .first();
+  if (exact) return exact;
+  const fallback = await db
+    .prepare(
+      `SELECT category, provider, description
+       FROM Cookie
+       WHERE siteId = ?1
+         AND isExpected = 1
+         AND lower(name) = lower(?2)
+         AND (domain IS NULL OR trim(domain) = '')
+       ORDER BY lastSeenAt DESC
+       LIMIT 1`,
+    )
+    .bind(siteId, name)
+    .first();
+  return fallback || null;
+}
+
 function parseCookieString(cookieString) {
   const parts = cookieString.split(';').map((p) => p.trim());
   const nameValue = parts[0].split('=');
@@ -48,6 +81,16 @@ function parseCookieString(cookieString) {
   }
 
   return cookie;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error('Fetch timeout')), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function handleScanSite(request, env) {
@@ -128,13 +171,14 @@ export async function handleScanSite(request, env) {
     let html = '';
     let setCookieHeaders = [];
 
-    // Strategy 1: Try HEAD request first (less likely to trigger bot protection)
+    // Strategy 1: Try HEAD request first (less likely to trigger bot protection).
+    // Keep timeout short so scan requests do not hang UI forever.
     try {
-      const headResponse = await fetch(scanUrl, {
+      const headResponse = await fetchWithTimeout(scanUrl, {
         method: 'HEAD',
         headers: browserHeaders,
         redirect: 'follow',
-      });
+      }, 10000);
 
       if (headResponse.ok) {
         // Extract cookies from HEAD response
@@ -154,11 +198,11 @@ export async function handleScanSite(request, env) {
 
     // Strategy 2: Try GET request to get full HTML and scripts
     try {
-      response = await fetch(scanUrl, {
+      response = await fetchWithTimeout(scanUrl, {
         method: 'GET',
         headers: browserHeaders,
         redirect: 'follow',
-      });
+      }, 20000);
 
       // Try to read response body even if status is not OK (some sites return HTML with 403)
       const contentType = response.headers.get('content-type') || '';
@@ -208,6 +252,9 @@ export async function handleScanSite(request, env) {
         console.log('[ScanSite] GET failed but we have cookies from HEAD, proceeding with partial scan');
         html = '';
       } else {
+        if (fetchError?.name === 'AbortError') {
+          throw new Error('Scan timed out while fetching the site. Try again, or verify the site is reachable and not blocking bot traffic.');
+        }
         // Re-throw the error if we have no data
         throw fetchError;
       }
@@ -219,14 +266,20 @@ export async function handleScanSite(request, env) {
     for (const cookieString of setCookieHeaders) {
       try {
         const parsed = parseCookieString(cookieString);
-        const provider = getCookieProvider(parsed.name, parsed.domain);
-        const category = categorizeCookie(parsed.name, parsed.domain, provider);
+        const autoProvider = getCookieProvider(parsed.name, parsed.domain);
+        const autoCategory = categorizeCookie(parsed.name, parsed.domain, autoProvider);
+        const rule = await getUserDefinedCookieRule(db, siteId, parsed.name, parsed.domain);
+        const provider = String(rule?.provider || autoProvider || '').trim() || null;
+        const category = String(rule?.category || autoCategory || 'uncategorized').toLowerCase();
+        const description = String(rule?.description || '').trim() || null;
 
+        const source = rule ? 'user-rule:http-header' : 'http-header';
         cookies.push({
           ...parsed,
           provider,
           category,
-          source: 'http-header', // Mark as from HTTP header
+          description,
+          source,
           isExpected: false, // Actual cookie found
         });
       } catch (e) {
@@ -244,16 +297,22 @@ export async function handleScanSite(request, env) {
         try {
           const cookieStr = docCookieMatch[1];
           const parsed = parseCookieString(cookieStr);
-          const provider = getCookieProvider(parsed.name, parsed.domain);
-          const category = categorizeCookie(parsed.name, parsed.domain, provider);
+          const autoProvider = getCookieProvider(parsed.name, parsed.domain);
+          const autoCategory = categorizeCookie(parsed.name, parsed.domain, autoProvider);
+          const rule = await getUserDefinedCookieRule(db, siteId, parsed.name, parsed.domain);
+          const provider = String(rule?.provider || autoProvider || '').trim() || null;
+          const category = String(rule?.category || autoCategory || 'uncategorized').toLowerCase();
+          const description = String(rule?.description || '').trim() || null;
           
           // Avoid duplicates
           if (!cookies.find(c => c.name === parsed.name && c.domain === parsed.domain)) {
+            const source = rule ? 'user-rule:javascript' : 'javascript';
             cookies.push({
               ...parsed,
               provider,
               category,
-              source: 'javascript', // Mark as from JavaScript
+              description,
+              source,
               isExpected: false, // Actual cookie found
             });
           }
@@ -269,15 +328,21 @@ export async function handleScanSite(request, env) {
         try {
           const cookieStr = metaMatch[1];
           const parsed = parseCookieString(cookieStr);
-          const provider = getCookieProvider(parsed.name, parsed.domain);
-          const category = categorizeCookie(parsed.name, parsed.domain, provider);
+          const autoProvider = getCookieProvider(parsed.name, parsed.domain);
+          const autoCategory = categorizeCookie(parsed.name, parsed.domain, autoProvider);
+          const rule = await getUserDefinedCookieRule(db, siteId, parsed.name, parsed.domain);
+          const provider = String(rule?.provider || autoProvider || '').trim() || null;
+          const category = String(rule?.category || autoCategory || 'uncategorized').toLowerCase();
+          const description = String(rule?.description || '').trim() || null;
           
           if (!cookies.find(c => c.name === parsed.name && c.domain === parsed.domain)) {
+            const source = rule ? 'user-rule:meta-tag' : 'meta-tag';
             cookies.push({
               ...parsed,
               provider,
               category,
-              source: 'meta-tag',
+              description,
+              source,
               isExpected: false, // Actual cookie found
             });
           }
@@ -305,15 +370,21 @@ export async function handleScanSite(request, env) {
           try {
             const cookieStr = inlineCookieMatch[1];
             const parsed = parseCookieString(cookieStr);
-            const provider = getCookieProvider(parsed.name, parsed.domain);
-            const category = categorizeCookie(parsed.name, parsed.domain, provider);
+            const autoProvider = getCookieProvider(parsed.name, parsed.domain);
+            const autoCategory = categorizeCookie(parsed.name, parsed.domain, autoProvider);
+            const rule = await getUserDefinedCookieRule(db, siteId, parsed.name, parsed.domain);
+            const provider = String(rule?.provider || autoProvider || '').trim() || null;
+            const category = String(rule?.category || autoCategory || 'uncategorized').toLowerCase();
+            const description = String(rule?.description || '').trim() || null;
             
             if (!cookies.find(c => c.name === parsed.name && c.domain === parsed.domain)) {
+            const source = rule ? 'user-rule:inline-script' : 'inline-script';
             cookies.push({
               ...parsed,
               provider,
               category,
-              source: 'inline-script',
+              description,
+              source,
               isExpected: false, // Actual cookie found
             });
             }

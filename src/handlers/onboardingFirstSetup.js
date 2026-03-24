@@ -4,6 +4,8 @@ import {
   getUserById,
   getOrCreateOrganizationForUser,
   createSite,
+  canonicalEmbedOrigin,
+  buildEmbedScriptUrl,
 } from '../services/db.js';
 
 function getSessionIdFromCookie(request) {
@@ -66,20 +68,22 @@ export async function handleOnboardingFirstSetup(request, env) {
     return Response.json({ success: false, error: 'Failed to initialize organization' }, { status: 500 });
   }
 
-  const url = new URL(request.url);
+  const embedOrigin = canonicalEmbedOrigin(request, env);
   const site = await createSite(db, {
     organizationId: org.id,
     name: siteName,
     domain,
-    origin: url.origin,
+    origin: embedOrigin || new URL(request.url).origin,
     bannerType: 'gdpr',
     // Default: GDPR only until user customizes
     regionMode: 'gdpr',
   });
 
-  // CDN script is served by cdnScriptId (not site.id)
-  // Use production-friendly path (/consentbit/) while keeping /client_data/ for backward compat.
-  const scriptUrl = `${url.origin}/consentbit/${site.cdnScriptId}/script.js`;
+  // Same absolute URL forever (Site.embedScriptUrl); fallback for legacy code paths
+  const scriptUrl =
+    site.embedScriptUrl ||
+    buildEmbedScriptUrl(embedOrigin || new URL(request.url).origin, site.cdnScriptId) ||
+    `${new URL(request.url).origin}/consentbit/${site.cdnScriptId}/script.js`;
   return Response.json(
     {
       success: true,

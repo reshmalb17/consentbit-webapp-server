@@ -2,10 +2,26 @@ import {
   createSite,
   listSites,
   getEffectivePlanForOrganization,
+  getSubscriptionBySiteId,
   getSessionById,
   getUserById,
   getOrCreateOrganizationForUser,
+  buildEmbedScriptUrl,
+  canonicalEmbedOrigin,
 } from '../services/db.js';
+
+/** Site API key for dashboard "License key" column (D1 field casing may vary). */
+function pickSiteLicenseKey(site) {
+  const k =
+    site?.apiKey ??
+    site?.apikey ??
+    site?.api_key ??
+    site?.licenseKey ??
+    site?.licensekey ??
+    site?.license_key ??
+    '';
+  return k != null ? String(k).trim() : '';
+}
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -86,17 +102,27 @@ export async function handleSites(request, env) {
       ? regionModeRaw
       : 'gdpr';
 
+    const embedOrigin = canonicalEmbedOrigin(request, env);
     // create or update site for this org + domain
     const site = await createSite(db, {
       organizationId,
       name,
       domain,
-      origin: url.origin,
+      origin: embedOrigin || url.origin,
       bannerType,
       regionMode,
     });
 
-    return Response.json({ success: true, site });
+    return Response.json({
+      success: true,
+      site: {
+        ...site,
+        scriptUrl:
+          site.embedScriptUrl ||
+          buildEmbedScriptUrl(embedOrigin || url.origin, site.cdnScriptId),
+        licenseKey: pickSiteLicenseKey(site),
+      },
+    });
   }
 
   if (request.method === 'GET') {
@@ -118,9 +144,61 @@ export async function handleSites(request, env) {
     }
 
     const sites = await listSites(db, { organizationId: organizationId || undefined });
+    const embedOrigin = canonicalEmbedOrigin(request, env);
+    // Freeze embed URL in DB once if missing (legacy rows) so the install snippet never drifts.
+    for (const row of sites || []) {
+      const id = row?.id;
+      const embed = row?.embedScriptUrl ?? row?.embedscripturl;
+      const cdnId = row?.cdnScriptId ?? row?.cdnscriptid;
+      if (!embed && cdnId && id) {
+        const computed = buildEmbedScriptUrl(embedOrigin, cdnId);
+        if (computed) {
+          await db
+            .prepare(
+              `UPDATE Site SET embedScriptUrl = ?1, updatedAt = datetime('now') WHERE id = ?2`,
+            )
+            .bind(computed, id)
+            .run();
+          row.embedScriptUrl = computed;
+        }
+      }
+    }
+    // Enrich each site with planId from its active/trialing subscription.
+    // If no site subscription exists, treat it as free.
+    const sitesWithPlan = await Promise.all(
+      (sites || []).map(async (site) => {
+        const sid = site?.id ?? site?.siteId ?? site?.site_id;
+        const sub = sid ? await getSubscriptionBySiteId(db, sid) : null;
+        const sitePlanId = String(sub?.planId ?? sub?.planid ?? 'free').toLowerCase();
+        const cdnId = site?.cdnScriptId ?? site?.cdnscriptid;
+        const scriptUrl =
+          site?.embedScriptUrl ||
+          site?.embedscripturl ||
+          buildEmbedScriptUrl(embedOrigin, cdnId);
+        return {
+          ...site,
+          scriptUrl,
+          licenseKey: pickSiteLicenseKey(site),
+          planId: sitePlanId,
+          plan_id: sitePlanId,
+          subscriptionId: sub?.id ?? null,
+          subscription_id: sub?.id ?? null,
+          stripeSubscriptionId: sub?.stripeSubscriptionId ?? sub?.stripesubscriptionid ?? null,
+          stripe_subscription_id: sub?.stripeSubscriptionId ?? sub?.stripesubscriptionid ?? null,
+          subscriptionCurrentPeriodEnd:
+            sub?.currentPeriodEnd ?? sub?.currentperiodend ?? null,
+          subscription_current_period_end:
+            sub?.currentPeriodEnd ?? sub?.currentperiodend ?? null,
+          subscriptionCancelAtPeriodEnd:
+            Number(sub?.cancelAtPeriodEnd ?? sub?.cancelatperiodend ?? 0) === 1 ? 1 : 0,
+          subscription_cancel_at_period_end:
+            Number(sub?.cancelAtPeriodEnd ?? sub?.cancelatperiodend ?? 0) === 1 ? 1 : 0,
+        };
+      })
+    );
     // Include effective plan so UI can restrict features (e.g., GDPR+CCPA only for paid plans)
     const { planId: effectivePlanId } = await getEffectivePlanForOrganization(db, organizationId, env);
-    return Response.json({ success: true, sites, effectivePlanId });
+    return Response.json({ success: true, sites: sitesWithPlan, effectivePlanId });
   }
 
   return new Response('Method Not Allowed', { status: 405 });

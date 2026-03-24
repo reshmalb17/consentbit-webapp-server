@@ -1,6 +1,7 @@
 // handlers/cdn.js
 import { getBannerCustomization } from '../services/db.js';
 import { mergeTranslations } from '../data/defaultTranslations.js';
+import { SCRIPT_BLOCK_PROVIDERS } from '../data/scriptBlockProviders.js';
 
 export async function handleCDNScript(request, env, url) {
   const parts = url.pathname.split('/');
@@ -82,6 +83,8 @@ export async function handleCDNScript(request, env, url) {
 
   // Generate custom CSS styles from customization
   let customStyles = null;
+  /** Passed to embed config for scripts that branch on initial banner shape. */
+  let bannerLayoutVisualForConfig = 'box';
   if (customization) {
     // Only bottom positions are supported for initial banner; top/center fall back to bottom-left
     const rawPosition = customization.position || 'bottom-left';
@@ -93,6 +96,11 @@ export async function handleCDNScript(request, env, url) {
     const headingColor = customization.headingColor || '#0f172a';
     const bannerRadius = customization.bannerBorderRadius || '0.375rem';
     const buttonRadius = customization.buttonBorderRadius || '0.375rem';
+    /** Accept/Reject share primary colors; Preferences/Save share customise colors (dashboard parity). */
+    var acceptBg = customization.acceptButtonBg || '#007aff';
+    var acceptTx = customization.acceptButtonText || '#ffffff';
+    var custBg = customization.customiseButtonBg || '#ffffff';
+    var custTx = customization.customiseButtonText || '#334155';
 
     /** Typography from stored translations (dashboard Type tab). */
     let enTrans = {};
@@ -107,6 +115,14 @@ export async function handleCDNScript(request, env, url) {
     } catch (eTy) {
       enTrans = {};
     }
+    /** box = corner card; banner = full-width bottom bar; popup = centered (initial banner only). */
+    var layoutVisual = 'box';
+    try {
+      var lvRaw = enTrans.bannerLayoutVisual != null ? String(enTrans.bannerLayoutVisual).toLowerCase() : 'box';
+      if (lvRaw === 'banner' || lvRaw === 'popup') layoutVisual = lvRaw;
+    } catch (eLayout) {}
+    bannerLayoutVisualForConfig = layoutVisual;
+
     var fontName = enTrans.bannerFontFamily || '';
     var fontWeightStr = String(enTrans.bannerFontWeight || '600');
     var textAlign = enTrans.bannerTextAlign || 'left';
@@ -117,28 +133,44 @@ export async function handleCDNScript(request, env, url) {
       fontName && String(fontName).length
         ? "'" + String(fontName).replace(/'/g, '') + "',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif"
         : "system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
-    
-    // Position classes (initial banner: bottom only)
-    let positionStyles = '';
-    if (position === 'bottom-left') {
-      positionStyles = 'bottom:32px;left:32px;';
-    } else if (position === 'bottom-right') {
-      positionStyles = 'bottom:32px;right:32px;';
-    } else if (position === 'bottom') {
-      positionStyles = 'bottom:32px;left:50%;transform:translateX(-50%);';
+
+    var positionStyles = '';
+    var initialSize = 'width:450px;max-width:90vw;max-height:230px;min-height:0;overflow:hidden;';
+    var initialRadius = 'border-radius:' + bannerRadius + ';';
+    if (layoutVisual === 'banner') {
+      initialSize = 'width:100%;max-width:none;';
+      positionStyles = 'bottom:0;left:0;right:0;transform:none;';
+      initialRadius =
+        'border-radius:0;border-top-left-radius:' +
+        bannerRadius +
+        ';border-top-right-radius:' +
+        bannerRadius +
+        ';';
+    } else if (layoutVisual === 'popup') {
+      initialSize = 'width:450px;max-width:90vw;max-height:230px;min-height:0;overflow:hidden;';
+      positionStyles = 'top:50%;left:50%;bottom:auto;transform:translate(-50%,-50%);';
+    } else {
+      if (position === 'bottom-left') {
+        positionStyles = 'bottom:32px;left:32px;transform:none;';
+      } else if (position === 'bottom-right') {
+        positionStyles = 'bottom:32px;right:32px;transform:none;';
+      } else if (position === 'bottom') {
+        positionStyles = 'bottom:32px;left:50%;transform:translateX(-50%);';
+      } else {
+        positionStyles = 'bottom:32px;left:32px;transform:none;';
+      }
     }
 
     customStyles = 
       "#cb-initial-banner.cb-banner{" +
-        "width:360px;" +
-        "max-width:90vw;" +
+        initialSize +
         "background-color:" + bgColor + ";" +
         "color:" + textColor + ";" +
         "position:fixed;" +
         positionStyles +
         "padding:16px;" +
         "border:1px solid #e2e8f0;" +
-        "border-radius:" + bannerRadius + ";" +
+        initialRadius +
         "box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);" +
         "z-index:2147483647;" +
         "display:flex;" +
@@ -147,10 +179,17 @@ export async function handleCDNScript(request, env, url) {
         "font-size:12px;" +
         "font-weight:" + fontWeightStr + ";" +
       "}" +
+      "#cb-initial-banner.cb-banner .cb-banner-body{" +
+        "flex:1 1 auto;" +
+        "min-height:0;" +
+        "overflow-y:auto;" +
+      "}" +
       "#cb-preferences-banner.cb-banner{" +
-        "width:360px;" +
+        "width:453px;" +
         "max-width:90vw;" +
-        "max-height:80vh;" +
+        "max-height:373px;" +
+        "min-height:0;" +
+        "overflow:hidden;" +
         "background-color:" + bgColor + ";" +
         "color:" + textColor + ";" +
         "position:fixed;" +
@@ -168,6 +207,11 @@ export async function handleCDNScript(request, env, url) {
         "font-size:12px;" +
         "font-weight:" + fontWeightStr + ";" +
       "}" +
+      "#cb-preferences-banner.cb-banner .cb-banner-body{" +
+        "flex:1 1 auto;" +
+        "min-height:0;" +
+        "overflow-y:auto;" +
+      "}" +
       ".cb-banner h3{" +
         "margin:0 0 8px;" +
         "font-size:14px;" +
@@ -175,12 +219,27 @@ export async function handleCDNScript(request, env, url) {
         "color:" + headingColor + ";" +
         "text-align:" + textAlign + ";" +
       "}" +
+      /* Base `.cb-banner h3` loses to static `#cb-initial-banner…h3` — match dashboard heading color. */
+      "#cb-initial-banner.cb-banner h3," +
+      "#cb-preferences-banner.cb-banner h3{" +
+        "color:" + headingColor + ";" +
+      "}" +
+      ".cb-gdpr-cat-label{" +
+        "color:" + headingColor + ";" +
+      "}" +
       ".cb-banner p{" +
         "margin:0 0 12px;" +
         "font-size:11px;" +
         "line-height:1.4;" +
         "color:" + textColor + ";" +
         "text-align:" + textAlign + ";" +
+      "}" +
+      /* Static base uses `#cb-initial-banner… .cb-banner-body > p` — must match dashboard text color. */
+      "#cb-initial-banner.cb-banner .cb-banner-body > p," +
+      "#cb-preferences-banner.cb-banner .cb-banner-body > p," +
+      "#cb-preferences-banner.cb-banner .cb-gdpr-cat-desc{" +
+        "color:" + textColor + ";" +
+        "opacity:0.92;" +
       "}" +
       ".cb-banner button{" +
         "padding:6px 12px;" +
@@ -192,32 +251,36 @@ export async function handleCDNScript(request, env, url) {
         "transition:opacity 0.2s;" +
       "}" +
       ".cb-banner button#cb-accept-all-btn{" +
-        "background-color:" + (customization.acceptButtonBg || '#007aff') + ";" +
-        "color:" + (customization.acceptButtonText || '#ffffff') + ";" +
-        "border-color:" + (customization.acceptButtonBg || '#007aff') + ";" +
+        "background-color:" + acceptBg + ";" +
+        "color:" + acceptTx + ";" +
+        "border-color:" + acceptBg + ";" +
       "}" +
       ".cb-banner button#cb-reject-all-btn{" +
-        "background-color:" + (customization.rejectButtonBg || '#ffffff') + ";" +
-        "color:" + (customization.rejectButtonText || '#334155') + ";" +
-        "border-color:#e2e8f0;" +
+        "background-color:" + acceptBg + ";" +
+        "color:" + acceptTx + ";" +
+        "border-color:" + acceptBg + ";" +
       "}" +
       ".cb-banner button#cb-preferences-btn," +
-      ".cb-banner button#cb-back-btn," +
-      ".cb-banner button#cb-prefs-reject-btn," +
       ".cb-banner button#cb-ccpa-donotsell-link{" +
-        "background-color:" + (customization.customiseButtonBg || '#ffffff') + ";" +
-        "color:" + (customization.customiseButtonText || '#334155') + ";" +
+        "background-color:" + custBg + ";" +
+        "color:" + custTx + ";" +
         "border-color:#e2e8f0;" +
       "}" +
+      ".cb-banner button#cb-back-btn," +
+      ".cb-banner button#cb-prefs-reject-btn{" +
+        "background-color:" + acceptBg + ";" +
+        "color:" + acceptTx + ";" +
+        "border-color:" + acceptBg + ";" +
+      "}" +
       "#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-save-prefs-btn{" +
-        "background-color:" + (customization.acceptButtonBg || '#007aff') + ";" +
-        "color:" + (customization.acceptButtonText || '#ffffff') + ";" +
-        "border-color:" + (customization.acceptButtonBg || '#007aff') + ";" +
+        "background-color:" + custBg + ";" +
+        "color:" + custTx + ";" +
+        "border-color:#e2e8f0;" +
       "}" +
       "#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{" +
-        "background-color:" + (customization.acceptButtonBg || '#007aff') + ";" +
-        "color:" + (customization.acceptButtonText || '#ffffff') + ";" +
-        "border-color:" + (customization.acceptButtonBg || '#007aff') + ";" +
+        "background-color:" + custBg + ";" +
+        "color:" + custTx + ";" +
+        "border-color:#e2e8f0;" +
       "}" +
       /* Dashboard preview: main banner row — outline Preference + solid Reject/Accept */
       "#cb-initial-banner.cb-banner .cb-banner-footer{" +
@@ -227,21 +290,25 @@ export async function handleCDNScript(request, env, url) {
         "justify-content:flex-start;" +
       "}" +
       "#cb-initial-banner.cb-banner #cb-preferences-btn{" +
-        "background:#ffffff!important;" +
-        "color:" + (customization.acceptButtonBg || '#007aff') + "!important;" +
-        "border:1px solid " + (customization.acceptButtonBg || '#007aff') + "!important;" +
+        "background:" + custBg + "!important;" +
+        "color:" + custTx + "!important;" +
+        "border:1px solid " + custTx + "!important;" +
         "font-size:10px!important;" +
         "padding:2px 12px!important;" +
         "font-weight:600!important;" +
       "}" +
       "#cb-initial-banner.cb-banner #cb-reject-all-btn," +
       "#cb-initial-banner.cb-banner #cb-accept-all-btn{" +
-        "background:" + (customization.acceptButtonBg || '#007aff') + "!important;" +
-        "color:#ffffff!important;" +
-        "border-color:" + (customization.acceptButtonBg || '#007aff') + "!important;" +
+        "background:" + acceptBg + "!important;" +
+        "color:" + acceptTx + "!important;" +
+        "border-color:" + acceptBg + "!important;" +
         "font-size:10px!important;" +
         "padding:2px 12px!important;" +
         "font-weight:600!important;" +
+      "}" +
+      /* Cookie category accordion — match banner background (rows sit on same surface as prefs panel). */
+      ".cb-gdpr-accordion{" +
+        "background-color:" + bgColor + ";" +
       "}" +
       ".cb-banner-footer{" +
         "display:flex;" +
@@ -318,6 +385,7 @@ export async function handleCDNScript(request, env, url) {
     customization: customization
       ? {
           position: customization.position,
+          bannerLayoutVisual: bannerLayoutVisualForConfig,
           privacyPolicyUrl: customization.privacyPolicyUrl,
           stopScroll: customization.stopScroll === 1,
           footerLink: customization.footerLink === 1,
@@ -333,12 +401,19 @@ export async function handleCDNScript(request, env, url) {
           autoDetectLanguage: customization.autoDetectLanguage === 1,
           cookieExpirationDays:
             customization.cookieExpirationDays != null ? customization.cookieExpirationDays : 30,
+          backgroundColor: customization.backgroundColor || '#ffffff',
+          textColor: customization.textColor || '#334155',
+          headingColor: customization.headingColor || '#0f172a',
           acceptButtonBg: customization.acceptButtonBg || '#007aff',
           acceptButtonText: customization.acceptButtonText || '#ffffff',
+          customiseButtonBg: customization.customiseButtonBg || '#ffffff',
+          customiseButtonText: customization.customiseButtonText || '#334155',
         }
       : null,
     floatingLogoUrl: resolveFloatingLogoUrl(),
     floatingLogoFallbackUrl: resolveWorkerFloatingLogoUrl(),
+    /** CookieYes-style URL → category rules (serialized into embed). */
+    scriptBlockProviders: SCRIPT_BLOCK_PROVIDERS,
   };
 
   const inlineConfig = `
@@ -360,6 +435,7 @@ ${inlineConfig}
   var API_BASE = siteConfig.apiBase;
   var GA_MEASUREMENT_ID = siteConfig.gaId || null;
   var CUSTOMIZATION = siteConfig.customization || null;
+  var BANNER_LAYOUT_VISUAL = CUSTOMIZATION ? (CUSTOMIZATION.bannerLayoutVisual || 'box') : 'box';
   var PRIVACY_POLICY_URL = CUSTOMIZATION ? CUSTOMIZATION.privacyPolicyUrl : null;
   var STOP_SCROLL = CUSTOMIZATION ? CUSTOMIZATION.stopScroll : false;
   var ANIMATION_ENABLED = CUSTOMIZATION ? (CUSTOMIZATION.animationEnabled !== false) : true;
@@ -559,6 +635,13 @@ ${inlineConfig}
       console.warn('[ConsentBit] Failed to save consent state', e);
     }
     consentState = next;
+    try {
+      if (typeof releaseBlockedScripts === 'function') {
+        releaseBlockedScripts();
+      }
+    } catch (eRel) {
+      console.warn('[ConsentBit] releaseBlockedScripts failed', eRel);
+    }
   }
 
   // Send consent to backend API
@@ -717,6 +800,292 @@ ${inlineConfig}
     // Compliance (disabled): || category === 'uncategorized'
   }
 
+  /**
+   * CookieYes-style dynamic script blocking: document.createElement hook + MutationObserver.
+   * - Blocks by setting type="javascript/blocked" and storing src in data-cb-blocked-src.
+   * - Re-runs when consent changes (releaseBlockedScripts).
+   */
+  var __cbInternalCreate = false;
+  var __cbCreateElementBackup = null;
+  var SCRIPT_BLOCK_PROVIDERS = siteConfig.scriptBlockProviders || [];
+
+  function isGoogleAnalyticsScriptUrl(url) {
+    if (!url || typeof url !== 'string') return false;
+    var u = url.toLowerCase();
+    return (
+      u.indexOf('googletagmanager.com/gtag/js') !== -1 ||
+      u.indexOf('googletagmanager.com/gtm.js') !== -1 ||
+      u.indexOf('google-analytics.com') !== -1
+    );
+  }
+
+  function userAllowsCategoryForScript(category) {
+    var cat = category;
+    if (cat === 'behavioral') {
+      cat = 'analytics';
+    }
+    if (cat === 'essential') return true;
+
+    if (BANNER_TYPE === 'ccpa') {
+      if (!consentState || !consentState.accepted) return false;
+      var d = consentState.ccpa && consentState.ccpa.doNotSell;
+      if (cat === 'marketing') {
+        return !d;
+      }
+      return true;
+    }
+
+    if (!consentState || !consentState.accepted) return false;
+    var cats = consentState.categories || {};
+    if (cat === 'analytics') return !!cats.analytics;
+    if (cat === 'marketing') return !!cats.marketing;
+    if (cat === 'preferences') return !!cats.preferences;
+    return true;
+  }
+
+  /** data-consentbit /  value → category list, or null */
+  function categoriesFromScriptTagAttr(raw) {
+    if (!raw) return null;
+    var c0 = String(raw).toLowerCase().trim();
+    if (
+      c0 === 'analytics' ||
+      c0 === 'marketing' ||
+      c0 === 'behavioral' ||
+      c0 === 'preferences' ||
+      c0 === 'essential'
+    ) {
+      return [c0 === 'essential' ? 'essential' : c0];
+    }
+    var cyLower = c0;
+    if (cyLower.indexOf('necessary') >= 0 || cyLower.indexOf('essential') >= 0) {
+      return ['essential'];
+    }
+    if (cyLower.indexOf('functional') >= 0 || cyLower.indexOf('preference') >= 0) {
+      return ['preferences'];
+    }
+    if (cyLower.indexOf('analytics') >= 0 || cyLower.indexOf('performance') >= 0 || cyLower.indexOf('statistics') >= 0) {
+      return ['analytics'];
+    }
+    if (cyLower.indexOf('advertisement') >= 0 || cyLower.indexOf('marketing') >= 0 || cyLower.indexOf('ads') >= 0) {
+      return ['marketing'];
+    }
+    if (cyLower.indexOf('social') >= 0) {
+      return ['marketing'];
+    }
+    if (cyLower.indexOf('other') >= 0) {
+      return ['analytics'];
+    }
+    return null;
+  }
+
+  function resolveScriptCategories(url, el) {
+    if (el && el.getAttribute) {
+      /** Primary: data-consentbit="analytics" | "cookieyes-analytics" etc. */
+      var fromCb = categoriesFromScriptTagAttr(el.getAttribute('data-consentbit'));
+      if (fromCb) return fromCb;
+      /** Legacy: data-consentbit-category (short names only) */
+      var dc = el.getAttribute('data-consentbit-category');
+      if (dc) {
+        var c1 = String(dc).toLowerCase().trim();
+        if (
+          c1 === 'analytics' ||
+          c1 === 'marketing' ||
+          c1 === 'behavioral' ||
+          c1 === 'preferences' ||
+          c1 === 'essential'
+        ) {
+          return [c1 === 'essential' ? 'essential' : c1];
+        }
+      }
+      /** Migration: data-cookieyes (CookieYes sites) */
+      var fromCy = categoriesFromScriptTagAttr(el.getAttribute('data-cookieyes'));
+      if (fromCy) return fromCy;
+    }
+    if (url && SCRIPT_BLOCK_PROVIDERS.length) {
+      for (var pi = 0; pi < SCRIPT_BLOCK_PROVIDERS.length; pi++) {
+        var p = SCRIPT_BLOCK_PROVIDERS[pi];
+        if (!p || !p.pattern) continue;
+        try {
+          var re = new RegExp(p.pattern, 'i');
+          if (re.test(url)) {
+            return p.categories && p.categories.length ? p.categories.slice() : ['analytics'];
+          }
+        } catch (eRe) {}
+      }
+    }
+    if (!url) return [];
+    var single = categorize(url);
+    if (single === 'uncategorized') return [];
+    return [single];
+  }
+
+  function shouldBlockScript(url, el) {
+    if (__cbInternalCreate) return false;
+    if (!url || typeof url !== 'string') return false;
+    var u = url.toLowerCase();
+    if (u.indexOf('consentbit') !== -1 || u.indexOf('client_data') !== -1) return false;
+
+    var cats = resolveScriptCategories(url, el);
+    if (!cats || cats.length === 0) return false;
+
+    for (var j = 0; j < cats.length; j++) {
+      var cat = cats[j];
+      if (!isNonEssential(cat)) continue;
+      if (GA_MEASUREMENT_ID && cat === 'analytics' && isGoogleAnalyticsScriptUrl(url)) {
+        continue;
+      }
+      if (!userAllowsCategoryForScript(cat)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function applyBlockToScriptNode(node) {
+    if (!node || node.nodeName !== 'SCRIPT') return;
+    if (node.getAttribute && node.getAttribute('type') === 'javascript/blocked') return;
+    var src = (node.getAttribute && node.getAttribute('src')) || node.src || '';
+    if (!src) return;
+    if (!shouldBlockScript(src, node)) return;
+    try {
+      node.setAttribute('data-cb-blocked-src', src);
+      node.setAttribute('type', 'javascript/blocked');
+      node.removeAttribute('src');
+    } catch (eBl) {}
+  }
+
+  function patchDynamicScriptElement(el) {
+    if (!el || el.__cbPatched) return;
+    el.__cbPatched = true;
+    try {
+      Object.defineProperty(el, 'src', {
+        configurable: true,
+        enumerable: true,
+        get: function () {
+          return el.getAttribute('src') || '';
+        },
+        set: function (v) {
+          if (shouldBlockScript(v, el)) {
+            el.setAttribute('data-cb-blocked-src', v);
+            el.setAttribute('type', 'javascript/blocked');
+            el.removeAttribute('src');
+          } else {
+            el.setAttribute('src', v);
+          }
+        }
+      });
+    } catch (eSrc) {}
+    try {
+      Object.defineProperty(el, 'type', {
+        configurable: true,
+        enumerable: true,
+        get: function () {
+          return el.getAttribute('type') || '';
+        },
+        set: function (val) {
+          var v = val;
+          if (shouldBlockScript(el.getAttribute('src') || el.src || '', el)) {
+            v = 'javascript/blocked';
+          }
+          el.setAttribute('type', v);
+        }
+      });
+    } catch (eTy) {}
+  }
+
+  function processNodeForBlocking(node) {
+    if (!node || node.nodeType !== 1) return;
+    if (node.nodeName === 'SCRIPT') {
+      applyBlockToScriptNode(node);
+      return;
+    }
+    if (node.querySelectorAll) {
+      var scripts = node.querySelectorAll('script[src]');
+      for (var si = 0; si < scripts.length; si++) {
+        applyBlockToScriptNode(scripts[si]);
+      }
+    }
+  }
+
+  function releaseBlockedScripts() {
+    var list = document.querySelectorAll('script[type="javascript/blocked"][data-cb-blocked-src]');
+    for (var i = 0; i < list.length; i++) {
+      var el = list[i];
+      var src = el.getAttribute('data-cb-blocked-src');
+      if (!src) continue;
+      if (shouldBlockScript(src, el)) continue;
+      __cbInternalCreate = true;
+      try {
+        var ns = document.createElement('script');
+        ns.async = el.hasAttribute('async');
+        ns.defer = el.hasAttribute('defer');
+        ns.crossOrigin = el.crossOrigin || '';
+        ns.integrity = el.integrity || '';
+        ns.referrerPolicy = el.referrerPolicy || '';
+        if (el.id) ns.id = el.id;
+        ns.src = src;
+        var attrs = el.attributes;
+        for (var a = 0; a < attrs.length; a++) {
+          var an = attrs[a].name;
+          if (an === 'src' || an === 'type' || an === 'data-cb-blocked-src') continue;
+          ns.setAttribute(an, attrs[a].value);
+        }
+        if (el.parentNode) {
+          el.parentNode.replaceChild(ns, el);
+        } else {
+          document.head.appendChild(ns);
+        }
+      } catch (eR) {
+        console.warn('[ConsentBit] releaseBlockedScripts node failed', eR);
+      } finally {
+        __cbInternalCreate = false;
+      }
+    }
+  }
+
+  function installConsentScriptBlocker() {
+    if (window.__cbCreateElementHookInstalled) return;
+    window.__cbCreateElementHookInstalled = true;
+    try {
+      __cbCreateElementBackup = document.createElement.bind(document);
+    } catch (eB) {
+      __cbCreateElementBackup = document.createElement;
+    }
+    document.createElement = function (tagName) {
+      var el = __cbCreateElementBackup(tagName);
+      var tag = String(tagName || '').toLowerCase();
+      if (tag === 'script') {
+        patchDynamicScriptElement(el);
+      }
+      return el;
+    };
+    var obs = new MutationObserver(function (mutations) {
+      for (var mi = 0; mi < mutations.length; mi++) {
+        var m = mutations[mi];
+        if (m.type === 'childList') {
+          var adds = m.addedNodes;
+          for (var ai = 0; ai < adds.length; ai++) {
+            processNodeForBlocking(adds[ai]);
+          }
+        } else if (m.type === 'attributes' && m.attributeName === 'src' && m.target && m.target.nodeName === 'SCRIPT') {
+          applyBlockToScriptNode(m.target);
+        }
+      }
+    });
+    try {
+      obs.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['src']
+      });
+    } catch (eObs) {
+      obs.observe(document.documentElement, { childList: true, subtree: true });
+    }
+    window.__cbMutationObserver = obs;
+    console.log('[ConsentBit] CookieYes-style script blocker installed');
+  }
+
   function blockNonEssentialScripts() {
     var scripts = collectScripts();
     console.log('[ConsentBit] Blocking non-essential scripts (GDPR) - but allowing GA for cookieless tracking');
@@ -730,20 +1099,39 @@ ${inlineConfig}
         continue;
       }
 
-      if (consentState.accepted) {
-        console.log('[ConsentBit] Consent already accepted, not blocking', src, category);
-        continue;
-      }
-
-      // Allow GA scripts to load for cookieless tracking (anonymous visitor count)
-      // These will use consent mode denied, so no cookies will be set
+      // Allow GA scripts to load for cookieless tracking when site has GA_MEASUREMENT_ID
       if (category === 'analytics' && GA_MEASUREMENT_ID) {
         var isGoogleAnalytics = src.indexOf('googletagmanager.com/gtag/js') !== -1 || 
                                  src.indexOf('googletagmanager.com/gtm.js') !== -1 ||
                                  src.indexOf('google-analytics.com') !== -1;
         if (isGoogleAnalytics) {
           console.log('[ConsentBit] Allowing GA script for cookieless tracking (no cookies will be set)', src);
-          continue; // Don't block GA - it will use consent mode denied
+          continue;
+        }
+      }
+
+      // Full accept-all: do not strip static scripts (dynamic injection still gated by hook)
+      if (consentState.accepted) {
+        var cats = consentState.categories || {};
+        var allOn =
+          !!cats.analytics &&
+          !!cats.preferences &&
+          !!cats.marketing;
+        if (allOn) {
+          console.log('[ConsentBit] All categories on, not blocking static script', src, category);
+          continue;
+        }
+        // Partial consent: block categories the user denied (same rules as createElement hook)
+        var mapCat = category === 'behavioral' ? 'analytics' : category;
+        if (mapCat === 'analytics' && !cats.analytics) {
+          /* fall through to delayedScripts */
+        } else if (mapCat === 'marketing' && !cats.marketing) {
+          /* fall through */
+        } else if (mapCat === 'preferences' && !cats.preferences) {
+          /* fall through */
+        } else {
+          console.log('[ConsentBit] Consent allows this category, not blocking static script', src, category);
+          continue;
         }
       }
 
@@ -771,6 +1159,8 @@ ${inlineConfig}
 
     if (!delayedScripts.length) return;
 
+    __cbInternalCreate = true;
+    try {
     for (var i = 0; i < delayedScripts.length; i++) {
       var item = delayedScripts[i];
       var newScript = document.createElement('script');
@@ -786,6 +1176,9 @@ ${inlineConfig}
       console.log('[ConsentBit] Re-injecting script', item.src, 'category:', item.category);
       document.head.appendChild(newScript);
     }
+    } finally {
+      __cbInternalCreate = false;
+    }
 
     delayedScripts = [];
   }
@@ -799,6 +1192,8 @@ ${inlineConfig}
       return;
     }
 
+    __cbInternalCreate = true;
+    try {
     console.log('[ConsentBit] Initializing Google Consent Mode (denied - cookieless tracking) for GA ID', GA_MEASUREMENT_ID);
 
     // Check if GA script already exists
@@ -858,6 +1253,9 @@ ${inlineConfig}
     });
     
     console.log('[ConsentBit] GA4 initialized for cookieless tracking (anonymous visitor count, no cookies)');
+    } finally {
+      __cbInternalCreate = false;
+    }
   }
 
   function grantGoogleConsent() {
@@ -879,8 +1277,11 @@ ${inlineConfig}
 
   var BANNER_STYLES =
     "#cb-initial-banner.cb-banner{" +
-      "width:360px;" +
+      "width:450px;" +
       "max-width:90vw;" +
+      "max-height:230px;" +
+      "min-height:0;" +
+      "overflow:hidden;" +
       "background-color:#ffffff;" +
       "color:#334155;" +
       "position:fixed;" +
@@ -896,10 +1297,17 @@ ${inlineConfig}
       "font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;" +
       "font-size:12px;" +
     "}" +
+    "#cb-initial-banner.cb-banner .cb-banner-body{" +
+      "flex:1 1 auto;" +
+      "min-height:0;" +
+      "overflow-y:auto;" +
+    "}" +
     "#cb-preferences-banner.cb-banner{" +
-      "width:360px;" +
+      "width:453px;" +
       "max-width:90vw;" +
-      "max-height:80vh;" +
+      "max-height:373px;" +
+      "min-height:0;" +
+      "overflow:hidden;" +
       "background-color:#ffffff;" +
       "color:#334155;" +
       "position:fixed;" +
@@ -915,6 +1323,11 @@ ${inlineConfig}
       "flex-direction:column;" +
       "font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;" +
       "font-size:12px;" +
+    "}" +
+    "#cb-preferences-banner.cb-banner .cb-banner-body{" +
+      "flex:1 1 auto;" +
+      "min-height:0;" +
+      "overflow-y:auto;" +
     "}" +
     // Preference banner position styles (will be overridden by JS)
     "#cb-preferences-banner.cb-banner.prefs-left{" +
@@ -958,6 +1371,12 @@ ${inlineConfig}
     ".cb-gdpr-accordion{" +
       "margin-top:4px;" +
       "margin-bottom:4px;" +
+    "}" +
+    ".cb-gdpr-cat-label{" +
+      "color:#0f172a;" +
+    "}" +
+    ".cb-gdpr-cat-desc{" +
+      "color:#64748b;" +
     "}" +
     ".cb-banner p{" +
       "margin:0 0 12px;" +
@@ -1033,23 +1452,27 @@ ${inlineConfig}
       "border-color:#007aff;" +
     "}" +
     ".cb-banner button#cb-reject-all-btn{" +
-      "background-color:#ffffff;" +
-      "color:#334155;" +
-      "border-color:#e2e8f0;" +
+      "background-color:#007aff;" +
+      "color:#ffffff;" +
+      "border-color:#007aff;" +
     "}" +
     ".cb-banner button#cb-preferences-btn," +
-    ".cb-banner button#cb-back-btn," +
-    ".cb-banner button#cb-prefs-reject-btn," +
     ".cb-banner button#cb-ccpa-donotsell-link{" +
       "background-color:#ffffff;" +
       "color:#334155;" +
       "border-color:#e2e8f0;" +
     "}" +
-    // GDPR preference modal: primary Save (CCPA uses .cb-ccpa-prefs rule below)
-    "#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{" +
+    ".cb-banner button#cb-back-btn," +
+    ".cb-banner button#cb-prefs-reject-btn{" +
       "background-color:#007aff;" +
       "color:#ffffff;" +
       "border-color:#007aff;" +
+    "}" +
+    // Save in prefs footer matches Preferences (customise) colors
+    "#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{" +
+      "background-color:#ffffff;" +
+      "color:#334155;" +
+      "border-color:#e2e8f0;" +
     "}" +
     ".cb-banner label{" +
       "display:block;" +
@@ -1132,9 +1555,9 @@ ${inlineConfig}
       "animation:prefsSlideCenterFromBottom 0.35s ease-out;" +
     "}" +
     "#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-save-prefs-btn{" +
-      "background-color:#007aff;" +
-      "color:#ffffff;" +
-      "border-color:#007aff;" +
+      "background-color:#ffffff;" +
+      "color:#334155;" +
+      "border-color:#e2e8f0;" +
     "}" +
     // Dashboard preview: GDPR main row (Preference outline + solid Reject/Accept)
     "#cb-initial-banner.cb-banner .cb-banner-footer{" +
@@ -1145,8 +1568,8 @@ ${inlineConfig}
     "}" +
     "#cb-initial-banner.cb-banner #cb-preferences-btn{" +
       "background:#ffffff!important;" +
-      "color:#007aff!important;" +
-      "border:1px solid #007aff!important;" +
+      "color:#334155!important;" +
+      "border:1px solid #334155!important;" +
       "font-size:10px!important;" +
       "padding:2px 12px!important;" +
       "font-weight:600!important;" +
@@ -1193,20 +1616,55 @@ ${inlineConfig}
       return;
     }
 
-    var abBg = (CUSTOMIZATION && CUSTOMIZATION.acceptButtonBg) ? String(CUSTOMIZATION.acceptButtonBg) : '#007aff';
-    var abTx = (CUSTOMIZATION && CUSTOMIZATION.acceptButtonText) ? String(CUSTOMIZATION.acceptButtonText) : '#ffffff';
-    // Always last: legacy siteConfig.styles sometimes grouped #cb-save-prefs-btn with outline buttons — force primary Save.
+    var cuBg = (CUSTOMIZATION && CUSTOMIZATION.customiseButtonBg) ? String(CUSTOMIZATION.customiseButtonBg) : '#ffffff';
+    var cuTx = (CUSTOMIZATION && CUSTOMIZATION.customiseButtonText) ? String(CUSTOMIZATION.customiseButtonText) : '#334155';
+    // Always last: Save in prefs footer matches Preferences (customise) — same as dashboard preview.
     var savePrefsOverride =
       '#cb-preferences-banner .cb-banner-footer button#cb-save-prefs-btn{' +
-        'background-color:' + abBg + ' !important;' +
-        'color:' + abTx + ' !important;' +
-        'border-color:' + abBg + ' !important;' +
+        'background-color:' + cuBg + ' !important;' +
+        'color:' + cuTx + ' !important;' +
+        'border-color:#e2e8f0 !important;' +
       '}';
+    // Ensure banner + GDPR category accordion surface use saved background (beats stale base CSS order).
+    var bannerBgOverride = '';
+    if (CUSTOMIZATION && CUSTOMIZATION.backgroundColor) {
+      var bbg = String(CUSTOMIZATION.backgroundColor);
+      bannerBgOverride =
+        '#cb-initial-banner.cb-banner,#cb-preferences-banner.cb-banner{' +
+          'background-color:' + bbg + ' !important;' +
+        '}' +
+        '.cb-gdpr-accordion{' +
+          'background-color:' + bbg + ' !important;' +
+        '}';
+    }
+
+    var headingColorOverride = '';
+    if (CUSTOMIZATION && CUSTOMIZATION.headingColor) {
+      var hCol = String(CUSTOMIZATION.headingColor);
+      headingColorOverride =
+        '#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{' +
+          'color:' + hCol + ' !important;' +
+        '}' +
+        '.cb-gdpr-cat-label{' +
+          'color:' + hCol + ' !important;' +
+        '}';
+    }
+
+    var textColorOverride = '';
+    if (CUSTOMIZATION && CUSTOMIZATION.textColor) {
+      var txCol = String(CUSTOMIZATION.textColor);
+      textColorOverride =
+        '#cb-initial-banner.cb-banner .cb-banner-body > p,' +
+        '#cb-preferences-banner.cb-banner .cb-banner-body > p,' +
+        '#cb-preferences-banner.cb-banner .cb-gdpr-cat-desc{' +
+          'color:' + txCol + ' !important;' +
+        '}';
+    }
 
     var style = document.createElement("style");
     style.id = "cb-styles";
     style.type = "text/css";
-    style.appendChild(document.createTextNode(BANNER_STYLES + '\\n' + savePrefsOverride));
+    style.appendChild(document.createTextNode(BANNER_STYLES + '\\n' + savePrefsOverride + '\\n' + bannerBgOverride + '\\n' + headingColorOverride + '\\n' + textColorOverride));
     document.head.appendChild(style);
     console.log('[ConsentBit] Styles injected into head');
   }
@@ -1377,7 +1835,8 @@ ${inlineConfig}
         exp.style.cssText =
           "flex-shrink:0;width:22px;height:22px;padding:0;border:1px solid #e5e7eb;border-radius:4px;background:#f3f4f6;color:#111827;font-size:14px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;";
         var lab = document.createElement("span");
-        lab.style.cssText = "flex:1;font-size:11px;font-weight:600;color:#0f172a;";
+        lab.className = "cb-gdpr-cat-label";
+        lab.style.cssText = "flex:1;font-size:11px;font-weight:600;";
         lab.textContent = opts.labelText;
         row.appendChild(exp);
         row.appendChild(lab);
@@ -1413,8 +1872,9 @@ ${inlineConfig}
         }
         row.appendChild(right);
         var desc = document.createElement("div");
+        desc.className = "cb-gdpr-cat-desc";
         desc.style.cssText =
-          "display:none;padding:0 12px 12px 44px;font-size:10px;line-height:1.45;color:#64748b;";
+          "display:none;padding:0 12px 12px 44px;font-size:10px;line-height:1.45;";
         desc.textContent = opts.descText;
         exp.addEventListener("click", function () {
           var open = desc.style.display === "none";
@@ -2065,6 +2525,7 @@ ${inlineConfig}
 
   function init() {
     console.log('[ConsentBit] Init start');
+    installConsentScriptBlocker();
     var hasGoogle = hasGoogleTracking();
 
     if (BANNER_TYPE === 'gdpr') {

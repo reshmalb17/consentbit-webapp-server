@@ -5,14 +5,8 @@ export async function handleCookies(request, env) {
   const db = env.CONSENT_WEBAPP;
   const url = new URL(request.url);
 
-  if (request.method !== 'GET') {
+  if (request.method !== 'GET' && request.method !== 'POST') {
     return Response.json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
-  }
-
-  const siteId = url.searchParams.get('siteId');
-
-  if (!siteId) {
-    return Response.json({ success: false, error: 'siteId is required' }, { status: 400 });
   }
 
   try {
@@ -52,6 +46,67 @@ export async function handleCookies(request, env) {
       await db.prepare(`ALTER TABLE Cookie ADD COLUMN source TEXT`).run();
     } catch (e) {
       // Column already exists, ignore
+    }
+
+    if (request.method === 'POST') {
+      let body;
+      try {
+        body = await request.json();
+      } catch (_) {
+        return Response.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
+      }
+
+      const siteId = String(body?.siteId || '').trim();
+      const name = String(body?.name || '').trim();
+      const category = String(body?.category || 'uncategorized').trim().toLowerCase();
+      const domain = String(body?.domain || '').trim() || null;
+      const description = String(body?.description || '').trim() || null;
+      const provider = String(body?.provider || '').trim() || null;
+      const expires = String(body?.duration || body?.expires || '').trim() || null;
+      const source = String(body?.scriptUrlPattern || '').trim() || null;
+      const path = '/';
+      const now = new Date().toISOString();
+
+      if (!siteId || !name) {
+        return Response.json({ success: false, error: 'siteId and name are required' }, { status: 400 });
+      }
+
+      await db
+        .prepare(
+          `INSERT INTO Cookie (
+            id, siteId, scanHistoryId, name, domain, path, category, provider, description, expires,
+            httpOnly, secure, sameSite, isExpected, source, firstSeenAt, lastSeenAt
+          ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, NULL, 1, ?10, ?11, ?11)
+           ON CONFLICT(siteId, name, domain) DO UPDATE SET
+             category = excluded.category,
+             provider = excluded.provider,
+             description = excluded.description,
+             expires = excluded.expires,
+             source = excluded.source,
+             isExpected = 1,
+             lastSeenAt = excluded.lastSeenAt`,
+        )
+        .bind(
+          crypto.randomUUID(),
+          siteId,
+          name,
+          domain,
+          path,
+          category,
+          provider,
+          description,
+          expires,
+          source,
+          now,
+        )
+        .run();
+
+      return Response.json({ success: true });
+    }
+
+    const siteId = url.searchParams.get('siteId');
+    if (!siteId) {
+      return Response.json({ success: false, error: 'siteId is required' }, { status: 400 });
     }
 
     // Get only actual cookies; one row per (siteId, name, domain) — the latest by lastSeenAt (removes duplicates)

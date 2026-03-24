@@ -38,6 +38,14 @@ export async function ensureSchema(db) {
     // Column already exists, ignore
   }
 
+  try {
+    await db.prepare(`
+      ALTER TABLE Site ADD COLUMN embedScriptUrl TEXT
+    `).run();
+  } catch (e) {
+    // Column already exists, ignore
+  }
+
   // Create Script table if it doesn't exist
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS Script (
@@ -125,6 +133,22 @@ export async function ensureSchema(db) {
     `).run();
   } catch (e) {
     // Index might already exist, ignore
+  }
+
+  // Cookie table migrations
+  try {
+    await db.prepare(`
+      ALTER TABLE Cookie ADD COLUMN isExpected INTEGER DEFAULT 0
+    `).run();
+  } catch (e) {
+    // Column already exists, ignore
+  }
+  try {
+    await db.prepare(`
+      ALTER TABLE Cookie ADD COLUMN source TEXT
+    `).run();
+  } catch (e) {
+    // Column already exists, ignore
   }
 
   // Create BannerCustomization table
@@ -799,6 +823,24 @@ export async function getPageviewUsageForOrganization(db, organizationId, date =
   };
 }
 
+/** Pageview count for a specific site for a given month (default current month). */
+export async function getPageviewUsageForSite(db, siteId, date = new Date()) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const yearMonth = `${year}-${month}`;
+  if (!siteId) return { yearMonth, pageviewCount: 0 };
+  const row = await db
+    .prepare(
+      `SELECT COALESCE(SUM(pageviewCount), 0) AS total FROM PageviewUsage WHERE siteId = ?1 AND yearMonth = ?2`
+    )
+    .bind(siteId, yearMonth)
+    .first();
+  return {
+    yearMonth,
+    pageviewCount: Number(row?.total ?? 0),
+  };
+}
+
 /** Get plan by id (free, basic, essential, growth). */
 export async function getPlanById(db, planId) {
   if (!planId) return null;
@@ -944,6 +986,25 @@ export async function getScanUsageForOrganization(db, organizationId, date = new
     .bind(...siteIds, start, end)
     .first();
   return { yearMonth, scanCount: Number(sumRes?.cnt ?? 0) };
+}
+
+/** Scan count for a specific site in a given month (default current). */
+export async function getScanUsageForSite(db, siteId, date = new Date()) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const yearMonth = `${year}-${month}`;
+  if (!siteId) return { yearMonth, scanCount: 0 };
+  const start = `${yearMonth}-01T00:00:00.000Z`;
+  const end = date.getUTCMonth() === 11
+    ? `${year + 1}-01-01T00:00:00.000Z`
+    : `${year}-${String(date.getUTCMonth() + 2).padStart(2, '0')}-01T00:00:00.000Z`;
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS cnt FROM ScanHistory WHERE siteId = ?1 AND createdAt >= ?2 AND createdAt < ?3`
+    )
+    .bind(siteId, start, end)
+    .first();
+  return { yearMonth, scanCount: Number(row?.cnt ?? 0) };
 }
 
 /** Number of sites for an organization. */
@@ -1230,6 +1291,34 @@ export async function listSites(db, { organizationId } = {}) {
   return results || [];
 }
 
+/**
+ * Public Worker/CDN origin for embed `<script src>`. Prefer env so stored URLs do not depend
+ * on whichever host hit the API (Next proxy vs worker vs localhost).
+ */
+export function canonicalEmbedOrigin(request, env) {
+  const fromEnv = String(env?.CDN_BASE_URL || env?.API_BASE_URL || '')
+    .trim()
+    .replace(/\/+$/, '');
+  if (fromEnv) return fromEnv;
+  try {
+    return new URL(request.url).origin;
+  } catch (e) {
+    return '';
+  }
+}
+
+/**
+ * Canonical install snippet URL, frozen at site creation (same string forever for that site).
+ */
+export function buildEmbedScriptUrl(origin, cdnScriptId) {
+  const o = String(origin || '')
+    .trim()
+    .replace(/\/+$/, '');
+  const id = String(cdnScriptId || '').trim();
+  if (!o || !id) return null;
+  return `${o}/consentbit/${id}/script.js`;
+}
+
 // createSite: upsert by organizationId + domain
 // IMPORTANT: cdnScriptId is permanent and never regenerated for existing sites
 // This ensures the installation script code remains stable for each site
@@ -1249,17 +1338,21 @@ export async function createSite(
   const now = new Date().toISOString();
 
   if (existing) {
-    // Update only banner settings - preserve permanent cdnScriptId and apiKey
+    const backfillEmbed =
+      existing.embedScriptUrl ||
+      buildEmbedScriptUrl(origin, existing.cdnScriptId);
+    // Update only banner settings - preserve permanent cdnScriptId and apiKey; freeze embed URL once set
     await db
       .prepare(
         `UPDATE Site
          SET name = ?1,
              banner_type = ?2,
              region_mode = ?3,
-             updatedAt = ?4
-         WHERE id = ?5`,
+             updatedAt = ?4,
+             embedScriptUrl = COALESCE(embedScriptUrl, ?5)
+         WHERE id = ?6`,
       )
-      .bind(name, bannerType, regionMode, now, existing.id)
+      .bind(name, bannerType, regionMode, now, backfillEmbed, existing.id)
       .run();
 
     return {
@@ -1268,6 +1361,7 @@ export async function createSite(
       banner_type: bannerType,
       region_mode: regionMode,
       updatedAt: now,
+      embedScriptUrl: existing.embedScriptUrl || backfillEmbed,
       // cdnScriptId and apiKey are preserved from existing record
     };
   }
@@ -1275,6 +1369,7 @@ export async function createSite(
   const id = crypto.randomUUID();
   const cdnScriptId = crypto.randomUUID();
   const apiKey = crypto.randomUUID();
+  const embedScriptUrl = buildEmbedScriptUrl(origin, cdnScriptId);
 
   await db
     .prepare(
@@ -1287,10 +1382,11 @@ export async function createSite(
          apiKey,
          banner_type,
          region_mode,
+         embedScriptUrl,
          createdAt,
          updatedAt
        )
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`,
     )
     .bind(
       id,
@@ -1301,6 +1397,7 @@ export async function createSite(
       apiKey,
       bannerType,
       regionMode,
+      embedScriptUrl,
       now,
       now,
     )
@@ -1315,6 +1412,7 @@ export async function createSite(
     apiKey,
     banner_type: bannerType,
     region_mode: regionMode,
+    embedScriptUrl,
     createdAt: now,
     updatedAt: now,
   };
@@ -1694,6 +1792,8 @@ export async function upsertCookie(db, { siteId, scanHistoryId, cookie, now }) {
   const httpOnly = cookie?.httpOnly ? 1 : 0;
   const secure = cookie?.secure ? 1 : 0;
   const sameSite = v(cookie?.sameSite);
+  const isExpected = cookie?.isExpected ? 1 : 0;
+  const source = v(cookie?.source);
   const ts = v(now) || new Date().toISOString();
 
   const bindValues = [
@@ -1710,8 +1810,10 @@ export async function upsertCookie(db, { siteId, scanHistoryId, cookie, now }) {
     { i: 11, key: 'httpOnly', val: httpOnly },
     { i: 12, key: 'secure', val: secure },
     { i: 13, key: 'sameSite', val: sameSite },
-    { i: 14, key: 'firstSeenAt', val: ts },
-    { i: 15, key: 'lastSeenAt', val: ts },
+    { i: 14, key: 'isExpected', val: isExpected },
+    { i: 15, key: 'source', val: source },
+    { i: 16, key: 'firstSeenAt', val: ts },
+    { i: 17, key: 'lastSeenAt', val: ts },
   ];
   for (const { key, val } of bindValues) {
     if (val === undefined) {
@@ -1724,11 +1826,12 @@ export async function upsertCookie(db, { siteId, scanHistoryId, cookie, now }) {
   try {
     await db
       .prepare(
-        `INSERT INTO Cookie (id, siteId, scanHistoryId, name, domain, path, category, provider, description, expires, httpOnly, secure, sameSite, firstSeenAt, lastSeenAt)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        `INSERT INTO Cookie (id, siteId, scanHistoryId, name, domain, path, category, provider, description, expires, httpOnly, secure, sameSite, isExpected, source, firstSeenAt, lastSeenAt)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(siteId, name, domain) DO UPDATE SET
            lastSeenAt = excluded.lastSeenAt,
            scanHistoryId = excluded.scanHistoryId,
+           source = excluded.source,
            category = excluded.category,
            provider = excluded.provider,
            description = CASE 
@@ -1750,6 +1853,8 @@ export async function upsertCookie(db, { siteId, scanHistoryId, cookie, now }) {
         httpOnly,
         secure,
         sameSite,
+        isExpected,
+        source,
         ts,
         ts,
       )

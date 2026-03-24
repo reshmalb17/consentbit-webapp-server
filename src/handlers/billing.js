@@ -6,12 +6,16 @@ import {
   getSessionById,
   getUserById,
   getSubscriptionByOrganization,
+  getSubscriptionBySiteId,
   getSubscriptionsByOrganization,
   getPageviewUsageForOrganization,
+  getPageviewUsageForSite,
   getScanUsageForOrganization,
+  getScanUsageForSite,
   getSitesCountByOrganization,
   getPlanById,
   getEffectivePlanForOrganization,
+  inferTierPlanIdFromStripePriceId,
   getOrganizationMember,
 } from '../services/db.js';
 
@@ -270,6 +274,7 @@ export async function handleBillingUsage(request, env) {
   const { db } = auth;
   const url = new URL(request.url);
   const organizationId = (url.searchParams.get('organizationId') || '').trim();
+  const siteId = (url.searchParams.get('siteId') || '').trim();
   if (!organizationId) {
     return Response.json({ error: 'organizationId required' }, { status: 400 });
   }
@@ -279,10 +284,43 @@ export async function handleBillingUsage(request, env) {
   }
 
   await ensureSchema(db);
-  const usage = await getPageviewUsageForOrganization(db, organizationId);
-  const scanUsage = await getScanUsageForOrganization(db, organizationId);
-  const sitesCount = await getSitesCountByOrganization(db, organizationId);
-  const { planId, plan } = await getEffectivePlanForOrganization(db, organizationId, env);
+  let usage;
+  let scanUsage;
+  let sitesCount;
+  let planId = 'free';
+  let plan = null;
+
+  if (siteId) {
+    const site = await db
+      .prepare(`SELECT id, organizationId FROM Site WHERE id = ?1 LIMIT 1`)
+      .bind(siteId)
+      .first();
+    if (!site || String(site.organizationId || '') !== String(organizationId)) {
+      return Response.json({ error: 'Site not found for this organization' }, { status: 404 });
+    }
+    usage = await getPageviewUsageForSite(db, siteId);
+    scanUsage = await getScanUsageForSite(db, siteId);
+    sitesCount = 1;
+
+    const siteSub = await getSubscriptionBySiteId(db, siteId);
+    let sitePlanId = siteSub ? (siteSub.planId ?? siteSub.planid ?? null) : null;
+    if (sitePlanId) sitePlanId = String(sitePlanId).toLowerCase();
+    if ((!sitePlanId || !['basic', 'essential', 'growth'].includes(sitePlanId)) && env && siteSub) {
+      const pid = siteSub.stripePriceId ?? siteSub.stripepriceid ?? null;
+      const inferred = inferTierPlanIdFromStripePriceId(env, pid);
+      if (inferred) sitePlanId = inferred;
+    }
+    planId = sitePlanId && ['basic', 'essential', 'growth'].includes(sitePlanId) ? sitePlanId : 'free';
+    plan = await getPlanById(db, planId);
+  } else {
+    usage = await getPageviewUsageForOrganization(db, organizationId);
+    scanUsage = await getScanUsageForOrganization(db, organizationId);
+    sitesCount = await getSitesCountByOrganization(db, organizationId);
+    const effective = await getEffectivePlanForOrganization(db, organizationId, env);
+    planId = effective.planId;
+    plan = effective.plan;
+  }
+
   const pageviewsIncluded = plan ? (plan.pageviewsIncluded ?? plan.pageviewsincluded ?? 0) : 7500;
   const scansIncluded = plan ? (plan.scansIncluded ?? plan.scansincluded ?? 0) : 100;
   const domainsIncluded = plan ? (plan.domainsIncluded ?? plan.domainsincluded ?? 1) : 1;
