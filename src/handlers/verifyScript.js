@@ -49,12 +49,24 @@ function decodeHtmlAttrMinimal(s) {
     .replace(/&#39;/g, "'");
 }
 
+function normalizeIdSet(pathId, bodySiteId) {
+  const out = new Set();
+  if (pathId && String(pathId).trim()) out.add(String(pathId).trim());
+  if (bodySiteId != null && String(bodySiteId).trim() !== '') {
+    out.add(String(bodySiteId).trim());
+  }
+  return [...out];
+}
+
 /**
- * True if this script tag is the ConsentBit embed for expectedSiteId (src + optional id/site attrs).
+ * True if this script tag is the ConsentBit embed for one of the allowed site ids
+ * (cdnScriptId in path and/or Site.id from the dashboard).
  */
-function scriptOpenTagMatchesSite(attrsRaw, expectedSiteId) {
-  const exp = String(expectedSiteId || '').trim();
-  if (!exp) return { match: false, reason: 'no_expected_site_id' };
+function scriptOpenTagMatchesSite(attrsRaw, expectedSiteIds) {
+  const ids = Array.isArray(expectedSiteIds)
+    ? expectedSiteIds.map((x) => String(x || '').trim()).filter(Boolean)
+    : [String(expectedSiteIds || '').trim()].filter(Boolean);
+  if (ids.length === 0) return { match: false, reason: 'no_expected_site_id' };
 
   const attrs = attrsRaw || '';
   let src = getAttrFromTagAttrs(attrs, 'src');
@@ -65,8 +77,11 @@ function scriptOpenTagMatchesSite(attrsRaw, expectedSiteId) {
     getAttrFromTagAttrs(attrs, 'data-site-id') ||
     getAttrFromTagAttrs(attrs, 'data_site_id');
 
-  if (siteFromAttr && siteFromAttr.toLowerCase() !== exp.toLowerCase()) {
-    return { match: false, reason: 'site_attr_mismatch' };
+  if (siteFromAttr) {
+    const ok = ids.some(
+      (id) => id.toLowerCase() === siteFromAttr.toLowerCase(),
+    );
+    if (!ok) return { match: false, reason: 'site_attr_mismatch' };
   }
 
   let pathForExtract = src;
@@ -75,25 +90,42 @@ function scriptOpenTagMatchesSite(attrsRaw, expectedSiteId) {
   } catch (e) {
     pathForExtract = src;
   }
-  const idFromSrc = extractSiteIdFromPathOrUrl(pathForExtract) || extractSiteIdFromPathOrUrl(src);
+  const idFromSrc =
+    extractSiteIdFromPathOrUrl(pathForExtract) || extractSiteIdFromPathOrUrl(src);
 
-  if (idFromSrc && idFromSrc.toLowerCase() === exp.toLowerCase()) {
-    return { match: true, how: 'src_site_id' };
+  if (
+    idFromSrc &&
+    ids.some((id) => id.toLowerCase() === idFromSrc.toLowerCase())
+  ) {
+    return { match: true, how: 'src_site_id', idFromSrc };
   }
 
-  // e.g. id="consentbit-banner-{siteId}-..." — must still tie to same site as src when src present
   if (idAttr) {
     const idLower = idAttr.toLowerCase();
-    const expLower = exp.toLowerCase();
-    if (idLower === 'consentbit' && idFromSrc && idFromSrc.toLowerCase() === expLower) {
-      return { match: true, how: 'legacy_id_consentbit' };
-    }
-    if (idLower.includes(expLower) && src && src.toLowerCase().includes(expLower)) {
-      return { match: true, how: 'banner_id_and_src' };
+    for (const exp of ids) {
+      const expLower = exp.toLowerCase();
+      if (
+        idLower === 'consentbit' &&
+        idFromSrc &&
+        idFromSrc.toLowerCase() === expLower
+      ) {
+        return { match: true, how: 'legacy_id_consentbit', idFromSrc };
+      }
+      if (
+        idLower.includes(expLower) &&
+        src &&
+        src.toLowerCase().includes(expLower)
+      ) {
+        return { match: true, how: 'banner_id_and_src' };
+      }
     }
   }
 
-  return { match: false, reason: 'no_matching_src_or_id' };
+  return {
+    match: false,
+    reason: 'no_matching_src_or_id',
+    idFromSrc: idFromSrc || null,
+  };
 }
 
 export async function handleVerifyScript(request, env) {
@@ -123,8 +155,14 @@ export async function handleVerifyScript(request, env) {
 
   try {
     const resp = await fetch(publicUrl, { redirect: 'follow' });
+    const fetchedUrl = resp.url || publicUrl;
 
     if (!resp.ok) {
+      console.warn('[VerifyScript] fetch failed', {
+        status: resp.status,
+        publicUrl,
+        fetchedUrl,
+      });
       return Response.json(
         {
           success: false,
@@ -137,27 +175,31 @@ export async function handleVerifyScript(request, env) {
     const html = await resp.text();
     const htmlLower = html.toLowerCase();
 
-    // Embed URL uses cdnScriptId in the path; dashboard may send internal Site.id — prefer id from scriptUrl for HTML match.
-    let expectedSiteId = extractSiteIdFromPathOrUrl(scriptUrl);
-    if (
-      !expectedSiteId &&
-      siteId != null &&
-      String(siteId).trim() !== ''
-    ) {
-      expectedSiteId = String(siteId).trim();
-    }
+    const idFromPath = extractSiteIdFromPathOrUrl(scriptUrl);
+    const idFromBody =
+      siteId != null && String(siteId).trim() !== ''
+        ? String(siteId).trim()
+        : null;
+    const expectedSiteIds = normalizeIdSet(idFromPath, idFromBody);
 
-    if (!expectedSiteId) {
+    if (expectedSiteIds.length === 0) {
+      console.warn('[VerifyScript] no site id from path or body', {
+        scriptUrl: scriptUrl.substring(0, 160),
+        siteId: siteId ?? null,
+      });
       return Response.json({
         success: true,
         found: false,
         siteId: null,
         error:
           'Cannot verify: provide siteId or a scriptUrl containing /client_data/{id}/script.js, /consentbit/{id}/script.js, or /runtime/{id}.js',
+        debug: {
+          idFromPath: idFromPath || null,
+          idFromBody: idFromBody || null,
+        },
       });
     }
 
-    // Exact install string (what we show in the dashboard) — strongest match
     const scriptUrlLower = scriptUrl.toLowerCase();
     const scriptUrlNoProtocol = scriptUrl.replace(/^https?:\/\//i, '').toLowerCase();
     let scriptPathOnly = scriptUrl;
@@ -172,26 +214,56 @@ export async function handleVerifyScript(request, env) {
       htmlLower.includes(String(scriptPathOnly).toLowerCase());
 
     const attrStrings = collectScriptOpenTagAttrStrings(html);
+    const perTag = [];
     let matchedTag = null;
     for (let i = 0; i < attrStrings.length; i++) {
-      const r = scriptOpenTagMatchesSite(attrStrings[i], expectedSiteId);
-      if (r.match) {
+      const r = scriptOpenTagMatchesSite(attrStrings[i], expectedSiteIds);
+      const srcRaw = getAttrFromTagAttrs(attrStrings[i], 'src');
+      perTag.push({
+        index: i,
+        srcSnippet: (decodeHtmlAttrMinimal(srcRaw) || '').slice(0, 200),
+        result: r,
+      });
+      if (r.match && !matchedTag) {
         matchedTag = { index: i, ...r };
-        break;
       }
     }
 
     const found = Boolean(hasExactInstallString || matchedTag);
 
-    // Do not treat "HEAD ok on script URL" or generic id="consentbit" alone as proof (removed).
+    const scriptSrcSamples = perTag.map((p) => p.srcSnippet).filter(Boolean);
 
-    console.log('[VerifyScript]', {
-      found,
-      expectedSiteId,
+    const debugPayload = {
+      expectedSiteIds,
+      idFromPath: idFromPath || null,
+      idFromBody: idFromBody || null,
       hasExactInstallString,
       matchedTag,
-      publicUrl: publicUrl.substring(0, 80),
-    });
+      fetchedUrl,
+      requestedUrl: publicUrl,
+      htmlLength: html.length,
+      scriptOpenTagCount: attrStrings.length,
+      scriptSrcSamples: scriptSrcSamples.slice(0, 15),
+      perTag: perTag.slice(0, 20),
+      scriptUrlPreview: scriptUrl.substring(0, 160),
+    };
+
+    console.log(
+      '[VerifyScript] result',
+      JSON.stringify({
+        found,
+        ...debugPayload,
+        perTag: debugPayload.perTag?.length,
+      }),
+    );
+
+    if (!found) {
+      console.warn('[VerifyScript] not found — check expectedSiteIds vs script tags on page', {
+        expectedSiteIds,
+        hasExactInstallString,
+        sampleSrcs: scriptSrcSamples.slice(0, 5),
+      });
+    }
 
     if (found && siteId) {
       await markSiteVerified(db, siteId, scriptUrl);
@@ -201,15 +273,10 @@ export async function handleVerifyScript(request, env) {
       success: true,
       found,
       siteId: siteId || null,
-      debug: {
-        expectedSiteId,
-        hasExactInstallString,
-        matchedTag,
-        scriptUrl: scriptUrl.substring(0, 120),
-        publicUrl,
-      },
+      debug: debugPayload,
     });
   } catch (err) {
+    console.error('[VerifyScript] error', err);
     return Response.json(
       { success: false, error: err?.message || 'Verification error' },
       { status: 500 },

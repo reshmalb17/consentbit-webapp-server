@@ -23,6 +23,12 @@ function pickSiteLicenseKey(site) {
   return k != null ? String(k).trim() : '';
 }
 
+/** True when Site.embedScriptUrl was saved with wrangler placeholder host (legacy misconfig). */
+function embedScriptUrlNeedsRepair(embedUrl) {
+  const s = String(embedUrl || '');
+  return /YOUR-ACCOUNT|YOUR_ACCOUNT/i.test(s);
+}
+
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
@@ -145,22 +151,28 @@ export async function handleSites(request, env) {
 
     const sites = await listSites(db, { organizationId: organizationId || undefined });
     const embedOrigin = canonicalEmbedOrigin(request, env);
-    // Freeze embed URL in DB once if missing (legacy rows) so the install snippet never drifts.
+    // Persist correct embed URL: missing, or legacy placeholder host in Site.embedScriptUrl (D1).
     for (const row of sites || []) {
       const id = row?.id;
       const embed = row?.embedScriptUrl ?? row?.embedscripturl;
       const cdnId = row?.cdnScriptId ?? row?.cdnscriptid;
-      if (!embed && cdnId && id) {
-        const computed = buildEmbedScriptUrl(embedOrigin, cdnId);
-        if (computed) {
-          await db
-            .prepare(
-              `UPDATE Site SET embedScriptUrl = ?1, updatedAt = datetime('now') WHERE id = ?2`,
-            )
-            .bind(computed, id)
-            .run();
-          row.embedScriptUrl = computed;
-        }
+      if (!id || !cdnId || !embedOrigin) continue;
+
+      let computed = null;
+      if (!embed) {
+        computed = buildEmbedScriptUrl(embedOrigin, cdnId);
+      } else if (embedScriptUrlNeedsRepair(embed)) {
+        computed = buildEmbedScriptUrl(embedOrigin, cdnId);
+      }
+
+      if (computed) {
+        await db
+          .prepare(
+            `UPDATE Site SET embedScriptUrl = ?1, updatedAt = datetime('now') WHERE id = ?2`,
+          )
+          .bind(computed, id)
+          .run();
+        row.embedScriptUrl = computed;
       }
     }
     // Enrich each site with planId from its active/trialing subscription.
