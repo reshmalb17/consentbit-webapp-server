@@ -1620,8 +1620,778 @@ ${inlineConfig}
     window.addEventListener('DOMContentLoaded', init);
   }
 })();`;
+const loaderIab=`(function () {
+  "use strict";
 
-  return new Response(loader, {
+  // ─── Base URL for external scripts ───────────────────────────────────────────
+  const BASE_URL = "https://test-cmp.pages.dev";
+
+  // ─── Inject external dependency scripts in order ─────────────────────────────
+  function loadScript(src, onload) {
+    const s = document.createElement("script");
+    s.src = src;
+    s.async = false;
+    if (onload) s.onload = onload;
+    document.head.appendChild(s);
+  }
+
+
+  // ─── Style Config ────────────────────────────────────────────────────────────
+// Replace colors / initialLayout / alignment with your actual values
+const colors = {};        // your colors object
+const alignment = "left"; // your text alignment
+const initialLayout = {}; // your layout object
+
+const styleConfig = {
+  bannerBg:          colors.bannerBg          || "#FFFFFF",
+  textColor:         colors.textColor         || "#000000",
+  headingColor:      colors.headingColor      || "#000000",
+  buttonColor:       colors.buttonColor       || "#FFFFFF",
+  buttonTextColor:   colors.buttonTextColor   || "#007AFF",
+  SecButtonColor:    colors.SecButtonColor    || "#007AFF",
+  SecButtonTextColor:colors.SecButtonTextColor|| "#FFFFFF",
+  textAlign:         alignment                || "left",
+  fontWeight:        colors.fontWeight        || "400",
+  borderRadius:      initialLayout?.borderRadius || "12",
+  bannerType:        initialLayout?.position  || "box", // "box" | "banner" | "popup"
+  boxAlignment:      initialLayout?.alignment || "bottom-left", // "bottom-left" | "bottom-right"
+};
+// ─── Inject all styles ───────────────────────────────────────────────────────
+function injectStyles() {
+  const s = styleConfig;
+  const br  = s.borderRadius + "px";
+  const brSm = Math.min(Number(s.borderRadius), 8) + "px";
+  const brPill = Math.min(Number(s.borderRadius), 999) + "px";
+
+  const css = ${`
+/* ── Vendor List & Search ── */
+.consentBit-vendors-search-wrapper{max-height:500px;overflow-y:auto;padding:20px}
+.consentBit-search-container{position:relative;margin-bottom:20px}
+.consentBit-search-input{width:100%;padding:12px 16px 12px 44px;border:2px solid #e0e0e0;border-radius:${brSm};font-size:14px;transition:border-color .2s ease;background:#fff;box-sizing:border-box}
+.consentBit-search-input:focus{outline:none;border-color:${s.SecButtonColor};box-shadow:0 0 0 3px ${s.SecButtonColor}22}
+.consentBit-search-icon{position:absolute;left:16px;top:50%;transform:translateY(-50%);font-size:16px;color:#666;pointer-events:none}
+.consentBit-vendors-list{display:flex;flex-direction:column;gap:12px}
+.consentBit-vendor-item{padding:16px;border:1px solid #f0f0f0;border-radius:${brSm};background:#fafafa;transition:all .2s ease;animation:consentBit-fadeIn .3s ease}
+.consentBit-vendor-item:hover{border-color:${s.SecButtonColor};background:#fff;box-shadow:0 4px 12px rgba(0,0,0,.1)}
+.consentBit-vendor-item.consentBit-hidden{display:none!important}
+.consentBit-vendor-header{display:flex;justify-content:space-between;align-items:center;gap:16px}
+.consentBit-vendor-info{flex:1}
+.consentBit-vendor-name{font-weight:600;font-size:15px;color:${s.headingColor};margin-bottom:4px}
+.consentBit-vendor-id{font-size:12px;color:#666;font-family:monospace}
+.consentBit-switch-wrapper{flex-shrink:0}
+.consentBit-consent-switch-wrapper{display:flex;align-items:center;gap:8px}
+.consentBit-switch-label{font-size:13px;font-weight:500;color:${s.textColor}}
+.consentBit-switch-sm{position:relative;width:36px;height:20px}
+.consentBit-switch-sm input{opacity:0;width:0;height:0}
+.consentBit-switch-sm input:checked+.consentBit-slider{background-color:${s.SecButtonColor}}
+.consentBit-switch-sm input:focus+.consentBit-slider{box-shadow:0 0 1px ${s.SecButtonColor}}
+.consentBit-switch-sm input:checked+.consentBit-slider:before{transform:translateX(16px)}
+.consentBit-slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#ccc;transition:.2s;border-radius:20px}
+.consentBit-slider:before{position:absolute;content:"";height:16px;width:16px;left:2px;top:2px;background-color:#fff;transition:.2s;border-radius:50%}
+.consentBit-no-results{text-align:center;padding:40px 20px;color:#666}
+.consentBit-no-results p{margin:0 0 4px 0;font-size:16px}
+.consentBit-empty-vendors-text{text-align:center;color:#666;padding:40px;font-style:italic}
+.consentBit-loading{text-align:center;padding:40px;color:${s.textColor}}
+@keyframes consentBit-fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+
+/* ── Cookie Consent Banner ── */
+.consentBit-consent-container{
+  position:fixed;
+  z-index:999999;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  border-radius:${br};
+  box-shadow:0 20px 60px rgba(0,0,0,.15);
+  backdrop-filter:blur(10px);
+  animation:consentBit-slideUp .4s cubic-bezier(.25,.46,.45,.94)
+}
+
+/* ── Banner type: full-width banner ── */
+.consentBit-type-banner{
+  bottom:0; left:0; right:0;
+  border-radius:0;
+  max-width:100%;
+}
+
+/* ── Banner type: box positions ── */
+.consentBit-type-box-bottom-left{
+  bottom:20px; left:20px; right:auto;
+  max-width:450px;
+}
+.consentBit-type-box-bottom-right{
+  bottom:20px; right:20px; left:auto;
+  max-width:450px;
+}
+
+/* ── Banner type: popup ── */
+.consentBit-type-popup{
+  top:50%; left:50%;
+  transform:translate(-50%,-50%);
+  max-width:480px;
+  width:calc(100% - 40px);
+  animation:consentBit-popIn .3s cubic-bezier(.34,1.2,.64,1);
+}
+.consentBit-popup-overlay{
+  position:fixed;inset:0;
+  background:rgba(0,0,0,.45);
+  z-index:999998;
+}
+
+@keyframes consentBit-slideUp{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}
+@keyframes consentBit-popIn{from{transform:translate(-50%,-50%) scale(0.88);opacity:0}to{transform:translate(-50%,-50%) scale(1);opacity:1}}
+
+/* ── Banner inner ── */
+.consentBit-consent-bar{
+  border:1px solid #f4f4f4;
+  background:${s.bannerBg};
+  border-radius:${br};
+  padding:24px;
+  max-height:500px;
+  overflow-y:auto;
+}
+/* Full-width banner overrides inner radius */
+.consentBit-type-banner .consentBit-consent-bar{
+  border-radius:0;
+  padding:16px 24px;
+}
+/* Full-width banner: row layout */
+.consentBit-type-banner .consentBit-notice{
+  flex-direction:row;
+  align-items:center;
+  gap:24px;
+}
+.consentBit-type-banner .consentBit-notice-group{
+  display:flex;
+  flex-direction:row;
+  align-items:center;
+  gap:20px;
+  flex:1;
+}
+.consentBit-type-banner .consentBit-notice-btn-wrapper{
+  flex-direction:row;
+  padding-top:0;
+  border-top:none;
+  flex-shrink:0;
+}
+
+.consentBit-notice{display:flex;flex-direction:column;gap:16px}
+.consentBit-title{
+  font-size:20px;
+  font-weight:700;
+  line-height:1.3;
+  margin:0 0 12px 0;
+  color:${s.headingColor};
+  text-align:${s.textAlign};
+}
+.consentBit-notice-group{display:flex;flex-direction:column;gap:20px}
+.consentBit-notice-des{
+  flex:1;
+  color:${s.textColor};
+  line-height:1.6;
+  font-size:14px;
+  font-weight:${s.fontWeight};
+  text-align:${s.textAlign};
+}
+.consentBit-notice-des p{margin:0 0 12px 0}
+.consentBit-notice-des p:last-child{margin-bottom:0}
+.consentBit-iab-dec-btn{
+  background:none;border:none;
+  color:${s.SecButtonColor};
+  font-weight:600;cursor:pointer;padding:0;
+  font-size:14px;text-decoration:underline;
+}
+.consentBit-iab-dec-btn:hover{opacity:.8}
+.consentBit-notice-btn-wrapper{
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+  padding-top:16px;
+  border-top:1px solid #f0f0f0;
+  justify-content:${s.textAlign === "center" ? "center" : s.textAlign === "right" ? "flex-end" : "flex-start"};
+}
+
+/* ── Buttons ── */
+.consentBit-btn{
+  padding:11px 20px;
+  border-radius:${brSm};
+  font-size:14px;
+  font-weight:${s.fontWeight};
+  cursor:pointer;
+  transition:opacity .2s ease;
+  border:2px solid transparent;
+  text-align:center;
+  min-height:44px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  white-space:nowrap;
+}
+.consentBit-btn:hover{opacity:.85}
+
+/* Customise / Reject All — outline */
+.consentBit-btn-customize,
+.consentBit-btn-reject{
+  color:${s.buttonTextColor};
+  background:${s.buttonColor};
+  border-color:${s.buttonTextColor};
+}
+
+/* Accept All — solid primary */
+.consentBit-btn-accept{
+  color:${s.SecButtonTextColor};
+  background:${s.SecButtonColor};
+  border-color:${s.SecButtonColor};
+}
+
+/* Customise spans full row in box/popup only */
+.consentBit-type-box-bottom-left .consentBit-btn-customize,
+.consentBit-type-box-bottom-right .consentBit-btn-customize,
+.consentBit-type-popup .consentBit-btn-customize{
+  width:100%;
+}
+
+/* ── Modal Overlay ── */
+.cb-modal{position:fixed;top:0;left:0;width:100%;height:100%;background-color:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000000;padding:20px;box-sizing:border-box}
+.cb-modal.cb-modal-hidden{display:none!important}
+.cb-preference-center{
+  background-color:${s.bannerBg};
+  border:1px solid #f4f4f4;
+  border-radius:${br};
+  max-width:720px;width:100%;
+  max-height:90vh;
+  display:flex;flex-direction:column;
+  box-shadow:0 4px 20px rgba(0,0,0,.15);
+}
+.cb-preference-header{padding:20px 24px;border-bottom:1px solid #f4f4f4;display:flex;justify-content:space-between;align-items:center}
+.cb-preference-title{font-size:18px;font-weight:600;color:${s.headingColor}}
+.cb-btn-close{background:none;border:none;cursor:pointer;padding:4px;opacity:.5;transition:opacity .2s}
+.cb-btn-close:hover{opacity:1}
+.cb-btn-close img{width:20px;height:20px}
+.cb-iab-detail-wrapper{flex:1;overflow-y:auto;padding:0 24px 24px}
+.cb-iab-preference-des{
+  padding:16px 0;
+  color:${s.textColor};
+  font-size:13px;
+  line-height:1.7;
+  font-weight:${s.fontWeight};
+  text-align:${s.textAlign};
+}
+.cb-iab-dec-btn{background:none;border:none;color:${s.SecButtonColor};text-decoration:underline;cursor:pointer;font-size:inherit;padding:0}
+.cb-iab-navbar-wrapper{margin-bottom:24px;border-bottom:2px solid #f4f4f4}
+.cb-iab-navbar{display:flex;list-style:none;gap:0;padding:0;margin:0}
+.cb-iab-nav-item{flex:1}
+.cb-iab-nav-btn{
+  width:100%;padding:12px 16px;
+  background:none;border:none;
+  border-bottom:3px solid transparent;
+  cursor:pointer;font-size:13px;font-weight:${s.fontWeight};
+  color:${s.textColor};opacity:.6;
+  transition:all .2s;
+}
+.cb-iab-nav-item-active .cb-iab-nav-btn{
+  color:${s.SecButtonColor};
+  border-bottom-color:${s.SecButtonColor};
+  opacity:1;font-weight:600;
+}
+.cb-iab-nav-btn:hover{background-color:#f9f9f9}
+.cb-preference-body-wrapper{display:none}
+.cb-preference-body-wrapper.active{display:block}
+.cb-iab-detail-title{
+  font-size:16px;font-weight:600;
+  color:${s.headingColor};
+  margin-bottom:14px;
+  text-align:${s.textAlign};
+}
+.cb-preference-content-wrapper{
+  color:${s.textColor};
+  font-size:13px;
+  font-weight:${s.fontWeight};
+  line-height:1.6;
+  margin-bottom:20px;
+  text-align:${s.textAlign};
+}
+.cb-show-desc-btn{background:none;border:none;color:${s.SecButtonColor};cursor:pointer;font-size:inherit;text-decoration:underline;padding:0}
+.cb-horizontal-separator{height:1px;background-color:#ebebeb;margin:20px 0}
+.cb-accordion-wrapper{display:flex;flex-direction:column;gap:10px}
+.cb-accordion{border:1px solid #ebebeb;border-radius:${brSm};overflow:hidden;background:${s.bannerBg}}
+.cb-accordion-item,.cb-accordion-iab-item{display:flex;gap:12px;padding:14px 16px;cursor:pointer;transition:background-color .2s}
+.cb-accordion-item:hover,.cb-accordion-iab-item:hover{background-color:#f9f9f9}
+.cb-accordion-chevron{flex-shrink:0;width:20px;height:20px;display:flex;align-items:center;justify-content:center}
+.cb-chevron-right{width:0;height:0;border-top:4px solid transparent;border-bottom:4px solid transparent;border-left:6px solid #999;transition:transform .2s;display:inline-block}
+.cb-accordion.active .cb-chevron-right{transform:rotate(90deg)}
+.cb-accordion-header-wrapper{flex:1}
+.cb-accordion-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:10px}
+.cb-accordion-btn{
+  background:none;border:none;
+  font-size:14px;font-weight:600;
+  color:${s.headingColor};
+  cursor:pointer;text-align:${s.textAlign};padding:0;
+}
+.cb-always-active{
+  padding:3px 10px;
+  background-color:#DCFCE7;color:#166534;
+  border-radius:${brPill};
+  font-size:11px;font-weight:500;
+}
+.cb-accordion-header-des{
+  color:${s.textColor};
+  font-size:13px;
+  font-weight:${s.fontWeight};
+  line-height:1.6;
+  text-align:${s.textAlign};
+}
+.cb-switch{position:relative;display:inline-block;width:44px;height:24px;flex-shrink:0}
+.cb-switch input{opacity:0;width:0;height:0}
+.cb-switch input[type="checkbox"]{appearance:none;width:44px;height:24px;background-color:#d0d5d2;border-radius:12px;position:relative;cursor:pointer;transition:background-color .2s}
+.cb-switch input[type="checkbox"]:checked{background-color:${s.SecButtonColor}}
+.cb-switch input[type="checkbox"]::before{content:'';position:absolute;width:18px;height:18px;border-radius:50%;background-color:#fff;top:3px;left:3px;transition:transform .2s}
+.cb-switch input[type="checkbox"]:checked::before{transform:translateX(20px)}
+.cb-accordion-body{max-height:0;overflow:hidden;transition:max-height .3s ease}
+.cb-accordion.active .cb-accordion-body{max-height:2000px}
+.cb-audit-table{background-color:#f4f4f4;border:1px solid #ebebeb;border-radius:${brSm};padding:14px;margin:0 14px 14px 28px}
+.cb-cookie-des-table{list-style:none;margin-bottom:14px;padding:0 0 14px 0;border-bottom:1px solid #ebebeb}
+.cb-cookie-des-table:last-child{margin-bottom:0;padding-bottom:0;border-bottom:none}
+.cb-cookie-des-table li{display:flex;margin-bottom:6px;font-size:12px}
+.cb-cookie-des-table li div:first-child{font-weight:600;min-width:90px;color:${s.textColor};opacity:.6}
+.cb-cookie-des-table li div:last-child{color:${s.textColor}}
+.cb-empty-cookies-text{color:${s.textColor};opacity:.5;font-style:italic;text-align:center;padding:16px}
+.cb-child-accordion{border-top:1px solid #ebebeb}
+.cb-child-accordion:first-child{border-top:none}
+.cb-child-accordion-item{display:flex;gap:12px;padding:12px 16px;cursor:pointer;transition:background-color .2s}
+.cb-child-accordion-item:hover{background-color:#f9f9f9}
+.cb-child-accordion-chevron{flex-shrink:0;width:16px;height:16px;display:flex;align-items:center;justify-content:center}
+.cb-child-accordion.active .cb-chevron-right{transform:rotate(90deg)}
+.cb-child-accordion-header-wrapper{flex:1;display:flex;justify-content:space-between;align-items:center;gap:16px}
+.cb-child-accordion-btn{background:none;border:none;font-size:13px;font-weight:500;color:${s.headingColor};cursor:pointer;text-align:left;padding:0;flex:1}
+.cb-child-accordion-body{max-height:0;overflow:hidden;transition:max-height .3s ease}
+.cb-child-accordion.active .cb-child-accordion-body{max-height:2000px}
+.cb-iab-ad-settings-details{padding:14px;background-color:#f9f9f9;margin:0 14px 14px;border-radius:${brSm}}
+.cb-iab-ad-settings-details-des{color:${s.textColor};font-size:13px;line-height:1.6;margin-bottom:12px;font-weight:${s.fontWeight}}
+.cb-iab-illustrations-title{font-weight:600;color:${s.headingColor};margin-bottom:6px;font-size:13px}
+.cb-iab-illustrations-des{list-style:none;padding-left:0}
+.cb-iab-illustrations-des li{padding-left:18px;position:relative;margin-bottom:10px;color:${s.textColor};font-size:12px;line-height:1.6;font-weight:${s.fontWeight}}
+.cb-iab-illustrations-des li::before{content:'•';position:absolute;left:0;color:${s.SecButtonColor}}
+.cb-iab-vendors-count-wrapper{margin-top:12px;font-size:12px;color:${s.textColor};opacity:.6;font-weight:500}
+.cb-switch-wrapper{display:flex;gap:12px;align-items:center;flex-shrink:0}
+.cb-switch-separator{padding-right:12px;border-right:1px solid #ddd}
+.cb-legitimate-switch-wrapper,.cb-consent-switch-wrapper{display:flex;align-items:center;gap:6px}
+.cb-switch-label{font-size:11px;color:${s.textColor};opacity:.6;font-weight:500;white-space:nowrap}
+.cb-switch-sm{position:relative;display:inline-block}
+.cb-switch-sm input[type="checkbox"]{appearance:none;width:36px;height:20px;background-color:#d0d5d2;border-radius:10px;position:relative;cursor:pointer;transition:background-color .2s}
+.cb-switch-sm input[type="checkbox"]:checked{background-color:${s.SecButtonColor}}
+.cb-switch-sm input[type="checkbox"]::before{content:'';position:absolute;width:14px;height:14px;border-radius:50%;background-color:#fff;top:3px;left:3px;transition:transform .2s}
+.cb-switch-sm input[type="checkbox"]:checked::before{transform:translateX(16px)}
+.cb-switch-sm input[type="checkbox"]:disabled{cursor:not-allowed}
+.cb-switch-sm input[type="checkbox"]:disabled:checked{opacity:.7}
+.cb-footer-wrapper{border-top:1px solid #f4f4f4;background-color:${s.bannerBg};flex-shrink:0}
+.cb-footer-shadow{display:block;height:20px;margin-top:-20px;background:linear-gradient(180deg,rgba(255,255,255,0) 0%,${s.bannerBg} 100%)}
+.cb-prefrence-btn-wrapper{
+  padding:14px 22px;
+  display:flex;gap:10px;
+  justify-content:${s.textAlign === "center" ? "center" : s.textAlign === "right" ? "flex-start" : "flex-end"};
+  flex-wrap:wrap;
+}
+.cb-btn{
+  padding:9px 20px;border-radius:${brSm};
+  font-size:13px;font-weight:${s.fontWeight};
+  cursor:pointer;transition:opacity .2s;
+  border:2px solid;
+  white-space:nowrap;
+}
+.cb-btn:hover{opacity:.85}
+.cb-btn-reject{
+  background-color:${s.buttonColor};
+  color:${s.buttonTextColor};
+  border-color:${s.buttonTextColor};
+}
+.cb-btn-preferences{
+  background-color:${s.buttonColor};
+  color:${s.buttonTextColor};
+  border-color:${s.buttonTextColor};
+}
+.cb-btn-accept{
+  background-color:${s.SecButtonColor};
+  color:${s.SecButtonTextColor};
+  border-color:${s.SecButtonColor};
+}
+
+/* ── Responsive ── */
+@media(max-width:768px){
+  .consentBit-type-box-bottom-left,
+  .consentBit-type-box-bottom-right{left:10px;right:10px;max-width:calc(100% - 20px)}
+  .consentBit-type-box-bottom-left{bottom:10px}
+  .consentBit-type-box-bottom-right{bottom:10px}
+  .consentBit-consent-bar{padding:18px}
+  .consentBit-title{font-size:16px}
+  .consentBit-notice-btn-wrapper{flex-direction:column}
+  .consentBit-btn{width:100%}
+  .consentBit-type-banner .consentBit-notice{flex-direction:column;gap:14px}
+  .consentBit-type-banner .consentBit-notice-group{flex-direction:column}
+  .consentBit-type-banner .consentBit-notice-btn-wrapper{flex-direction:row;flex-wrap:wrap}
+  .cb-preference-center{max-height:95vh}
+  .cb-iab-navbar{flex-direction:column}
+  .cb-prefrence-btn-wrapper{flex-direction:column}
+  .cb-btn{width:100%}
+  .cb-switch-wrapper{flex-direction:column;align-items:flex-start;gap:6px}
+  .cb-switch-separator{border-right:none;padding-right:0;padding-bottom:6px;border-bottom:1px solid #ddd}
+}
+@media(prefers-reduced-motion:reduce){
+  .consentBit-consent-container{animation:none}
+  .consentBit-type-popup{animation:none}
+}
+.consentBit-consent-bar::-webkit-scrollbar{width:6px}
+.consentBit-consent-bar::-webkit-scrollbar-track{background:#f5f5f5;border-radius:3px}
+.consentBit-consent-bar::-webkit-scrollbar-thumb{background:#c1c1c1;border-radius:3px}
+.consentBit-consent-bar::-webkit-scrollbar-thumb:hover{background:#a8a8a8}
+`};
+
+  const style = document.createElement("style");
+  style.textContent = css;
+  document.head.appendChild(style);
+}
+
+// ─── Build & inject HTML ─────────────────────────────────────────────────────
+function injectHTML() {
+  const s = styleConfig;
+
+  // Determine banner container class based on type + boxAlignment
+  let bannerPositionClass = "";
+  if (s.bannerType === "banner") {
+    bannerPositionClass = "consentBit-type-banner";
+  } else if (s.bannerType === "popup") {
+    bannerPositionClass = "consentBit-type-popup";
+  } else {
+    // box
+    bannerPositionClass = s.boxAlignment === "bottom-right"
+      ? "consentBit-type-box-bottom-right"
+      : "consentBit-type-box-bottom-left";
+  }
+
+  // Popup needs a backdrop overlay div
+  const popupOverlay = s.bannerType === "popup"
+    ? "<div class="consentBit-popup-overlay" id="consentBitPopupOverlay"></div>"
+    : "";
+
+  const bannerHTML = ${`
+${popupOverlay}
+
+<div class="consentBit-consent-container ${bannerPositionClass}"
+     id="consentBitBanner" tabindex="-1"
+     aria-label="We value your privacy" role="region">
+  <div class="consentBit-consent-bar" data-consentBit-tag="notice">
+    <div class="consentBit-notice">
+
+      <p class="consentBit-title"
+         aria-level="2" data-consentBit-tag="title" role="heading">
+       Your privacy matters to us
+      </p>
+
+      <div class="consentBit-notice-group">
+        <div class="consentBit-notice-des" data-consentBit-tag="iab-description">
+          <p>We and our trusted partners use cookies and similar technologies to collect and store information from your device. This may include details such as your IP address, browsing behavior, and device information.
+This data is used to ensure the website functions properly, enhance your experience, deliver personalized content and advertisements, and analyze performance and user engagement. In certain situations, we may also process location data and use device-based identification methods.
+You have the option to manage your preferences and control how your information is used.
+          </p>
+        </div>
+
+        <div class="consentBit-notice-btn-wrapper" data-consentBit-tag="notice-buttons">
+          <button class="consentBit-btn consentBit-btn-customize"
+                  id="consentBitCustomiseBtn"
+                  aria-label="Customise"
+                  aria-haspopup="dialog"
+                  aria-controls="cbPreferenceModal"
+                  data-consentBit-tag="settings-button">
+            Customise
+          </button>
+          <button class="consentBit-btn consentBit-btn-reject"
+                  id="consentBitRejectAllBanner"
+                  aria-label="Reject All"
+                  data-consentBit-tag="reject-button">
+            Reject All
+          </button>
+          <button class="consentBit-btn consentBit-btn-accept"
+                  id="consentBitAcceptAllBanner"
+                  aria-label="Accept All"
+                  data-consentBit-tag="accept-button">
+            Accept All
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div class="cb-modal cb-modal-hidden" id="cbPreferenceModal" tabindex="-1">
+  <div class="cb-preference-center" role="dialog" aria-modal="true"
+       aria-label="Customise Consent Preferences">
+    <div class="cb-preference-header">
+      <span class="cb-preference-title" role="heading" aria-level="2">
+        Customise Consent Preferences
+      </span>
+      <button aria-label="Close" class="cb-btn-close" id="cbCloseBtn">
+        <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='18' y1='6' x2='6' y2='18'%3E%3C/line%3E%3Cline x1='6' y1='6' x2='18' y2='18'%3E%3C/line%3E%3C/svg%3E" alt="Close">
+      </button>
+    </div>
+
+    <div class="cb-iab-detail-wrapper">
+      <div class="cb-iab-preference-des">
+        <p>Customise your consent preferences for Cookie Categories and advertising tracking
+        preferences for Purposes &amp; Features and Vendors below. You can give granular consent
+        for each Third Party Vendor. Most vendors require explicit consent for personal data
+        processing, while some rely on legitimate interest. However, you have the right to object
+        to their use of legitimate interest.</p>
+      </div>
+
+      <div class="cb-iab-navbar-wrapper">
+        <ul class="cb-iab-navbar">
+          <li class="cb-iab-nav-item cb-iab-nav-item-active" data-tab="cookie">
+            <button aria-label="Cookie Categories" class="cb-iab-nav-btn">Cookie Categories</button>
+          </li>
+          <li class="cb-iab-nav-item" data-tab="purpose">
+            <button aria-label="Purposes &amp; Features" class="cb-iab-nav-btn">Purposes &amp; Features</button>
+          </li>
+          <li class="cb-iab-nav-item" data-tab="vendor">
+            <button aria-label="Vendors" class="cb-iab-nav-btn">Vendors</button>
+          </li>
+        </ul>
+      </div>
+
+      <div class="cb-iab-detail-sub-wrapper">
+        <div class="cb-preference-body-wrapper active" id="cbIABSectionCookie">
+          <p class="cb-iab-detail-title">Cookie Categories</p>
+          <div class="cb-preference-content-wrapper">
+            <p>We use cookies to help you navigate efficiently and perform certain functions.
+            You will find detailed information about all cookies under each consent category below.</p>
+            <p>The cookies that are categorised as "Necessary" are stored on your browser as they
+            are essential for enabling the basic functionalities of the site.</p>
+          </div>
+          <div class="cb-horizontal-separator"></div>
+          <div class="cb-accordion-wrapper" id="cookieAccordions"></div>
+        </div>
+
+        <div class="cb-preference-body-wrapper" id="cbIABSectionPurpose">
+          <p class="cb-iab-detail-title">Purposes &amp; Features</p>
+          <div class="cb-accordion-wrapper" id="purposeAccordions"></div>
+        </div>
+
+        <div class="cb-preference-body-wrapper" id="cbIABSectionVendor">
+          <p class="cb-iab-detail-title">Vendors</p>
+          <div class="consentBit-vendors-search-wrapper">
+            <div class="consentBit-search-container">
+              <input type="text" id="vendorsSearch"
+                     class="consentBit-search-input"
+                     placeholder="Search vendors by name or ID..."
+                     autocomplete="off">
+              <div class="consentBit-search-icon">🔍</div>
+            </div>
+            <div id="vendorsLoading" class="consentBit-loading">Loading vendors...</div>
+            <div id="vendorsList" class="consentBit-vendors-list" style="display:none;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="cb-footer-wrapper">
+      <span class="cb-footer-shadow"></span>
+      <div class="cb-prefrence-btn-wrapper">
+        <button aria-label="Reject All" class="cb-btn cb-btn-reject" id="cbRejectBtn">Reject All</button>
+        <button aria-label="Save My Preferences" class="cb-btn cb-btn-preferences" id="cbSaveBtn">Save My Preferences</button>
+        <button aria-label="Accept All" class="cb-btn cb-btn-accept" id="cbAcceptBtn">Accept All</button>
+      </div>
+    </div>
+  </div>
+</div>
+`};
+
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = bannerHTML;
+  document.body.appendChild(wrapper);
+}
+  // ─── Cookie Categories Data ──────────────────────────────────────────────────
+  const cookieCategories = [
+    {
+      id: "necessary", name: "Necessary", alwaysActive: true,
+      description: "Necessary cookies are required to enable the basic features of this site, such as providing secure log-in or adjusting your consent preferences. These cookies do not store any personally identifiable data.",
+      cookies: [
+        { name: "_cfuvid", duration: "session", description: "Calendly sets this cookie to track users across sessions to optimize user experience by maintaining session consistency and providing personalized services." },
+        { name: "cookieyes-consent", duration: "1 year", description: "CookieYes sets this cookie to remember users' consent preferences so that their preferences are respected on subsequent visits to this site. It does not collect or store any personal information about the site visitors." }
+      ]
+    },
+    {
+      id: "functional", name: "Functional", alwaysActive: false,
+      description: "Functional cookies help perform certain functionalities like sharing the content of the website on social media platforms, collecting feedback, and other third-party features.",
+      cookies: []
+    },
+    {
+      id: "analytics", name: "Analytics", alwaysActive: false,
+      description: "Analytical cookies are used to understand how visitors interact with the website. These cookies help provide information on metrics such as the number of visitors, bounce rate, traffic source, etc.",
+      cookies: [
+        { name: "_hjSessionUser_*", duration: "1 year", description: "Hotjar sets this cookie to ensure data from subsequent visits to the same site is attributed to the same user ID, which persists in the Hotjar User ID, which is unique to that site." },
+        { name: "_hjSession_*", duration: "1 hour", description: "Hotjar sets this cookie to ensure data from subsequent visits to the same site is attributed to the same user ID, which persists in the Hotjar User ID, which is unique to that site." }
+      ]
+    },
+    {
+      id: "performance", name: "Performance", alwaysActive: false,
+      description: "Performance cookies are used to understand and analyse the key performance indexes of the website which helps in delivering a better user experience for the visitors.",
+      cookies: [
+        { name: "SRM_B", duration: "1 year 24 days", description: "Used by Microsoft Advertising as a unique ID for visitors." }
+      ]
+    },
+    {
+      id: "advertisement", name: "Advertisement", alwaysActive: false,
+      description: "Advertisement cookies are used to provide visitors with customised advertisements based on the pages you visited previously and to analyse the effectiveness of the ad campaigns.",
+      cookies: [
+        { name: "MUID", duration: "1 year 24 days", description: "Bing sets this cookie to recognise unique web browsers visiting Microsoft sites. This cookie is used for advertising, site analytics, and other operations." },
+        { name: "ANONCHK", duration: "10 minutes", description: "The ANONCHK cookie, set by Bing, is used to store a user's session ID and verify ads' clicks on the Bing search engine. The cookie helps in reporting and personalization as well." }
+      ]
+    }
+  ];
+
+  // ─── Purposes Data ───────────────────────────────────────────────────────────
+  const purposesData = [
+    {
+      id: "purposes", title: "Purposes (11)", hasToggle: true,
+      items: [
+        { id: "purpose1", title: "Store and/or access information on a device", description: "Cookies, device or similar online identifiers (e.g. login-based identifiers, randomly assigned identifiers, network based identifiers) together with other information (e.g. browser type and information, language, screen size, supported technologies etc.) can be stored or read on your device to recognise it each time it connects to an app or to a website, for one or several of the purposes presented here.", illustrations: ["Most purposes explained in this notice rely on the storage or accessing of information from your device when you use an app or visit a website."], vendorCount: 777, hasConsent: true, hasLegitimate: false },
+        { id: "purpose2", title: "Use limited data to select advertising", description: "Advertising presented to you on this service can be based on limited data, such as the website or app you are using, your non-precise location, your device type or which content you are (or have been) interacting with.", illustrations: ["A car manufacturer wants to promote its electric vehicles to environmentally conscious users living in the city after office hours.", "A large producer of watercolour paints wants to carry out an online advertising campaign for its latest watercolour range."], vendorCount: 734, hasConsent: true, hasLegitimate: true },
+        { id: "purpose3", title: "Create profiles for personalised advertising", description: "Information about your activity on this service (such as forms you submit, content you look at) can be stored and combined with other information about you.", illustrations: ["If you read several articles about the best bike accessories to buy, this information could be used to create a profile about your interest in bike accessories.", "An apparel company wishes to promote its new line of high-end baby clothes by building profiles of wealthy young parents."], vendorCount: 594, hasConsent: true, hasLegitimate: false },
+        { id: "purpose4", title: "Use profiles to select personalised advertising", description: "Advertising presented to you on this service can be based on your advertising profiles, which can reflect your activity on this service or other websites or apps.", illustrations: ["An online retailer targets users who previously looked at running shoes.", "A profile created on one site is used on another app to show relevant ads."], vendorCount: 596, hasConsent: true, hasLegitimate: false },
+        { id: "purpose5", title: "Create profiles to personalise content", description: "Information about your activity on this service can be stored and combined with other information to build or improve a profile which is then used to present more relevant content.", illustrations: ["Reading DIY articles leads to more DIY content recommendations.", "Viewing space videos creates interest profile for space content."], vendorCount: 267, hasConsent: true, hasLegitimate: false },
+        { id: "purpose6", title: "Use profiles to select personalised content", description: "Content presented to you can be based on your content personalisation profiles and interests.", illustrations: ["Vegetarian recipes shown based on reading habits.", "Rowing videos recommended based on viewing history."], vendorCount: 238, hasConsent: true, hasLegitimate: false },
+        { id: "purpose7", title: "Measure advertising performance", description: "Information regarding which advertising is presented to you and how you interact with it can be used to determine how well an advert has worked.", illustrations: ["Clicks and purchases tracked for ad performance.", "Ad placement optimisation based on interaction data."], vendorCount: 847, hasConsent: true, hasLegitimate: true },
+        { id: "purpose8", title: "Measure content performance", description: "Information regarding which content is presented to you and how you interact with it can be used to determine content effectiveness.", illustrations: ["Blog engagement tracked for content planning.", "Video watch time used to optimise length."], vendorCount: 404, hasConsent: true, hasLegitimate: true },
+        { id: "purpose9", title: "Understand audiences through statistics or combinations of data from different sources", description: "Reports can be generated based on the combination of data sets regarding interactions to identify common characteristics.", illustrations: ["Online bookstore audience analytics.", "Advertiser audience comparison study."], vendorCount: 548, hasConsent: true, hasLegitimate: true },
+        { id: "purpose10", title: "Develop and improve services", description: "Information about your activity can be used to improve products and services and build new services.", illustrations: ["Optimising ads for mobile devices.", "Developing new ad formats for new devices."], vendorCount: 633, hasConsent: true, hasLegitimate: true },
+        { id: "purpose11", title: "Use limited data to select content", description: "Content can be based on limited data such as website/app used, non-precise location, device type, or interactions.", illustrations: ["Travel content selected by location.", "Shorter videos selected based on fast-forward behaviour."], vendorCount: 174, hasConsent: true, hasLegitimate: true }
+      ]
+    },
+    {
+      id: "special_purposes", title: "Special Purposes (3)", hasToggle: false,
+      items: [
+        { id: "specialPurpose1", title: "Ensure security, prevent and detect fraud, and fix errors", description: "Your data can be used to monitor for and prevent unusual and possibly fraudulent activity (for example, regarding advertising, ad clicks by bots), and ensure systems and processes work properly and securely.", illustrations: ["An advertising intermediary notices a large increase in clicks on ads and uses data to determine 80% come from bots."], vendorCount: 595, hasConsent: false, hasLegitimate: false },
+        { id: "specialPurpose2", title: "Deliver and present advertising and content", description: "Certain information (like an IP address or device capabilities) is used to ensure the technical compatibility of the content or advertising, and to facilitate the transmission of the content or ad to your device.", illustrations: ["Clicking on a link in an article might normally send you to another page. Your browser sends a request to a server to properly display the information."], vendorCount: 594, hasConsent: false, hasLegitimate: false },
+        { id: "specialPurpose3", title: "Save and communicate privacy choices", description: "The choices you make regarding the purposes and entities listed in this notice are saved and made available to those entities in the form of digital signals.", illustrations: ["When you visit a website and are offered a choice between consenting to personalised advertising or not, the choice you make is saved and made available to advertising providers."], vendorCount: 445, hasConsent: false, hasLegitimate: false }
+      ]
+    },
+    {
+      id: "features", title: "Features (3)", hasToggle: false,
+      items: [
+        { id: "feature1", title: "Match and combine data from other data sources", description: "Information about your activity on this service may be matched and combined with other information relating to you and originating from various sources.", vendorCount: 436, hasConsent: false, hasLegitimate: false },
+        { id: "feature2", title: "Link different devices", description: "In support of the purposes explained in this notice, your device might be considered as likely linked to other devices that belong to you or your household.", vendorCount: 369, hasConsent: false, hasLegitimate: false },
+        { id: "feature3", title: "Identify devices based on information transmitted automatically", description: "Your device might be distinguished from other devices based on information it automatically sends when accessing the Internet.", vendorCount: 558, hasConsent: false, hasLegitimate: false }
+      ]
+    },
+    {
+      id: "special-features", title: "Special Features (2)", hasToggle: true,
+      items: [
+        { id: "special-feature1", title: "Use precise geolocation data", description: "With your acceptance, your precise location (within a radius of less than 500 metres) may be used in support of the purposes explained in this notice.", vendorCount: 280, hasConsent: true, hasLegitimate: false },
+        { id: "special-feature2", title: "Actively scan device characteristics for identification", description: "With your acceptance, certain characteristics specific to your device might be requested and used to distinguish it from other devices.", vendorCount: 157, hasConsent: true, hasLegitimate: false }
+      ]
+    }
+  ];
+
+  // ─── Init Cookie Accordions ──────────────────────────────────────────────────
+
+
+  // ─── Init Purpose Accordions ─────────────────────────────────────────────────
+  
+  // ─── Load Vendors ────────────────────────────────────────────────────────────
+
+  // ─── Tabs ────────────────────────────────────────────────────────────────────
+  
+
+  // ─── Accordions ──────────────────────────────────────────────────────────────
+
+
+  // ─── Save Preferences + TCF String ──────────────────────────────────────────
+  
+  // ─── Button Actions ──────────────────────────────────────────────────────────
+
+
+ 
+
+ 
+
+
+  // ─── Bootstrap ───────────────────────────────────────────────────────────────
+  // function bootstrap() {
+  //   // Check if already consented — skip banner if so
+  //   const saved = localStorage.getItem("cookieConsentPrefs");
+  //   if (saved) {
+  //     try {
+  //       const parsed = JSON.parse(saved);
+  //       if (parsed.choice === "accepted" || parsed.choice === "rejected") {
+  //         console.log("✅ Consent already recorded, skipping banner.");
+  //         return;
+  //       }
+  //     } catch (_) {}
+  //   }
+
+  //   injectStyles();
+  //   injectHTML();
+
+  //   // Small delay to ensure DOM is ready
+  //   // setTimeout(() => {
+  //   //   initCookieAccordions();
+  //   //   initPurposeAccordions();
+  //   //   initTabs();
+  //   //   initAccordions();
+  //   //   initButtons();
+  //   // }, 0);
+  // }
+async function bootstrap() {
+  const saved = localStorage.getItem("cookieConsentPrefs");
+
+  if (saved) {
+    try {
+      const parsed = JSON.parse(saved);
+      if (parsed.choice === "accepted" || parsed.choice === "rejected") {
+        console.log("✅ Consent already recorded, skipping banner.");
+        return;
+      }
+    } catch (_) {}
+  }
+
+  injectStyles();
+  injectHTML();
+
+  console.log("✅ HTML Injected");
+
+  // ✅ Wait one tick so DOM updates
+  await new Promise((r) => setTimeout(r, 0));
+
+  // ✅ NOW elements exist
+  // initCookieAccordions();
+  // initPurposeAccordions();
+  // initTabs();
+  // initAccordions();
+  // initButtons();
+
+  console.log("✅ UI Initialized");
+
+  // ✅ Vendors depend on TCF Manager → wait for it
+  // waitForTCFAndLoad();
+}
+  // ─── Load external scripts then bootstrap ────────────────────────────────────
+  function init() {
+    // Load TCF bundle first, then consentui + Tcfmanager
+    loadScript(BASE_URL + "/tcf.bundle.js", function () {
+      loadScript(BASE_URL + "/consentuiV2.js");
+      loadScript(BASE_URL + "/Tcfmanager.js");
+    });
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", bootstrap);
+    } else {
+      bootstrap();
+    }
+  }
+
+  init();
+})();`
+
+  const loadBaner= resolvedSite.banner_type==="iab"? loaderIab:loader
+  return new Response(loadBaner, {
     status: 200,
     headers: {
       'Content-Type': 'application/javascript; charset=utf-8',
