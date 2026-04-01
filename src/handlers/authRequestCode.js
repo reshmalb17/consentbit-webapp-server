@@ -1,4 +1,4 @@
-import { createEmailVerificationCode } from '../services/db.js';
+import { createEmailVerificationCode, getUserByEmail } from '../services/db.js';
 
 function isValidEmail(email) {
   const e = (email || '').trim().toLowerCase();
@@ -48,7 +48,7 @@ async function sendEmailViaBrevo(env, { to, subject, text }) {
   }
 }
 
-export async function handleAuthRequestCode(request, env) {
+export async function handleAuthRequestCode(request, env, ctx) {
   const db = env.CONSENT_WEBAPP;
   if (request.method !== 'POST') {
     return Response.json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
@@ -64,6 +64,11 @@ export async function handleAuthRequestCode(request, env) {
   const email = (body?.email || '').trim().toLowerCase();
   const purpose = body?.purpose === 'signup' ? 'signup' : 'login';
   const name = purpose === 'signup' ? (body?.name || '').trim() : null;
+  try {
+    const origin = request.headers.get('Origin') || request.headers.get('origin') || '';
+    const referer = request.headers.get('Referer') || request.headers.get('referer') || '';
+    console.log('[AuthRequestCode] debug headers', { origin, referer });
+  } catch {}
 
   const emailDomain = email.includes('@') ? email.split('@')[1] : '';
   console.log('[AuthRequestCode] request', {
@@ -84,6 +89,20 @@ export async function handleAuthRequestCode(request, env) {
     return Response.json({ success: false, error: 'name is required for signup' }, { status: 400 });
   }
 
+  if (purpose === 'login') {
+    const existingUser = await getUserByEmail(db, email);
+    if (!existingUser) {
+      return Response.json({ success: false, error: 'No account found with this email. Please sign up first.' }, { status: 404 });
+    }
+  }
+
+  if (purpose === 'signup') {
+    const existingUser = await getUserByEmail(db, email);
+    if (existingUser) {
+      return Response.json({ success: false, error: 'An account with this email already exists. Please log in instead.' }, { status: 409 });
+    }
+  }
+
   const code = generateCode();
   const salt = env.OTP_SECRET || 'dev-otp-secret';
   const codeHash = await sha256Hex(`${purpose}|${email}|${code}|${salt}`);
@@ -92,26 +111,32 @@ export async function handleAuthRequestCode(request, env) {
   const row = await createEmailVerificationCode(db, { email, purpose, codeHash, name, ttlMinutes });
 
   const subject = 'Your ConsentBit verification code';
-  const text = `Your verification code is: ${code}\n\nIt expires in ${ttlMinutes} minutes.`;
+  const text = `Hello,\n\nYour verification code is: ${code}\n\nIt will expire in ${ttlMinutes} minutes, so please use it soon.\n\nIf you didn’t request this, you can safely ignore this email.\n\nBest regards,\nConsentBit Team\n`;
 
-  const isProd = env.NODE_ENV === 'production';
+  const hasBrevoConfig = Boolean(env.BREVO_API_KEY && env.BREVO_FROM_EMAIL);
   const allowReturn = String(env.RETURN_OTP_IN_RESPONSE || '').toLowerCase() === 'true';
+  console.log('[AuthRequestCode] created otp', {
+    purpose,
+    emailDomain,
+    requestId: row?.id,
+    expiresAt: row?.expiresAt,
+    willReturnCode: (!hasBrevoConfig || allowReturn),
+  });
 
-  try {
-    console.log('[AuthRequestCode] sending via Brevo', { toDomain: emailDomain, expiresAt: row.expiresAt });
-    await sendEmailViaBrevo(env, { to: email, subject, text });
-  } catch (e) {
-    // Dev fallback: return code in response if explicitly allowed or non-prod.
-    console.error('[AuthRequestCode] Brevo send failed:', e?.message || e);
-    if (!isProd || allowReturn) {
-      return Response.json(
-        { success: true, message: 'DEV: email not configured; returning code', requestId: row.id, expiresAt: row.expiresAt, code },
-        { status: 200 },
-      );
-    }
-    console.error('[AuthRequestCode] Email send failed:', e);
-    return Response.json({ success: false, error: 'Failed to send verification code' }, { status: 502 });
+  // If Brevo is not configured, fall back to returning the code in the response (dev only)
+  if (!hasBrevoConfig || allowReturn) {
+    return Response.json(
+      { success: true, message: 'DEV: email not configured; returning code', requestId: row.id, expiresAt: row.expiresAt, code },
+      { status: 200 },
+    );
   }
+
+  // Brevo is configured — fire email in background and respond immediately
+  ctx.waitUntil(
+    sendEmailViaBrevo(env, { to: email, subject, text }).catch((e) => {
+      console.error('[AuthRequestCode] Brevo send failed:', e?.message || e);
+    })
+  );
 
   return Response.json(
     { success: true, requestId: row.id, expiresAt: row.expiresAt },

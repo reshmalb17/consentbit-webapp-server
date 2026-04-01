@@ -1,13 +1,14 @@
 // handlers/scanCookies.js
-import { 
-  getSiteById, 
-  createScanHistory, 
-  upsertCookie 
+import {
+  getSiteById,
+  createScanHistory,
+  upsertCookie,
+  upsertScripts,
 } from '../services/db.js';
 import { requestDomainMatchesSite } from '../utils/domainValidate.js';
-import { 
-  categorizeCookie, 
-  getCookieProvider 
+import {
+  categorizeCookie,
+  getCookieProvider
 } from '../data/cookieDatabase.js';
 
 async function getUserDefinedCookieRule(db, siteId, name, domain) {
@@ -46,9 +47,10 @@ async function getUserDefinedCookieRule(db, siteId, name, domain) {
 function parseCookieFromDocumentCookie(cookieString) {
   // Parse simple "name=value" format from document.cookie
   const parts = cookieString.split(';').map((p) => p.trim());
-  const nameValue = parts[0].split('=');
-  const name = nameValue[0].trim();
-  const value = nameValue[1] || '';
+  const firstPart = parts[0] || '';
+  const eqIdx = firstPart.indexOf('=');
+  const name = (eqIdx >= 0 ? firstPart.slice(0, eqIdx) : firstPart).trim();
+  const value = eqIdx >= 0 ? firstPart.slice(eqIdx + 1) : '';
 
   const cookie = {
     name,
@@ -98,9 +100,11 @@ export async function handleScanCookies(request, env) {
 
   const siteId = body?.siteId;
   const cookies = body?.cookies || [];
+  const scripts = Array.isArray(body?.scripts) ? body.scripts : [];
   const pageUrl = body?.pageUrl || '';
+  const createNewScan = body?.createNewScan === true;
 
-  console.log('[ScanCookies] Received scan for siteId:', siteId, 'with', cookies, 'cookies detected from pageUrl:', pageUrl);
+  console.log('[ScanCookies] Received scan for siteId:', siteId, 'cookies:', cookies.length, 'scripts:', scripts.length, 'createNewScan:', createNewScan);
 
   if (!siteId) {
     return Response.json({ success: false, error: 'siteId is required' }, { status: 400 });
@@ -182,39 +186,77 @@ export async function handleScanCookies(request, env) {
       // Invalid URL, ignore
     }
 
-    // Find or create a scan history entry for client-side detection
-    // Use a special scan history ID based on siteId and "client-detection"
-    const scanHistoryId = `client-${siteId}-${Date.now()}`;
-    
-    // Check if we already have a recent client-side scan (within last hour)
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const existingScan = await db
-      .prepare(
-        'SELECT id FROM ScanHistory WHERE siteId = ?1 AND scanUrl LIKE ?2 AND createdAt > ?3 ORDER BY createdAt DESC LIMIT 1'
-      )
-      .bind(siteId, '%client-detection%', oneHourAgo)
-      .first();
+    // For createNewScan (triggered by "Scan Now"), always create a new scan record.
+    // For passive collection, reuse the most recent browser scan within the last hour.
+    const newScanHistoryId = `client-${siteId}-${Date.now()}`;
+    let currentScanHistoryId;
 
-    let currentScanHistoryId = existingScan?.id || scanHistoryId;
-
-    // Create scan history if it doesn't exist
-    if (!existingScan) {
+    if (createNewScan) {
       await createScanHistory(db, {
-        id: scanHistoryId,
-        siteId: siteId,
-        scanUrl: pageUrl || 'client-detection',
-        scriptsFound: 0,
+        id: newScanHistoryId,
+        siteId,
+        scanUrl: pageUrl || 'browser-scan',
+        scriptsFound: scripts.length,
         cookiesFound: cookies.length,
         scanDuration: null,
         scanStatus: 'completed',
       });
-      currentScanHistoryId = scanHistoryId;
+      currentScanHistoryId = newScanHistoryId;
+      // Clear the pendingScan flag so the script stops triggering full scans
+      try {
+        await db.prepare('UPDATE Site SET pendingScan = 0, updatedAt = ?1 WHERE id = ?2')
+          .bind(new Date().toISOString(), siteId)
+          .run();
+      } catch (e) {
+        console.warn('[ScanCookies] Failed to clear pendingScan flag', e);
+      }
     } else {
-      // Update existing scan with new cookie count
-      await db
-        .prepare('UPDATE ScanHistory SET cookiesFound = ?1 WHERE id = ?2')
-        .bind(cookies.length, currentScanHistoryId)
-        .run();
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      const existingScan = await db
+        .prepare('SELECT id FROM ScanHistory WHERE siteId = ?1 AND scanUrl LIKE ?2 AND createdAt > ?3 ORDER BY createdAt DESC LIMIT 1')
+        .bind(siteId, '%client-detection%', oneHourAgo)
+        .first();
+
+      if (!existingScan) {
+        await createScanHistory(db, {
+          id: newScanHistoryId,
+          siteId,
+          scanUrl: pageUrl || 'client-detection',
+          scriptsFound: scripts.length,
+          cookiesFound: cookies.length,
+          scanDuration: null,
+          scanStatus: 'completed',
+        });
+        currentScanHistoryId = newScanHistoryId;
+      } else {
+        currentScanHistoryId = existingScan.id;
+        await db.prepare('UPDATE ScanHistory SET cookiesFound = ?1, scriptsFound = ?2 WHERE id = ?3')
+          .bind(cookies.length, scripts.length, currentScanHistoryId)
+          .run();
+      }
+    }
+
+    // Store scripts if provided
+    if (scripts.length > 0) {
+      try {
+        await upsertScripts(db, {
+          siteId,
+          scripts: scripts.map(url => ({
+            url: String(url),
+            category: (() => {
+              try {
+                const h = new URL(String(url)).hostname;
+                if (h.includes('google-analytics.com') || h.includes('googletagmanager.com')) return 'analytics';
+                if (h.includes('facebook.com') || h.includes('fbcdn.net') || h.includes('doubleclick.net')) return 'marketing';
+                if (h.includes('hotjar.com') || h.includes('intercom.io') || h.includes('fullstory.com')) return 'behavioral';
+                return 'uncategorized';
+              } catch { return 'uncategorized'; }
+            })(),
+          })),
+        });
+      } catch (e) {
+        console.warn('[ScanCookies] Failed to upsert scripts', e);
+      }
     }
 
     // Process and store cookies

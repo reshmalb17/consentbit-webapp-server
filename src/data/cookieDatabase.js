@@ -79,6 +79,59 @@ export const COOKIE_DATABASE = {
       { name: '_pinid', category: 'marketing', provider: 'Pinterest', description: 'Pinterest cookie - stores a unique user identifier.' },
     ],
   },
+  'adroll': {
+    cookies: [
+      { name: '__adroll', category: 'marketing', provider: 'AdRoll', description: 'AdRoll cookie - used for ad retargeting and tracking across websites.' },
+      { name: '__adroll_fpc', category: 'marketing', provider: 'AdRoll', description: 'AdRoll first-party cookie - stores a unique user identifier for ad targeting.' },
+      { name: '__adroll_shared', category: 'marketing', provider: 'AdRoll', description: 'AdRoll shared cookie - used for cross-site ad targeting and frequency capping.' },
+      { name: '__ar_v4', category: 'marketing', provider: 'AdRoll', description: 'AdRoll cookie - stores user segment data for ad retargeting.' },
+    ],
+  },
+  'hubspot': {
+    cookies: [
+      { name: '__hstc', category: 'analytics', provider: 'HubSpot', description: 'HubSpot cookie - main cookie for tracking visitors. Stores session start, last access time, and session count.' },
+      { name: '__hssc', category: 'analytics', provider: 'HubSpot', description: 'HubSpot cookie - tracks session information. Used to determine if HubSpot should increment the session count.' },
+      { name: '__hssrc', category: 'analytics', provider: 'HubSpot', description: 'HubSpot cookie - set when a new session starts. Used to determine if the user has restarted their browser.' },
+      { name: 'hubspotutk', category: 'analytics', provider: 'HubSpot', description: 'HubSpot cookie - stores a unique user token for tracking across pages.' },
+      { name: '__zlcmid', category: 'functional', provider: 'Zopim/Zendesk', description: 'Zendesk Live Chat cookie - stores a unique visitor ID for the chat session.' },
+    ],
+  },
+  'microsoft-clarity': {
+    cookies: [
+      { name: '_clck', category: 'behavioral', provider: 'Microsoft Clarity', description: 'Microsoft Clarity cookie - persists the Clarity User ID and preferences, unique to that site.' },
+      { name: '_clsk', category: 'behavioral', provider: 'Microsoft Clarity', description: 'Microsoft Clarity cookie - connects multiple page views by a user into a single Clarity session recording.' },
+      { name: 'CLID', category: 'behavioral', provider: 'Microsoft Clarity', description: 'Microsoft Clarity cookie - identifies the first time Clarity saw this user on any site using Clarity.' },
+      { name: 'ANONCHK', category: 'behavioral', provider: 'Microsoft Clarity', description: 'Microsoft Clarity cookie - used to verify if cookies are enabled on a user\'s browser.' },
+      { name: 'MR', category: 'behavioral', provider: 'Microsoft Clarity', description: 'Microsoft cookie - used to refresh the MUID cookie.' },
+      { name: 'MUID', category: 'behavioral', provider: 'Microsoft', description: 'Microsoft cookie - identifies unique web browsers visiting Microsoft sites.' },
+      { name: 'SM', category: 'behavioral', provider: 'Microsoft Clarity', description: 'Microsoft cookie - used in synchronizing the MUID across Microsoft domains.' },
+    ],
+  },
+  'marketo': {
+    cookies: [
+      { name: '_mkto_trk', category: 'marketing', provider: 'Marketo', description: 'Marketo cookie - links visitor behaviour to the recipient of an email marketing campaign.' },
+    ],
+  },
+  'heap': {
+    cookies: [
+      { name: '_hp2_id', category: 'analytics', provider: 'Heap Analytics', description: 'Heap Analytics cookie - stores a unique user identifier for session tracking.' },
+      { name: '_hp2_props', category: 'analytics', provider: 'Heap Analytics', description: 'Heap Analytics cookie - stores user property data for analytics.' },
+      { name: '_hp2_ses_props', category: 'analytics', provider: 'Heap Analytics', description: 'Heap Analytics cookie - stores session property data.' },
+      { name: '_hp5_event_pr', category: 'analytics', provider: 'Heap Analytics', description: 'Heap Analytics cookie - stores event property data.' },
+      { name: '_hp5_let', category: 'analytics', provider: 'Heap Analytics', description: 'Heap Analytics cookie - stores user session data.' },
+      { name: '_hp5_meta', category: 'analytics', provider: 'Heap Analytics', description: 'Heap Analytics cookie - stores metadata for session tracking.' },
+    ],
+    pattern: /^_hp[25]_/i,
+  },
+  'contentsquare': {
+    cookies: [
+      { name: '_cs_id', category: 'analytics', provider: 'Contentsquare', description: 'Contentsquare cookie - stores a unique visitor identifier.' },
+      { name: '_cs_c', category: 'analytics', provider: 'Contentsquare', description: 'Contentsquare cookie - stores consent information for data collection.' },
+      { name: '_cs_s', category: 'analytics', provider: 'Contentsquare', description: 'Contentsquare cookie - stores session information.' },
+      { name: '_cs_cvars', category: 'analytics', provider: 'Contentsquare', description: 'Contentsquare cookie - stores custom variable data.' },
+    ],
+    pattern: /^_cs_/i,
+  },
 };
 
 /**
@@ -120,9 +173,57 @@ export function getCookieProvider(cookieName, cookieDomain) {
   if (name.includes('_hj') || name.includes('hotjar') || domain.includes('hotjar')) {
     return 'Hotjar';
   }
+  if (name.startsWith('sl_') || name.includes('smartlook') || domain.includes('smartlook')) {
+    return 'Smartlook';
+  }
   if (name.includes('consentbit') || name.includes('cookieyes')) {
     return 'ConsentBit';
   }
+
+  // Ad networks & DSPs — domain-based
+  if (domain.includes('rubiconproject.com')) return 'Rubicon Project';
+  if (domain.includes('pubmatic.com')) return 'PubMatic';
+  if (domain.includes('taboola.com')) return 'Taboola';
+  if (domain.includes('tapad.com')) return 'Tapad';
+  if (domain.includes('outbrain.com')) return 'Outbrain';
+  if (domain.includes('adnxs.com')) return 'Xandr (AppNexus)';
+  if (domain.includes('adsrvr.org')) return 'The Trade Desk';
+  if (domain.includes('bidswitch.net')) return 'BidSwitch';
+  if (domain.includes('3lift.com')) return 'TripleLift';
+  if (domain.includes('eyeota.net')) return 'Eyeota';
+  if (domain.includes('adroll.com') || domain.includes('d.adroll.com')) return 'AdRoll';
+  if (domain.includes('ml314.com')) return 'MediaLink';
+  if (domain.includes('casalemedia.com')) return 'Index Exchange';
+  if (domain.includes('openx.net') || domain.includes('openx.com')) return 'OpenX';
+  if (domain.includes('sharethrough.com')) return 'Sharethrough';
+  if (domain.includes('criteo.com')) return 'Criteo';
+  if (domain.includes('rlcdn.com')) return 'LiveRamp';
+  if (domain.includes('id5-sync.com')) return 'ID5';
+  if (domain.includes('33across.com')) return '33Across';
+  if (domain.includes('intentiq.com')) return 'Intent IQ';
+  if (domain.includes('smartadserver.com')) return 'Smart AdServer';
+  if (domain.includes('spotxchange.com') || domain.includes('spotx.tv')) return 'SpotX';
+  if (domain.includes('yldbt.com') || domain.includes('yieldbot.com')) return 'Yieldbot';
+  if (domain.includes('contextweb.com')) return 'Pulsepoint';
+  if (domain.includes('krxd.net')) return 'Krux';
+  if (domain.includes('bluekai.com')) return 'BlueKai';
+
+  // Ad networks — name-based
+  if (name === 'uid' || name === 'uuid' || name === 'uuid2' || name.startsWith('uid_')) return 'Ad Network';
+  if (name === 'tdid' || name === 'tdcpm') return 'The Trade Desk';
+  if (name === 'obuid') return 'Outbrain';
+  if (name.startsWith('t_gid') || name.startsWith('t_pt_') || name === 'taboola_vmp') return 'Taboola';
+  if (name.startsWith('tapad_') || name.startsWith('tapad') || name === 'tapad_did' || name === 'tapad_ts') return 'Tapad';
+  if (name.startsWith('krtbcookie') || name === 'pugt') return 'PubMatic';
+  if (name === 'khaos_p' || name === 'khaos') return 'Rubicon Project';
+  if (name.startsWith('__adroll') || name.startsWith('__ar_')) return 'AdRoll';
+  if (name === 'receive-cookie-deprecation') return 'Ad Network';
+  if (name === 'mako_uid' || name === 'serverid') return 'Eyeota';
+  if (name.startsWith('tluid') || name.startsWith('tluidp')) return 'TripleLift';
+  if (name.startsWith('tuuid') || name === 'tuuid_lu') return 'BidSwitch';
+  if (name === 'pi') return 'MediaLink';
+  if (name.startsWith('xandr_') || name === 'anj') return 'Xandr (AppNexus)';
+  if (name.startsWith('tap_') || name.startsWith('tapad_')) return 'Tapad';
 
   return null;
 }
@@ -204,7 +305,45 @@ export function categorizeCookie(cookieName, cookieDomain, provider) {
     provider?.toLowerCase().includes('marketing') ||
     provider?.toLowerCase().includes('linkedin') ||
     provider?.toLowerCase().includes('twitter') ||
-    provider?.toLowerCase().includes('pinterest')
+    provider?.toLowerCase().includes('pinterest') ||
+    // Ad networks & DSPs
+    domain.includes('rubiconproject.com') ||
+    domain.includes('pubmatic.com') ||
+    domain.includes('taboola.com') ||
+    domain.includes('tapad.com') ||
+    domain.includes('outbrain.com') ||
+    domain.includes('adnxs.com') ||
+    domain.includes('adsrvr.org') ||
+    domain.includes('bidswitch.net') ||
+    domain.includes('3lift.com') ||
+    domain.includes('eyeota.net') ||
+    domain.includes('adroll.com') ||
+    domain.includes('ml314.com') ||
+    domain.includes('casalemedia.com') ||
+    domain.includes('openx.net') ||
+    domain.includes('openx.com') ||
+    domain.includes('sharethrough.com') ||
+    domain.includes('criteo.com') ||
+    domain.includes('rlcdn.com') ||
+    domain.includes('id5-sync.com') ||
+    domain.includes('33across.com') ||
+    domain.includes('intentiq.com') ||
+    domain.includes('smartadserver.com') ||
+    domain.includes('spotxchange.com') ||
+    domain.includes('spotx.tv') ||
+    domain.includes('contextweb.com') ||
+    domain.includes('krxd.net') ||
+    domain.includes('bluekai.com') ||
+    name === 'tdid' || name === 'tdcpm' ||
+    name === 'obuid' ||
+    name.startsWith('t_gid') || name.startsWith('t_pt_') || name === 'taboola_vmp' ||
+    name.startsWith('tapad_did') || name === 'tapad_ts' || name.startsWith('tapad_3way') ||
+    name.startsWith('krtbcookie') || name === 'pugt' ||
+    name === 'khaos_p' || name === 'khaos' ||
+    name.startsWith('__adroll') || name.startsWith('__ar_') ||
+    name.startsWith('tluid') || name.startsWith('tuuid') ||
+    name === 'xandr_panid' || name === 'uuid2' || name === 'anj' ||
+    name === 'receive-cookie-deprecation'
   ) {
     return 'marketing';
   }
@@ -217,9 +356,12 @@ export function categorizeCookie(cookieName, cookieDomain, provider) {
     name.includes('fullstory') ||
     name.includes('mixpanel') ||
     name.includes('amplitude') ||
+    name.startsWith('sl_') ||
+    name.includes('smartlook') ||
     domain.includes('hotjar') ||
     domain.includes('intercom') ||
-    domain.includes('fullstory')
+    domain.includes('fullstory') ||
+    domain.includes('smartlook')
   ) {
     return 'behavioral';
   }
@@ -304,9 +446,9 @@ export function generateExpectedCookiesFromScripts(measurementIds, scriptUrls, s
                   path: '/',
                   category: cookieDef.category,
                   provider: cookieDef.provider,
-                  description: `[Expected] ${cookieDef.description} - Inferred from detected Google Analytics script.`,
-                  expected: true,
-                  isExpected: true,
+                  description: `${cookieDef.description} - Inferred from detected Google Analytics script.`,
+                  expected: false,
+                  isExpected: false,
                   source: 'script-inference'
                 });
                 seenCookies[cookieName] = true;
@@ -326,9 +468,9 @@ export function generateExpectedCookiesFromScripts(measurementIds, scriptUrls, s
                 path: '/',
                 category: 'analytics',
                 provider: 'Google Analytics',
-                description: `[Expected] Google Analytics 4 cookie - stores session and campaign data for measurement ID ${mid.id}. Inferred from detected GA4 script.`,
-                expected: true,
-                isExpected: true,
+                description: `Google Analytics 4 cookie - stores session and campaign data for measurement ID ${mid.id}. Inferred from detected GA4 script.`,
+                expected: false,
+                isExpected: false,
                 source: 'script-inference'
               });
               seenCookies[ga4CookieName] = true;
@@ -347,8 +489,10 @@ export function generateExpectedCookiesFromScripts(measurementIds, scriptUrls, s
                   path: '/',
                   category: cookieDef.category,
                   provider: cookieDef.provider,
-                  description: `[Expected] ${cookieDef.description} - Inferred from detected Universal Analytics script.`,
-                  expected: true
+                  description: `${cookieDef.description} - Inferred from detected Universal Analytics script.`,
+                  expected: false,
+                  isExpected: false,
+                  source: 'script-inference'
                 });
                 seenCookies[cookieName] = true;
               }
@@ -364,9 +508,9 @@ export function generateExpectedCookiesFromScripts(measurementIds, scriptUrls, s
                 path: '/',
                 category: cookieDef.category,
                 provider: cookieDef.provider,
-                description: `[Expected] ${cookieDef.description} - Inferred from detected Google Tag Manager script.`,
-                expected: true,
-                isExpected: true,
+                description: `${cookieDef.description} - Inferred from detected Google Tag Manager script.`,
+                expected: false,
+                isExpected: false,
                 source: 'script-inference'
               });
               seenCookies[cookieDef.name] = true;
@@ -384,9 +528,9 @@ export function generateExpectedCookiesFromScripts(measurementIds, scriptUrls, s
                   path: '/',
                   category: cookieDef.category,
                   provider: cookieDef.provider,
-                  description: `[Expected] ${cookieDef.description} - Inferred from detected Google Tag Manager script.`,
-                  expected: true,
-                  isExpected: true,
+                  description: `${cookieDef.description} - Inferred from detected Google Tag Manager script.`,
+                  expected: false,
+                  isExpected: false,
                   source: 'script-inference'
                 });
                 seenCookies[cookieName] = true;
@@ -410,9 +554,9 @@ export function generateExpectedCookiesFromScripts(measurementIds, scriptUrls, s
                 path: '/',
                 category: cookieDef.category,
                 provider: cookieDef.provider,
-                description: `[Expected] ${cookieDef.description} - Inferred from detected Facebook Pixel script.`,
-                expected: true,
-                isExpected: true,
+                description: `${cookieDef.description} - Inferred from detected Facebook Pixel script.`,
+                expected: false,
+                isExpected: false,
                 source: 'script-inference'
               });
               seenCookies[cookieDef.name] = true;
@@ -430,9 +574,9 @@ export function generateExpectedCookiesFromScripts(measurementIds, scriptUrls, s
                 path: '/',
                 category: cookieDef.category,
                 provider: cookieDef.provider,
-                description: `[Expected] ${cookieDef.description} - Inferred from detected Hotjar script.`,
-                expected: true,
-                isExpected: true,
+                description: `${cookieDef.description} - Inferred from detected Hotjar script.`,
+                expected: false,
+                isExpected: false,
                 source: 'script-inference'
               });
               seenCookies[cookieDef.name] = true;
@@ -450,9 +594,9 @@ export function generateExpectedCookiesFromScripts(measurementIds, scriptUrls, s
                 path: '/',
                 category: cookieDef.category,
                 provider: cookieDef.provider,
-                description: `[Expected] ${cookieDef.description} - Inferred from detected LinkedIn Insight Tag script.`,
-                expected: true,
-                isExpected: true,
+                description: `${cookieDef.description} - Inferred from detected LinkedIn Insight Tag script.`,
+                expected: false,
+                isExpected: false,
                 source: 'script-inference'
               });
               seenCookies[cookieDef.name] = true;
@@ -470,9 +614,9 @@ export function generateExpectedCookiesFromScripts(measurementIds, scriptUrls, s
                 path: '/',
                 category: cookieDef.category,
                 provider: cookieDef.provider,
-                description: `[Expected] ${cookieDef.description} - Inferred from detected Twitter Pixel script.`,
-                expected: true,
-                isExpected: true,
+                description: `${cookieDef.description} - Inferred from detected Twitter Pixel script.`,
+                expected: false,
+                isExpected: false,
                 source: 'script-inference'
               });
               seenCookies[cookieDef.name] = true;
@@ -485,21 +629,106 @@ export function generateExpectedCookiesFromScripts(measurementIds, scriptUrls, s
           for (const cookieDef of COOKIE_DATABASE['pinterest'].cookies) {
             if (!seenCookies[cookieDef.name]) {
               expectedCookies.push({
-                name: cookieDef.name,
-                domain: hostname,
-                path: '/',
-                category: cookieDef.category,
-                provider: cookieDef.provider,
-                description: `[Expected] ${cookieDef.description} - Inferred from detected Pinterest script.`,
-                expected: true,
-                isExpected: true,
-                source: 'script-inference'
+                name: cookieDef.name, domain: hostname, path: '/',
+                category: cookieDef.category, provider: cookieDef.provider,
+                description: `${cookieDef.description} - Inferred from detected Pinterest script.`,
+                expected: false, isExpected: false, source: 'script-inference'
+              });
+              seenCookies[cookieDef.name] = true;
+            }
+          }
+        }
+
+        // AdRoll
+        if (urlLower.includes('adroll.com') || urlLower.includes('adnxs.com')) {
+          for (const cookieDef of COOKIE_DATABASE['adroll'].cookies) {
+            if (!seenCookies[cookieDef.name]) {
+              expectedCookies.push({
+                name: cookieDef.name, domain: hostname, path: '/',
+                category: cookieDef.category, provider: cookieDef.provider,
+                description: `${cookieDef.description} - Inferred from detected AdRoll script.`,
+                expected: false, isExpected: false, source: 'script-inference'
+              });
+              seenCookies[cookieDef.name] = true;
+            }
+          }
+        }
+
+        // HubSpot
+        if (urlLower.includes('hubspot.com') || urlLower.includes('hs-scripts.com') || urlLower.includes('hscollectedforms.net')) {
+          for (const cookieDef of COOKIE_DATABASE['hubspot'].cookies) {
+            if (!seenCookies[cookieDef.name]) {
+              expectedCookies.push({
+                name: cookieDef.name, domain: hostname, path: '/',
+                category: cookieDef.category, provider: cookieDef.provider,
+                description: `${cookieDef.description} - Inferred from detected HubSpot script.`,
+                expected: false, isExpected: false, source: 'script-inference'
+              });
+              seenCookies[cookieDef.name] = true;
+            }
+          }
+        }
+
+        // Microsoft Clarity
+        if (urlLower.includes('clarity.ms') || urlLower.includes('microsoft.com/clarity')) {
+          for (const cookieDef of COOKIE_DATABASE['microsoft-clarity'].cookies) {
+            if (!seenCookies[cookieDef.name]) {
+              expectedCookies.push({
+                name: cookieDef.name, domain: hostname, path: '/',
+                category: cookieDef.category, provider: cookieDef.provider,
+                description: `${cookieDef.description} - Inferred from detected Microsoft Clarity script.`,
+                expected: false, isExpected: false, source: 'script-inference'
+              });
+              seenCookies[cookieDef.name] = true;
+            }
+          }
+        }
+
+        // Marketo
+        if (urlLower.includes('marketo.com') || urlLower.includes('marketo.net') || urlLower.includes('mktoresp.com')) {
+          for (const cookieDef of COOKIE_DATABASE['marketo'].cookies) {
+            if (!seenCookies[cookieDef.name]) {
+              expectedCookies.push({
+                name: cookieDef.name, domain: hostname, path: '/',
+                category: cookieDef.category, provider: cookieDef.provider,
+                description: `${cookieDef.description} - Inferred from detected Marketo script.`,
+                expected: false, isExpected: false, source: 'script-inference'
+              });
+              seenCookies[cookieDef.name] = true;
+            }
+          }
+        }
+
+        // Heap Analytics
+        if (urlLower.includes('heapanalytics.com') || urlLower.includes('heap.io') || urlLower.includes('cdn.heapanalytics.com')) {
+          for (const cookieDef of COOKIE_DATABASE['heap'].cookies) {
+            if (!seenCookies[cookieDef.name]) {
+              expectedCookies.push({
+                name: cookieDef.name, domain: hostname, path: '/',
+                category: cookieDef.category, provider: cookieDef.provider,
+                description: `${cookieDef.description} - Inferred from detected Heap Analytics script.`,
+                expected: false, isExpected: false, source: 'script-inference'
+              });
+              seenCookies[cookieDef.name] = true;
+            }
+          }
+        }
+
+        // Contentsquare
+        if (urlLower.includes('contentsquare.net') || urlLower.includes('contentsquare.com') || urlLower.includes('tagcommander.com')) {
+          for (const cookieDef of COOKIE_DATABASE['contentsquare'].cookies) {
+            if (!seenCookies[cookieDef.name]) {
+              expectedCookies.push({
+                name: cookieDef.name, domain: hostname, path: '/',
+                category: cookieDef.category, provider: cookieDef.provider,
+                description: `${cookieDef.description} - Inferred from detected Contentsquare script.`,
+                expected: false, isExpected: false, source: 'script-inference'
               });
               seenCookies[cookieDef.name] = true;
             }
           }
         }
   }
-  
+
   return expectedCookies;
 }

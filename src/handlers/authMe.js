@@ -77,28 +77,22 @@ export async function handleAuthMe(request, env) {
     return Response.json({ authenticated: false }, { status: 200 });
   }
 
-  // 2. Get user from session
+  // 2. Get user + orgs in parallel (both only need userId)
   const userId = session.userId ?? session.user_id;
-  const user = await getUserById(db, userId);
+  const [user, orgsInitial] = await Promise.all([
+    getUserById(db, userId),
+    getOrganizationsForUser(db, userId),
+  ]);
   if (!user) {
     return Response.json({ authenticated: false }, { status: 200 });
   }
 
-  // 3. In parallel: fetch orgs, and (if needed) ensure an org exists
-  const defaultOrgName = user?.name ? `${user.name}'s Organization` : 'My Organization';
-
-  // First fetch orgs
-  let orgs = await getOrganizationsForUser(db, user.id);
-
-  // If user has no orgs, create one and then refetch in parallel
+  // 3. If user has no orgs yet, create one then refetch
+  let orgs = orgsInitial;
   if (!orgs || orgs.length === 0) {
-    const [createdOrg, freshOrgs] = await Promise.all([
-      getOrCreateOrganizationForUser(db, { userId: user.id, organizationName: defaultOrgName }),
-      getOrganizationsForUser(db, user.id),
-    ]);
-
-    // Prefer freshOrgs if it returned something; otherwise fall back to createdOrg
-    orgs = freshOrgs && freshOrgs.length ? freshOrgs : [createdOrg];
+    const defaultOrgName = user.name ? `${user.name}'s Organization` : 'My Organization';
+    await getOrCreateOrganizationForUser(db, { userId: user.id, organizationName: defaultOrgName });
+    orgs = await getOrganizationsForUser(db, user.id);
   }
 
   return Response.json(

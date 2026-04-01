@@ -14,6 +14,7 @@
     "dotenv": "^17.2.3"
   },
   "devDependencies": {
+    "@cloudflare/puppeteer": "^1.0.6",
     "@cloudflare/workers-types": "^4.20260131.0",
     "uuid": "^13.0.0",
     "wrangler": "^4.61.1"

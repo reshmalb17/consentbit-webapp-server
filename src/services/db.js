@@ -2,7 +2,12 @@
 
 // --- Schema ---
 
+// Cache per Worker instance — ensureSchema only runs once per cold start.
+const _schemaEnsured = new WeakMap();
+
 export async function ensureSchema(db) {
+  if (_schemaEnsured.get(db)) return;
+  _schemaEnsured.set(db, true);
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS Site (
       id TEXT PRIMARY KEY,
@@ -41,6 +46,14 @@ export async function ensureSchema(db) {
   try {
     await db.prepare(`
       ALTER TABLE Site ADD COLUMN embedScriptUrl TEXT
+    `).run();
+  } catch (e) {
+    // Column already exists, ignore
+  }
+
+  try {
+    await db.prepare(`
+      ALTER TABLE Site ADD COLUMN pendingScan INTEGER DEFAULT 0
     `).run();
   } catch (e) {
     // Column already exists, ignore
@@ -126,14 +139,36 @@ export async function ensureSchema(db) {
     )
   `).run();
 
-  // Create unique index on siteId + cookie name for conflict resolution
+  // Create unique index on siteId + name + domain.
+  // Domain is always stored as '' (never NULL) so plain column index works with ON CONFLICT.
+  try {
+    await db.prepare(`DROP INDEX IF EXISTS idx_cookie_site_name`).run();
+  } catch (e) { /* ignore */ }
+  try {
+    await db.prepare(`DROP INDEX IF EXISTS idx_cookie_site_name_domain`).run();
+  } catch (e) { /* ignore */ }
   try {
     await db.prepare(`
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_cookie_site_name ON Cookie(siteId, name, domain)
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_cookie_site_name_domain
+      ON Cookie(siteId, name, domain)
     `).run();
   } catch (e) {
     // Index might already exist, ignore
   }
+  // Remove duplicate cookie rows — keep only the most recent per (siteId, name, domain)
+  try {
+    await db.prepare(`
+      DELETE FROM Cookie
+      WHERE id NOT IN (
+        SELECT id FROM (
+          SELECT id, ROW_NUMBER() OVER (
+            PARTITION BY siteId, name, domain
+            ORDER BY lastSeenAt DESC
+          ) AS rn FROM Cookie
+        ) WHERE rn = 1
+      )
+    `).run();
+  } catch (e) { /* ignore — window functions may not be available on older D1 */ }
 
   // Cookie table migrations
   try {
@@ -422,6 +457,41 @@ export async function ensureSchema(db) {
       UNIQUE(siteId, yearMonth)
     )
   `).run();
+
+  // ScanUsage: monthly scan counts per site (counter table — avoids COUNT(*) on ScanHistory)
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS ScanUsage (
+      id TEXT PRIMARY KEY,
+      siteId TEXT NOT NULL,
+      yearMonth TEXT NOT NULL,
+      scanCount INTEGER NOT NULL DEFAULT 0,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(siteId, yearMonth)
+    )
+  `).run();
+
+  // One-time backfill: populate ScanUsage from existing ScanHistory records.
+  // Runs only when ScanUsage is empty (first deploy after table creation).
+  try {
+    const existing = await db.prepare('SELECT COUNT(*) AS cnt FROM ScanUsage').first();
+    if (Number(existing?.cnt ?? 0) === 0) {
+      await db.prepare(`
+        INSERT OR IGNORE INTO ScanUsage (id, siteId, yearMonth, scanCount, createdAt, updatedAt)
+        SELECT
+          siteId || ':' || strftime('%Y-%m', createdAt),
+          siteId,
+          strftime('%Y-%m', createdAt),
+          COUNT(*),
+          MIN(createdAt),
+          MAX(createdAt)
+        FROM ScanHistory
+        GROUP BY siteId, strftime('%Y-%m', createdAt)
+      `).run();
+    }
+  } catch (e) {
+    console.warn('[ensureSchema] ScanUsage backfill failed', e?.message);
+  }
 
   // LicenseActivation: maps license key to site (for quantity plan keys activated via add-site flow)
   await db.prepare(`
@@ -967,44 +1037,55 @@ export async function getEffectivePlanForOrganization(db, organizationId, env = 
 }
 
 /** Scan count for an organization in a given month (default current). */
+/** Increment scan counter for a site in the current month. Call after every successful scan. */
+export async function incrementScanUsage(db, siteId, date = new Date()) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const yearMonth = `${year}-${month}`;
+  const id = `${siteId}:${yearMonth}`;
+  const now = new Date().toISOString();
+
+  await db
+    .prepare(`INSERT OR IGNORE INTO ScanUsage (id, siteId, yearMonth, scanCount, createdAt, updatedAt) VALUES (?1, ?2, ?3, 0, ?4, ?4)`)
+    .bind(id, siteId, yearMonth, now)
+    .run();
+
+  await db
+    .prepare(`UPDATE ScanUsage SET scanCount = scanCount + 1, updatedAt = ?2 WHERE id = ?1`)
+    .bind(id, now)
+    .run();
+
+  const row = await db.prepare(`SELECT scanCount FROM ScanUsage WHERE id = ?1`).bind(id).first();
+  return { yearMonth, scanCount: Number(row?.scanCount ?? 0) };
+}
+
+/** Total scan count for an organization for the current month — reads from ScanUsage counter table. */
 export async function getScanUsageForOrganization(db, organizationId, date = new Date()) {
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, '0');
   const yearMonth = `${year}-${month}`;
-  const start = `${yearMonth}-01T00:00:00.000Z`;
-  const end = date.getUTCMonth() === 11
-    ? `${year + 1}-01-01T00:00:00.000Z`
-    : `${year}-${String(date.getUTCMonth() + 2).padStart(2, '0')}-01T00:00:00.000Z`;
   const sitesRes = await db.prepare('SELECT id FROM Site WHERE organizationId = ?1').bind(organizationId).all();
   const siteIds = (sitesRes.results || []).map((r) => r.id).filter(Boolean);
   if (siteIds.length === 0) return { yearMonth, scanCount: 0 };
   const placeholders = siteIds.map(() => '?').join(',');
   const sumRes = await db
-    .prepare(
-      `SELECT COUNT(*) AS cnt FROM ScanHistory WHERE siteId IN (${placeholders}) AND createdAt >= ? AND createdAt < ?`
-    )
-    .bind(...siteIds, start, end)
+    .prepare(`SELECT COALESCE(SUM(scanCount), 0) AS total FROM ScanUsage WHERE siteId IN (${placeholders}) AND yearMonth = ?`)
+    .bind(...siteIds, yearMonth)
     .first();
-  return { yearMonth, scanCount: Number(sumRes?.cnt ?? 0) };
+  return { yearMonth, scanCount: Number(sumRes?.total ?? 0) };
 }
 
-/** Scan count for a specific site in a given month (default current). */
+/** Scan count for a specific site in the current month — reads from ScanUsage counter table. */
 export async function getScanUsageForSite(db, siteId, date = new Date()) {
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, '0');
   const yearMonth = `${year}-${month}`;
   if (!siteId) return { yearMonth, scanCount: 0 };
-  const start = `${yearMonth}-01T00:00:00.000Z`;
-  const end = date.getUTCMonth() === 11
-    ? `${year + 1}-01-01T00:00:00.000Z`
-    : `${year}-${String(date.getUTCMonth() + 2).padStart(2, '0')}-01T00:00:00.000Z`;
   const row = await db
-    .prepare(
-      `SELECT COUNT(*) AS cnt FROM ScanHistory WHERE siteId = ?1 AND createdAt >= ?2 AND createdAt < ?3`
-    )
-    .bind(siteId, start, end)
+    .prepare(`SELECT COALESCE(SUM(scanCount), 0) AS total FROM ScanUsage WHERE siteId = ?1 AND yearMonth = ?2`)
+    .bind(siteId, yearMonth)
     .first();
-  return { yearMonth, scanCount: Number(row?.cnt ?? 0) };
+  return { yearMonth, scanCount: Number(row?.total ?? 0) };
 }
 
 /** Number of sites for an organization. */
@@ -1091,11 +1172,33 @@ export async function getSubscriptionBySiteId(db, siteId) {
   if (!siteId) return null;
   const row = await db
     .prepare(
-      `SELECT * FROM Subscription WHERE siteId = ?1 AND status IN ('active', 'trialing') AND (currentPeriodEnd IS NULL OR currentPeriodEnd > datetime('now')) ORDER BY updatedAt DESC LIMIT 1`
+      `SELECT * FROM Subscription WHERE siteId = ?1 AND status IN ('active', 'trialing') ORDER BY updatedAt DESC LIMIT 1`
     )
     .bind(siteId)
     .first();
   return row || null;
+}
+
+/** Batch version — fetches subscriptions for multiple sites in a single D1 query.
+ *  Returns a map of siteId -> subscription row (most recent active/trialing per site). */
+export async function getSubscriptionsBySiteIds(db, siteIds) {
+  if (!siteIds || siteIds.length === 0) return {};
+  const placeholders = siteIds.map((_, i) => `?${i + 1}`).join(', ');
+  // Rely on status active/trialing only — avoid comparing ISO currentPeriodEnd to sqlite datetime('now')
+  // (can mis-filter valid subscriptions and leave per-site planId stuck on "free" in dashboard-init).
+  const { results } = await db
+    .prepare(
+      `SELECT * FROM Subscription WHERE siteId IN (${placeholders}) AND status IN ('active', 'trialing') ORDER BY updatedAt DESC`
+    )
+    .bind(...siteIds)
+    .all();
+  // First row per siteId wins (already sorted by updatedAt DESC)
+  const map = {};
+  for (const row of (results || [])) {
+    const sid = String(row.siteId ?? row.siteid ?? '');
+    if (sid && !map[sid]) map[sid] = row;
+  }
+  return map;
 }
 
 // --- License key generation ---
@@ -1319,6 +1422,29 @@ export function buildEmbedScriptUrl(origin, cdnScriptId) {
   return `${o}/consentbit/${id}/script.js`;
 }
 
+/**
+ * Canonicalize a user-provided domain / websiteUrl into a stable unique key.
+ * - strips protocol and path
+ * - strips leading www.
+ * - lowercases
+ */
+export function normalizeDomain(input) {
+  const raw = String(input || '').trim();
+  if (!raw) return '';
+  let host = raw;
+  try {
+    // If user entered a bare domain, URL() throws; prepend scheme.
+    const u = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+    host = u.hostname || raw;
+  } catch {
+    host = raw;
+  }
+  host = host.replace(/^www\./i, '').toLowerCase();
+  // drop any trailing dot
+  host = host.replace(/\.+$/, '');
+  return host;
+}
+
 // createSite: upsert by organizationId + domain
 // IMPORTANT: cdnScriptId is permanent and never regenerated for existing sites
 // This ensures the installation script code remains stable for each site
@@ -1328,16 +1454,33 @@ export async function createSite(
 ) {
   await ensureSchema(db);
 
+  const canonicalDomain = normalizeDomain(domain);
+  if (!canonicalDomain) {
+    const e = new Error('domain is required');
+    e.code = 'DOMAIN_REQUIRED';
+    throw e;
+  }
+
+  // Domain is globally UNIQUE — check by domain first.
   const existing = await db
-    .prepare(
-      'SELECT * FROM Site WHERE organizationId = ?1 AND domain = ?2',
-    )
-    .bind(organizationId, domain)
+    .prepare('SELECT * FROM Site WHERE domain = ?1')
+    .bind(canonicalDomain)
     .first();
 
   const now = new Date().toISOString();
 
   if (existing) {
+    // If another org already owns this domain, surface a clear error.
+    if (
+      organizationId &&
+      existing.organizationId &&
+      String(existing.organizationId) !== String(organizationId)
+    ) {
+      const e = new Error('Domain already exists');
+      e.code = 'DOMAIN_EXISTS';
+      e.status = 409;
+      throw e;
+    }
     const backfillEmbed =
       existing.embedScriptUrl ||
       buildEmbedScriptUrl(origin, existing.cdnScriptId);
@@ -1392,7 +1535,7 @@ export async function createSite(
       id,
       organizationId,
       name,
-      domain,
+      canonicalDomain,
       cdnScriptId,
       apiKey,
       bannerType,
@@ -1407,7 +1550,7 @@ export async function createSite(
     id,
     organizationId,
     name,
-    domain,
+    domain: canonicalDomain,
     cdnScriptId,
     apiKey,
     banner_type: bannerType,
@@ -1558,7 +1701,7 @@ export async function getUserByEmail(db, email) {
   return user || null;
 }
 
-export async function createUser(db, { email, name, passwordHash }) {
+export async function createUser(db, { email, name, passwordHash = 'passwordless' }) {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
@@ -1725,7 +1868,8 @@ export async function getOrganizationsForUser(db, userId) {
       `SELECT o.*
        FROM Organization o
        JOIN OrganizationMember m ON m.organizationId = o.id
-       WHERE m.userId = ?1`,
+       WHERE m.userId = ?1
+       ORDER BY o.createdAt ASC`,
     )
     .bind(userId)
     .all();
@@ -1783,7 +1927,7 @@ export async function upsertCookie(db, { siteId, scanHistoryId, cookie, now }) {
   // Coerce undefined to null for D1 (D1 rejects undefined)
   const v = (x) => (x === undefined ? null : x);
   const name = v(cookie?.name) ?? '';
-  const domain = v(cookie?.domain);
+  const domain = cookie?.domain ? String(cookie.domain).trim() : '';
   const path = (v(cookie?.path) || '/');
   const category = (v(cookie?.category) || 'uncategorized'); // NOT NULL
   const provider = v(cookie?.provider);
@@ -1820,7 +1964,6 @@ export async function upsertCookie(db, { siteId, scanHistoryId, cookie, now }) {
       console.error('[db] upsertCookie undefined bind:', key, 'full cookie:', JSON.stringify(cookie));
     }
   }
-  console.log('[db] upsertCookie bind values:', bindValues.map(({ key, val }) => `${key}=${val === undefined ? 'UNDEFINED' : typeof val === 'string' ? val.slice(0, 40) : val}`).join(', '));
 
   const cookieId = bindValues[0].val;
   try {
@@ -1867,20 +2010,56 @@ export async function upsertCookie(db, { siteId, scanHistoryId, cookie, now }) {
 }
 
 /**
- * Insert or update multiple cookies in batch
+ * Insert or update multiple cookies using D1 batch for maximum speed.
  */
 export async function upsertCookies(db, { siteId, scanHistoryId, cookies }) {
   await ensureSchema(db);
-  
+  if (!cookies || cookies.length === 0) return [];
+
   const now = new Date().toISOString();
-  const results = [];
-  
-  for (const cookie of cookies) {
-    const result = await upsertCookie(db, { siteId, scanHistoryId, cookie, now });
-    results.push(result);
+  const v = (x) => (x === undefined ? null : x);
+
+  const statements = cookies.map((cookie) => {
+    const name = v(cookie?.name) ?? '';
+    const domain = cookie?.domain ? String(cookie.domain).trim() : '';
+    const path = v(cookie?.path) || '/';
+    const category = v(cookie?.category) || 'uncategorized';
+    const provider = v(cookie?.provider);
+    const description = v(cookie?.description);
+    const expires = v(cookie?.expires);
+    const httpOnly = cookie?.httpOnly ? 1 : 0;
+    const secure = cookie?.secure ? 1 : 0;
+    const sameSite = v(cookie?.sameSite);
+    const isExpected = cookie?.isExpected ? 1 : 0;
+    const source = v(cookie?.source);
+    const cookieId = crypto.randomUUID();
+
+    return db
+      .prepare(
+        `INSERT INTO Cookie (id, siteId, scanHistoryId, name, domain, path, category, provider, description, expires, httpOnly, secure, sameSite, isExpected, source, firstSeenAt, lastSeenAt)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+         ON CONFLICT(siteId, name, domain) DO UPDATE SET
+           lastSeenAt = excluded.lastSeenAt,
+           scanHistoryId = excluded.scanHistoryId,
+           source = excluded.source,
+           category = excluded.category,
+           provider = excluded.provider,
+           isExpected = excluded.isExpected,
+           description = CASE
+             WHEN excluded.description IS NOT NULL THEN excluded.description
+             ELSE Cookie.description
+           END`,
+      )
+      .bind(cookieId, siteId, scanHistoryId, name, domain, path, category, provider, description, expires, httpOnly, secure, sameSite, isExpected, source, now, now);
+  });
+
+  try {
+    await db.batch(statements);
+    return cookies.map(() => ({ success: true }));
+  } catch (err) {
+    console.error('[db] upsertCookies batch failed:', err);
+    return cookies.map(() => ({ success: false, error: err.message }));
   }
-  
-  return results;
 }
 
 /**

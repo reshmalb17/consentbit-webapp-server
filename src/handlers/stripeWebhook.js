@@ -18,6 +18,7 @@ import {
   createSite,
   inferTierPlanIdFromStripePriceId,
 } from '../services/db.js';
+import { sendPaidPlanEmail } from '../services/email.js';
 
 /** Find existing Stripe customer by email, or create one (Use Case 3 / bulk guest checkout). */
 async function findOrCreateStripeCustomerByEmail(env, email) {
@@ -82,7 +83,7 @@ async function verifyStripeSignature(payload, signature, secret) {
   return hex === v1;
 }
 
-export async function handleStripeWebhook(request, env) {
+export async function handleStripeWebhook(request, env, ctx) {
   if (request.method !== 'POST') {
     return Response.json({ error: 'Method not allowed' }, { status: 405 });
   }
@@ -301,7 +302,15 @@ export async function handleStripeWebhook(request, env) {
         });
 
         const licenseKey = siteId ? await generateUniqueLicenseKey(db) : null;
-        console.log('[StripeWebhook] checkout.session.completed: saving subscription', { siteId, licenseKey: licenseKey ? `${licenseKey.substring(0, 12)}...` : null });
+        let resolvedPlanId = subMeta.planId || null;
+        if (!resolvedPlanId && stripePriceFromSub) {
+          resolvedPlanId = inferTierPlanIdFromStripePriceId(env, stripePriceFromSub);
+        }
+        console.log('[StripeWebhook] checkout.session.completed: saving subscription', {
+          siteId,
+          planId: resolvedPlanId,
+          licenseKey: licenseKey ? `${licenseKey.substring(0, 12)}...` : null,
+        });
         await saveSubscription(db, {
           organizationId: orgId,
           siteId: siteId || null,
@@ -309,7 +318,7 @@ export async function handleStripeWebhook(request, env) {
           stripeCustomerId: session.customer,
           stripePriceId: stripePriceFromSub,
           planType: planTypeMeta === 'tier' ? 'tier' : 'single',
-          planId: subMeta.planId || null,
+          planId: resolvedPlanId,
           interval,
           status: subscriptionStatus,
           currentPeriodStart,
@@ -317,6 +326,19 @@ export async function handleStripeWebhook(request, env) {
           licenseKey,
           amountCents: session.amount_total ?? null,
         });
+
+        // Send paid-plan confirmation email in the background
+        const customerEmail = session.customer_email || session.customer_details?.email;
+        const customerName  = session.customer_details?.name || '';
+        const planName      = resolvedPlanId || subMeta.planId || 'Basic';
+        if (customerEmail) {
+          sendPaidPlanEmail(env, ctx, {
+            to:       customerEmail,
+            name:     customerName,
+            domain:   siteDomainMeta || '',
+            planName,
+          });
+        }
       }
       return Response.json({ received: true });
     }

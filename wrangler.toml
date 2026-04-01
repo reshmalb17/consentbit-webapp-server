@@ -1,6 +1,10 @@
 name = "consent-webapp-manager"
 main = "src/index.js"
 compatibility_date = "2026-02-02"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "./public"
 
 [[d1_databases]]
 binding = "CONSENT_WEBAPP"
@@ -46,6 +50,10 @@ STRIPE_PRODUCT_YEARLY = "prod_TwvVRX1MaDL7wV"
 # STRIPE_ONE_TIME_PRICE_YEARLY = "price_1SpSw0JwcuG9163MLkRgIPmD"
 # STRIPE_ONE_TIME_PRODUCT_MONTHLY = "prod_Tn30iMTLmnS6Yz"
 # STRIPE_ONE_TIME_PRODUCT_YEARLY = "prod_Tn329EHlZLyLtR"
+
+# Cloudflare Browser Rendering — headless Chrome for full cookie scanning
+[browser]
+binding = "BROWSER"
 
 # Cron trigger to execute scheduled scans every minute
 [triggers]

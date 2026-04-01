@@ -1,5 +1,13 @@
 // handlers/scheduledScan.js
-import { ensureSchema, getScheduledScans, createScheduledScan, deleteScheduledScan } from '../services/db.js';
+import {
+  ensureSchema,
+  getScheduledScans,
+  createScheduledScan,
+  deleteScheduledScan,
+  getSiteById,
+  getScanUsageForSite,
+  getEffectivePlanForOrganization,
+} from '../services/db.js';
 
 export async function handleScheduledScan(request, env) {
   const db = env.CONSENT_WEBAPP;
@@ -40,6 +48,31 @@ export async function handleScheduledScan(request, env) {
         { success: false, error: 'siteId and scheduledAt are required' },
         { status: 400 }
       );
+    }
+
+    // Check scan limit before allowing a new scheduled scan to be created
+    try {
+      const site = await getSiteById(db, siteId);
+      const organizationId = site ? (site.organizationId ?? site.organizationid) : null;
+      if (organizationId) {
+        const [{ plan }, scanUsage] = await Promise.all([
+          getEffectivePlanForOrganization(db, organizationId, env),
+          getScanUsageForSite(db, siteId),
+        ]);
+        const scansLimit = plan ? (plan.scansIncluded ?? plan.scansincluded ?? 100) : 100;
+        if (scanUsage.scanCount >= scansLimit) {
+          return Response.json(
+            {
+              success: false,
+              error: `Scan limit reached (${scansLimit} scans/month for this site). Upgrade your plan to schedule more scans.`,
+              code: 'SCAN_LIMIT_REACHED',
+            },
+            { status: 402 }
+          );
+        }
+      }
+    } catch (limitErr) {
+      console.warn('[ScheduledScan] Limit check failed:', limitErr?.message);
     }
 
     try {

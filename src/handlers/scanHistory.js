@@ -45,10 +45,23 @@ export async function handleScanHistory(request, env) {
             .prepare('SELECT COUNT(*) as count FROM Cookie WHERE siteId = ?1 AND scanHistoryId = ?2 AND (isExpected = 0 OR isExpected IS NULL)')
             .bind(siteId, scan.id)
             .first();
-          
+
+          const { results: catRows } = await db
+            .prepare(
+              `SELECT DISTINCT category FROM Cookie
+               WHERE siteId = ?1 AND scanHistoryId = ?2
+                 AND (isExpected = 0 OR isExpected IS NULL)
+                 AND category IS NOT NULL AND TRIM(category) != ''`,
+            )
+            .bind(siteId, scan.id)
+            .all();
+
+          const categories = [...new Set((catRows || []).map((r) => String(r.category || '').toLowerCase().trim()).filter(Boolean))].sort();
+
           return {
             ...scan,
             cookiesFound: cookieCount?.count || scan.cookiesFound || 0,
+            categories,
           };
         } catch (e) {
           // If error, use original count

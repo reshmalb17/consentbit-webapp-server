@@ -239,28 +239,72 @@ export async function handleBillingInvoices(request, env) {
     return Response.json({ error: 'Not allowed for this organization' }, { status: 403 });
   }
 
-  const sub = await getSubscriptionByOrganization(db, organizationId);
-  const stripeCustomerId = sub && (sub.stripeCustomerId ?? sub.stripecustomerid);
-  if (!stripeCustomerId || !env.STRIPE_SECRET_KEY) {
+  if (!env.STRIPE_SECRET_KEY) {
     return Response.json({ invoices: [] });
   }
 
-  const res = await fetch(
-    `https://api.stripe.com/v1/invoices?customer=${stripeCustomerId}&limit=${limit}`,
-    { headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` } }
+  // Fetch all subscriptions for this org to get every Stripe customer ID
+  const subRows = await db
+    .prepare(
+      `SELECT stripeSubscriptionId, stripeCustomerId, siteId FROM Subscription
+       WHERE organizationId = ?1 AND stripeCustomerId IS NOT NULL AND stripeCustomerId != ''`,
+    )
+    .bind(organizationId)
+    .all();
+
+  const allRows = subRows.results || [];
+  if (allRows.length === 0) {
+    return Response.json({ invoices: [] });
+  }
+
+  // Build subscription → siteId map
+  const stripeSubToSite = {};
+  const customerIds = new Set();
+  for (const r of allRows) {
+    const stripeSub = r.stripeSubscriptionId ?? r.stripesubscriptionid;
+    const custId = r.stripeCustomerId ?? r.stripecustomerid;
+    const siteId = r.siteId ?? r.siteid;
+    if (stripeSub) stripeSubToSite[String(stripeSub)] = siteId ? String(siteId) : null;
+    if (custId) customerIds.add(String(custId));
+  }
+
+  // Fetch invoices for all customers in parallel
+  const perCustomerLimit = Math.ceil(limit / customerIds.size);
+  const fetchPromises = Array.from(customerIds).map((custId) =>
+    fetch(
+      `https://api.stripe.com/v1/invoices?customer=${custId}&limit=${perCustomerLimit}`,
+      { headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` } }
+    ).then((r) => r.json()).then((d) => d.data || []).catch(() => [])
   );
-  const data = await res.json();
-  const list = data.data || [];
-  const invoices = list.map((inv) => ({
-    id: inv.id,
-    number: inv.number || null,
-    status: inv.status || null,
-    amountDue: inv.amount_due ?? 0,
-    amountPaid: inv.amount_paid ?? 0,
-    created: inv.created ? new Date(inv.created * 1000).toISOString() : null,
-    hostedInvoiceUrl: inv.hosted_invoice_url || null,
-    invoicePdf: inv.invoice_pdf || null,
-  }));
+  const allLists = await Promise.all(fetchPromises);
+  // Merge, deduplicate by invoice id, sort by created desc, trim to limit
+  const seen = new Set();
+  const list = allLists.flat().filter((inv) => {
+    if (seen.has(inv.id)) return false;
+    seen.add(inv.id);
+    return true;
+  }).sort((a, b) => (b.created || 0) - (a.created || 0)).slice(0, limit);
+
+  const invoices = list.map((inv) => {
+    const stripeSubId =
+      typeof inv.subscription === 'string'
+        ? inv.subscription
+        : inv.subscription && typeof inv.subscription === 'object'
+          ? inv.subscription.id
+          : null;
+    const siteId = stripeSubId ? stripeSubToSite[String(stripeSubId)] ?? null : null;
+    return {
+      id: inv.id,
+      number: inv.number || null,
+      status: inv.status || null,
+      amountDue: inv.amount_due ?? 0,
+      amountPaid: inv.amount_paid ?? 0,
+      created: inv.created ? new Date(inv.created * 1000).toISOString() : null,
+      hostedInvoiceUrl: inv.hosted_invoice_url || null,
+      invoicePdf: inv.invoice_pdf || null,
+      siteId,
+    };
+  });
   return Response.json({ invoices });
 }
 

@@ -1,5 +1,6 @@
 // handlers/verifyScript.js
 import { markSiteVerified } from '../services/db.js';
+const VERIFY_PAGE_FETCH_TIMEOUT_MS = 12000;
 
 /**
  * Extract ConsentBit site / script id from embed URL path (dashboard or runtime CDN).
@@ -154,7 +155,18 @@ export async function handleVerifyScript(request, env) {
   }
 
   try {
-    const resp = await fetch(publicUrl, { redirect: 'follow' });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), VERIFY_PAGE_FETCH_TIMEOUT_MS);
+    let resp;
+    try {
+      resp = await fetch(publicUrl, {
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: { 'User-Agent': 'ConsentBit-Verifier/1.0' },
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
     const fetchedUrl = resp.url || publicUrl;
 
     if (!resp.ok) {
@@ -163,11 +175,18 @@ export async function handleVerifyScript(request, env) {
         publicUrl,
         fetchedUrl,
       });
+      let friendlyError;
+      if (resp.status === 403 || resp.status === 401) {
+        friendlyError = 'Your site is blocking automated requests. Please add the script to your site first, then click Verify again from your browser.';
+      } else if (resp.status === 404) {
+        friendlyError = 'Page not found. Please check the domain is correct and the site is live.';
+      } else if (resp.status >= 500) {
+        friendlyError = 'Your site returned a server error. Please ensure your site is live and try again.';
+      } else {
+        friendlyError = `Could not reach your site (HTTP ${resp.status}). Please ensure the domain is correct and publicly accessible.`;
+      }
       return Response.json(
-        {
-          success: false,
-          error: 'Failed to fetch page: ' + resp.status + ' ' + resp.statusText,
-        },
+        { success: false, error: friendlyError },
         { status: 502 },
       );
     }
@@ -276,6 +295,16 @@ export async function handleVerifyScript(request, env) {
       debug: debugPayload,
     });
   } catch (err) {
+    if (err?.name === 'AbortError') {
+      return Response.json(
+        {
+          success: false,
+          found: false,
+          error: `Verification timed out after ${Math.round(VERIFY_PAGE_FETCH_TIMEOUT_MS / 1000)}s. Try again or verify a faster public URL.`,
+        },
+        { status: 504 },
+      );
+    }
     console.error('[VerifyScript] error', err);
     return Response.json(
       { success: false, error: err?.message || 'Verification error' },
