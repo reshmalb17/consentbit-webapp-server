@@ -2390,7 +2390,8 @@ async function bootstrap() {
   init();
 })();`
 
-  const loadBaner= resolvedSite.banner_type==="iab"? loaderIab:loader
+  const loadBaner= resolvedSite.banner_type==="iab"? loaderIab:loader;
+  console.log("Resolved Site:", resolvedSite);
   return new Response(loadBaner, {
     status: 200,
     headers: {
