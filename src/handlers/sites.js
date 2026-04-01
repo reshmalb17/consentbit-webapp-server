@@ -66,7 +66,7 @@ export async function handleSites(request, env) {
     const organizationId = org.id;
 
     // Validate bannerType/regionMode (same as before)
-    const allowedBannerTypes = ['gdpr', 'ccpa'];
+    const allowedBannerTypes = ['gdpr', 'ccpa','iab'];
     const bannerType = allowedBannerTypes.includes(bannerTypeRaw) ? bannerTypeRaw : 'gdpr';
     const allowedRegionModes = ['gdpr', 'ccpa', 'both'];
     const regionMode = allowedRegionModes.includes(regionModeRaw) ? regionModeRaw : 'gdpr';
