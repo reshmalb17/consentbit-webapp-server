@@ -17,11 +17,7 @@ export async function handleCDNScript(request, env, url) {
 
 async function _handleCDNScript(request, env, url) {
   const parts = url.pathname.split('/');
-  // Extract script ID:
-  // - /client_data/{cdnScriptId}/script.js -> {cdnScriptId}
-  // - /consentbit/{cdnScriptId}/script.js  -> {cdnScriptId}
-  // - /client_data/{cdnScriptId}           -> {cdnScriptId}
-  // - /consentbit/{cdnScriptId}            -> {cdnScriptId}
+
   let cdnScriptId = parts[parts.length - 1];
   // If last part is "script.js", get the one before it
   if (cdnScriptId === 'script.js' && parts.length > 2) {
@@ -310,7 +306,6 @@ async function _handleCDNScript(request, env, url) {
         "color:" + custTx + ";" +
         "border-color:#e2e8f0;" +
       "}" +
-      ".cb-banner button#cb-back-btn," +
       ".cb-banner button#cb-prefs-reject-btn{" +
         "background-color:" + acceptBg + ";" +
         "color:" + acceptTx + ";" +
@@ -454,6 +449,8 @@ async function _handleCDNScript(request, env, url) {
           customiseButtonBg: customization.customiseButtonBg || '#ffffff',
           customiseButtonText: customization.customiseButtonText || '#334155',
           bannerEntranceAnimation: (enTrans && enTrans.bannerEntranceAnimation) ? String(enTrans.bannerEntranceAnimation) : 'fade-in',
+          showBannerLogo: customization.showBannerLogo == null ? true : (customization.showBannerLogo === 1 || customization.showBannerLogo === true),
+          bannerLogoPosition: customization.bannerLogoPosition || 'left',
         }
       : null,
     floatingLogoUrl: resolveFloatingLogoUrl(),
@@ -494,6 +491,10 @@ ${inlineConfig}
   var CENTER_ANIMATION_DIRECTION = CUSTOMIZATION ? (CUSTOMIZATION.centerAnimationDirection || 'fade') : 'fade';
   var BANNER_LANGUAGE = CUSTOMIZATION ? (CUSTOMIZATION.language || 'en') : 'en';
   var AUTO_DETECT_LANGUAGE = CUSTOMIZATION ? (CUSTOMIZATION.autoDetectLanguage === true) : false;
+  /** Show ConsentBit logo inside banner body. Default true; set showBannerLogo:false in customization to hide. */
+  var SHOW_BANNER_LOGO = CUSTOMIZATION ? (CUSTOMIZATION.showBannerLogo !== false) : true;
+  /** Logo alignment: 'left' | 'center' | 'right' — from banner config, default 'left'. */
+  var BANNER_LOGO_POSITION = (CUSTOMIZATION && CUSTOMIZATION.bannerLogoPosition) ? String(CUSTOMIZATION.bannerLogoPosition) : 'left';
   
   // Language translations (from backend / variables)
   ${translationsVar}
@@ -695,6 +696,53 @@ ${inlineConfig}
     }
   }
 
+  // ─── Preference toggle persistence (base64-encoded JSON in localStorage) ────
+  var PREFS_KEY = 'consentbit_prefs_' + (SITE_ID || '');
+
+  /**
+   * Persist GDPR category toggle states as a base64-encoded JSON value so the
+   * preference panel can be pre-populated correctly on every future page load.
+   * @param {{ analytics: boolean, preferences: boolean, marketing: boolean }} cats
+   */
+  function savePreferenceToggles(cats) {
+    try {
+      var data = {
+        analytics:   !!cats.analytics,
+        preferences: !!cats.preferences,
+        marketing:   !!cats.marketing
+      };
+      var encoded = btoa(JSON.stringify(data));
+      localStorage.setItem(PREFS_KEY, encoded);
+      console.log('[ConsentBit] Saved preference toggles (encoded)', data);
+    } catch (e) {
+      console.warn('[ConsentBit] Failed to save preference toggles', e);
+    }
+  }
+
+  /**
+   * Read back the encoded preference toggle states.
+   * Returns null when no value is stored or the value cannot be decoded.
+   * @returns {{ analytics: boolean, preferences: boolean, marketing: boolean } | null}
+   */
+  function loadPreferenceToggles() {
+    try {
+      var raw = localStorage.getItem(PREFS_KEY);
+      if (!raw) return null;
+      var decoded = JSON.parse(atob(raw));
+      if (decoded && typeof decoded === 'object') {
+        return {
+          analytics:   !!decoded.analytics,
+          preferences: !!decoded.preferences,
+          marketing:   !!decoded.marketing
+        };
+      }
+      return null;
+    } catch (e) {
+      console.warn('[ConsentBit] Failed to load preference toggles', e);
+      return null;
+    }
+  }
+
   // Send consent to backend API
   function sendConsentToServer(consent, options) {
     if (!SITE_ID || !API_BASE) return;
@@ -855,7 +903,8 @@ ${inlineConfig}
     var scripts = document.scripts;
     for (var i = 0; i < scripts.length; i++) {
       var s = scripts[i];
-      var src = s.src || '';
+      // Check both src (active) and data-cb-blocked-src (blocked by consent manager)
+      var src = s.src || s.getAttribute('data-cb-blocked-src') || '';
       if (
         src.indexOf('googletagmanager.com/gtag/js') !== -1 ||
         src.indexOf('googletagmanager.com/gtm.js') !== -1 ||
@@ -955,44 +1004,34 @@ ${inlineConfig}
   }
 
   function resolveScriptCategories(url, el) {
+    // 1. Explicit attribute on the tag (highest priority)
     if (el && el.getAttribute) {
-      /** Primary: data-consentbit="analytics" | "cookieyes-analytics" etc. */
       var fromCb = categoriesFromScriptTagAttr(el.getAttribute('data-consentbit'));
       if (fromCb) return fromCb;
-      /** Legacy: data-consentbit-category (short names only) */
       var dc = el.getAttribute('data-consentbit-category');
       if (dc) {
         var c1 = String(dc).toLowerCase().trim();
-        if (
-          c1 === 'analytics' ||
-          c1 === 'marketing' ||
-          c1 === 'behavioral' ||
-          c1 === 'preferences' ||
-          c1 === 'essential'
-        ) {
-          return [c1 === 'essential' ? 'essential' : c1];
+        if (c1 === 'analytics' || c1 === 'marketing' || c1 === 'behavioral' || c1 === 'preferences' || c1 === 'essential') {
+          return [c1];
         }
       }
-      /** Migration: data-cookieyes (CookieYes sites) */
       var fromCy = categoriesFromScriptTagAttr(el.getAttribute('data-cookieyes'));
       if (fromCy) return fromCy;
     }
+    // 2. URL pattern matching — SCRIPT_BLOCK_PROVIDERS is the sole source of truth
     if (url && SCRIPT_BLOCK_PROVIDERS.length) {
       for (var pi = 0; pi < SCRIPT_BLOCK_PROVIDERS.length; pi++) {
         var p = SCRIPT_BLOCK_PROVIDERS[pi];
         if (!p || !p.pattern) continue;
         try {
-          var re = new RegExp(p.pattern, 'i');
-          if (re.test(url)) {
+          if (new RegExp(p.pattern, 'i').test(url)) {
             return p.categories && p.categories.length ? p.categories.slice() : ['analytics'];
           }
         } catch (eRe) {}
       }
     }
-    if (!url) return [];
-    var single = categorize(url);
-    if (single === 'uncategorized') return [];
-    return [single];
+    // 3. Not matched anywhere — unknown script, allow freely
+    return [];
   }
 
   function shouldBlockScript(url, el) {
@@ -1002,17 +1041,22 @@ ${inlineConfig}
     if (u.indexOf('consentbit') !== -1 || u.indexOf('client_data') !== -1) return false;
 
     var cats = resolveScriptCategories(url, el);
+    // Not in SCRIPT_BLOCK_PROVIDERS and no attribute → not managed, allow freely
     if (!cats || cats.length === 0) return false;
 
+    // CCPA: opt-out — allow all unless user explicitly opted out (doNotSell)
+    if (BANNER_TYPE === 'ccpa') {
+      if (!consentState || !consentState.accepted) return false;
+      return !!(consentState.ccpa && consentState.ccpa.doNotSell);
+    }
+
+    // GDPR: opt-in — block any non-essential category not yet consented
     for (var j = 0; j < cats.length; j++) {
       var cat = cats[j];
       if (!isNonEssential(cat)) continue;
-      if (GA_MEASUREMENT_ID && cat === 'analytics' && isGoogleAnalyticsScriptUrl(url)) {
-        continue;
-      }
-      if (!userAllowsCategoryForScript(cat)) {
-        return true;
-      }
+      // Allow Google Analytics script itself — uses Consent Mode for cookieless tracking
+      if (cat === 'analytics' && isGoogleAnalyticsScriptUrl(url)) continue;
+      if (!userAllowsCategoryForScript(cat)) return true;
     }
     return false;
   }
@@ -1022,11 +1066,17 @@ ${inlineConfig}
     if (node.getAttribute && node.getAttribute('type') === 'javascript/blocked') return;
     var src = (node.getAttribute && node.getAttribute('src')) || node.src || '';
     if (!src) return;
-    if (!shouldBlockScript(src, node)) return;
+    var cats = resolveScriptCategories(src, node);
+    var category = cats.length > 0 ? cats[0] : 'uncategorized';
+    if (!shouldBlockScript(src, node)) {
+      console.log('[ConsentBit][Dynamic] ALLOWED (dynamic inject):', src, '| category:', category);
+      return;
+    }
     try {
       node.setAttribute('data-cb-blocked-src', src);
       node.setAttribute('type', 'javascript/blocked');
       node.removeAttribute('src');
+      console.log('[ConsentBit][Dynamic] BLOCKED (dynamic inject):', src, '| category:', category);
     } catch (eBl) {}
   }
 
@@ -1041,12 +1091,16 @@ ${inlineConfig}
           return el.getAttribute('src') || '';
         },
         set: function (v) {
+          var cats = resolveScriptCategories(v, el);
+          var category = cats.length > 0 ? cats[0] : 'uncategorized';
           if (shouldBlockScript(v, el)) {
             el.setAttribute('data-cb-blocked-src', v);
             el.setAttribute('type', 'javascript/blocked');
             el.removeAttribute('src');
+            console.log('[ConsentBit][Dynamic] BLOCKED (src set):', v, '| category:', category);
           } else {
             el.setAttribute('src', v);
+            console.log('[ConsentBit][Dynamic] ALLOWED (src set):', v, '| category:', category);
           }
         }
       });
@@ -1085,11 +1139,20 @@ ${inlineConfig}
 
   function releaseBlockedScripts() {
     var list = document.querySelectorAll('script[type="javascript/blocked"][data-cb-blocked-src]');
+    console.log('[ConsentBit][Release] releaseBlockedScripts called — total blocked scripts found:', list.length);
+    var released = 0;
+    var stillBlocked = 0;
+    var stillBlockedList = [];
+    var releasedList = [];
     for (var i = 0; i < list.length; i++) {
       var el = list[i];
       var src = el.getAttribute('data-cb-blocked-src');
       if (!src) continue;
-      if (shouldBlockScript(src, el)) continue;
+      if (shouldBlockScript(src, el)) {
+        stillBlocked++;
+        stillBlockedList.push(src);
+        continue;
+      }
       __cbInternalCreate = true;
       try {
         var ns = document.createElement('script');
@@ -1111,12 +1174,18 @@ ${inlineConfig}
         } else {
           document.head.appendChild(ns);
         }
+        released++;
+        releasedList.push(src);
+        console.log('[ConsentBit][Release] RELEASED:', src);
       } catch (eR) {
-        console.warn('[ConsentBit] releaseBlockedScripts node failed', eR);
+        console.warn('[ConsentBit][Release] Failed to release script:', src, eR);
       } finally {
         __cbInternalCreate = false;
       }
     }
+    console.log('[ConsentBit][Release] Summary — released:', released, '| still blocked:', stillBlocked);
+    if (releasedList.length) console.log('[ConsentBit][Release] Released scripts:', releasedList);
+    if (stillBlockedList.length) console.log('[ConsentBit][Release] Still blocked scripts:', stillBlockedList);
   }
 
   function installConsentScriptBlocker() {
@@ -1170,31 +1239,47 @@ ${inlineConfig}
     // in <head>, before any tracking tags, so the createElement hook intercepts them
     // as they are dynamically injected or parsed afterward.
     var scripts = collectScripts();
-    console.log('[ConsentBit] Blocking non-essential scripts (GDPR)');
+    console.log('[ConsentBit][Block] blockNonEssentialScripts called — total scripts on page:', scripts.length);
     var blocked = 0;
+    var allowed = 0;
+    var skipped = 0;
+    var blockedList = [];
+    var allowedList = [];
 
     for (var i = 0; i < scripts.length; i++) {
       var s = scripts[i];
       var src = s.src;
 
       // Skip already-blocked scripts
-      if (s.getAttribute('type') === 'javascript/blocked') continue;
+      if (s.getAttribute('type') === 'javascript/blocked') {
+        skipped++;
+        continue;
+      }
 
       // Resolve category from URL pattern
       var cats = resolveScriptCategories(src, s);
       var category = cats.length > 0 ? cats[0] : 'uncategorized';
 
-      if (!isNonEssential(category)) continue;
+      if (!isNonEssential(category)) {
+        console.log('[ConsentBit][Block] ESSENTIAL (not blocking):', src, '| category:', category);
+        allowed++;
+        allowedList.push({ src: src, category: category, reason: 'essential' });
+        continue;
+      }
 
       // Allow GA for cookieless tracking
       if (category === 'analytics' && GA_MEASUREMENT_ID && isGoogleAnalyticsScriptUrl(src)) {
-        console.log('[ConsentBit] Allowing GA for cookieless tracking', src);
+        console.log('[ConsentBit][Block] ALLOWED (GA cookieless tracking):', src);
+        allowed++;
+        allowedList.push({ src: src, category: category, reason: 'ga-cookieless' });
         continue;
       }
 
       // If consent already granted for this category, skip blocking
       if (userAllowsCategoryForScript(category)) {
-        console.log('[ConsentBit] Consent allows category, not blocking', src, category);
+        console.log('[ConsentBit][Block] ALLOWED (consent granted):', src, '| category:', category);
+        allowed++;
+        allowedList.push({ src: src, category: category, reason: 'consent-granted' });
         continue;
       }
 
@@ -1205,13 +1290,21 @@ ${inlineConfig}
         s.setAttribute('type', 'javascript/blocked');
         s.removeAttribute('src');
         blocked++;
-        console.log('[ConsentBit] Blocked static script', src, 'category:', category);
+        blockedList.push({ src: src, category: category });
+        console.log('[ConsentBit][Block] BLOCKED:', src, '| category:', category);
       } catch (eBl) {
-        console.warn('[ConsentBit] Failed to block script', src, eBl);
+        console.warn('[ConsentBit][Block] Failed to block script:', src, eBl);
       }
     }
 
-    console.log('[ConsentBit] Total static scripts blocked:', blocked);
+    console.group('[ConsentBit][Block] === Consent Reject Summary ===');
+    console.log('Total scripts scanned:', scripts.length);
+    console.log('Blocked:', blocked);
+    console.log('Allowed/essential:', allowed);
+    console.log('Already blocked (skipped):', skipped);
+    if (blockedList.length) console.table(blockedList);
+    if (allowedList.length) console.log('[ConsentBit][Block] Allowed list:', allowedList);
+    console.groupEnd();
   }
 
   function _enableDelayedScripts_unused() {
@@ -1329,19 +1422,42 @@ ${inlineConfig}
     }
   }
 
-  function grantGoogleConsent() {
-    if (!window.gtag) {
-      console.log('[ConsentBit] gtag not defined, cannot grant Google consent');
+  /**
+   * Single shared helper — builds gtag consent payload from stored categories
+   * and updates gtag. If window.gtag not ready, polls up to 2s.
+   */
+  function updateGtagConsentFromCategories(cats, label) {
+    if (!GA_MEASUREMENT_ID && !hasGoogleTracking()) {
+      console.warn('[ConsentBit]' + (label || '') + ' No Google tracking detected — gtag update skipped');
       return;
     }
-    console.log('[ConsentBit] Granting Google consent (update to granted)');
-    window.gtag('consent', 'update', {
-      ad_storage: 'granted',
-      analytics_storage: 'granted',
-      ad_user_data: 'granted',
-      ad_personalization: 'granted',
-    });
+    var payload = {
+      analytics_storage:   cats.analytics   ? 'granted' : 'denied',
+      ad_storage:          cats.marketing   ? 'granted' : 'denied',
+      ad_user_data:        cats.marketing   ? 'granted' : 'denied',
+      ad_personalization:  cats.preferences ? 'granted' : 'denied',
+    };
+    console.log('[ConsentBit]' + (label || '') + ' gtag consent update:', payload);
+    if (window.gtag) {
+      window.gtag('consent', 'update', payload);
+      console.log('[ConsentBit]' + (label || '') + ' gtag updated. dataLayer length:', window.dataLayer ? window.dataLayer.length : 'n/a');
+    } else {
+      console.log('[ConsentBit]' + (label || '') + ' window.gtag not ready — polling (max 2s)');
+      var retries = 0;
+      var interval = setInterval(function () {
+        retries++;
+        if (window.gtag) {
+          clearInterval(interval);
+          console.log('[ConsentBit]' + (label || '') + ' gtag ready after', retries * 100, 'ms — applying:', payload);
+          window.gtag('consent', 'update', payload);
+        } else if (retries >= 20) {
+          clearInterval(interval);
+          console.warn('[ConsentBit]' + (label || '') + ' window.gtag unavailable after 2s — consent NOT updated');
+        }
+      }, 100);
+    }
   }
+
 
   // --- Banner styles ---
   // Matching preview banner styles from defaultBannerConfig
@@ -1536,7 +1652,6 @@ ${inlineConfig}
       "color:#334155;" +
       "border-color:#e2e8f0;" +
     "}" +
-    ".cb-banner button#cb-back-btn," +
     ".cb-banner button#cb-prefs-reject-btn{" +
       "background-color:#007aff;" +
       "color:#ffffff;" +
@@ -1797,6 +1912,27 @@ ${inlineConfig}
     prefsBannerEl.appendChild(btn);
   }
 
+  /** Creates logo element for banner headers using the resolved floating logo URL. */
+  function createBannerLogo() {
+    if (!SHOW_BANNER_LOGO) return null;
+    var url = FLOATING_LOGO_URL || FLOATING_LOGO_FALLBACK_URL || '';
+    if (!url) return null;
+    var alignMap = { left: 'flex-start', center: 'center', right: 'flex-end' };
+    var justifyContent = alignMap[BANNER_LOGO_POSITION] || 'flex-start';
+    var wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;justify-content:' + justifyContent + ';margin-bottom:8px;';
+    var img = document.createElement('img');
+    img.src = url;
+    img.alt = '';
+    img.setAttribute('width', '80');
+    img.setAttribute('height', '20');
+    img.draggable = false;
+    img.style.cssText = 'display:block;max-width:80px;height:20px;object-fit:contain;';
+    img.addEventListener('error', function () { if (wrap.parentNode) wrap.parentNode.removeChild(wrap); });
+    wrap.appendChild(img);
+    return wrap;
+  }
+
   function renderConsentBitBanners() {
     if (document.getElementById("cb-initial-banner")) {
       console.log('[ConsentBit] Banner already exists');
@@ -1825,7 +1961,7 @@ ${inlineConfig}
       bodyDiv.appendChild(h3);
       var p = document.createElement("p");
       var pText = getTranslation('description');
-      
+
       if (PRIVACY_POLICY_URL && isCookiePolicyLinkEnabled()) {
         p.appendChild(document.createTextNode(pText + " "));
         var link = document.createElement("a");
@@ -1907,10 +2043,6 @@ ${inlineConfig}
       
       var prefsFooter = document.createElement("div");
       prefsFooter.className = "cb-banner-footer";
-      var backBtn = document.createElement("button");
-      backBtn.id = "cb-back-btn";
-      backBtn.textContent = getTranslation('cancel');
-      prefsFooter.appendChild(backBtn);
       var saveBtn = document.createElement("button");
       saveBtn.id = "cb-save-prefs-btn";
       saveBtn.textContent = getTranslation('saveMyPreferences') || getTranslation('save');
@@ -1997,7 +2129,7 @@ ${inlineConfig}
       bodyDiv.appendChild(h3);
       var p = document.createElement("p");
       var pText = getTranslation('description');
-      
+
       if (PRIVACY_POLICY_URL && isCookiePolicyLinkEnabled()) {
         p.appendChild(document.createTextNode(pText + " "));
         var link = document.createElement("a");
@@ -2010,7 +2142,7 @@ ${inlineConfig}
         p.textContent = pText;
       }
       bodyDiv.appendChild(p);
-      
+
       initialBanner.appendChild(bodyDiv);
       
       var footerDiv = document.createElement("div");
@@ -2078,7 +2210,11 @@ ${inlineConfig}
           descText: getTranslation("essentialDescription"),
         })
       );
-      var storedCats = (consentState && consentState.accepted && consentState.categories) || {};
+      // Prefer the separately encoded toggle state; fall back to categories in consentState.
+      var _savedToggles = loadPreferenceToggles();
+      var storedCats = _savedToggles
+        || (consentState && consentState.accepted && consentState.categories)
+        || {};
       catList.appendChild(
         makeGdprPrefCategoryBlock({
           labelText: getTranslation("marketing"),
@@ -2109,10 +2245,10 @@ ${inlineConfig}
       
       var prefsFooter = document.createElement("div");
       prefsFooter.className = "cb-banner-footer";
-      var backGdprBtn = document.createElement("button");
-      backGdprBtn.id = "cb-back-btn";
-      backGdprBtn.textContent = getTranslation("rejectAll");
-      prefsFooter.appendChild(backGdprBtn);
+      var prefsRejectBtn = document.createElement("button");
+      prefsRejectBtn.id = "cb-prefs-reject-btn";
+      prefsRejectBtn.textContent = getTranslation("rejectAll");
+      prefsFooter.appendChild(prefsRejectBtn);
       var saveBtn = document.createElement("button");
       saveBtn.id = "cb-save-prefs-btn";
       saveBtn.textContent = getTranslation("save");
@@ -2131,9 +2267,7 @@ ${inlineConfig}
       console.log('[ConsentBit] Scroll stopped while banner is visible');
     }
     
-    // Hide floating button while initial banner is visible
-    var floatBtnOnLoad = document.getElementById('cb-floating-trigger');
-    if (floatBtnOnLoad) floatBtnOnLoad.style.display = 'none';
+    // Floating button stays visible even when banner is showing
 
     // Ensure banner is visible and apply animation
     var initialBannerEl = document.getElementById("cb-initial-banner");
@@ -2326,6 +2460,7 @@ ${inlineConfig}
     injectConsentBitStyles();
     renderConsentBitBanners();
     injectFloatingButton();
+    // Floating button stays visible regardless of banner state
 
     var initialBanner = document.getElementById("cb-initial-banner");
     var prefsBanner   = document.getElementById("cb-preferences-banner");
@@ -2333,7 +2468,7 @@ ${inlineConfig}
     var btnPrefs      = document.getElementById("cb-preferences-btn");
     var btnAcceptAll  = document.getElementById("cb-accept-all-btn");
     var btnRejectAll  = document.getElementById("cb-reject-all-btn");
-    var btnBack       = document.getElementById("cb-back-btn");
+    var btnPrefsReject   = document.getElementById("cb-prefs-reject-btn");
     var btnSave       = document.getElementById("cb-save-prefs-btn");
     var linkDoNotSell = document.getElementById("cb-ccpa-donotsell-link");
     var isCCPA        = BANNER_TYPE === 'ccpa';
@@ -2362,8 +2497,8 @@ ${inlineConfig}
         stripPrefAnimClasses(prefsBanner);
       }
       // Hide floating button while initial banner is visible
-      var floatBtnShow = document.getElementById('cb-floating-trigger');
-      if (floatBtnShow) floatBtnShow.style.display = 'none';
+      // var floatBtnShow = document.getElementById('cb-floating-trigger');
+      // if (floatBtnShow) floatBtnShow.style.display = 'none';
       initialBanner.style.display = "flex";
       initialBanner.style.visibility = "visible";
       initialBanner.style.opacity = "1";
@@ -2394,6 +2529,21 @@ ${inlineConfig}
 
     btnPrefs && btnPrefs.addEventListener("click", function () {
       if (!initialBanner || !prefsBanner) return;
+      // Sync GDPR toggle states from the encoded localStorage value (most authoritative),
+      // falling back to in-memory consentState, before the preferences panel is shown.
+      if (!isCCPA) {
+        var _toggleState = loadPreferenceToggles() || (consentState && consentState.categories) || {};
+        var syncToggle = function (checkboxId, val) {
+          var cbEl = document.getElementById(checkboxId);
+          if (!cbEl) return;
+          cbEl.checked = !!val;
+          var track = cbEl.parentNode && cbEl.parentNode.querySelector('button.cb-pref-toggle-track');
+          if (track) track.setAttribute('aria-checked', cbEl.checked ? 'true' : 'false');
+        };
+        syncToggle('cb-pref-analytics', _toggleState.analytics);
+        syncToggle('cb-pref-preferences', _toggleState.preferences);
+        syncToggle('cb-pref-marketing', _toggleState.marketing);
+      }
       initialBanner.style.display = "none";
       initialBanner.classList.remove('cb-banner-animate-left', 'cb-banner-animate-right', 'cb-banner-animate-top', 'cb-banner-animate-bottom', 'cb-banner-animate-fade');
       
@@ -2409,8 +2559,17 @@ ${inlineConfig}
       }
     });
 
-    // CCPA: Cancel · GDPR prefs: Reject label — dismiss all UI (do not return to initial banner)
-    btnBack && btnBack.addEventListener("click", function () {
+    btnPrefsReject && btnPrefsReject.addEventListener("click", function () {
+      console.log("[ConsentBit] User clicked Reject All (preferences banner)");
+      var consentR = {
+        accepted: true,
+        timestamp: new Date().toISOString(),
+        categories: { essential: true, analytics: false, preferences: false, marketing: false }
+      };
+      saveConsent(consentR);
+      sendConsentToServer(consentR, { status: 'rejected' });
+      savePreferenceToggles(consentR.categories);
+      updateGtagConsentFromCategories(consentR.categories, '[PrefsReject]');
       hideAll();
     });
 
@@ -2455,25 +2614,9 @@ ${inlineConfig}
         };
         saveConsent(consentR);
         sendConsentToServer(consentR, { status: 'rejected' });
+        savePreferenceToggles(consentR.categories);
 
-        // Initialize GA for cookieless tracking (anonymous visitor count)
-        if (GA_MEASUREMENT_ID) {
-          if (!window.gtag) {
-            initGoogleConsentMode();
-          } else {
-            // Update consent to denied and send pageview
-            window.gtag('consent', 'update', {
-              analytics_storage: 'denied',
-              ad_storage: 'denied',
-              ad_user_data: 'denied',
-              ad_personalization: 'denied',
-            });
-            window.gtag('event', 'page_view', {
-              page_path: window.location.pathname,
-              page_title: document.title || '',
-            });
-          }
-        }
+        updateGtagConsentFromCategories(consentR.categories, '[Reject]');
       }
       hideAll();
     });
@@ -2508,13 +2651,10 @@ ${inlineConfig}
         };
         saveConsent(consentG);
         sendConsentToServer(consentG, { status: 'given' });
+        savePreferenceToggles(consentG.categories);
 
         releaseBlockedScripts();
-        // enableDelayedFonts(consentG.categories);
-        // enableDelayedEmbeds(consentG.categories);
-        if (hasGoogleTracking()) {
-          grantGoogleConsent();
-        }
+        updateGtagConsentFromCategories(consentG.categories, '[Accept]');
       }
       hideAll();
     });
@@ -2556,33 +2696,10 @@ ${inlineConfig}
         };
         saveConsent(consentG);
         sendConsentToServer(consentG, { status: 'partial' });
+        savePreferenceToggles(consentG.categories);
 
         releaseBlockedScripts();
-        // enableDelayedFonts(consentG.categories);
-        // enableDelayedEmbeds(consentG.categories);
-        // Update gtag consent per category
-        if (GA_MEASUREMENT_ID || hasGoogleTracking()) {
-          if (!window.gtag) {
-            initGoogleConsentMode();
-            setTimeout(function() {
-              if (window.gtag) {
-                window.gtag('consent', 'update', {
-                  analytics_storage: consentG.categories.analytics ? 'granted' : 'denied',
-                  ad_storage: consentG.categories.marketing ? 'granted' : 'denied',
-                  ad_user_data: consentG.categories.marketing ? 'granted' : 'denied',
-                  ad_personalization: consentG.categories.preferences ? 'granted' : 'denied',
-                });
-              }
-            }, 100);
-          } else {
-            window.gtag('consent', 'update', {
-              analytics_storage: consentG.categories.analytics ? 'granted' : 'denied',
-              ad_storage: consentG.categories.marketing ? 'granted' : 'denied',
-              ad_user_data: consentG.categories.marketing ? 'granted' : 'denied',
-              ad_personalization: consentG.categories.preferences ? 'granted' : 'denied',
-            });
-          }
-        }
+        updateGtagConsentFromCategories(consentG.categories, '[Save]');
       }
       hideAll();
     });
@@ -2602,45 +2719,32 @@ ${inlineConfig}
     var hasGoogle = hasGoogleTracking();
 
     if (BANNER_TYPE === 'gdpr') {
-      // GDPR: Initialize GA for cookieless tracking when banner loads (before consent)
-      // This allows anonymous visitor count tracking without cookies
-      if (GA_MEASUREMENT_ID) {
-        initGoogleConsentMode(); // Sets consent to denied, enables cookieless tracking
-      }
-
-      // Always block non-essential scripts first — respects stored category choices on reload.
-      // blockNonEssentialScripts uses userAllowsCategoryForScript which checks consentState,
-      // so scripts allowed by stored consent are skipped, denied ones are blocked.
+      // Always block non-essential scripts first
       blockNonEssentialScripts();
 
-      if (!consentState.accepted) {
-        // No prior consent — banner will show, scripts blocked above
-      } else if (hasGoogle || GA_MEASUREMENT_ID) {
-        console.log('[ConsentBit] Consent already accepted from previous visit, upgrading Google consent');
-        var cats = consentState.categories || {};
-        if (GA_MEASUREMENT_ID) {
-          if (!window.gtag) {
-            initGoogleConsentMode();
-            setTimeout(function() {
-              if (window.gtag) {
-                window.gtag('consent', 'update', {
-                  analytics_storage: cats.analytics ? 'granted' : 'denied',
-                  ad_storage: cats.marketing ? 'granted' : 'denied',
-                  ad_user_data: cats.marketing ? 'granted' : 'denied',
-                  ad_personalization: cats.preferences ? 'granted' : 'denied',
-                });
-              }
-            }, 100);
-          } else {
-            window.gtag('consent', 'update', {
-              analytics_storage: cats.analytics ? 'granted' : 'denied',
-              ad_storage: cats.marketing ? 'granted' : 'denied',
-              ad_user_data: cats.marketing ? 'granted' : 'denied',
-              ad_personalization: cats.preferences ? 'granted' : 'denied',
-            });
-          }
-        } else if (hasGoogle && cats.analytics) {
-          grantGoogleConsent();
+      if (GA_MEASUREMENT_ID || hasGoogle) {
+        // Step 1: Always set consent default denied first (required before GTM processes tags)
+        if (window.gtag) {
+          console.log('[ConsentBit][GDPR] Setting gtag consent default: all denied');
+          window.gtag('consent', 'default', {
+            analytics_storage: 'denied',
+            ad_storage: 'denied',
+            ad_user_data: 'denied',
+            ad_personalization: 'denied',
+            functionality_storage: 'denied',
+            personalization_storage: 'denied',
+            security_storage: 'granted',
+            wait_for_update: 500,
+          });
+        }
+
+        // Step 2: If prior consent exists, immediately update with stored values
+        if (consentState.accepted) {
+          console.log('[ConsentBit][Reload] Prior consent found — restoring gtag from stored categories:', consentState.categories);
+          updateGtagConsentFromCategories(consentState.categories || {}, '[Reload]');
+        } else {
+          console.log('[ConsentBit][GDPR] No prior consent — banner will show, gtag stays denied');
+          if (GA_MEASUREMENT_ID) initGoogleConsentMode();
         }
       }
     }
@@ -2660,10 +2764,15 @@ ${inlineConfig}
       showBanner();
     } else {
       console.log('[ConsentBit] Banner not shown - consent already accepted');
-      // Inject styles + floating button even when banner is skipped,
+      // Initialize full UI (renders banner DOM + attaches floating button click handler)
       // so the user can always reopen preferences after accepting.
-      injectConsentBitStyles();
-      injectFloatingButton();
+      initConsentBitBannerUI();
+      // Immediately hide the initial banner — consent was already given.
+      var ib = document.getElementById('cb-initial-banner');
+      if (ib) ib.style.display = 'none';
+      // Ensure floating button is visible.
+      var fb = document.getElementById('cb-floating-trigger');
+      if (fb) fb.style.display = 'flex';
     }
 
     // Track a pageview for this site (used for billing/usage)

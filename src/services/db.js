@@ -273,6 +273,12 @@ export async function ensureSchema(db) {
   } catch (e) {
     // Column already exists, ignore
   }
+  try {
+    await db.prepare(`ALTER TABLE BannerCustomization ADD COLUMN showBannerLogo INTEGER DEFAULT 1`).run();
+  } catch (e) { /* Column already exists */ }
+  try {
+    await db.prepare(`ALTER TABLE BannerCustomization ADD COLUMN bannerLogoPosition TEXT DEFAULT 'left'`).run();
+  } catch (e) { /* Column already exists */ }
 
   // Consent table (for consent logs)
   await db.prepare(`
@@ -2418,9 +2424,10 @@ export async function saveBannerCustomization(db, siteId, customization) {
           privacyPolicyUrl, bannerBorderRadius, buttonBorderRadius,
           stopScroll, footerLink, animationEnabled, preferencePosition, centerAnimationDirection,
           language, autoDetectLanguage, translations, cookieExpirationDays,
+          showBannerLogo, bannerLogoPosition,
           createdAt, updatedAt
         ) VALUES (
-          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32
+          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34
         )
         ON CONFLICT(siteId) DO UPDATE SET
           position = ?3,
@@ -2451,7 +2458,9 @@ export async function saveBannerCustomization(db, siteId, customization) {
           autoDetectLanguage = ?28,
           translations = ?29,
           cookieExpirationDays = ?30,
-          updatedAt = ?32
+          showBannerLogo = ?31,
+          bannerLogoPosition = ?32,
+          updatedAt = ?34
       `)
       .bind(
         id,
@@ -2484,6 +2493,8 @@ export async function saveBannerCustomization(db, siteId, customization) {
         customization.autoDetectLanguage ? 1 : 0,
         translationsJson,
         customization.cookieExpirationDays != null ? Math.max(1, Math.min(365, Number(customization.cookieExpirationDays) || 30)) : 30,
+        customization.showBannerLogo !== undefined ? (customization.showBannerLogo ? 1 : 0) : 1,
+        customization.bannerLogoPosition || 'left',
         now,
         now
       )
