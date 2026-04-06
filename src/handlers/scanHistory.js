@@ -30,6 +30,13 @@ export async function handleScanHistory(request, env) {
       )
     `).run();
 
+    // Add categories column if not present (migration)
+    try {
+      await db.prepare(`ALTER TABLE ScanHistory ADD COLUMN categories TEXT`).run();
+    } catch (e) {
+      // Column already exists, ignore
+    }
+
     const { results } = await db
       .prepare(
         'SELECT * FROM ScanHistory WHERE siteId = ?1 ORDER BY createdAt DESC LIMIT 50'
@@ -41,26 +48,30 @@ export async function handleScanHistory(request, env) {
     const scansWithCounts = await Promise.all(
       (results || []).map(async (scan) => {
         try {
-          const cookieCount = await db
-            .prepare('SELECT COUNT(*) as count FROM Cookie WHERE siteId = ?1 AND scanHistoryId = ?2 AND (isExpected = 0 OR isExpected IS NULL)')
-            .bind(siteId, scan.id)
-            .first();
-
-          const { results: catRows } = await db
-            .prepare(
-              `SELECT DISTINCT category FROM Cookie
-               WHERE siteId = ?1 AND scanHistoryId = ?2
-                 AND (isExpected = 0 OR isExpected IS NULL)
-                 AND category IS NOT NULL AND TRIM(category) != ''`,
-            )
-            .bind(siteId, scan.id)
-            .all();
-
-          const categories = [...new Set((catRows || []).map((r) => String(r.category || '').toLowerCase().trim()).filter(Boolean))].sort();
+          // Use stored categories snapshot if available (avoids stale data from upsert overwriting scanHistoryId)
+          let categories;
+          if (scan.categories) {
+            try {
+              categories = JSON.parse(scan.categories);
+            } catch {
+              categories = [];
+            }
+          } else {
+            const { results: catRows } = await db
+              .prepare(
+                `SELECT DISTINCT category FROM Cookie
+                 WHERE siteId = ?1 AND scanHistoryId = ?2
+                   AND (isExpected = 0 OR isExpected IS NULL)
+                   AND category IS NOT NULL AND TRIM(category) != ''`,
+              )
+              .bind(siteId, scan.id)
+              .all();
+            categories = [...new Set((catRows || []).map((r) => String(r.category || '').toLowerCase().trim()).filter(Boolean))].sort();
+          }
 
           return {
             ...scan,
-            cookiesFound: cookieCount?.count || scan.cookiesFound || 0,
+            cookiesFound: scan.cookiesFound || 0,
             categories,
           };
         } catch (e) {

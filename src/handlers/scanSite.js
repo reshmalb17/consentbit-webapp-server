@@ -347,9 +347,12 @@ async function performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId,
     await upsertCookies(db, { siteId, scanHistoryId, cookies });
     await upsertScripts(db, { siteId, scripts: scripts.map(url => ({ url, category: 'uncategorized' })) });
 
+    const categoriesJson = JSON.stringify(
+      [...new Set(cookies.map((c) => String(c.category || 'uncategorized').toLowerCase()).filter(Boolean))].sort()
+    );
     await db.prepare(
-      `UPDATE ScanHistory SET cookiesFound = ?1, scriptsFound = ?2, scanDuration = ?3, scanStatus = 'completed' WHERE id = ?4`
-    ).bind(cookies.length, scripts.length, scanDuration, scanHistoryId).run();
+      `UPDATE ScanHistory SET cookiesFound = ?1, scriptsFound = ?2, scanDuration = ?3, scanStatus = 'completed', categories = ?5 WHERE id = ?4`
+    ).bind(cookies.length, scripts.length, scanDuration, scanHistoryId, categoriesJson).run();
 
     console.log(`[ScanSite] Browser scan done: ${cookies.length} cookies, ${scripts.length} scripts`);
   } catch (err) {
@@ -611,11 +614,7 @@ export async function handleScanSite(request, env, ctx) {
     await incrementScanUsage(db, siteId);
 
     // Store cookies using db.js function
-    await upsertCookies(db, {
-      siteId,
-      scanHistoryId,
-      cookies,
-    });
+    await upsertCookies(db, { siteId, scanHistoryId, cookies });
 
     // Store scripts and extract measurement IDs
     const detectedMeasurementIds = [];
@@ -739,7 +738,14 @@ export async function handleScanSite(request, env, ctx) {
       siteId,
       scripts: scripts.map(url => ({ url, category: categorizeScript(url) })),
     });
-    
+
+    // Final UPDATE — persist actual counts and categories snapshot after all inference is done
+    const categoriesSnapshot = JSON.stringify(
+      [...new Set(cookies.map((c) => String(c.category || 'uncategorized').toLowerCase()).filter(Boolean))].sort()
+    );
+    await db.prepare(`UPDATE ScanHistory SET cookiesFound = ?1, scriptsFound = ?2, categories = ?3 WHERE id = ?4`)
+      .bind(cookies.length, scripts.length, categoriesSnapshot, scanHistoryId).run();
+
     // Calculate cookies by consent state
     const cookiesByConsent = getCookiesByConsentState(cookies, {
       analytics: true,

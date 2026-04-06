@@ -192,16 +192,28 @@ export async function handleScanCookies(request, env) {
     let currentScanHistoryId;
 
     if (createNewScan) {
-      await createScanHistory(db, {
-        id: newScanHistoryId,
-        siteId,
-        scanUrl: pageUrl || 'browser-scan',
-        scriptsFound: scripts.length,
-        cookiesFound: cookies.length,
-        scanDuration: null,
-        scanStatus: 'completed',
-      });
-      currentScanHistoryId = newScanHistoryId;
+      // If there is already a pending puppeteer scan for this site, attach cookies to it
+      // instead of creating a duplicate record (puppeteer visits the page and triggers this).
+      const pendingScan = await db
+        .prepare(`SELECT id FROM ScanHistory WHERE siteId = ?1 AND scanStatus = 'pending' ORDER BY createdAt DESC LIMIT 1`)
+        .bind(siteId)
+        .first();
+
+      if (pendingScan) {
+        // Reuse the pending scan — do not create a new record
+        currentScanHistoryId = pendingScan.id;
+      } else {
+        await createScanHistory(db, {
+          id: newScanHistoryId,
+          siteId,
+          scanUrl: pageUrl || 'browser-scan',
+          scriptsFound: scripts.length,
+          cookiesFound: cookies.length,
+          scanDuration: null,
+          scanStatus: 'completed',
+        });
+        currentScanHistoryId = newScanHistoryId;
+      }
       // Clear the pendingScan flag so the script stops triggering full scans
       try {
         await db.prepare('UPDATE Site SET pendingScan = 0, updatedAt = ?1 WHERE id = ?2')
@@ -259,8 +271,16 @@ export async function handleScanCookies(request, env) {
       }
     }
 
+    // Ensure ScanHistory has a categories column (added after initial schema)
+    try {
+      await db.prepare(`ALTER TABLE ScanHistory ADD COLUMN categories TEXT`).run();
+    } catch (e) {
+      // Column already exists, ignore
+    }
+
     // Process and store cookies
     let storedCount = 0;
+    const categorySet = new Set();
     const now = new Date().toISOString();
     for (const cookieData of cookies) {
       try {
@@ -291,6 +311,7 @@ export async function handleScanCookies(request, env) {
         const rule = await getUserDefinedCookieRule(db, siteId, parsedCookie.name, parsedCookie.domain);
         const provider = String(rule?.provider || autoProvider || '').trim() || null;
         const category = String(rule?.category || autoCategory || 'uncategorized').toLowerCase();
+        categorySet.add(category);
         const description = String(rule?.description || '').trim() || null;
         const baseSource =
           typeof cookieData === 'string'
@@ -352,10 +373,21 @@ export async function handleScanCookies(request, env) {
       }
     }
 
-    return Response.json({ 
-      success: true, 
+    // Persist the categories snapshot on the ScanHistory record so they survive future upserts
+    if (categorySet.size > 0) {
+      try {
+        await db.prepare('UPDATE ScanHistory SET categories = ?1 WHERE id = ?2')
+          .bind(JSON.stringify([...categorySet].sort()), currentScanHistoryId)
+          .run();
+      } catch (e) {
+        console.warn('[ScanCookies] Failed to update ScanHistory categories:', e);
+      }
+    }
+
+    return Response.json({
+      success: true,
       stored: storedCount,
-      scanHistoryId: currentScanHistoryId 
+      scanHistoryId: currentScanHistoryId
     });
   } catch (error) {
     console.error('[ScanCookies] Error:', error);

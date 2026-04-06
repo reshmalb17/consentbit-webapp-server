@@ -174,14 +174,15 @@ async function _handleCDNScript(request, env, url) {
         : "inherit";
 
     var positionStyles = '';
-    var initialSize = 'width:520px;max-width:92vw;max-height:280px;min-height:0;overflow:hidden;';
+    // Keep parity with base CSS (wider initial banner so 3 buttons fit on one row).
+    var initialSize = 'width:680px;max-width:92vw;max-height:280px;min-height:0;overflow:hidden;';
     var initialRadius = 'border-radius:' + bannerRadius + ';';
     if (layoutVisual === 'banner') {
       initialSize = 'width:100%;max-width:none;';
       positionStyles = 'bottom:0;left:0;right:0;transform:none;';
       initialRadius = 'border-radius:' + bannerRadius + ';';
     } else if (layoutVisual === 'bottom-center') {
-      initialSize = 'width:520px;max-width:92vw;max-height:280px;min-height:0;overflow:hidden;';
+      initialSize = 'width:680px;max-width:92vw;max-height:280px;min-height:0;overflow:hidden;';
       positionStyles = 'bottom:32px;left:50%;transform:translateX(-50%);';
       initialRadius = 'border-radius:' + bannerRadius + ';';
     } else {
@@ -514,6 +515,24 @@ ${inlineConfig}
     return t[key] || TRANSLATIONS['en'][key] || key;
   }
 
+  // Match dashboard editor limits (prevents production layout breaks).
+  var LIMITS = {
+    title: 60,
+    message: 320,
+    button: 20,
+    policyLabel: 35,
+    linkLabel: 60
+  };
+
+  function clampLen(value, max) {
+    var s = (value == null) ? '' : String(value);
+    return s.length > max ? s.slice(0, max) : s;
+  }
+
+  function safeText(key, max) {
+    return clampLen(getTranslation(key), max);
+  }
+
   function isCookiePolicyLinkEnabled() {
     try {
       var lang = getBannerLanguage();
@@ -541,6 +560,100 @@ ${inlineConfig}
     } catch (e) {
       return true;
     }
+  }
+
+  /**
+   * Apply initial-banner placement before first paint.
+   * Avoids "render off-center then jump" when center alignment is used.
+   */
+  /** ~40px trigger + gap so the initial banner does not cover the floating logo (live site). */
+  var FLOAT_LOGO_GUTTER_PX = 56;
+
+  function applyInitialBannerFloatingGutter(el) {
+    if (!el) return;
+    el.style.marginLeft = '';
+    el.style.marginRight = '';
+    el.style.paddingLeft = '';
+    el.style.paddingRight = '';
+    if (!isFloatingButtonEnabled()) return;
+
+    var layout = (BANNER_LAYOUT_VISUAL || 'box');
+    var pos = (CUSTOMIZATION && CUSTOMIZATION.position) ? String(CUSTOMIZATION.position) : 'bottom-left';
+    if (pos !== 'bottom-left' && pos !== 'bottom-right' && pos !== 'bottom') pos = 'bottom-left';
+    var floatPos = getFloatingButtonPosition();
+    var g = FLOAT_LOGO_GUTTER_PX + 'px';
+
+    if (layout === 'banner') {
+      if (floatPos === 'left') el.style.paddingLeft = g;
+      else el.style.paddingRight = g;
+      return;
+    }
+
+    if (floatPos === 'left') {
+      if (layout === 'bottom-center' || layout === 'popup' || pos === 'bottom' || pos === 'bottom-left') {
+        el.style.marginLeft = g;
+      }
+    } else {
+      if (layout === 'bottom-center' || layout === 'popup' || pos === 'bottom' || pos === 'bottom-right') {
+        el.style.marginRight = g;
+      }
+    }
+  }
+
+  function applyInitialBannerPosition(el) {
+    if (!el) return false;
+    var layout = (BANNER_LAYOUT_VISUAL || 'box');
+    var pos = (CUSTOMIZATION && CUSTOMIZATION.position) ? String(CUSTOMIZATION.position) : 'bottom-left';
+    // Only bottom positions supported for initial banner.
+    if (pos !== 'bottom-left' && pos !== 'bottom-right' && pos !== 'bottom') pos = 'bottom-left';
+
+    // Reset first (prevents leftover inline styles from previous runs).
+    el.style.left = '';
+    el.style.right = '';
+    el.style.top = '';
+    el.style.bottom = '';
+    el.style.transform = '';
+    el.style.width = '';
+    el.style.maxWidth = '';
+    el.style.marginLeft = '';
+    el.style.marginRight = '';
+    el.style.paddingLeft = '';
+    el.style.paddingRight = '';
+
+    if (layout === 'banner') {
+      // Full-width bottom bar.
+      el.style.left = '0';
+      el.style.right = '0';
+      el.style.bottom = '0';
+      el.style.transform = 'none';
+      el.style.width = '100%';
+      el.style.maxWidth = 'none';
+      el.setAttribute('data-cb-initial-centered', '0');
+      applyInitialBannerFloatingGutter(el);
+      return false;
+    }
+
+    // Centered card (bottom-center) uses left:50% + translateX(-50%)
+    if (layout === 'bottom-center' || layout === 'popup' || pos === 'bottom') {
+      el.style.bottom = '32px';
+      el.style.left = '50%';
+      el.style.transform = 'translateX(-50%)';
+      el.setAttribute('data-cb-initial-centered', '1');
+      applyInitialBannerFloatingGutter(el);
+      return true;
+    }
+
+    // Corner cards.
+    el.style.bottom = '32px';
+    if (pos === 'bottom-right') {
+      el.style.right = '32px';
+    } else {
+      el.style.left = '32px';
+    }
+    el.style.transform = 'none';
+    el.setAttribute('data-cb-initial-centered', '0');
+    applyInitialBannerFloatingGutter(el);
+    return false;
   }
 
   /** First path segment before /, ?, # — no RegExp (loader is embedded in a template literal). */
@@ -1463,12 +1576,15 @@ ${inlineConfig}
   // Matching preview banner styles from defaultBannerConfig
 
   var BANNER_STYLES =
+    ".cb-banner,.cb-banner *{box-sizing:border-box;}" +
     "#cb-initial-banner.cb-banner{" +
-      "width:520px;" +
+      // Wider initial banner so 3 buttons can fit on one row (desktop/tablet).
+      "width:680px;" +
       "max-width:92vw;" +
       "max-height:280px;" +
       "min-height:0;" +
       "overflow:hidden;" +
+      "overflow-x:hidden;" +
       "background-color:#ffffff;" +
       "color:#334155;" +
       "position:fixed;" +
@@ -1489,6 +1605,7 @@ ${inlineConfig}
       "flex:1 1 auto;" +
       "min-height:0;" +
       "overflow-y:auto;" +
+      "overflow-x:hidden;" +
     "}" +
     "#cb-preferences-banner.cb-banner{" +
       "width:540px;" +
@@ -1496,6 +1613,7 @@ ${inlineConfig}
       "max-height:440px;" +
       "min-height:0;" +
       "overflow:hidden;" +
+      "overflow-x:hidden;" +
       "background-color:#ffffff;" +
       "color:#334155;" +
       "position:fixed;" +
@@ -1517,6 +1635,7 @@ ${inlineConfig}
       "flex:1 1 auto;" +
       "min-height:0;" +
       "overflow-y:auto;" +
+      "overflow-x:hidden;" +
     "}" +
     // Preference banner position styles (will be overridden by JS)
     "#cb-preferences-banner.cb-banner.prefs-left{" +
@@ -1538,6 +1657,7 @@ ${inlineConfig}
     "}" +
     ".cb-banner-body{" +
       "overflow-y:auto;" +
+      "overflow-x:hidden;" +
       "margin-bottom:12px;" +
     "}" +
     ".cb-banner h3{" +
@@ -1573,12 +1693,20 @@ ${inlineConfig}
       "font-size:14px!important;" +
       "line-height:1.5!important;" +
       "color:#334155;" +
+      "word-break:break-word;" +
+      "overflow-wrap:anywhere;" +
+      "max-width:100%;" +
     "}" +
     ".cb-banner-footer{" +
       "display:flex;" +
       "justify-content:flex-end;" +
       "gap:10px;" +
       "flex-wrap:wrap;" +
+      "align-items:center;" +
+    "}" +
+    // Initial banner footer: keep buttons on one line when space allows.
+    "#cb-initial-banner.cb-banner .cb-banner-footer{" +
+      "flex-wrap:nowrap;" +
     "}" +
     ".cb-banner button{" +
       "padding:6px 12px;" +
@@ -1588,6 +1716,22 @@ ${inlineConfig}
       "font-weight:600;" +
       "border:1px solid #e2e8f0;" +
       "transition:opacity 0.2s;" +
+      // Keep buttons straight (single line), truncate long labels.
+      "white-space:nowrap;" +
+      "overflow:hidden;" +
+      "text-overflow:ellipsis;" +
+      "max-width:220px;" +
+      "min-width:0;" +
+      "text-align:center;" +
+    "}" +
+    // Responsive: wrap buttons row-by-row and allow full-width on very small screens
+    "@media (max-width:520px){" +
+      "#cb-initial-banner.cb-banner{width:92vw;left:4vw;right:4vw;}" +
+      ".cb-banner-footer{justify-content:stretch;}" +
+      ".cb-banner-footer button{flex:1 1 auto;max-width:100%;}" +
+    "}" +
+    "@media (max-width:420px){" +
+      ".cb-banner-footer button{flex:1 1 100%;}" +
     "}" +
     ".cb-banner button:hover:not(.cb-pref-toggle-track){" +
       "opacity:0.8;" +
@@ -1718,6 +1862,28 @@ ${inlineConfig}
     "@keyframes zoomIn{" +
       "from{transform:scale(0.85);opacity:0;}" +
       "to{transform:scale(1);opacity:1;}" +
+    "}" +
+    // Initial banner (bottom-center) must preserve translateX(-50%) during animations.
+    "@keyframes cbInitialCenterSlideFromBottom{" +
+      "from{transform:translate(-50%,100%);opacity:0;}" +
+      "to{transform:translate(-50%,0);opacity:1;}" +
+    "}" +
+    "@keyframes cbInitialCenterSlideFromTop{" +
+      "from{transform:translate(-50%,-100%);opacity:0;}" +
+      "to{transform:translate(-50%,0);opacity:1;}" +
+    "}" +
+    "@keyframes cbInitialCenterZoomIn{" +
+      "from{transform:translateX(-50%) scale(0.85);opacity:0;}" +
+      "to{transform:translateX(-50%) scale(1);opacity:1;}" +
+    "}" +
+    ".cb-banner-animate-initial-center-bottom{" +
+      "animation:cbInitialCenterSlideFromBottom 0.35s ease-out;" +
+    "}" +
+    ".cb-banner-animate-initial-center-top{" +
+      "animation:cbInitialCenterSlideFromTop 0.35s ease-out;" +
+    "}" +
+    ".cb-banner-animate-initial-center-zoom{" +
+      "animation:cbInitialCenterZoomIn 0.3s ease-out;" +
     "}" +
     "@keyframes prefsZoomIn{" +
       "from{transform:translate(-50%,-50%) scale(0.85);opacity:0;}" +
@@ -1890,7 +2056,8 @@ ${inlineConfig}
     btn.setAttribute('aria-label', 'Close');
     btn.textContent = '\u00d7';
     btn.style.cssText =
-      'position:absolute;top:8px;right:8px;width:32px;height:32px;margin:0;padding:0;border:0;border-radius:6px;' +
+      // Keep the close button clear of the (right-side) scrollbar.
+      'position:absolute;top:8px;right:24px;width:32px;height:32px;margin:0;padding:0;border:0;border-radius:6px;' +
       'background:transparent;cursor:pointer;z-index:10;line-height:1;' +
       'font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;' +
       'font-size:22px;font-weight:400;color:#0f172a;opacity:0.75;';
@@ -1905,7 +2072,8 @@ ${inlineConfig}
     btn.setAttribute('aria-label', 'Close');
     btn.textContent = '\u00d7';
     btn.style.cssText =
-      'position:absolute;top:8px;right:8px;width:32px;height:32px;margin:0;padding:0;border:0;border-radius:6px;' +
+      // Keep the close button clear of the (right-side) scrollbar.
+      'position:absolute;top:8px;right:30px;width:32px;height:32px;margin:0;padding:0;border:0;border-radius:6px;' +
       'background:transparent;cursor:pointer;z-index:10;line-height:1;' +
       'font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;' +
       'font-size:22px;font-weight:400;color:#0f172a;opacity:0.75;';
@@ -1957,15 +2125,15 @@ ${inlineConfig}
       var bodyDiv = document.createElement("div");
       bodyDiv.className = "cb-banner-body";
       var h3 = document.createElement("h3");
-      h3.textContent = getTranslation('title');
+      h3.textContent = safeText('title', LIMITS.title);
       bodyDiv.appendChild(h3);
       var p = document.createElement("p");
-      var pText = getTranslation('description');
+      var pText = clampLen(getTranslation('description'), LIMITS.message);
 
       if (PRIVACY_POLICY_URL && isCookiePolicyLinkEnabled()) {
         p.appendChild(document.createTextNode(pText + " "));
         var link = document.createElement("a");
-        link.textContent = getTranslation('privacyPolicy');
+        link.textContent = safeText('privacyPolicy', LIMITS.policyLabel);
         link.style.cssText = "color:#007aff;text-decoration:underline;cursor:pointer;";
         attachPrivacyPolicyLink(link, PRIVACY_POLICY_URL);
         p.appendChild(link);
@@ -2149,15 +2317,15 @@ ${inlineConfig}
       footerDiv.className = "cb-banner-footer";
       var customiseBtn = document.createElement("button");
       customiseBtn.id = "cb-preferences-btn";
-      customiseBtn.textContent = getTranslation('customise');
+      customiseBtn.textContent = safeText('customise', LIMITS.button);
       footerDiv.appendChild(customiseBtn);
       var rejectBtn = document.createElement("button");
       rejectBtn.id = "cb-reject-all-btn";
-      rejectBtn.textContent = getTranslation('rejectAll');
+      rejectBtn.textContent = safeText('rejectAll', LIMITS.button);
       footerDiv.appendChild(rejectBtn);
       var acceptBtn = document.createElement("button");
       acceptBtn.id = "cb-accept-all-btn";
-      acceptBtn.textContent = getTranslation('acceptAll');
+      acceptBtn.textContent = safeText('acceptAll', LIMITS.button);
       footerDiv.appendChild(acceptBtn);
       initialBanner.appendChild(footerDiv);
       appendBannerCloseButton(initialBanner, 'cb-close-initial-btn');
@@ -2180,15 +2348,15 @@ ${inlineConfig}
       var prefsBody = document.createElement("div");
       prefsBody.className = "cb-banner-body";
       var prefsH3 = document.createElement("h3");
-      prefsH3.textContent = getTranslation('cookiePreferences');
+      prefsH3.textContent = safeText('cookiePreferences', LIMITS.title);
       prefsBody.appendChild(prefsH3);
       var prefsP = document.createElement("p");
-      var prefsPText = (getTranslation('managePreferences') || "").replace(/\s*More info\.?\s*$/i, "").trim();
+      var prefsPText = (clampLen(getTranslation('managePreferences'), LIMITS.message) || "").replace(/\s*More info\.?\s*$/i, "").trim();
       
       if (PRIVACY_POLICY_URL && isCookiePolicyLinkEnabled()) {
         prefsP.appendChild(document.createTextNode(prefsPText + " "));
         var linkPrefs = document.createElement("a");
-        linkPrefs.textContent = getTranslation('privacyPolicy');
+        linkPrefs.textContent = safeText('privacyPolicy', LIMITS.policyLabel);
         linkPrefs.style.cssText = "color:#007aff;text-decoration:underline;cursor:pointer;";
         attachPrivacyPolicyLink(linkPrefs, PRIVACY_POLICY_URL);
         prefsP.appendChild(linkPrefs);
@@ -2247,11 +2415,11 @@ ${inlineConfig}
       prefsFooter.className = "cb-banner-footer";
       var prefsRejectBtn = document.createElement("button");
       prefsRejectBtn.id = "cb-prefs-reject-btn";
-      prefsRejectBtn.textContent = getTranslation("rejectAll");
+      prefsRejectBtn.textContent = safeText("rejectAll", LIMITS.button);
       prefsFooter.appendChild(prefsRejectBtn);
       var saveBtn = document.createElement("button");
       saveBtn.id = "cb-save-prefs-btn";
-      saveBtn.textContent = getTranslation("save");
+      saveBtn.textContent = safeText("save", LIMITS.button);
       prefsFooter.appendChild(saveBtn);
       prefsBanner.appendChild(prefsFooter);
       appendPrefsCloseButton(prefsBanner);
@@ -2272,6 +2440,8 @@ ${inlineConfig}
     // Ensure banner is visible and apply animation
     var initialBannerEl = document.getElementById("cb-initial-banner");
     if (initialBannerEl) {
+      // Apply final placement before showing to avoid visible "jump" into center.
+      var isCenteredInitial = applyInitialBannerPosition(initialBannerEl);
       initialBannerEl.style.display = "flex";
       initialBannerEl.style.visibility = "visible";
       initialBannerEl.style.opacity = "1";
@@ -2280,10 +2450,17 @@ ${inlineConfig}
       if (ANIMATION_ENABLED) {
         var animClass = '';
         var anim = BANNER_ENTRANCE_ANIMATION;
-        if (anim === 'slide-up') animClass = 'cb-banner-animate-bottom';
-        else if (anim === 'slide-down') animClass = 'cb-banner-animate-top';
-        else if (anim === 'zoom-in') animClass = 'cb-banner-animate-zoom-in';
-        else animClass = 'cb-banner-animate-fade';
+        if (isCenteredInitial) {
+          if (anim === 'slide-up') animClass = 'cb-banner-animate-initial-center-bottom';
+          else if (anim === 'slide-down') animClass = 'cb-banner-animate-initial-center-top';
+          else if (anim === 'zoom-in') animClass = 'cb-banner-animate-initial-center-zoom';
+          else animClass = 'cb-banner-animate-fade';
+        } else {
+          if (anim === 'slide-up') animClass = 'cb-banner-animate-bottom';
+          else if (anim === 'slide-down') animClass = 'cb-banner-animate-top';
+          else if (anim === 'zoom-in') animClass = 'cb-banner-animate-zoom-in';
+          else animClass = 'cb-banner-animate-fade';
+        }
         initialBannerEl.classList.add(animClass);
         console.log('[ConsentBit] Applied animation class:', animClass);
       }
@@ -2442,6 +2619,15 @@ ${inlineConfig}
   function getPreferenceBannerAnimClass() {
     if (!ANIMATION_ENABLED) return '';
     var anim = BANNER_ENTRANCE_ANIMATION;
+    // Side panels must use side keyframes; center uses center-preserving keyframes.
+    if (PREFERENCE_POSITION === 'left') {
+      if (anim === 'zoom-in') return 'cb-banner-animate-prefs-zoom-in';
+      return 'cb-banner-animate-prefs-left';
+    }
+    if (PREFERENCE_POSITION === 'right') {
+      if (anim === 'zoom-in') return 'cb-banner-animate-prefs-zoom-in';
+      return 'cb-banner-animate-prefs-right';
+    }
     if (anim === 'slide-up') return 'cb-banner-animate-center-bottom';
     if (anim === 'slide-down') return 'cb-banner-animate-center-top';
     if (anim === 'zoom-in') return 'cb-banner-animate-prefs-zoom-in';
@@ -2499,6 +2685,8 @@ ${inlineConfig}
       // Hide floating button while initial banner is visible
       // var floatBtnShow = document.getElementById('cb-floating-trigger');
       // if (floatBtnShow) floatBtnShow.style.display = 'none';
+      // Apply final placement before showing to avoid visible "jump" into center.
+      var isCenteredInitial2 = applyInitialBannerPosition(initialBanner);
       initialBanner.style.display = "flex";
       initialBanner.style.visibility = "visible";
       initialBanner.style.opacity = "1";
@@ -2506,10 +2694,17 @@ ${inlineConfig}
       if (ANIMATION_ENABLED) {
         var animClass2 = '';
         var anim2 = BANNER_ENTRANCE_ANIMATION;
-        if (anim2 === 'slide-up') animClass2 = 'cb-banner-animate-bottom';
-        else if (anim2 === 'slide-down') animClass2 = 'cb-banner-animate-top';
-        else if (anim2 === 'zoom-in') animClass2 = 'cb-banner-animate-zoom-in';
-        else animClass2 = 'cb-banner-animate-fade';
+        if (isCenteredInitial2) {
+          if (anim2 === 'slide-up') animClass2 = 'cb-banner-animate-initial-center-bottom';
+          else if (anim2 === 'slide-down') animClass2 = 'cb-banner-animate-initial-center-top';
+          else if (anim2 === 'zoom-in') animClass2 = 'cb-banner-animate-initial-center-zoom';
+          else animClass2 = 'cb-banner-animate-fade';
+        } else {
+          if (anim2 === 'slide-up') animClass2 = 'cb-banner-animate-bottom';
+          else if (anim2 === 'slide-down') animClass2 = 'cb-banner-animate-top';
+          else if (anim2 === 'zoom-in') animClass2 = 'cb-banner-animate-zoom-in';
+          else animClass2 = 'cb-banner-animate-fade';
+        }
         initialBanner.classList.add(animClass2);
       }
       if (STOP_SCROLL) {
@@ -3080,7 +3275,8 @@ function injectStyles() {
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  white-space:nowrap;
+  white-space:normal;
+  word-break:break-word;
 }
 .consentBit-btn:hover{opacity:.85}
 
@@ -3118,9 +3314,9 @@ function injectStyles() {
   display:flex;flex-direction:column;
   box-shadow:0 4px 20px rgba(0,0,0,.15);
 }
-.cb-preference-header{padding:20px 24px;border-bottom:1px solid #f4f4f4;display:flex;justify-content:space-between;align-items:center}
-.cb-preference-title{font-size:18px;font-weight:600;color:\${s.headingColor}}
-.cb-btn-close{background:none;border:none;cursor:pointer;padding:4px;opacity:.5;transition:opacity .2s}
+.cb-preference-header{padding:20px 24px;border-bottom:1px solid #f4f4f4;display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.cb-preference-title{font-size:18px;font-weight:600;color:\${s.headingColor};flex:1;min-width:0;word-break:break-word;overflow-wrap:anywhere}
+.cb-btn-close{background:none;border:none;cursor:pointer;padding:4px;opacity:.5;transition:opacity .2s;flex-shrink:0}
 .cb-btn-close:hover{opacity:1}
 .cb-btn-close img{width:20px;height:20px}
 .cb-iab-detail-wrapper{flex:1;overflow-y:auto;padding:0 24px 24px}
@@ -3252,7 +3448,8 @@ function injectStyles() {
   font-size:13px;font-weight:\${s.fontWeight};
   cursor:pointer;transition:opacity .2s;
   border:2px solid;
-  white-space:nowrap;
+  white-space:normal;
+  word-break:break-word;
 }
 .cb-btn:hover{opacity:.85}
 .cb-btn-reject{

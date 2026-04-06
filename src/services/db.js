@@ -100,6 +100,13 @@ export async function ensureSchema(db) {
     )
   `).run();
 
+  // Add categories column to ScanHistory if not present (migration)
+  try {
+    await db.prepare(`ALTER TABLE ScanHistory ADD COLUMN categories TEXT`).run();
+  } catch (e) {
+    // Column already exists, ignore
+  }
+
   // Create ScheduledScan table
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS ScheduledScan (
@@ -1897,12 +1904,13 @@ export async function getOrganizationMember(db, userId, organizationId) {
  * Create a scan history record
  * id is optional; if not provided, a UUID is generated.
  */
-export async function createScanHistory(db, { id, siteId, scanUrl, scriptsFound, cookiesFound, scanDuration }) {
+export async function createScanHistory(db, { id, siteId, scanUrl, scriptsFound, cookiesFound, scanDuration, scanStatus }) {
   await ensureSchema(db);
 
   const scanHistoryId = id ?? crypto.randomUUID();
   const now = new Date().toISOString();
   const duration = scanDuration === undefined ? null : scanDuration;
+  const status = scanStatus ?? 'completed';
 
   await db
     .prepare(
@@ -1916,7 +1924,7 @@ export async function createScanHistory(db, { id, siteId, scanUrl, scriptsFound,
       scriptsFound ?? 0,
       cookiesFound ?? 0,
       duration,
-      'completed',
+      status,
       now,
     )
     .run();

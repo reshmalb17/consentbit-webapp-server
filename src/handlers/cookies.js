@@ -109,18 +109,42 @@ export async function handleCookies(request, env) {
       return Response.json({ success: false, error: 'siteId is required' }, { status: 400 });
     }
 
-    // Get only actual cookies; one row per (siteId, name, domain) — the latest by lastSeenAt (removes duplicates)
-    const { results } = await db
+    // Find the latest completed puppeteer/dashboard scan (exclude client-detection scans)
+    const latestScan = await db
       .prepare(
-        `SELECT * FROM (
-          SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
-          FROM Cookie
-          WHERE siteId = ?1 AND (isExpected = 0 OR isExpected IS NULL)
-        ) WHERE rn = 1
-        ORDER BY lastSeenAt DESC, category ASC`
+        `SELECT id FROM ScanHistory
+         WHERE siteId = ?1 AND scanStatus = 'completed'
+           AND (scanUrl NOT LIKE '%client-detection%')
+         ORDER BY createdAt DESC LIMIT 1`
       )
       .bind(siteId)
-      .all();
+      .first();
+
+    // Get cookies from the latest completed scan only so the list matches the scan history count.
+    // Fall back to all-time cookies if no scan record exists yet.
+    const { results } = latestScan
+      ? await db
+          .prepare(
+            `SELECT * FROM (
+              SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
+              FROM Cookie
+              WHERE siteId = ?1 AND scanHistoryId = ?2 AND (isExpected = 0 OR isExpected IS NULL)
+            ) WHERE rn = 1
+            ORDER BY lastSeenAt DESC, category ASC`
+          )
+          .bind(siteId, latestScan.id)
+          .all()
+      : await db
+          .prepare(
+            `SELECT * FROM (
+              SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
+              FROM Cookie
+              WHERE siteId = ?1 AND (isExpected = 0 OR isExpected IS NULL)
+            ) WHERE rn = 1
+            ORDER BY lastSeenAt DESC, category ASC`
+          )
+          .bind(siteId)
+          .all();
 
     // Drop the rn column from each row for the response (D1 may return lowercase or uppercase)
     const cookies = (results || []).map((row) => {
