@@ -28,6 +28,12 @@ async function ensureTable(db) {
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_ccr_site_name_domain ON CustomCookieRule(siteId, name, domain)`
     )
     .run();
+  // Add provider column if not present (migration)
+  try {
+    await db.prepare(`ALTER TABLE CustomCookieRule ADD COLUMN provider TEXT`).run();
+  } catch (e) {
+    // Column already exists, ignore
+  }
 }
 
 export async function handleCustomCookieRules(request, env) {
@@ -46,7 +52,7 @@ export async function handleCustomCookieRules(request, env) {
       }
       const { results } = await db
         .prepare(
-          `SELECT id, siteId, name, domain, scriptUrlPattern, category, description, duration, published, createdAt, updatedAt
+          `SELECT id, siteId, name, domain, scriptUrlPattern, category, provider, description, duration, published, createdAt, updatedAt
            FROM CustomCookieRule
            WHERE siteId = ?1
            ORDER BY createdAt DESC`,
@@ -95,6 +101,7 @@ export async function handleCustomCookieRules(request, env) {
       const domain = String(body?.domain || '').trim();
       const scriptUrlPattern = String(body?.scriptUrlPattern || '').trim() || null;
       const category = String(body?.category || 'uncategorized').trim().toLowerCase();
+      const provider = String(body?.provider || '').trim() || null;
       const description = String(body?.description || '').trim() || null;
       const duration = String(body?.duration || '').trim() || null;
       const now = new Date().toISOString();
@@ -110,17 +117,18 @@ export async function handleCustomCookieRules(request, env) {
       await db
         .prepare(
           `INSERT INTO CustomCookieRule
-             (id, siteId, name, domain, scriptUrlPattern, category, description, duration, published, createdAt, updatedAt)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?9)
+             (id, siteId, name, domain, scriptUrlPattern, category, provider, description, duration, published, createdAt, updatedAt)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?10)
            ON CONFLICT(siteId, name, domain) DO UPDATE SET
              scriptUrlPattern = excluded.scriptUrlPattern,
              category = excluded.category,
+             provider = excluded.provider,
              description = excluded.description,
              duration = excluded.duration,
              published = 0,
              updatedAt = excluded.updatedAt`,
         )
-        .bind(id, siteId, name, domain, scriptUrlPattern, category, description, duration, now)
+        .bind(id, siteId, name, domain, scriptUrlPattern, category, provider, description, duration, now)
         .run();
 
       // Add UNIQUE constraint support via separate migration if needed

@@ -6,6 +6,9 @@ import {
   getOrCreateOrganizationForUser,
   createSite,
   normalizeDomain,
+  getSiteById,
+  updateSiteFromPatch,
+  getOrganizationsForUser,
 } from '../services/db.js';
 
 function getSessionIdFromCookie(request) {
@@ -141,5 +144,111 @@ export async function handleSites(request, env) {
     return Response.json({ success: true, sites, effectivePlanId });
   }
 
-  return new Response('Method Not Allowed', { status: 405 });
+  
+  if (request.method === 'PATCH') {
+    const sid = getSessionIdFromCookie(request);
+    if (!sid) {
+      return Response.json({ success: false, error: 'Not authenticated' }, { status: 401 });
+    }
+
+    const [session, body] = await Promise.all([
+      getSessionById(db, sid),
+      request.json().catch(() => null),
+    ]);
+
+    if (!session) {
+      return Response.json({ success: false, error: 'Not authenticated' }, { status: 401 });
+    }
+
+    if (!body) {
+      return Response.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
+    }
+
+    const siteId = (body.siteId || '').trim();
+    const name = (body.name || '').trim();
+    const domainRaw = body.domain != null ? String(body.domain).trim() : '';
+
+    if (!siteId || !name) {
+      return Response.json({ success: false, error: 'siteId and name required' }, { status: 400 });
+    }
+    if (!domainRaw) {
+      return Response.json(
+        { success: false, error: 'Website URL is required', code: 'DOMAIN_REQUIRED' },
+        { status: 400 },
+      );
+    }
+    const normPatchDomain = normalizeDomain(domainRaw);
+    if (!normPatchDomain || !normPatchDomain.includes('.')) {
+      return Response.json(
+        {
+          success: false,
+          error: 'Enter a valid domain like example.com.',
+          code: 'INVALID_DOMAIN',
+        },
+        { status: 400 },
+      );
+    }
+    if (/\s/.test(domainRaw)) {
+      return Response.json(
+        { success: false, error: 'Domain cannot contain spaces.', code: 'INVALID_DOMAIN' },
+        { status: 400 },
+      );
+    }
+
+    const userId = session.userId ?? session.user_id;
+    const user = await getUserById(db, userId);
+    if (!user) {
+      return Response.json({ success: false, error: 'Not authenticated' }, { status: 401 });
+    }
+
+    // Verify the site belongs to one of this user's organizations
+    const [existingSite, userOrgs] = await Promise.all([
+      getSiteById(db, siteId),
+      getOrganizationsForUser(db, user.id),
+    ]);
+    if (!existingSite) {
+      return Response.json({ success: false, error: 'Site not found' }, { status: 404 });
+    }
+    const orgIds = new Set(userOrgs.map(function(o) { return String(o.id); }));
+    if (!orgIds.has(String(existingSite.organizationId))) {
+      return Response.json({ success: false, error: 'Site not found' }, { status: 404 });
+    }
+
+    let site;
+    try {
+      site = await updateSiteFromPatch(db, siteId, { name, domain: domainRaw });
+    } catch (e) {
+      if (e?.code === 'DUPLICATE_SITE_NAME') {
+        return Response.json(
+          {
+            success: false,
+            error: e.message || 'This site name is already in use',
+            code: 'DUPLICATE_SITE_NAME',
+          },
+          { status: 409 },
+        );
+      }
+      if (
+        e?.code === 'DOMAIN_EXISTS' ||
+        e?.code === 'DOMAIN_EXISTS_SAME_ACCOUNT' ||
+        e?.code === 'DOMAIN_EXISTS_OTHER_ACCOUNT'
+      ) {
+        return Response.json(
+          {
+            success: false,
+            error: e.message || 'Domain already in use',
+            code: e.code || 'DOMAIN_EXISTS',
+          },
+          { status: 409 },
+        );
+      }
+      throw e;
+    }
+    if (!site) {
+      return Response.json({ success: false, error: 'Site not found' }, { status: 404 });
+    }
+    return Response.json({ success: true, site });
+  }
+
+return new Response('Method Not Allowed', { status: 405 });
 }

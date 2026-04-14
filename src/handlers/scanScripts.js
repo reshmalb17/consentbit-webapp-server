@@ -1,5 +1,6 @@
 // src/handlers/scanScripts.js
-import { ensureScanSchema, insertScripts, recordScanHistory } from '../services/db.js';
+import { ensureScanSchema, insertScripts, recordScanHistory, getSiteById } from '../services/db.js';
+import { requestDomainMatchesSite } from '../utils/domainValidate.js';
 
 export async function handleScanScripts(request, env) {
   let body = null;
@@ -26,6 +27,18 @@ export async function handleScanScripts(request, env) {
 
   try {
     const db = env.CONSENT_WEBAPP;
+
+    // Validate that the siteId belongs to the requesting domain
+    const site = await getSiteById(db, siteId);
+    if (!site) {
+      return Response.json({ success: false, error: 'Site not found', code: 'SITE_NOT_FOUND' }, { status: 404 });
+    }
+    if (!requestDomainMatchesSite(site, request)) {
+      return Response.json(
+        { success: false, error: 'This script is not valid for this domain. It is licensed for the site it was issued to.', code: 'DOMAIN_MISMATCH' },
+        { status: 403 }
+      );
+    }
     const now = new Date().toISOString();
     const scanStartTime = Date.now();
 

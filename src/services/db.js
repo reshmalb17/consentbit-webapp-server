@@ -59,6 +59,14 @@ export async function ensureSchema(db) {
     // Column already exists, ignore
   }
 
+  try {
+    await db.prepare(`
+      ALTER TABLE Site ADD COLUMN trialUsed INTEGER DEFAULT 0
+    `).run();
+  } catch (e) {
+    // Column already exists, ignore
+  }
+
   // Create Script table if it doesn't exist
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS Script (
@@ -518,6 +526,7 @@ export async function ensureSchema(db) {
     )
   `).run();
 
+
   // PaymentEvent: declined payments, retries, cancellations for audit
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS PaymentEvent (
@@ -647,6 +656,20 @@ export async function ensureSchema(db) {
       FOREIGN KEY (userId) REFERENCES User(id)
     )
   `).run();
+
+  // Feedback submitted by users from the dashboard
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS Feedback (
+      id TEXT PRIMARY KEY,
+      userId TEXT,
+      message TEXT NOT NULL,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (userId) REFERENCES User(id) ON DELETE SET NULL
+    )
+  `).run();
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_feedback_created ON Feedback(createdAt DESC)`).run();
+  } catch (e) {}
 }
 
 export async function createEmailVerificationCode(
@@ -1192,6 +1215,21 @@ export async function getSubscriptionBySiteId(db, siteId) {
   return row || null;
 }
 
+/** Returns true if this site has already used its free trial. */
+export async function getSiteTrialUsed(db, siteId) {
+  if (!siteId) return false;
+  const row = await db.prepare('SELECT trialUsed FROM Site WHERE id = ?1').bind(siteId).first();
+  return row ? Number(row.trialUsed ?? row.trialused ?? 0) === 1 : false;
+}
+
+/** Mark a site's free trial as used (called when first trialing subscription is created). */
+export async function markTrialUsed(db, siteId) {
+  if (!siteId) return;
+  await db.prepare('UPDATE Site SET trialUsed = 1, updatedAt = ?1 WHERE id = ?2')
+    .bind(new Date().toISOString(), siteId)
+    .run();
+}
+
 /** Batch version — fetches subscriptions for multiple sites in a single D1 query.
  *  Returns a map of siteId -> subscription row (most recent active/trialing per site). */
 export async function getSubscriptionsBySiteIds(db, siteIds) {
@@ -1489,10 +1527,65 @@ export async function createSite(
       existing.organizationId &&
       String(existing.organizationId) !== String(organizationId)
     ) {
-      const e = new Error('Domain already exists');
-      e.code = 'DOMAIN_EXISTS';
-      e.status = 409;
-      throw e;
+      // If the existing owner still has an active/trialing subscription, the domain is not claimable.
+      let ownerSub = null;
+      try {
+        ownerSub = await getSubscriptionByOrganization(db, existing.organizationId);
+      } catch {
+        ownerSub = null;
+      }
+      const ownerStatus = ownerSub ? String(ownerSub.status || '').toLowerCase() : '';
+      const ownerActive = ownerStatus === 'active' || ownerStatus === 'trialing';
+      if (ownerActive) {
+        const e = new Error('Domain already exists');
+        e.code = 'DOMAIN_EXISTS';
+        e.status = 409;
+        e.details = { code: 'DOMAIN_IN_USE_ACTIVE' };
+        throw e;
+      }
+
+      // Existing subscription is not active — transfer ownership to this org and regenerate credentials.
+      const now = new Date().toISOString();
+      const newCdnScriptId = crypto.randomUUID();
+      const newApiKey = crypto.randomUUID();
+      const embedScriptUrl = buildEmbedScriptUrl(origin, newCdnScriptId);
+      await db
+        .prepare(
+          `UPDATE Site
+           SET organizationId = ?1,
+               name = ?2,
+               cdnScriptId = ?3,
+               apiKey = ?4,
+               banner_type = ?5,
+               region_mode = ?6,
+               updatedAt = ?7,
+               embedScriptUrl = ?8
+           WHERE id = ?9`,
+        )
+        .bind(
+          organizationId,
+          name,
+          newCdnScriptId,
+          newApiKey,
+          bannerType,
+          regionMode,
+          now,
+          embedScriptUrl,
+          existing.id,
+        )
+        .run();
+
+      return {
+        ...existing,
+        organizationId,
+        name,
+        cdnScriptId: newCdnScriptId,
+        apiKey: newApiKey,
+        banner_type: bannerType,
+        region_mode: regionMode,
+        updatedAt: now,
+        embedScriptUrl,
+      };
     }
     const backfillEmbed =
       existing.embedScriptUrl ||
@@ -1761,6 +1854,90 @@ export async function getUserById(db, id) {
   return user || null;
 }
 // --- Site verification ---
+
+export async function updateSiteName(db, siteId, name) {
+  await db
+    .prepare(`UPDATE Site SET name = ?1, updatedAt = datetime('now') WHERE id = ?2`)
+    .bind(name, siteId)
+    .run();
+  return getSiteById(db, siteId);
+}
+
+/**
+ * PATCH site: update display name; optionally update canonical domain (Site URL column).
+ * Domain is globally unique — rejects if another site already uses the new host.
+ */
+export async function updateSiteFromPatch(db, siteId, { name, domain: domainInput }) {
+  await ensureSchema(db);
+  const nameTrim = String(name || '').trim();
+  if (!nameTrim) {
+    const e = new Error('name is required');
+    e.code = 'NAME_REQUIRED';
+    throw e;
+  }
+
+  const existing = await getSiteById(db, siteId);
+  if (!existing) {
+    return null;
+  }
+
+  const orgId = String(existing.organizationId ?? existing.organizationid ?? '');
+  if (orgId) {
+    const dupName = await db
+      .prepare(
+        `SELECT id FROM Site WHERE organizationId = ?1 AND id != ?2 AND LOWER(TRIM(COALESCE(name,''))) = LOWER(?3)`,
+      )
+      .bind(orgId, siteId, nameTrim)
+      .first();
+    if (dupName) {
+      const e = new Error(
+        'This site name is already used by another site in your account.',
+      );
+      e.code = 'DUPLICATE_SITE_NAME';
+      throw e;
+    }
+  }
+
+  const currentNorm = normalizeDomain(existing.domain || '');
+  const hasNewDomain =
+    domainInput != null && String(domainInput).trim() !== '';
+  const newNorm = hasNewDomain ? normalizeDomain(domainInput) : '';
+
+  if (!hasNewDomain || !newNorm || newNorm === currentNorm) {
+    await db
+      .prepare(`UPDATE Site SET name = ?1, updatedAt = datetime('now') WHERE id = ?2`)
+      .bind(nameTrim, siteId)
+      .run();
+    return getSiteById(db, siteId);
+  }
+
+  const conflict = await db
+    .prepare(
+      'SELECT id, organizationId FROM Site WHERE LOWER(domain) = LOWER(?1) AND id != ?2',
+    )
+    .bind(newNorm, siteId)
+    .first();
+  if (conflict) {
+    const existingOrg = String(existing.organizationId ?? existing.organizationid ?? '');
+    const conflictOrg = String(conflict.organizationId ?? conflict.organizationid ?? '');
+    const sameOrg = existingOrg && conflictOrg && existingOrg === conflictOrg;
+    const e = new Error(
+      sameOrg
+        ? 'This website URL is already used by another site in your account.'
+        : 'This website URL is already registered to another ConsentBit account.',
+    );
+    e.code = sameOrg ? 'DOMAIN_EXISTS_SAME_ACCOUNT' : 'DOMAIN_EXISTS_OTHER_ACCOUNT';
+    throw e;
+  }
+
+  await db
+    .prepare(
+      `UPDATE Site SET name = ?1, domain = ?2, updatedAt = datetime('now') WHERE id = ?3`,
+    )
+    .bind(nameTrim, newNorm, siteId)
+    .run();
+  return getSiteById(db, siteId);
+}
 
 export async function markSiteVerified(db, siteId, scriptUrl) {
   if (!siteId) return; // nothing to do
@@ -2514,3 +2691,4 @@ export async function saveBannerCustomization(db, siteId, customization) {
     throw error;
   }
 }
+

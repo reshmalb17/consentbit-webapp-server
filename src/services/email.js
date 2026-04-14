@@ -148,12 +148,12 @@ export function sendWelcomeEmail(env, ctx, { to, name }) {
       Welcome to ConsentBit. We are glad to have you with us.
     </p>
     <p style="margin:0 0 20px;color:#6b7280;font-size:15px;line-height:1.6;">
-      Your account is ready, and you’re just a few quick steps away from getting your site compliant and running smoothly.
+      Your account is ready, and you're just a few quick steps away from getting your site compliant and running smoothly.
     </p>
 
     ${HR}
 
-    <p style="margin:0 0 12px;color:#111827;font-size:15px;font-weight:600;">Here’s how to get started:</p>
+    <p style="margin:0 0 12px;color:#111827;font-size:15px;font-weight:600;">Here's how to get started:</p>
 
     <ul style="margin:0 0 22px;padding-left:18px;color:#374151;font-size:14px;line-height:1.7;">
       <li>Add your website (domain)</li>
@@ -162,7 +162,7 @@ export function sendWelcomeEmail(env, ctx, { to, name }) {
     </ul>
 
     <p style="margin:0 0 22px;color:#6b7280;font-size:14px;line-height:1.6;">
-      That’s it, your cookie consent banner will be live in minutes.
+      That's it, your cookie consent banner will be live in minutes.
     </p>
 
     <a href="${dashboardUrl}" style="${BTN}">Go to your Dashboard →</a>
@@ -180,14 +180,14 @@ export function sendWelcomeEmail(env, ctx, { to, name }) {
 
 Welcome to ConsentBit. We are glad to have you with us.
 
-Your account is ready, and you’re just a few quick steps away from getting your site compliant and running smoothly.
+Your account is ready, and you're just a few quick steps away from getting your site compliant and running smoothly.
 
-Here’s how to get started:
+Here's how to get started:
 - Add your website (domain)
 - Choose a plan (you can start free)
 - Paste one simple script on your site
 
-That’s it, your cookie consent banner will be live in minutes.
+That's it, your cookie consent banner will be live in minutes.
 
 Go to your dashboard: ${dashboardUrl}
 
@@ -231,7 +231,7 @@ export function sendFreePlanEmail(env, ctx, { to, name, domain, scriptUrl }) {
       Good news, your site <strong style="color:#111827;">${displayDomain}</strong> is all set up on the free plan.
     </p>
     <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
-      To get your consent banner live, just copy and paste the script below into your website’s
+      To get your consent banner live, just copy and paste the script below into your website's
       <code style="font-size:13px;background:#f3f4f6;padding:2px 6px;border-radius:4px;">&lt;head&gt;</code> section:
     </p>
 
@@ -251,6 +251,7 @@ export function sendFreePlanEmail(env, ctx, { to, name, domain, scriptUrl }) {
 
     <a href="${dashboardUrl}" style="${BTN}">Customize your banner →</a>
 
+
     ${HR}
 
     <p style="margin:0 0 10px;color:#111827;font-size:14px;font-weight:700;">Your Free Plan includes:</p>
@@ -265,7 +266,7 @@ export function sendFreePlanEmail(env, ctx, { to, name, domain, scriptUrl }) {
       Need more as you grow? You can upgrade anytime.
     </p>
     <p style="margin:0;color:#6b7280;font-size:14px;line-height:1.6;">
-      Thanks for getting started with ConsentBit, we’re here if you need anything.
+      Thanks for getting started with ConsentBit, we're here if you need anything.
     </p>
     <p style="margin:18px 0 0;color:#6b7280;font-size:14px;line-height:1.6;">Best,<br/>ConsentBit Team</p>
     `
@@ -275,7 +276,7 @@ export function sendFreePlanEmail(env, ctx, { to, name, domain, scriptUrl }) {
 
 Good news, your site ${displayDomain} is all set up on the free plan.
 
-To get your consent banner live, just copy and paste the script below into your website’s <head> section:
+To get your consent banner live, just copy and paste the script below into your website's <head> section:
 
 <!-- ConsentBit -->
 <script id="consentbit" src="${scriptUrl || 'YOUR_SCRIPT_URL'}" async></script>
@@ -292,7 +293,7 @@ Your Free Plan includes:
 
 Need more as you grow? You can upgrade anytime.
 
-Thanks for getting started with ConsentBit, we’re here if you need anything.
+Thanks for getting started with ConsentBit, we're here if you need anything.
 
 Best,
 ConsentBit Team
@@ -311,13 +312,15 @@ ConsentBit Team
 /**
  * @param {object} env
  * @param {ExecutionContext|null} ctx
- * @param {{ to: string, name: string, domain: string, planName: string }} opts
+ * @param {{
+ *   to: string, name: string, domain: string, planName: string,
+ *   invoice?: { invoiceNumber, invoiceUrl, invoicePdf, amountPaid, currency, date, interval } | null
+ * }} opts
  */
-export function sendPaidPlanEmail(env, ctx, { to, name, domain, planName }) {
+export function sendPaidPlanEmail(env, ctx, { to, name, domain, planName, invoice = null }) {
   const displayName   = name || 'there';
   const displayDomain = domain || 'your website';
   const displayPlan   = planName || 'Basic';
-  const dashboardUrl  = (env.WEBAPP_PUBLIC_URL || 'https://app.consentbit.com').replace(/\/$/, '') + '/dashboard';
 
   // Plan-specific feature bullets
   const planFeatures = {
@@ -326,8 +329,48 @@ export function sendPaidPlanEmail(env, ctx, { to, name, domain, planName }) {
     growth:    ['1 domain', '2M page views / month', '10,000 cookie scans', 'GDPR + CCPA + IAB/TCF', 'Dedicated support'],
   };
   const features = planFeatures[displayPlan.toLowerCase()] || planFeatures.basic;
+  const featureItems = features.map(f => `<li>${f}</li>`).join('\n      ');
 
-  const subject = `You’re all set on the ${displayPlan} plan.`;
+  // Invoice section HTML
+  const invoiceHtml = invoice ? `
+    ${HR}
+    <p style="margin:0 0 12px;color:#111827;font-size:14px;font-weight:700;">Invoice Details</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+           style="background:#f9fafb;border-radius:8px;padding:16px 20px;margin-bottom:20px;border:1px solid #e5e7eb;">
+      <tr>
+        <td style="padding:6px 0;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+            ${invoice.invoiceNumber ? `<tr><td style="color:#6b7280;font-size:13px;width:140px;">Invoice #</td><td style="color:#111827;font-size:13px;font-weight:600;">${invoice.invoiceNumber}</td></tr>` : ''}
+            ${invoice.date         ? `<tr><td style="color:#6b7280;font-size:13px;padding-top:6px;">Date</td><td style="color:#111827;font-size:13px;padding-top:6px;">${invoice.date}</td></tr>` : ''}
+            ${invoice.amountPaid   ? `<tr><td style="color:#6b7280;font-size:13px;padding-top:6px;">Amount paid</td><td style="color:#111827;font-size:13px;font-weight:600;padding-top:6px;">${invoice.currency} ${invoice.amountPaid}</td></tr>` : ''}
+            ${invoice.interval     ? `<tr><td style="color:#6b7280;font-size:13px;padding-top:6px;">Billing</td><td style="color:#111827;font-size:13px;padding-top:6px;text-transform:capitalize;">${invoice.interval}</td></tr>` : ''}
+            <tr><td style="color:#6b7280;font-size:13px;padding-top:6px;">Plan</td><td style="color:#111827;font-size:13px;padding-top:6px;">${displayPlan}</td></tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+    ${invoice.invoicePdf || invoice.invoiceUrl ? `
+    <table role="presentation" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+      <tr>
+        ${invoice.invoicePdf    ? `<td style="padding-right:12px;"><a href="${invoice.invoicePdf}" style="${BTN}font-size:14px;padding:10px 22px;" target="_blank">⬇ Download Invoice PDF</a></td>` : ''}
+        ${invoice.invoiceUrl    ? `<td><a href="${invoice.invoiceUrl}" style="display:inline-block;background:#f3f4f6;color:#111827;text-decoration:none;font-size:14px;font-weight:600;padding:10px 22px;border-radius:8px;border:1px solid #e5e7eb;" target="_blank">View Invoice Online →</a></td>` : ''}
+      </tr>
+    </table>` : ''}
+  ` : '';
+
+  // Invoice plain text
+  const invoiceText = invoice ? `
+--- Invoice Details ---
+${invoice.invoiceNumber ? `Invoice #: ${invoice.invoiceNumber}` : ''}
+${invoice.date         ? `Date: ${invoice.date}` : ''}
+${invoice.amountPaid   ? `Amount paid: ${invoice.currency} ${invoice.amountPaid}` : ''}
+${invoice.interval     ? `Billing: ${invoice.interval}` : ''}
+Plan: ${displayPlan}
+${invoice.invoicePdf   ? `Download PDF: ${invoice.invoicePdf}` : ''}
+${invoice.invoiceUrl   ? `View online: ${invoice.invoiceUrl}` : ''}
+` : '';
+
+  const subject = `You're all set on the ${displayPlan} plan.`;
 
   const html = layout(
     `Your ${displayPlan} plan is active.`,
@@ -343,39 +386,15 @@ export function sendPaidPlanEmail(env, ctx, { to, name, domain, planName }) {
 
     ${HR}
 
-    <p style="margin:0 0 10px;color:#111827;font-size:14px;font-weight:700;">Here’s what your plan includes:</p>
-
-    <p style="margin:0 0 8px;color:#111827;font-size:13px;font-weight:700;">Basic Plan</p>
-    <ul style="margin:0 0 16px;padding-left:18px;color:#374151;font-size:14px;line-height:1.7;">
-      <li>1 domain</li>
-      <li>100,000 page views/month</li>
-      <li>750 cookie scans</li>
-      <li>GDPR &amp; CCPA</li>
-      <li>Email support</li>
-    </ul>
-
-    <p style="margin:0 0 8px;color:#111827;font-size:13px;font-weight:700;">Essential Plan</p>
-    <ul style="margin:0 0 16px;padding-left:18px;color:#374151;font-size:14px;line-height:1.7;">
-      <li>1 domain</li>
-      <li>500,000 page views/month</li>
-      <li>5,000 cookie scans</li>
-      <li>GDPR, CCPA &amp; IAB/TCF</li>
-      <li>Priority support</li>
-    </ul>
-
-    <p style="margin:0 0 8px;color:#111827;font-size:13px;font-weight:700;">Growth Plan</p>
+    <p style="margin:0 0 10px;color:#111827;font-size:14px;font-weight:700;">What's included in your ${displayPlan} plan:</p>
     <ul style="margin:0 0 22px;padding-left:18px;color:#374151;font-size:14px;line-height:1.7;">
-      <li>1 domain</li>
-      <li>2M page views/month</li>
-      <li>10,000 cookie scans</li>
-      <li>GDPR, CCPA &amp; IAB/TCF</li>
-      <li>Dedicated support</li>
+      ${featureItems}
     </ul>
 
-    <a href="${dashboardUrl}" style="${BTN}">Go to your dashboard →</a>
+    ${invoiceHtml}
 
-    <p style="margin:18px 0 0;color:#6b7280;font-size:14px;line-height:1.6;">
-      If you have any questions or need help, just reply, we’re happy to help.
+    <p style="margin:0;color:#6b7280;font-size:14px;line-height:1.6;">
+      If you have any questions or need help, just reply to this email, we're happy to help.
     </p>
     <p style="margin:12px 0 0;color:#6b7280;font-size:14px;line-height:1.6;">
       Thanks again for choosing ConsentBit.
@@ -390,32 +409,10 @@ Thanks for your purchase, your ${displayPlan} plan is now active for ${displayDo
 
 You now have access to everything included in your plan to keep your site fully compliant and running at scale.
 
-Here’s what your plan includes:
-
-Basic Plan
-- 1 domain
-- 100,000 page views/month
-- 750 cookie scans
-- GDPR & CCPA
-- Email support
-
-Essential Plan
-- 1 domain
-- 500,000 page views/month
-- 5,000 cookie scans
-- GDPR, CCPA & IAB/TCF
-- Priority support
-
-Growth Plan
-- 1 domain
-- 2M page views/month
-- 10,000 cookie scans
-- GDPR, CCPA & IAB/TCF
-- Dedicated support
-
-Go to your dashboard: ${dashboardUrl}
-
-If you have any questions or need help, just reply, we’re happy to help.
+What's included in your ${displayPlan} plan:
+${features.map(f => `- ${f.replace(/&amp;/g, '&')}`).join('\n')}
+${invoiceText}
+If you have any questions or need help, just reply to this email, we're happy to help.
 
 Thanks again for choosing ConsentBit.
 
@@ -428,3 +425,4 @@ ConsentBit Team
 
   if (ctx?.waitUntil) ctx.waitUntil(send);
 }
+

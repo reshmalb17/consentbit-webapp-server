@@ -10,39 +10,11 @@ import {
   categorizeCookie,
   getCookieProvider
 } from '../data/cookieDatabase.js';
-
-async function getUserDefinedCookieRule(db, siteId, name, domain) {
-  if (!siteId || !name) return null;
-  const normalizedDomain = domain ? String(domain).trim().toLowerCase() : null;
-  const exact = await db
-    .prepare(
-      `SELECT category, provider, description
-       FROM Cookie
-       WHERE siteId = ?1
-         AND isExpected = 1
-         AND lower(name) = lower(?2)
-         AND lower(COALESCE(domain, '')) = lower(COALESCE(?3, ''))
-       ORDER BY lastSeenAt DESC
-       LIMIT 1`,
-    )
-    .bind(siteId, name, normalizedDomain)
-    .first();
-  if (exact) return exact;
-  const fallback = await db
-    .prepare(
-      `SELECT category, provider, description
-       FROM Cookie
-       WHERE siteId = ?1
-         AND isExpected = 1
-         AND lower(name) = lower(?2)
-         AND (domain IS NULL OR trim(domain) = '')
-       ORDER BY lastSeenAt DESC
-       LIMIT 1`,
-    )
-    .bind(siteId, name)
-    .first();
-  return fallback || null;
-}
+import {
+  loadPublishedCustomCookieRules,
+  resolveUserDefinedCookieRule,
+  hostHintsFromSiteDomain,
+} from '../utils/customCookieRules.js';
 
 function parseCookieFromDocumentCookie(cookieString) {
   // Parse simple "name=value" format from document.cookie
@@ -175,6 +147,8 @@ export async function handleScanCookies(request, env) {
       );
     }
 
+    const customRules = await loadPublishedCustomCookieRules(db, siteId);
+
     // Infer domain from pageUrl if not provided in cookies
     let inferredDomain = null;
     try {
@@ -185,6 +159,13 @@ export async function handleScanCookies(request, env) {
     } catch (e) {
       // Invalid URL, ignore
     }
+
+    const siteHints = [
+      ...new Set([
+        ...hostHintsFromSiteDomain(site?.domain ?? site?.DOMAIN ?? ''),
+        ...(inferredDomain ? [inferredDomain] : []),
+      ]),
+    ];
 
     // For createNewScan (triggered by "Scan Now"), always create a new scan record.
     // For passive collection, reuse the most recent browser scan within the last hour.
@@ -308,7 +289,14 @@ export async function handleScanCookies(request, env) {
         // Categorize cookie (auto + user-defined override)
         const autoProvider = getCookieProvider(parsedCookie.name, parsedCookie.domain);
         const autoCategory = categorizeCookie(parsedCookie.name, parsedCookie.domain, autoProvider);
-        const rule = await getUserDefinedCookieRule(db, siteId, parsedCookie.name, parsedCookie.domain);
+        const rule = await resolveUserDefinedCookieRule(
+          db,
+          siteId,
+          parsedCookie.name,
+          parsedCookie.domain,
+          customRules,
+          siteHints,
+        );
         const provider = String(rule?.provider || autoProvider || '').trim() || null;
         const category = String(rule?.category || autoCategory || 'uncategorized').toLowerCase();
         categorySet.add(category);

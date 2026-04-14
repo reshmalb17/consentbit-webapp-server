@@ -17,6 +17,7 @@ import {
   generateLicenseKeys,
   createSite,
   inferTierPlanIdFromStripePriceId,
+  markTrialUsed,
 } from '../services/db.js';
 import { sendPaidPlanEmail } from '../services/email.js';
 
@@ -327,16 +328,73 @@ export async function handleStripeWebhook(request, env, ctx) {
           amountCents: session.amount_total ?? null,
         });
 
+        // Mark trial as used on the site so it can never be granted again
+        if (subscriptionStatus === 'trialing' && siteId) {
+          try { await markTrialUsed(db, siteId); } catch (e) {
+            console.warn('[StripeWebhook] markTrialUsed failed', e.message);
+          }
+        }
+
+        // Cancel the old subscription now that the new one is active (upgrade/downgrade flow)
+        const oldStripeSubscriptionId = subMeta.oldStripeSubscriptionId
+          ? String(subMeta.oldStripeSubscriptionId).trim()
+          : null;
+        if (oldStripeSubscriptionId && oldStripeSubscriptionId !== subId && env.STRIPE_SECRET_KEY) {
+          try {
+            const cancelRes = await fetch(
+              `https://api.stripe.com/v1/subscriptions/${encodeURIComponent(oldStripeSubscriptionId)}`,
+              {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
+              },
+            );
+            const cancelData = await cancelRes.json();
+            if (cancelData.error) {
+              console.warn('[StripeWebhook] checkout.session.completed: failed to cancel old subscription', oldStripeSubscriptionId, cancelData.error.message);
+            } else {
+              console.log('[StripeWebhook] checkout.session.completed: cancelled old subscription', oldStripeSubscriptionId);
+            }
+          } catch (e) {
+            console.warn('[StripeWebhook] checkout.session.completed: error cancelling old subscription', e.message);
+          }
+        }
+
         // Send paid-plan confirmation email in the background
         const customerEmail = session.customer_email || session.customer_details?.email;
         const customerName  = session.customer_details?.name || '';
         const planName      = resolvedPlanId || subMeta.planId || 'Basic';
         if (customerEmail) {
+          // Fetch the latest invoice for this subscription to include in the email
+          let invoiceData = null;
+          if (subId && env.STRIPE_SECRET_KEY) {
+            try {
+              const invRes = await fetch(
+                `https://api.stripe.com/v1/invoices?subscription=${subId}&limit=1`,
+                { headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` } }
+              );
+              const invJson = await invRes.json();
+              const inv = invJson?.data?.[0];
+              if (inv && !inv.error) {
+                invoiceData = {
+                  invoiceNumber: inv.number || null,
+                  invoiceUrl:    inv.hosted_invoice_url || null,
+                  invoicePdf:    inv.invoice_pdf || null,
+                  amountPaid:    inv.amount_paid != null ? (inv.amount_paid / 100).toFixed(2) : null,
+                  currency:      (inv.currency || 'usd').toUpperCase(),
+                  date:          inv.created ? new Date(inv.created * 1000).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) : null,
+                  interval:      interval || 'monthly',
+                };
+              }
+            } catch (e) {
+              console.warn('[StripeWebhook] Could not fetch invoice for email', e.message);
+            }
+          }
           sendPaidPlanEmail(env, ctx, {
             to:       customerEmail,
             name:     customerName,
             domain:   siteDomainMeta || '',
             planName,
+            invoice:  invoiceData,
           });
         }
       }

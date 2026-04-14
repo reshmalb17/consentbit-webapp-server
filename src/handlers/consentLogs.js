@@ -20,7 +20,7 @@ export async function handleConsentLogs(request, env) {
   try {
     await ensureSchema(db);
 
-    const { results: consents, meta } = await db
+    const { results: consents } = await db
       .prepare(
         `SELECT id, siteId, deviceId, ipAddress, userAgent, country, region, is_eu,
                 createdAt, updatedAt, regulation, bannerType, consentMethod, status, expiresAt, consent_categories
@@ -84,10 +84,28 @@ export async function handleConsentLogs(request, env) {
       return rest;
     });
 
+    // Published user-defined cookie rules for this site
+    let customCookieRules = [];
+    try {
+      const { results: ccrRows } = await db
+        .prepare(
+          `SELECT id, name, domain, scriptUrlPattern, category, duration, description
+           FROM CustomCookieRule
+           WHERE siteId = ?1 AND published = 1
+           ORDER BY category, name`
+        )
+        .bind(siteId)
+        .all();
+      customCookieRules = ccrRows || [];
+    } catch (_) {
+      // Non-fatal — omit custom rules if the table doesn't exist yet
+    }
+
     return Response.json({
       success: true,
       consents: logs,
       cookies,
+      customCookieRules,
       total,
       limit,
       offset,

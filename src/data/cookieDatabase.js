@@ -254,7 +254,17 @@ export function categorizeCookie(cookieName, cookieDomain, provider) {
     name.includes('cookieyes') ||
     name.includes('cookie-consent') ||
     name.includes('gdpr-consent') ||
-    name.includes('ccpa-consent')
+    name.includes('ccpa-consent') ||
+    // IAB TCF / consent framework cookies — always necessary
+    name === 'euconsent-v2' ||
+    name === 'euconsent' ||
+    name === 'usprivacy' ||
+    name === 'us_privacy' ||
+    name.startsWith('euconsent') ||
+    name.includes('cmapi_cookie_privacy') ||
+    name.includes('cmapi_gtm_bl') ||
+    name === 'addtl_consent' ||
+    name === 'iab-privacy-consent'
   ) {
     return 'necessary';
   }

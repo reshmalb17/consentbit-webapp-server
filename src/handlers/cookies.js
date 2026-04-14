@@ -1,5 +1,10 @@
 // handlers/cookies.js
 import { getCookiesByConsentState } from '../data/cookieDatabase.js';
+import {
+  loadPublishedCustomCookieRules,
+  applyPublishedRulesToCookieRows,
+  hostHintsFromSiteDomain,
+} from '../utils/customCookieRules.js';
 
 export async function handleCookies(request, env) {
   const db = env.CONSENT_WEBAPP;
@@ -147,12 +152,70 @@ export async function handleCookies(request, env) {
           .all();
 
     // Drop the rn column from each row for the response (D1 may return lowercase or uppercase)
-    const cookies = (results || []).map((row) => {
+    let cookies = (results || []).map((row) => {
       const { rn, RN, ...rest } = row;
       return rest;
     });
 
-    // Group cookies by category
+    // Merge manually-added cookies (isExpected = 1) only if they were actually found
+    // in the latest scan. Cookies that exist in the Cookie table as expected but were
+    // not detected during scanning should not appear in the cookie list.
+    try {
+      const expectedQuery = latestScan
+        ? `SELECT * FROM (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
+            FROM Cookie
+            WHERE siteId = ?1 AND isExpected = 1 AND scanHistoryId = ?2
+          ) WHERE rn = 1`
+        : `SELECT * FROM (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
+            FROM Cookie
+            WHERE siteId = ?1 AND isExpected = 1
+          ) WHERE rn = 1`;
+
+      const expectedStmt = latestScan
+        ? db.prepare(expectedQuery).bind(siteId, latestScan.id)
+        : db.prepare(expectedQuery).bind(siteId);
+
+      const { results: expectedRows } = await expectedStmt.all();
+
+      if (expectedRows?.length) {
+        // Build a lookup of scanned cookies by name+domain so we don't duplicate
+        const scannedKeys = new Set(
+          cookies.map((c) => `${String(c.name || '').toLowerCase()}|${String(c.domain || '').toLowerCase()}`)
+        );
+        for (const row of expectedRows) {
+          const { rn, RN, ...rest } = row;
+          const key = `${String(rest.name || '').toLowerCase()}|${String(rest.domain || '').toLowerCase()}`;
+          if (!scannedKeys.has(key)) {
+            cookies.push(rest);
+          }
+        }
+      }
+    } catch (e) {
+      // Non-fatal — omit expected cookies if something goes wrong
+      console.error('[Cookies] Failed to load expected cookies:', e?.message);
+    }
+
+    const publishedRules = await loadPublishedCustomCookieRules(db, siteId);
+    const siteRow = await db
+      .prepare(`SELECT domain FROM Site WHERE id = ?1 LIMIT 1`)
+      .bind(siteId)
+      .first();
+    const siteDomainField = siteRow?.domain ?? siteRow?.DOMAIN ?? '';
+    const siteHints = hostHintsFromSiteDomain(siteDomainField);
+
+    // Apply published rules only to scanned cookies — manually-added (isExpected=1) cookies
+    // keep the category the user explicitly assigned to them.
+    cookies = cookies.map((c) => {
+      if (c.isExpected) return c;
+      const m = publishedRules?.length
+        ? (applyPublishedRulesToCookieRows(publishedRules, [c], siteHints)[0] ?? c)
+        : c;
+      return m;
+    });
+
+    // Group cookies by category (after rule overlay so list matches dashboard rules)
     const cookiesByCategory = {};
     const totalCookies = cookies.length;
 

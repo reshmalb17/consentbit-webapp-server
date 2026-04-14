@@ -61,6 +61,7 @@ export async function handleBillingSummary(request, env) {
   const { db } = auth;
   const url = new URL(request.url);
   const organizationId = (url.searchParams.get('organizationId') || '').trim();
+  const siteId = (url.searchParams.get('siteId') || '').trim();
   if (!organizationId) {
     return Response.json({ error: 'organizationId required' }, { status: 400 });
   }
@@ -70,7 +71,9 @@ export async function handleBillingSummary(request, env) {
   }
 
   await ensureSchema(db);
-  const sub = await getSubscriptionByOrganization(db, organizationId);
+  const sub = siteId
+    ? (await getSubscriptionBySiteId(db, siteId)) || (await getSubscriptionByOrganization(db, organizationId))
+    : await getSubscriptionByOrganization(db, organizationId);
   if (!sub) {
     const { plan } = await getEffectivePlanForOrganization(db, organizationId, env);
     return Response.json({
@@ -100,6 +103,8 @@ export async function handleBillingSummary(request, env) {
   let nextBillingDate = currentPeriodEnd;
   let amountCents = sub.amountCents ?? null;
   let paymentMethod = null;
+  let billingCountry = null;
+  let billingAddress = null;
 
   if (env.STRIPE_SECRET_KEY && stripeSubId) {
     try {
@@ -122,6 +127,30 @@ export async function handleBillingSummary(request, env) {
             exp_month: pm.card.exp_month,
             exp_year: pm.card.exp_year,
           };
+        }
+        // Billing address from payment method
+        if (!pm.error && pm.billing_details) {
+          billingCountry = pm.billing_details.address?.country || null;
+          const addr = pm.billing_details.address;
+          if (addr) {
+            const parts = [addr.line1, addr.line2, addr.city, addr.state, addr.postal_code].filter(Boolean);
+            billingAddress = parts.length > 0 ? parts.join(', ') : null;
+          }
+        }
+      }
+      // Fallback: fetch customer address if payment method had no address
+      if ((!billingCountry || !billingAddress) && stripeCustomerId) {
+        const custRes = await fetch(`https://api.stripe.com/v1/customers/${stripeCustomerId}`, {
+          headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
+        });
+        const custData = await custRes.json();
+        if (!custData.error && custData.address) {
+          if (!billingCountry) billingCountry = custData.address.country || null;
+          if (!billingAddress) {
+            const addr = custData.address;
+            const parts = [addr.line1, addr.line2, addr.city, addr.state, addr.postal_code].filter(Boolean);
+            billingAddress = parts.length > 0 ? parts.join(', ') : null;
+          }
         }
       }
       const upRes = await fetch(`https://api.stripe.com/v1/invoices/upcoming?subscription=${stripeSubId}`, {
@@ -166,6 +195,8 @@ export async function handleBillingSummary(request, env) {
     stripeSubscriptionId: stripeSubId,
     paymentMethod,
     domainsLimit,
+    billingCountry,
+    billingAddress,
   });
 }
 
@@ -380,3 +411,4 @@ export async function handleBillingUsage(request, env) {
     planId,
   });
 }
+

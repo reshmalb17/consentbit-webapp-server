@@ -64,6 +64,7 @@ async function buildDashboardInit(db, env, request, user, orgsInitial) {
         stripeSubscriptionId: sub?.stripeSubscriptionId ?? sub?.stripesubscriptionid ?? null,
         subscriptionCurrentPeriodEnd: sub?.currentPeriodEnd ?? sub?.currentperiodend ?? null,
         subscriptionCancelAtPeriodEnd: Number(sub?.cancelAtPeriodEnd ?? sub?.cancelatperiodend ?? 0) === 1 ? 1 : 0,
+        interval: sub?.interval ?? sub?.billing_interval ?? null,
       };
     })
   );

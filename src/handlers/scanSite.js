@@ -13,109 +13,14 @@ import {
   categorizeCookie,
   getCookieProvider,
   getCookiesByConsentState,
-  generateExpectedCookiesFromScripts,
 } from '../data/cookieDatabase.js';
+import {
+  loadPublishedCustomCookieRules,
+  resolveUserDefinedCookieRule,
+  matchPublishedCustomRule,
+  hostHintsFromSiteDomain,
+} from '../utils/customCookieRules.js';
 
-/** Load all published CustomCookieRule rows for a site — called once per scan. */
-async function loadCustomCookieRules(db, siteId) {
-  if (!siteId) return [];
-  try {
-    const { results } = await db
-      .prepare(
-        `SELECT name, domain, scriptUrlPattern, category, description
-         FROM CustomCookieRule
-         WHERE siteId = ?1 AND published = 1`,
-      )
-      .bind(siteId)
-      .all();
-    return results || [];
-  } catch {
-    return []; // table may not exist yet on first scan
-  }
-}
-
-/**
- * Find the best matching user-defined rule for a cookie by name + domain.
- * Checks CustomCookieRule first (new table), then legacy Cookie.isExpected=1.
- */
-async function getUserDefinedCookieRule(db, siteId, name, domain, customRules) {
-  if (!siteId || !name) return null;
-  const nameLow = name.toLowerCase();
-  const domLow = domain ? String(domain).trim().toLowerCase() : '';
-
-  // 1. Check pre-loaded CustomCookieRule list (published rules)
-  if (customRules && customRules.length > 0) {
-    // Exact name + domain match
-    const exact = customRules.find(
-      (r) =>
-        r.name.toLowerCase() === nameLow &&
-        (r.domain || '').toLowerCase() === domLow,
-    );
-    if (exact) {
-      return { category: exact.category, provider: exact.domain, description: exact.description };
-    }
-    // Name match with blank domain rule (wildcard)
-    const wild = customRules.find(
-      (r) => r.name.toLowerCase() === nameLow && !r.domain.trim(),
-    );
-    if (wild) {
-      return { category: wild.category, provider: wild.domain || null, description: wild.description };
-    }
-  }
-
-  // 2. Legacy fallback: Cookie table isExpected=1
-  const exact = await db
-    .prepare(
-      `SELECT category, provider, description
-       FROM Cookie
-       WHERE siteId = ?1
-         AND isExpected = 1
-         AND lower(name) = lower(?2)
-         AND lower(domain) = lower(?3)
-       ORDER BY lastSeenAt DESC
-       LIMIT 1`,
-    )
-    .bind(siteId, name, domLow)
-    .first();
-  if (exact) return exact;
-
-  const fallback = await db
-    .prepare(
-      `SELECT category, provider, description
-       FROM Cookie
-       WHERE siteId = ?1
-         AND isExpected = 1
-         AND lower(name) = lower(?2)
-         AND trim(domain) = ''
-       ORDER BY lastSeenAt DESC
-       LIMIT 1`,
-    )
-    .bind(siteId, name)
-    .first();
-  return fallback || null;
-}
-
-/**
- * Find a CustomCookieRule whose scriptUrlPattern matches the given script URL.
- * Returns the first matching rule or null.
- */
-function findRuleByScriptUrl(scriptUrl, customRules) {
-  if (!scriptUrl || !customRules || customRules.length === 0) return null;
-  const urlLow = scriptUrl.toLowerCase();
-  return (
-    customRules.find((r) => {
-      if (!r.scriptUrlPattern) return false;
-      const pat = r.scriptUrlPattern.toLowerCase();
-      // Support glob-style wildcard (*) or plain substring match
-      if (pat.includes('*')) {
-        const parts = pat.split('*').map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-        const regex = new RegExp(parts.join('.*'));
-        return regex.test(urlLow);
-      }
-      return urlLow.includes(pat);
-    }) || null
-  );
-}
 
 function parseCookieString(cookieString) {
   const parts = cookieString.split(';').map((p) => p.trim());
@@ -266,6 +171,7 @@ async function scanWithBrowser(browserBinding, scanUrl) {
 
 async function performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId, customRules) {
   const scanStartTime = Date.now();
+  const siteHints = hostHintsFromSiteDomain(site?.domain ?? site?.DOMAIN ?? '');
   try {
     const browserResult = await scanWithBrowser(env.BROWSER, scanUrl);
     const cookies = [];
@@ -278,13 +184,7 @@ async function performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId,
       const autoProvider = getCookieProvider(raw.name, raw.domain);
       const autoCategory = categorizeCookie(raw.name, raw.domain, autoProvider);
       // In-memory only — no per-cookie DB round-trips inside waitUntil
-      const nameLow = raw.name.toLowerCase();
-      const domLow = raw.domain ? String(raw.domain).trim().toLowerCase() : '';
-      const rule = customRules.find(r =>
-        r.name.toLowerCase() === nameLow && (r.domain || '').toLowerCase() === domLow
-      ) || customRules.find(r =>
-        r.name.toLowerCase() === nameLow && !r.domain?.trim()
-      );
+      const rule = matchPublishedCustomRule(customRules, raw.name, raw.domain, siteHints);
       const provider = String(rule?.provider || autoProvider || '').trim() || null;
       const category = String(rule?.category || autoCategory || 'uncategorized').toLowerCase();
       const description = String(rule?.description || '').trim() || null;
@@ -313,13 +213,7 @@ async function performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId,
         };
         const autoProvider = getCookieProvider(merged.name, merged.domain);
         const autoCategory = categorizeCookie(merged.name, merged.domain, autoProvider);
-        const nameLow = merged.name.toLowerCase();
-        const domLow = merged.domain ? String(merged.domain).trim().toLowerCase() : '';
-        const rule = customRules.find(r =>
-          r.name.toLowerCase() === nameLow && (r.domain || '').toLowerCase() === domLow
-        ) || customRules.find(r =>
-          r.name.toLowerCase() === nameLow && !r.domain?.trim()
-        );
+        const rule = matchPublishedCustomRule(customRules, merged.name, merged.domain, siteHints);
         const provider = String(rule?.provider || autoProvider || '').trim() || null;
         const category = String(rule?.category || autoCategory || 'uncategorized').toLowerCase();
         const description = String(rule?.description || '').trim() || null;
@@ -327,19 +221,6 @@ async function performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId,
           cookies.push({ ...merged, provider, category, description, isExpected: false });
         }
       } catch (_) {}
-    }
-
-    // Infer additional cookies from detected scripts
-    const inferredCookies = generateExpectedCookiesFromScripts([], scripts, site.domain || scanUrl);
-    for (const ic of inferredCookies) {
-      if (!cookies.find(c => c.name.toLowerCase() === ic.name.toLowerCase())) {
-        cookies.push({
-          name: ic.name, domain: ic.domain || null, path: ic.path || '/',
-          expires: null, httpOnly: false, secure: false, sameSite: null,
-          provider: ic.provider || null, category: ic.category || 'uncategorized',
-          description: ic.description || null, source: 'script-inference', isExpected: false,
-        });
-      }
     }
 
     const scanDuration = Date.now() - scanStartTime;
@@ -399,6 +280,20 @@ export async function handleScanSite(request, env, ctx) {
       );
     }
 
+    // Only allow scanning if the ConsentBit script has been verified on the site.
+    // This prevents users from scanning domains they don't own.
+    const isVerified = site.verified === 1 || site.verified === true || site.VERIFIED === 1;
+    if (!isVerified) {
+      return Response.json(
+        {
+          success: false,
+          error: 'Site not verified. Please install the ConsentBit script on your site before scanning.',
+          code: 'SITE_NOT_VERIFIED',
+        },
+        { status: 403 },
+      );
+    }
+
     const organizationId = site.organizationId ?? site.organizationid ?? null;
     if (organizationId) {
       const { plan } = await getEffectivePlanForOrganization(db, organizationId, env);
@@ -416,7 +311,8 @@ export async function handleScanSite(request, env, ctx) {
       }
     }
 
-    const customRules = await loadCustomCookieRules(db, siteId);
+    const customRules = await loadPublishedCustomCookieRules(db, siteId);
+    const siteHints = hostHintsFromSiteDomain(site?.domain ?? site?.DOMAIN ?? '');
     const scanUrl = site.domain.startsWith('http') ? site.domain : `https://${site.domain}`;
 
     // When Browser Rendering is available, create a pending scan record, respond
@@ -475,7 +371,7 @@ export async function handleScanSite(request, env, ctx) {
         if (!raw.name) continue;
         const autoProvider = getCookieProvider(raw.name, raw.domain);
         const autoCategory = categorizeCookie(raw.name, raw.domain, autoProvider);
-        const rule = await getUserDefinedCookieRule(db, siteId, raw.name, raw.domain, customRules);
+        const rule = await resolveUserDefinedCookieRule(db, siteId, raw.name, raw.domain, customRules, siteHints);
         const provider = String(rule?.provider || autoProvider || '').trim() || null;
         const category = String(rule?.category || autoCategory || 'uncategorized').toLowerCase();
         const description = String(rule?.description || '').trim() || null;
@@ -529,7 +425,7 @@ export async function handleScanSite(request, env, ctx) {
           const parsed = parseCookieString(cookieString);
           const autoProvider = getCookieProvider(parsed.name, parsed.domain);
           const autoCategory = categorizeCookie(parsed.name, parsed.domain, autoProvider);
-          const rule = await getUserDefinedCookieRule(db, siteId, parsed.name, parsed.domain, customRules);
+          const rule = await resolveUserDefinedCookieRule(db, siteId, parsed.name, parsed.domain, customRules, siteHints);
           const provider = String(rule?.provider || autoProvider || '').trim() || null;
           const category = String(rule?.category || autoCategory || 'uncategorized').toLowerCase();
           const description = String(rule?.description || '').trim() || null;
@@ -548,7 +444,7 @@ export async function handleScanSite(request, env, ctx) {
             if (!cookies.find(c => c.name === parsed.name && c.domain === parsed.domain)) {
               const autoProvider = getCookieProvider(parsed.name, parsed.domain);
               const autoCategory = categorizeCookie(parsed.name, parsed.domain, autoProvider);
-              const rule = await getUserDefinedCookieRule(db, siteId, parsed.name, parsed.domain, customRules);
+              const rule = await resolveUserDefinedCookieRule(db, siteId, parsed.name, parsed.domain, customRules, siteHints);
               cookies.push({
                 ...parsed,
                 provider: String(rule?.provider || autoProvider || '').trim() || null,
@@ -613,133 +509,15 @@ export async function handleScanSite(request, env, ctx) {
     });
     await incrementScanUsage(db, siteId);
 
-    // Store cookies using db.js function
+    // Store only real detected cookies — no inference or script-pattern phantoms
     await upsertCookies(db, { siteId, scanHistoryId, cookies });
 
-    // Store scripts and extract measurement IDs
-    const detectedMeasurementIds = [];
-    
-    // Extract measurement IDs from HTML content (more comprehensive than just URLs)
-    if (html) {
-      // GA4: gtag('config', 'G-XXXXXXX') or gtag('js', new Date()); gtag('config', 'G-XXXXXXX')
-      const ga4ConfigMatches = html.match(/gtag\s*\(\s*['"]config['"]\s*,\s*['"](G-[A-Z0-9]+)['"]/gi);
-      if (ga4ConfigMatches) {
-        for (const match of ga4ConfigMatches) {
-          const idMatch = match.match(/(G-[A-Z0-9]+)/i);
-          if (idMatch && !detectedMeasurementIds.find(m => m.type === 'ga4' && m.id === idMatch[1])) {
-            detectedMeasurementIds.push({ type: 'ga4', id: idMatch[1] });
-          }
-        }
-      }
-      
-      // Universal Analytics: ga('create', 'UA-XXXXXXX-X', 'auto')
-      const uaMatches = html.match(/ga\s*\(\s*['"]create['"]\s*,\s*['"](UA-\d+-\d+)['"]/gi);
-      if (uaMatches) {
-        for (const match of uaMatches) {
-          const idMatch = match.match(/(UA-\d+-\d+)/i);
-          if (idMatch && !detectedMeasurementIds.find(m => m.type === 'ua' && m.id === idMatch[1])) {
-            detectedMeasurementIds.push({ type: 'ua', id: idMatch[1] });
-          }
-        }
-      }
-      
-      // Google Tag Manager: dataLayer.push({'gtm.start': ...}) or gtm.js?id=GTM-XXXXXXX
-      const gtmMatches = html.match(/gtm\.js[?&]id=(GTM-[A-Z0-9]+)/gi);
-      if (gtmMatches) {
-        for (const match of gtmMatches) {
-          const idMatch = match.match(/(GTM-[A-Z0-9]+)/i);
-          if (idMatch && !detectedMeasurementIds.find(m => m.type === 'gtm' && m.id === idMatch[1])) {
-            detectedMeasurementIds.push({ type: 'gtm', id: idMatch[1] });
-          }
-        }
-      }
-    }
-
-    // Infer cookies from detected scripts and measurement IDs
-    const inferredCookies = generateExpectedCookiesFromScripts(
-      detectedMeasurementIds,
-      scripts,
-      site.domain || scanUrl,
-    );
-    for (const ic of inferredCookies) {
-      const alreadySeen = cookies.find(
-        (c) => c.name.toLowerCase() === ic.name.toLowerCase(),
-      );
-      if (!alreadySeen) {
-        cookies.push({
-          name: ic.name,
-          domain: ic.domain || null,
-          path: ic.path || '/',
-          expires: null,
-          httpOnly: false,
-          secure: false,
-          sameSite: null,
-          provider: ic.provider || null,
-          category: ic.category || 'uncategorized',
-          description: ic.description || null,
-          source: 'script-inference',
-          // Inferred cookies should be shown as real findings (no "[Expected]" prefix in UI).
-          isExpected: false,
-        });
-      }
-    }
-
-    for (const scriptUrl of scripts) {
-      // If this script URL matches a user-defined rule's pattern, create a synthetic
-      // cookie entry for that rule so it appears in the scanned cookie list.
-      const scriptRule = findRuleByScriptUrl(scriptUrl, customRules);
-      if (scriptRule) {
-        const alreadyAdded = cookies.find(
-          (c) => c.name === scriptRule.name && (c.domain || '') === (scriptRule.domain || ''),
-        );
-        if (!alreadyAdded) {
-          cookies.push({
-            name: scriptRule.name,
-            domain: scriptRule.domain || null,
-            path: '/',
-            expires: scriptRule.duration || null,
-            httpOnly: false,
-            secure: false,
-            sameSite: null,
-            provider: scriptRule.domain || null,
-            category: scriptRule.category,
-            description: scriptRule.description || null,
-            source: `user-rule:script-pattern`,
-            isExpected: false,
-          });
-        }
-      }
-
-      // Extract measurement IDs from script URLs (as fallback)
-      try {
-        // Google Tag Manager / GA4: gtag/js?id=G-XXXXXXX
-        const ga4Match = scriptUrl.match(/gtag\/js[?&]id=(G-[A-Z0-9]+)/i);
-        if (ga4Match && !detectedMeasurementIds.find(m => m.type === 'ga4' && m.id === ga4Match[1])) {
-          detectedMeasurementIds.push({ type: 'ga4', id: ga4Match[1] });
-        }
-        
-        // Google Tag Manager: gtm.js?id=GTM-XXXXXXX
-        const gtmMatch = scriptUrl.match(/gtm\.js[?&]id=(GTM-[A-Z0-9]+)/i);
-        if (gtmMatch && !detectedMeasurementIds.find(m => m.type === 'gtm' && m.id === gtmMatch[1])) {
-          detectedMeasurementIds.push({ type: 'gtm', id: gtmMatch[1] });
-        }
-        
-        // Universal Analytics: analytics.js
-        if (scriptUrl.includes('google-analytics.com/analytics.js') && !detectedMeasurementIds.find(m => m.type === 'ua')) {
-          detectedMeasurementIds.push({ type: 'ua', id: 'UA' });
-        }
-      } catch (e) {
-        // Ignore URL parsing errors
-      }
-    }
-    
-    // Store scripts using db.js function
     await upsertScripts(db, {
       siteId,
       scripts: scripts.map(url => ({ url, category: categorizeScript(url) })),
     });
 
-    // Final UPDATE — persist actual counts and categories snapshot after all inference is done
+    // Persist accurate counts and categories snapshot
     const categoriesSnapshot = JSON.stringify(
       [...new Set(cookies.map((c) => String(c.category || 'uncategorized').toLowerCase()).filter(Boolean))].sort()
     );

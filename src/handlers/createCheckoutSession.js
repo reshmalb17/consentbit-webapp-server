@@ -5,7 +5,7 @@
 // Checkout uses `customer_email` from the logged-in user; Stripe creates the Customer on completion.
 // Returns { success, sessionId, url }
 
-import { getSessionById, getUserById } from '../services/db.js';
+import { getSessionById, getUserById, getSiteTrialUsed } from '../services/db.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -133,7 +133,11 @@ export async function handleCreateCheckoutSession(request, env) {
   const siteId = (body.siteId && typeof body.siteId === 'string') ? body.siteId.trim() : null;
   const siteName = (body.siteName && typeof body.siteName === 'string') ? body.siteName.trim() : null;
   const siteDomain = (body.siteDomain && typeof body.siteDomain === 'string') ? body.siteDomain.trim() : null;
-  const successUrl = body.successUrl || `${request.url.replace(/\/api\/.*$/, '')}/pro-plan?success=true`;
+  const rawSuccessUrl = body.successUrl || `${request.url.replace(/\/api\/.*$/, '')}/pro-plan?success=true`;
+  // Append Stripe's {CHECKOUT_SESSION_ID} template so the frontend receives the session ID on redirect
+  const successUrl = rawSuccessUrl.includes('?')
+    ? `${rawSuccessUrl}&session_id={CHECKOUT_SESSION_ID}`
+    : `${rawSuccessUrl}?session_id={CHECKOUT_SESSION_ID}`;
   const cancelUrl = body.cancelUrl || `${request.url.replace(/\/api\/.*$/, '')}/pro-plan?canceled=true`;
   const stripeCouponId = body.stripeCouponId && body.stripeCouponId.trim() ? body.stripeCouponId.trim() : null;
 
@@ -245,6 +249,7 @@ export async function handleCreateCheckoutSession(request, env) {
   params.set('cancel_url', cancelUrl);
   params.set('client_reference_id', organizationId);
   params.set('customer_email', email);
+  params.set('billing_address_collection', 'required');
 
   if (useTierPlan) {
     params.set('line_items[0][price]', tierPrice);
@@ -260,7 +265,11 @@ export async function handleCreateCheckoutSession(request, env) {
       const domainNorm = String(body.siteDomain).trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
       if (domainNorm) params.set('subscription_data[metadata][siteDomain]', domainNorm);
     }
-    params.set('subscription_data[trial_period_days]', '14');
+    // Only grant trial if this site has never used one before
+    const trialAlreadyUsed = siteId ? await getSiteTrialUsed(db, siteId) : false;
+    if (!trialAlreadyUsed) {
+      params.set('subscription_data[trial_period_days]', '14');
+    }
   } else {
     params.set('line_items[0][price]', interval === 'yearly' ? priceYearly : priceMonthly);
     params.set('line_items[0][quantity]', String(quantity));

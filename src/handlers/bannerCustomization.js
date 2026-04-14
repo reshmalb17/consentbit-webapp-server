@@ -23,6 +23,7 @@ export async function handleBannerCustomization(request, env) {
         }
       }
       const customization = row ? { ...row, translations } : null;
+      console.log('[BannerCustomization] GET siteId=%s customization=%s', siteId, JSON.stringify(customization));
       return Response.json({ success: true, customization });
     } catch (error) {
       console.error('[BannerCustomization] Error fetching:', error);
@@ -53,6 +54,7 @@ export async function handleBannerCustomization(request, env) {
     }
 
     try {
+      console.log('[BannerCustomization] POST siteId=%s customization=%s', siteId, JSON.stringify(customization));
       await saveBannerCustomization(db, siteId, customization);
       return Response.json({ success: true });
     } catch (error) {

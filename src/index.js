@@ -1,6 +1,7 @@
 // src/index.js
 import { handleSites } from './handlers/sites.js';
 import { handleCDNScript } from './handlers/cdn.js';
+import { handleConsentV2Script } from './handlers/consentv2handler.js';
 import { handleEmbedFloatingLogo } from './handlers/embedFloatingLogo.js';
 import { handleConsent } from './handlers/consent.js';
 import { handleScanScripts } from './handlers/scanScripts.js';
@@ -16,11 +17,14 @@ import { handleScheduledScan } from './handlers/scheduledScan.js';
 import { handleConsentLogs } from './handlers/consentLogs.js';
 import { handleValidatePromo } from './handlers/validatePromo.js';
 import { handleCreateCheckoutSession } from './handlers/createCheckoutSession.js';
+import { handleCheckoutSessionDetails } from './handlers/checkoutSessionDetails.js';
+import { handleCheckoutSuccessRedirect } from './handlers/checkoutSuccessRedirect.js';
 import { handleStripeWebhook } from './handlers/stripeWebhook.js';
 import { reportStripeMeteredUsage } from './handlers/reportStripeUsage.js';
 import { handleLicenses } from './handlers/licenses.js';
 import { handleActivateLicense } from './handlers/activateLicense.js';
 import { handleCancelSubscription } from './handlers/cancelSubscription.js';
+import { handleUpgradeSubscription } from './handlers/updateSubscription.js';
 import { handleDebugSchema } from './handlers/debugSchema.js';
 import { handleBillingSummary, handleBillingPortal, handleBillingInvoices, handleBillingUsage } from './handlers/billing.js';
 import { handleCustomCookieRules } from './handlers/customCookieRules.js';
@@ -34,6 +38,8 @@ import { handleAuthRequestCode } from './handlers/authRequestCode.js';
 import { handleAuthVerifyCode } from './handlers/authVerifyCode.js';
 import { handleAuthLogout } from './handlers/authLogout.js';
 import { handleOnboardingFirstSetup } from './handlers/onboardingFirstSetup.js';
+import { handleCheckDomainAvailability } from './handlers/checkDomainAvailability.js';
+import { handleFeedback } from './handlers/feedback.js';
 
 import { handleOptions, withCors, withPublicCors } from './utils/cors.js';
 import {
@@ -101,6 +107,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/webhooks/stripe',
   '/api/auth/logout',
   '/api/auth/dashboard-init',
+  '/api/checkout-success-redirect',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -149,6 +156,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     // — Onboarding
     case '/api/onboarding/first-setup':
       response = await handleOnboardingFirstSetup(request, env, ctx); break;
+    case '/api/sites/check-domain':
+      response = await handleCheckDomainAvailability(request, env); break;
 
     // — Banner / scan
     case '/api/banner-customization':
@@ -175,6 +184,10 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleValidatePromo(request, env); break;
     case '/api/create-checkout-session':
       response = await handleCreateCheckoutSession(request, env); break;
+    case '/api/checkout-session':
+      response = await handleCheckoutSessionDetails(request, env); break;
+    case '/api/checkout-success-redirect':
+      response = await handleCheckoutSuccessRedirect(request, env); break;
     case '/api/billing/summary':
       response = await handleBillingSummary(request, env); break;
     case '/api/billing/portal':
@@ -191,10 +204,16 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleActivateLicense(request, env); break;
     case '/api/subscriptions/cancel':
       response = await handleCancelSubscription(request, env); break;
+    case '/api/subscriptions/upgrade':
+      response = await handleUpgradeSubscription(request, env); break;
 
     // — Webhooks (own auth mechanism — Stripe signature)
     case '/api/webhooks/stripe':
       response = await handleStripeWebhook(request, env, ctx); break;
+
+    // — Feedback
+    case '/api/feedback':
+      response = await handleFeedback(request, env); break;
 
     // — Debug (should be disabled in production via env guard inside the handler)
     case '/api/debug/schema':
@@ -217,7 +236,7 @@ function toTimestamp(ts) {
   return ts;
 }
 
-async function executeScheduledScans(env) {
+async function executeScheduledScans(env, ctx) {
   const db = env.CONSENT_WEBAPP;
   await ensureSchema(db);
   try {
@@ -247,7 +266,7 @@ async function executeScheduledScans(env) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ siteId: scheduledScan.siteId }),
         });
-        await handleScanSite(scanRequest, env);
+        await handleScanSite(scanRequest, env, ctx);
         if (scheduledScan.frequency === 'once') {
           await deactivateScheduledScan(db, scheduledScan.id, now);
           executed.push({ id: scheduledScan.id, status: 'completed', deactivated: true });
@@ -344,7 +363,7 @@ export default {
   async scheduled(_event, env, ctx) {
     ctx.waitUntil(
       Promise.all([
-        executeScheduledScans(env),
+        executeScheduledScans(env, ctx),
         processSubscriptionQueue(env),
         reportStripeMeteredUsage(env),
       ])
@@ -368,6 +387,11 @@ export default {
     // ── CDN scripts — no security middleware, served as-is ────────────────
     if (pathname.startsWith('/client_data/') || pathname.startsWith('/consentbit/')) {
       return handleCDNScript(request, env, url);
+    }
+
+    // ── ConsentV2 scripts — domain + subscription blocking ────────────────
+    if (pathname.startsWith('/consentv2/')) {
+      return handleConsentV2Script(request, env, url);
     }
 
     // ── Only continue for /api/ routes ────────────────────────────────────
