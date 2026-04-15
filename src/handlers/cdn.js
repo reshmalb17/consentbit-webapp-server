@@ -3337,7 +3337,7 @@ ${inlineConfig}
     return new Response(null, { status: 304 });
   }
 
-  const loaderIab=`
+ const loaderIab=`
   ${inlineConfig}
   ${translationsVar}
 /**
@@ -3376,35 +3376,42 @@ function initConsentDependencies() {
   });
 }
 
-const colors = {};
-const alignment = 'left';
-const initialLayout = {};
-const siteCustomization = (window.siteConfig && window.siteConfig.customization) || {};
+var CUSTOMIZATION = (window.siteConfig && window.siteConfig.customization) || {};
 
-function normalizeRadiusValue(value, fallback) {
-  if (value == null || value === '') return fallback;
-  if (typeof value === 'number') return value + 'px';
-  const normalized = String(value).trim();
-  if (!normalized) return fallback;
-  if (/^-?\d+(\.\d+)?(px|rem|em|%)$/i.test(normalized)) return normalized;
-  const numeric = parseFloat(normalized);
-  return Number.isFinite(numeric) ? numeric + 'px' : fallback;
-}
+const colors = {
+  bannerBg: CUSTOMIZATION.backgroundColor || ${JSON.stringify(customization?.backgroundColor || '#FFFFFF')},
+  textColor: CUSTOMIZATION.textColor || ${JSON.stringify(customization?.textColor || '#000000')},
+  headingColor: CUSTOMIZATION.headingColor || ${JSON.stringify(customization?.headingColor || '#000000')},
+  buttonColor: CUSTOMIZATION.acceptButtonBg || ${JSON.stringify(customization?.acceptButtonBg || '#FFFFFF')},
+  buttonTextColor: CUSTOMIZATION.acceptButtonText || ${JSON.stringify(customization?.acceptButtonText || '#007AFF')},
+  SecButtonColor: CUSTOMIZATION.customiseButtonBg || ${JSON.stringify(customization?.customiseButtonBg || '#007AFF')},
+  SecButtonTextColor: CUSTOMIZATION.customiseButtonText || ${JSON.stringify(customization?.customiseButtonText || '#FFFFFF')},
+  fontWeight: CUSTOMIZATION.bannerFontWeight || ${JSON.stringify(fontWeightStr || '400')}
+};
+
+const alignment = CUSTOMIZATION.textAlign || ${JSON.stringify(textAlign || 'left')};
+
+const initialLayout = {
+  borderRadius: CUSTOMIZATION.bannerBorderRadius || ${JSON.stringify(customization?.bannerBorderRadius || '12')},
+  position: CUSTOMIZATION.bannerLayoutVisual || ${JSON.stringify(bannerLayoutVisualForConfig || 'box')},
+  alignment: CUSTOMIZATION.position || ${JSON.stringify(customization?.position || 'bottom-left')},
+  animation: CUSTOMIZATION.bannerEntranceAnimation || ${JSON.stringify((enTrans && enTrans.bannerEntranceAnimation) || 'slide-up')}
+};
 
 const styleConfig = {
-  bannerBg: ${JSON.stringify(customization.backgroundColor || '#FFFFFF')},
-  textColor: ${JSON.stringify(customization.textColor || '#000000')},
-  headingColor: ${JSON.stringify(customization.headingColor || '#000000')},
-  buttonColor: ${JSON.stringify(customization.acceptButtonBg || '#FFFFFF')},
-  buttonTextColor: ${JSON.stringify(customization.acceptButtonText || '#007AFF')},
-  SecButtonColor: ${JSON.stringify(customization.customiseButtonBg || '#007AFF')},
-  SecButtonTextColor: ${JSON.stringify(customization.customiseButtonText || '#FFFFFF')},
-  textAlign: ${JSON.stringify(textAlign || 'left')},
-  fontWeight: ${JSON.stringify(fontWeightStr || '400')},
-  borderRadius: ${JSON.stringify(customization.bannerBorderRadius || '12px')},
-  bannerType: ${JSON.stringify(bannerLayoutVisualForConfig || 'box')},
-  boxAlignment: ${JSON.stringify(customization.position || 'bottom-left')},
-  animation: ${JSON.stringify((enTrans && enTrans.bannerEntranceAnimation) || 'slide-up')}
+  bannerBg: colors.bannerBg || '#FFFFFF',
+  textColor: colors.textColor || '#000000',
+  headingColor: colors.headingColor || '#000000',
+  buttonColor: colors.buttonColor || '#FFFFFF',
+  buttonTextColor: colors.buttonTextColor || '#007AFF',
+  SecButtonColor: colors.SecButtonColor || '#007AFF',
+  SecButtonTextColor: colors.SecButtonTextColor || '#FFFFFF',
+  textAlign: alignment || 'left',
+  fontWeight: colors.fontWeight || '400',
+  borderRadius: initialLayout?.borderRadius || '12',
+  bannerType: initialLayout?.position || 'box',
+  boxAlignment: initialLayout?.alignment || 'bottom-left',
+  animation: initialLayout?.animation || 'slide-up'
 };
 
 
