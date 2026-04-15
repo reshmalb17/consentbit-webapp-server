@@ -249,7 +249,7 @@ export async function handleCreateCheckoutSession(request, env) {
   params.set('cancel_url', cancelUrl);
   params.set('client_reference_id', organizationId);
   params.set('customer_email', email);
-  params.set('billing_address_collection', 'required');
+  params.set('billing_address_collection', 'auto');
 
   if (useTierPlan) {
     params.set('line_items[0][price]', tierPrice);

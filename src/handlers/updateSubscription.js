@@ -116,7 +116,7 @@ export async function handleUpgradeSubscription(request, env) {
   params.set('cancel_url', cancelUrl);
   params.set('client_reference_id', organizationId);
   params.set('customer_email', email);
-  params.set('billing_address_collection', 'required');
+  params.set('billing_address_collection', 'auto');
   params.set('mode', 'subscription');
   params.set('line_items[0][price]', newPriceId);
   params.set('line_items[0][quantity]', '1');
