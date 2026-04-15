@@ -3337,7 +3337,7 @@ ${inlineConfig}
     return new Response(null, { status: 304 });
   }
 
- const loaderIab=`
+  const loaderIab=`
   ${inlineConfig}
   ${translationsVar}
 /**
@@ -3381,6 +3381,16 @@ const alignment = 'left';
 const initialLayout = {};
 const siteCustomization = (window.siteConfig && window.siteConfig.customization) || {};
 
+function normalizeRadiusValue(value, fallback) {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'number') return value + 'px';
+  const normalized = String(value).trim();
+  if (!normalized) return fallback;
+  if (/^-?\d+(\.\d+)?(px|rem|em|%)$/i.test(normalized)) return normalized;
+  const numeric = parseFloat(normalized);
+  return Number.isFinite(numeric) ? numeric + 'px' : fallback;
+}
+
 const styleConfig = {
   bannerBg: siteCustomization.backgroundColor || '#FFFFFF',
   textColor: siteCustomization.textColor || '#000000',
@@ -3391,7 +3401,8 @@ const styleConfig = {
   SecButtonTextColor: siteCustomization.customiseButtonText || '#FFFFFF',
   textAlign: siteCustomization.textAlign || 'left',
   fontWeight: siteCustomization.bannerFontWeight || '400',
-  borderRadius: parseFloat(siteCustomization.bannerBorderRadius) || 12,
+  borderRadius: normalizeRadiusValue(siteCustomization.bannerBorderRadius, '12px'),
+  buttonRadius: normalizeRadiusValue(siteCustomization.buttonBorderRadius, '8px'),
   bannerType: siteCustomization.bannerLayoutVisual || 'box',
   boxAlignment: siteCustomization.position || 'bottom-left',
   animation: siteCustomization.bannerEntranceAnimation || 'slide-up'
@@ -3430,9 +3441,13 @@ function getBannerAnimationName() {
   const animation = String(styleConfig.animation || '').trim().toLowerCase();
   const animationMap = {
     'fade-in': 'consentBit-fadeInBanner',
+    'fade': 'consentBit-fadeInBanner',
     'slide-up': 'consentBit-slideUpBanner',
+    'slideup': 'consentBit-slideUpBanner',
     'slide-down': 'consentBit-slideDownBanner',
-    'zoom-in': 'consentBit-zoomInBanner'
+    'slidedown': 'consentBit-slideDownBanner',
+    'zoom-in': 'consentBit-zoomInBanner',
+    'zoomin': 'consentBit-zoomInBanner'
   };
 
   if (animationMap[animation]) {
@@ -3457,9 +3472,9 @@ function getBannerAnimationName() {
 function injectStyles() {
   if (document.getElementById('consentbit-inline-styles')) return;
   const s = styleConfig;
-  const br = s.borderRadius + 'px';
-  const brSm = Math.min(Number(s.borderRadius), 8) + 'px';
-  const brPill = Math.min(Number(s.borderRadius), 999) + 'px';
+  const br = s.borderRadius;
+  const brSm = s.buttonRadius;
+  const brPill = '999px';
   const bannerAnimation = getBannerAnimationName();
   const css = \`
 \
