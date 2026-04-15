@@ -3392,21 +3392,21 @@ function normalizeRadiusValue(value, fallback) {
 }
 
 const styleConfig = {
-  bannerBg: siteCustomization.backgroundColor || '#FFFFFF',
-  textColor: siteCustomization.textColor || '#000000',
-  headingColor: siteCustomization.headingColor || '#000000',
-  buttonColor: siteCustomization.acceptButtonBg || '#FFFFFF',
-  buttonTextColor: siteCustomization.acceptButtonText || '#007AFF',
-  SecButtonColor: siteCustomization.customiseButtonBg || '#007AFF',
-  SecButtonTextColor: siteCustomization.customiseButtonText || '#FFFFFF',
-  textAlign: siteCustomization.textAlign || 'left',
-  fontWeight: siteCustomization.bannerFontWeight || '400',
-  borderRadius: normalizeRadiusValue(siteCustomization.bannerBorderRadius, '12px'),
-  buttonRadius: normalizeRadiusValue(siteCustomization.buttonBorderRadius, '8px'),
-  bannerType: siteCustomization.bannerLayoutVisual || 'box',
-  boxAlignment: siteCustomization.position || 'bottom-left',
-  animation: siteCustomization.bannerEntranceAnimation || 'slide-up'
+  bannerBg: ${JSON.stringify(customization.backgroundColor || '#FFFFFF')},
+  textColor: ${JSON.stringify(customization.textColor || '#000000')},
+  headingColor: ${JSON.stringify(customization.headingColor || '#000000')},
+  buttonColor: ${JSON.stringify(customization.acceptButtonBg || '#FFFFFF')},
+  buttonTextColor: ${JSON.stringify(customization.acceptButtonText || '#007AFF')},
+  SecButtonColor: ${JSON.stringify(customization.customiseButtonBg || '#007AFF')},
+  SecButtonTextColor: ${JSON.stringify(customization.customiseButtonText || '#FFFFFF')},
+  textAlign: ${JSON.stringify(textAlign || 'left')},
+  fontWeight: ${JSON.stringify(fontWeightStr || '400')},
+  borderRadius: ${JSON.stringify(customization.bannerBorderRadius || '12px')},
+  bannerType: ${JSON.stringify(bannerLayoutVisualForConfig || 'box')},
+  boxAlignment: ${JSON.stringify(customization.position || 'bottom-left')},
+  animation: ${JSON.stringify((enTrans && enTrans.bannerEntranceAnimation) || 'slide-up')}
 };
+
 
 function getStoredConsentData() {
   try {
