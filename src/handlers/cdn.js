@@ -3346,7 +3346,11 @@ ${inlineConfig}
   if (ifNoneMatch === etag) {
     return new Response(null, { status: 304 });
   }
+function remToPx(rem, baseFontSize = 16) {
+  return rem * baseFontSize;
+}
 
+const banerBr=remToPx(parseFloat(customization?.bannerBorderRadius) || 12);
   const loaderIab=`
 ${inlineConfig}
 (function () {
@@ -3402,9 +3406,11 @@ ${inlineConfig}
     buttonTextColor:   CUSTOMIZATION.customiseButtonText || "#334155",
     SecButtonColor:    CUSTOMIZATION.acceptButtonBg      || "#007AFF",
     SecButtonTextColor:CUSTOMIZATION.acceptButtonText    || "#ffffff",
-    textAlign:         CUSTOMIZATION.bannerTextAlign     || "left",
+    textAlign:         CUSTOMIZATION.textAlign     || "left",
     fontWeight:        CUSTOMIZATION.bannerFontWeight    || "400",
-    borderRadius:      CUSTOMIZATION.bannerBorderRadius != null ? String(CUSTOMIZATION.bannerBorderRadius).replace('rem','').replace('px','') : "12",
+    borderRadius:     CUSTOMIZATION.bannerBorderRadius != null
+  ? parseFloat(CUSTOMIZATION.bannerBorderRadius) *
+    (String(CUSTOMIZATION.bannerBorderRadius).includes("rem") ? 16 : 1): 12,
     bannerType:        CUSTOMIZATION.bannerLayoutVisual  || "box",
     boxAlignment:      CUSTOMIZATION.position            || "bottom-left",
     animation:         (CUSTOMIZATION && CUSTOMIZATION.bannerEntranceAnimation) || "fade-in",
@@ -3437,11 +3443,11 @@ function injectStyles() {
   const css = \`
 .consentBit-vendors-search-wrapper{max-height:500px;overflow-y:auto;padding:20px}
 .consentBit-search-container{position:relative;margin-bottom:20px}
-.consentBit-search-input{width:100%;padding:12px 16px 12px 44px;border:2px solid #e0e0e0;border-radius:\${brSm};font-size:14px;transition:border-color .2s ease;background:#fff;box-sizing:border-box}
+.consentBit-search-input{width:100%;padding:12px 16px 12px 44px;border:2px solid #e0e0e0;border-radius:\${brSm};font-size:14px;transition:border-color .2s ease;background:transparent;box-sizing:border-box}
 .consentBit-search-input:focus{outline:none;border-color:\${s.SecButtonColor};box-shadow:0 0 0 3px \${s.SecButtonColor}22}
 .consentBit-search-icon{position:absolute;left:16px;top:50%;transform:translateY(-50%);font-size:16px;color:#666;pointer-events:none}
 .consentBit-vendors-list{display:flex;flex-direction:column;gap:12px}
-.consentBit-vendor-item{padding:16px;border:1px solid #f0f0f0;border-radius:\${brSm};background:#fafafa;transition:all .2s ease;animation:consentBit-fadeIn .3s ease}
+.consentBit-vendor-item{padding:16px;border-radius:\${brSm};transition:all .2s ease;animation:consentBit-fadeIn .3s ease}
 .consentBit-vendor-item:hover{border-color:\${s.SecButtonColor};background:#fff;box-shadow:0 4px 12px rgba(0,0,0,.1)}
 .consentBit-vendor-item.consentBit-hidden{display:none!important}
 .consentBit-vendor-header{display:flex;justify-content:space-between;align-items:center;gap:16px}
@@ -3504,7 +3510,7 @@ function injectStyles() {
 .cb-iab-nav-item{flex:1}
 .cb-iab-nav-btn{width:100%;padding:12px 16px;background:none;border:none;border-bottom:3px solid transparent;cursor:pointer;font-size:13px;font-weight:\${s.fontWeight};color:\${s.textColor};opacity:.6;transition:all .2s}
 .cb-iab-nav-item-active .cb-iab-nav-btn{color:\${s.SecButtonColor};border-bottom-color:\${s.SecButtonColor};opacity:1;font-weight:600}
-.cb-iab-nav-btn:hover{background-color:#f9f9f9}
+.cb-iab-nav-btn:hover{}
 .cb-preference-body-wrapper{display:none}
 .cb-preference-body-wrapper.active{display:block}
 .cb-iab-detail-title{font-size:16px;font-weight:600;color:\${s.headingColor};margin-bottom:14px;text-align:\${s.textAlign}}
@@ -3512,7 +3518,7 @@ function injectStyles() {
 .cb-accordion-wrapper{display:flex;flex-direction:column;gap:10px}
 .cb-accordion{border:1px solid #ebebeb;border-radius:\${brSm};overflow:hidden;background:\${s.bannerBg}}
 .cb-accordion-item,.cb-accordion-iab-item{display:flex;gap:12px;padding:14px 16px;cursor:pointer;transition:background-color .2s}
-.cb-accordion-item:hover,.cb-accordion-iab-item:hover,.cb-child-accordion-item:hover{background-color:#f9f9f9}
+.cb-accordion-item:hover,.cb-accordion-iab-item:hover,.cb-child-accordion-item:hover{}
 .cb-accordion-chevron,.cb-child-accordion-chevron{flex-shrink:0;display:flex;align-items:center;justify-content:center}
 .cb-accordion-chevron{width:20px;height:20px}
 .cb-child-accordion-chevron{width:16px;height:16px}
@@ -3533,7 +3539,7 @@ function injectStyles() {
 .cb-switch input[type="checkbox"]:checked::before{transform:translateX(20px)}
 .cb-accordion-body,.cb-child-accordion-body{max-height:0;overflow:hidden;transition:max-height .3s ease}
 .cb-accordion.active .cb-accordion-body,.cb-child-accordion.active .cb-child-accordion-body{max-height:2000px}
-.cb-audit-table{background-color:#f4f4f4;border:1px solid #ebebeb;border-radius:\${brSm};padding:14px;margin:0 14px 14px 28px}
+.cb-audit-table{border-radius:\${brSm};padding:14px;margin:0 14px 14px 28px}
 .cb-child-accordion{border-top:1px solid #ebebeb}
 .cb-child-accordion:first-child{border-top:none}
 .cb-child-accordion-item{display:flex;gap:12px;padding:12px 16px;cursor:pointer;transition:background-color .2s}
