@@ -3487,22 +3487,22 @@ function injectStyles() {
 @keyframes consentBit-slideUpBanner{from{transform:var(--cb-banner-transform-start-up,translate3d(0,100%,0));opacity:0}to{transform:var(--cb-banner-transform-rest,translate3d(0,0,0));opacity:1}}
 @keyframes consentBit-slideDownBanner{from{transform:var(--cb-banner-transform-start-down,translate3d(0,-100%,0));opacity:0}to{transform:var(--cb-banner-transform-rest,translate3d(0,0,0));opacity:1}}
 @keyframes consentBit-zoomInBanner{from{transform:var(--cb-banner-transform-start-zoom,scale(.92));opacity:0}to{transform:var(--cb-banner-transform-rest,translate3d(0,0,0));opacity:1}}
-.consentBit-consent-bar{border:1px solid #f4f4f4;background:\${s.bannerBg};border-radius:\${br};padding:24px;max-height:500px;overflow-y:auto}
+.consentBit-consent-bar{border:1px solid #f4f4f4;background:\${s.bannerBg};border-radius:\${br};padding:24px;max-height:500px;overflow-y:auto;position: relative;}
 .consentBit-type-banner .consentBit-consent-bar{border-radius:0;padding:16px 24px}
 .consentBit-type-banner .consentBit-notice{flex-direction:row;align-items:center;gap:24px}
 .consentBit-type-banner .consentBit-notice-group{display:flex;flex-direction:row;align-items:center;gap:20px;flex:1}
 .consentBit-type-banner .consentBit-notice-btn-wrapper{flex-direction:row;padding-top:0;border-top:none;flex-shrink:0}
 .consentBit-notice{display:flex;flex-direction:column;gap:16px}
-.consentBit-title{font-size:20px;font-weight:700;line-height:1.3;margin:0 0 12px 0;color:\${s.headingColor};text-align:\${s.textAlign}}
+.consentBit-title{font-size:20px;font-weight:700;line-height:1.3;margin:0 0 12px 0;color:\${s.headingColor};text-align:\${s.textAlign};padding-right: 15px;}
 .consentBit-notice-group{display:flex;flex-direction:column;gap:20px}
-.consentBit-notice-des{flex:1;color:\${s.textColor};line-height:1.6;font-size:14px;font-weight:\${s.fontWeight};text-align:\${s.textAlign}}
+.consentBit-notice-des{flex:1;color:\${s.textColor};line-height:1.6;font-size:14px;font-weight:\${s.fontWeight};text-align:\${s.textAlign}; }
 .consentBit-notice-des p{margin:0 0 12px 0}
 .consentBit-notice-des p:last-child{margin-bottom:0}
 .consentBit-notice-btn-wrapper{display:flex;gap:8px;padding-top:16px;border-top:1px solid #f0f0f0;justify-content:\${s.textAlign === 'center' ? 'center' : s.textAlign === 'right' ? 'flex-end' : 'flex-start'}}
 .consentBit-btn{padding:11px 20px;border-radius:\${brSm};font-size:14px;font-weight:\${s.fontWeight};cursor:pointer;transition:opacity .2s ease;border:2px solid transparent;text-align:center;min-height:44px;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap}
 .consentBit-btn:hover,.cb-btn:hover{opacity:.85}
-.consentBit-btn-customize{color:\${s.buttonTextColor};background:\${s.buttonColor};border-color:\${s.buttonTextColor}}
-.consentBit-btn-reject,.consentBit-btn-accept,.cb-btn-accept{color:\${s.SecButtonTextColor};background:\${s.SecButtonColor};border-color:\${s.SecButtonColor}}
+.consentBit-btn-customize , .cb-btn-accept{color:\${s.buttonTextColor};background:\${s.buttonColor};border-color:\${s.buttonTextColor}}
+.consentBit-btn-reject,.consentBit-btn-accept,.cb-btn-reject, .cb-btn-preferences{color:\${s.SecButtonTextColor};background:\${s.SecButtonColor};border-color:\${s.SecButtonColor}}
 .cb-modal{position:fixed;top:0;left:0;width:100%;height:100%;background-color:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000000;padding:20px;box-sizing:border-box}
 .cb-modal.cb-modal-hidden{display:none!important}
 .cb-preference-center{background-color:\${s.bannerBg};border:1px solid #f4f4f4;border-radius:\${br};max-width:720px;width:100%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 4px 20px rgba(0,0,0,.15)}
@@ -3511,6 +3511,7 @@ function injectStyles() {
 .cb-btn-close{background:none;border:none;cursor:pointer;padding:4px;opacity:.5;transition:opacity .2s}
 .cb-btn-close:hover{opacity:1}
 .cb-btn-close img{width:20px;height:20px}
+.cb-iab-preference-des{margin-top:16px}
 .cb-iab-detail-wrapper{flex:1;overflow-y:auto;padding:0 24px 24px}
 .cb-iab-preference-des,.cb-preference-content-wrapper,.cb-accordion-header-des,.cb-iab-ad-settings-details-des{color:\${s.textColor};font-size:13px;line-height:1.6;font-weight:\${s.fontWeight};text-align:\${s.textAlign}}
 .cb-iab-navbar-wrapper{margin-bottom:24px;border-bottom:2px solid #f4f4f4}
@@ -3572,7 +3573,7 @@ function injectStyles() {
 .cb-footer-shadow{display:block;height:20px;margin-top:-20px;background:linear-gradient(180deg,rgba(255,255,255,0) 0%,\${s.bannerBg} 100%)}
 .cb-prefrence-btn-wrapper{padding:14px 22px;display:flex;gap:10px;justify-content:\${s.textAlign === 'center' ? 'center' : s.textAlign === 'right' ? 'flex-start' : 'flex-end'};flex-wrap:wrap}
 .cb-btn{padding:9px 20px;border-radius:\${brSm};font-size:13px;font-weight:\${s.fontWeight};cursor:pointer;transition:opacity .2s;border:2px solid;white-space:nowrap}
-.cb-btn-reject,.cb-btn-preferences{background-color:\${s.buttonColor};color:\${s.buttonTextColor};border-color:\${s.buttonTextColor}}
+.cb-btn-reject,.cb-btn-preferences{border:none};border-color:\${s.buttonTextColor}}
 @media(max-width:768px){.consentBit-type-box-bottom-left,.consentBit-type-box-bottom-right{left:10px;right:10px;max-width:calc(100% - 20px)}.consentBit-type-box-bottom-left,.consentBit-type-box-bottom-right{bottom:10px}.consentBit-consent-bar{padding:18px}.consentBit-title{font-size:16px}.consentBit-notice-btn-wrapper,.cb-prefrence-btn-wrapper{flex-direction:column}.consentBit-btn,.cb-btn{width:100%}.consentBit-type-banner .consentBit-notice,.consentBit-type-banner .consentBit-notice-group{flex-direction:column}.cb-iab-navbar{flex-direction:column}.cb-switch-wrapper{flex-direction:column;align-items:flex-start;gap:6px}.cb-switch-separator{border-right:none;padding-right:0;padding-bottom:6px;border-bottom:1px solid #ddd}}
 \`;
 
@@ -3610,6 +3611,12 @@ function injectHTML() {
      id="consentBitBanner" tabindex="-1"
      aria-label="We value your privacy" role="region"\${bannerInlineStyle}>
   <div class="consentBit-consent-bar" data-consentBit-tag="notice">
+<button aria-label="Close" class="cb-btn-close" id="cbCloseBtn1" style="
+    position: absolute;
+    right: 10px;
+">
+        <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='18' y1='6' x2='6' y2='18'%3E%3C/line%3E%3Cline x1='6' y1='6' x2='18' y2='18'%3E%3C/line%3E%3C/svg%3E" alt="Close">
+      </button>
     <div class="consentBit-notice">
 
       <p class="consentBit-title"
@@ -4377,6 +4384,7 @@ function ensureConsentUiShell() {
 
   function initButtons() {
     document.getElementById('cbCloseBtn').addEventListener('click', closeModal);
+    document.getElementById('cbCloseBtn1').addEventListener('click', hideBanner);
     document.getElementById('cbRejectBtn').addEventListener('click', rejectAll);
     document.querySelector('.consentBit-btn-reject').addEventListener('click', rejectAll);
     document.getElementById('cbSaveBtn').addEventListener('click', savePreferences);
@@ -4460,7 +4468,7 @@ function ensureConsentUiShell() {
     btn.id = 'cb-floating-trigger';
     btn.type = 'button';
     btn.setAttribute('aria-label', 'Cookie Preferences');
-    btn.style.cssText = 'position:fixed;bottom:16px;right:16px;z-index:2147483646;width:40px;height:40px;border:none;border-radius:9999px;background:transparent;cursor:pointer;padding:0;box-shadow:none';
+    btn.style.cssText = 'position:fixed;bottom:16px;left:16px;z-index:99999;width:40px;height:40px;border:none;border-radius:9999px;background:transparent;cursor:pointer;padding:0;box-shadow:none';
     var img = document.createElement('img');
     img.alt = '';
     var logoUrl = (siteConfig && siteConfig.floatingLogoUrl) || (BASE_URL + '/embed/floating-logo.svg');
@@ -4529,7 +4537,8 @@ function ensureConsentUiShell() {
   // so the IAB UI is never served.
   const iabAllowed = effectivePlanId === 'growth' || effectivePlanId === 'essential';
   const wantsIab = String(resolvedSite.banner_type || '').toLowerCase() === 'iab';
-  const serveKind = (wantsIab && iabAllowed) ? 'iab' : 'standard';
+  console.log('[ConsentBit] Banner type decision:', { wantsIab, iabAllowed, effectivePlanId, siteBannerType: resolvedSite.banner_type });
+  const serveKind = (wantsIab ) ? 'iab' : 'standard';
   const why = {
     wantsIab,
     iabAllowed,
