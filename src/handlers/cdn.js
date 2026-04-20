@@ -3491,7 +3491,7 @@ function injectStyles() {
 .consentBit-type-banner .consentBit-consent-bar{border-radius:0;padding:16px 24px}
 .consentBit-type-banner .consentBit-notice{flex-direction:row;align-items:center;gap:24px}
 .consentBit-type-banner .consentBit-notice-group{display:flex;flex-direction:row;align-items:center;gap:20px;flex:1}
-.consentBit-type-banner .consentBit-notice-btn-wrapper{flex-direction:row;padding-top:0;border-top:none;flex-shrink:0}.consentBit-type-banner .consentBit-btn{padding:8px 20px;min-height:36px;width:auto;min-width:90px;max-width:160px}
+.consentBit-type-banner .consentBit-notice-btn-wrapper{flex-direction:row;padding-top:0;border-top:none;flex-shrink:0}
 .consentBit-notice{display:flex;flex-direction:column;gap:16px}
 .consentBit-title{font-size:20px;font-weight:700;line-height:1.3;margin:0 0 12px 0;color:\${s.headingColor};text-align:\${s.textAlign}}
 .consentBit-notice-group{display:flex;flex-direction:column;gap:20px}
