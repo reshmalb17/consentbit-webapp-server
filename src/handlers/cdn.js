@@ -3456,7 +3456,7 @@ function injectStyles() {
 .consentBit-search-icon{position:absolute;left:16px;top:50%;transform:translateY(-50%);font-size:16px;color:#666;pointer-events:none}
 .consentBit-vendors-list{display:flex;flex-direction:column;gap:12px}
 .consentBit-vendor-item{padding:16px;border-radius:\${brSm};transition:all .2s ease;animation:consentBit-fadeIn .3s ease}
-.consentBit-vendor-item:hover{border-color:\${s.SecButtonColor};background:#fff;box-shadow:0 4px 12px rgba(0,0,0,.1)}
+.consentBit-vendor-item:hover{border-color:\${s.SecButtonColor};box-shadow:0 4px 12px rgba(0,0,0,.1)}
 .consentBit-vendor-item.consentBit-hidden{display:none!important}
 .consentBit-vendor-header{display:flex;justify-content:space-between;align-items:center;gap:16px}
 .consentBit-vendor-info{flex:1}
