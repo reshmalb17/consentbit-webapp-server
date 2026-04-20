@@ -429,6 +429,10 @@ async function _handleCDNScript(request, env, url) {
         "flex:1 1 auto;" +
         "min-width:80px;" +
       "}" +
+      (layoutVisual === 'banner'
+        ? "#cb-initial-banner.cb-banner .cb-banner-footer{flex-wrap:nowrap;justify-content:flex-end;}" +
+          "#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto;width:auto;min-width:80px;max-width:140px;}"
+        : "") +
       "#cb-initial-banner.cb-banner #cb-preferences-btn{" +
         "background:" + custBg + "!important;" +
         "color:" + custTx + "!important;" +
@@ -1965,6 +1969,10 @@ ${inlineConfig}
       "flex:1 1 auto;" +
       "min-width:80px;" +
     "}" +
+    ((CUSTOMIZATION && CUSTOMIZATION.bannerLayoutVisual === 'banner')
+      ? "#cb-initial-banner.cb-banner .cb-banner-footer{flex-wrap:nowrap;justify-content:flex-end;}" +
+        "#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto;width:auto;min-width:80px;max-width:140px;}"
+      : "") +
     ".cb-banner button{" +
       "padding:10px 32px;" +
       "border-radius:0.375rem;" +
