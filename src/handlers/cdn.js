@@ -485,6 +485,7 @@ async function _handleCDNScript(request, env, url) {
     }
   }
   const translationsForScript = mergeTranslations(storedTranslations);
+  console.log('[CDN] translationsForScript.en.saveMyPreferences =', translationsForScript?.en?.saveMyPreferences);
 
   /** Worker-hosted SVG (same origin as the embed script). */
   function resolveWorkerFloatingLogoUrl() {
@@ -576,7 +577,7 @@ async function _handleCDNScript(request, env, url) {
       : null,
   };
 
-  console.log("siteConfigPayload);
+  console.log("siteConfigPayload", siteConfigPayload);
   const inlineConfig = `
     window.__CONSENT_SITE__ = ${jsonForInlineScript(siteConfigPayload)};
   `;
@@ -631,7 +632,8 @@ ${inlineConfig}
   
   // Language translations (from backend / variables)
   ${translationsVar}
-  
+  console.log('[CB] TRANSLATIONS.en.saveMyPreferences =', TRANSLATIONS && TRANSLATIONS.en && TRANSLATIONS.en.saveMyPreferences);
+
   // Detect language from browser or use configured language
   function getBannerLanguage() {
     if (AUTO_DETECT_LANGUAGE) {
@@ -2502,7 +2504,9 @@ ${inlineConfig}
       prefsFooter.appendChild(cancelBtn);
       var saveBtn = document.createElement("button");
       saveBtn.id = "cb-save-prefs-btn";
-      saveBtn.textContent = getTranslation('saveMyPreferences') || getTranslation('save');
+      var saveBtnText = getTranslation('saveMyPreferences') || getTranslation('save');
+      console.log('[ConsentBit] saveMyPreferences translation:', saveBtnText, '| TRANSLATIONS.en:', JSON.stringify(TRANSLATIONS && TRANSLATIONS.en && TRANSLATIONS.en.saveMyPreferences));
+      saveBtn.textContent = saveBtnText;
       prefsFooter.appendChild(saveBtn);
       prefsBanner.appendChild(prefsFooter);
       appendPrefsCloseButton(prefsBanner);
@@ -2708,7 +2712,7 @@ ${inlineConfig}
       prefsFooter.appendChild(prefsRejectBtn);
       var saveBtn = document.createElement("button");
       saveBtn.id = "cb-save-prefs-btn";
-      saveBtn.textContent = clampLen(getButtonTranslation("save"), LIMITS.button);
+      saveBtn.textContent = clampLen(getButtonTranslation("saveMyPreferences") || getButtonTranslation("save"), LIMITS.button);
       prefsFooter.appendChild(saveBtn);
       prefsBanner.appendChild(prefsFooter);
       appendPrefsCloseButton(prefsBanner);
@@ -3324,14 +3328,15 @@ ${inlineConfig}
   // ETag must change whenever banner customization/translation changes.
   // `Site.updatedAt` does not always update when only BannerCustomization changes, so include both.
   // Also include a script version so CDN logic changes propagate even when site/customization did not change.
-  const SCRIPT_VERSION = '2026-04-08-iab-debug-3';
+  const SCRIPT_VERSION = '2026-04-19-translations-hash';
   const customizationUpdatedAt = customization?.updatedAt || customization?.updated_at || '';
-  const translationsSig = (() => {
+  const translationsSig = await (async () => {
     try {
       const tr = customization?.translations;
       if (!tr) return '';
       const s = typeof tr === 'string' ? tr : JSON.stringify(tr);
-      return String(s.length);
+      const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(s));
+      return Array.from(new Uint8Array(buf)).slice(0, 8).map(b => b.toString(16).padStart(2, '0')).join('');
     } catch {
       return '';
     }
@@ -3472,7 +3477,7 @@ function injectStyles() {
 .consentBit-type-banner .consentBit-consent-bar{border-radius:0;padding:16px 24px}
 .consentBit-type-banner .consentBit-notice{flex-direction:row;align-items:center;gap:24px}
 .consentBit-type-banner .consentBit-notice-group{display:flex;flex-direction:row;align-items:center;gap:20px;flex:1}
-.consentBit-type-banner .consentBit-notice-btn-wrapper{flex-direction:row;padding-top:0;border-top:none;flex-shrink:0}
+.consentBit-type-banner .consentBit-notice-btn-wrapper{flex-direction:row;padding-top:0;border-top:none;flex-shrink:0}.consentBit-type-banner .consentBit-btn{padding:8px 20px;min-height:36px;width:auto;min-width:90px;max-width:160px}
 .consentBit-notice{display:flex;flex-direction:column;gap:16px}
 .consentBit-title{font-size:20px;font-weight:700;line-height:1.3;margin:0 0 12px 0;color:\${s.headingColor};text-align:\${s.textAlign}}
 .consentBit-notice-group{display:flex;flex-direction:column;gap:20px}
@@ -4531,7 +4536,7 @@ function ensureConsentUiShell() {
     status: 200,
     headers: {
       'Content-Type': 'application/javascript; charset=utf-8',
-      'Cache-Control': 'no-cache, must-revalidate',
+      'Cache-Control': 'no-store',
       'ETag': etag,
       // Debug headers (safe, non-sensitive): helps confirm which loader was served and why.
       'X-ConsentBit-Loader': serveKind,
