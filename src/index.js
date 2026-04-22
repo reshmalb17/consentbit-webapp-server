@@ -112,6 +112,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/auth/logout',
   '/api/auth/dashboard-init',
   '/api/checkout-success-redirect',
+  '/api/custom-checkout',
 ]);
 
 // ---------------------------------------------------------------------------

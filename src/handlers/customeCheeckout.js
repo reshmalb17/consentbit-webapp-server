@@ -60,15 +60,21 @@ function getPriceId(env, planId, interval) {
 async function findOrCreateStripeCustomer(secret, email, paymentMethodId) {
   const normalized = email.trim().toLowerCase();
   const query = encodeURIComponent(`email:'${normalized}'`);
+  console.log('[CustomCheckout/Stripe] searching customer by email', normalized);
   const searchRes = await fetch(
     `https://api.stripe.com/v1/customers/search?query=${query}&limit=1`,
     { headers: { Authorization: `Bearer ${secret}` } },
   );
   const searchData = await searchRes.json();
+  console.log('[CustomCheckout/Stripe] customer search result', { httpStatus: searchRes.status, found: searchData?.data?.length || 0, error: searchData?.error });
+  if (searchData.error) {
+    throw new Error(searchData.error.message || 'Stripe customer search failed');
+  }
   if (searchData.data?.length > 0 && searchData.data[0].id) {
     const customerId = searchData.data[0].id;
     if (paymentMethodId) {
-      await fetch(`https://api.stripe.com/v1/payment_methods/${paymentMethodId}/attach`, {
+      console.log('[CustomCheckout/Stripe] attaching PM to existing customer', { customerId, paymentMethodId });
+      const attachRes = await fetch(`https://api.stripe.com/v1/payment_methods/${paymentMethodId}/attach`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${secret}`,
@@ -76,12 +82,28 @@ async function findOrCreateStripeCustomer(secret, email, paymentMethodId) {
         },
         body: new URLSearchParams({ customer: customerId }).toString(),
       });
+      const attachData = await attachRes.json();
+      console.log('[CustomCheckout/Stripe] attach result', { httpStatus: attachRes.status, error: attachData?.error });
+      if (attachData.error) {
+        if (attachData.error.code === 'payment_method_already_attached') {
+          // Already attached to this customer — safe to proceed
+        } else if (attachData.error.code === 'resource_missing') {
+          throw new Error(
+            `PaymentMethod ${paymentMethodId} not found in this Stripe account. ` +
+            `This almost always means the frontend Stripe publishable key (pk_...) belongs to a different account or different mode (test vs live) than the backend's STRIPE_SECRET_KEY. ` +
+            `Verify both keys come from the same Stripe account and are both either test or live.`
+          );
+        } else {
+          throw new Error(attachData.error.message || 'Failed to attach payment method');
+        }
+      }
     }
     return customerId;
   }
   const params = new URLSearchParams();
   params.set('email', normalized);
   if (paymentMethodId) params.set('payment_method', paymentMethodId);
+  console.log('[CustomCheckout/Stripe] creating new customer', normalized);
   const createRes = await fetch('https://api.stripe.com/v1/customers', {
     method: 'POST',
     headers: {
@@ -91,6 +113,7 @@ async function findOrCreateStripeCustomer(secret, email, paymentMethodId) {
     body: params.toString(),
   });
   const created = await createRes.json();
+  console.log('[CustomCheckout/Stripe] customer create result', { httpStatus: createRes.status, id: created?.id, error: created?.error });
   if (created.error) {
     throw new Error(created.error.message || 'Failed to create Stripe customer');
   }
@@ -160,24 +183,48 @@ async function provisionAccount(db, env, request, {
 }
 
 export async function handleCustomCheckout(request, env) {
+  console.log('[CustomCheckout] >>> request received', { method: request.method, url: request.url });
+
   if (request.method !== 'POST') {
+    console.warn('[CustomCheckout] rejected: method not POST');
     return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
   }
 
   const secret = trimEnv(env.STRIPE_SECRET_KEY);
   const db = env.CONSENT_WEBAPP;
 
+  console.log('[CustomCheckout] env check', {
+    hasStripeSecret: Boolean(secret),
+    hasDB: Boolean(db),
+    hasBasicMonthly: Boolean(trimEnv(env.STRIPE_PRICE_BASIC_MONTHLY)),
+    hasEssentialMonthly: Boolean(trimEnv(env.STRIPE_PRICE_ESSENTIAL_MONTHLY)),
+    hasEssentialYearly: Boolean(trimEnv(env.STRIPE_PRICE_ESSENTIAL_YEARLY)),
+    hasGrowthMonthly: Boolean(trimEnv(env.STRIPE_PRICE_GROWTH_MONTHLY)),
+  });
+
   if (!secret) {
+    console.error('[CustomCheckout] STRIPE_SECRET_KEY not set');
     return Response.json({ success: false, error: 'Stripe not configured. Set STRIPE_SECRET_KEY.' }, { status: 503 });
   }
   if (!db) {
+    console.error('[CustomCheckout] CONSENT_WEBAPP DB binding not set');
     return Response.json({ success: false, error: 'Database not available' }, { status: 503 });
   }
 
   let body;
   try {
     body = await request.json();
-  } catch {
+    console.log('[CustomCheckout] parsed body', {
+      hasPaymentMethodId: Boolean(body?.paymentMethodId),
+      hasSubscriptionId: Boolean(body?.subscriptionId),
+      email: body?.email,
+      domain: body?.domain,
+      siteName: body?.siteName,
+      planId: body?.planId,
+      interval: body?.interval,
+    });
+  } catch (err) {
+    console.error('[CustomCheckout] invalid JSON body', err);
     return Response.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
   }
 
@@ -189,22 +236,30 @@ export async function handleCustomCheckout(request, env) {
   const paymentMethodId = (body.paymentMethodId || '').trim() || null;
   const subscriptionId = (body.subscriptionId || '').trim() || null;
 
+  console.log('[CustomCheckout] normalized input', { email, rawDomain, siteName, planId, interval, hasPM: !!paymentMethodId, hasSubId: !!subscriptionId });
+
   if (!isValidEmail(email)) {
+    console.warn('[CustomCheckout] validation failed: invalid email', email);
     return Response.json({ success: false, error: 'Valid email is required' }, { status: 400 });
   }
   if (!rawDomain) {
+    console.warn('[CustomCheckout] validation failed: missing domain');
     return Response.json({ success: false, error: 'domain is required' }, { status: 400 });
   }
   if (!planId) {
+    console.warn('[CustomCheckout] validation failed: invalid planId', body.planId);
     return Response.json({ success: false, error: 'planId must be basic, essential, or growth' }, { status: 400 });
   }
   if (!paymentMethodId && !subscriptionId) {
+    console.warn('[CustomCheckout] validation failed: missing paymentMethodId or subscriptionId');
     return Response.json({ success: false, error: 'paymentMethodId (initial) or subscriptionId (after 3DS) is required' }, { status: 400 });
   }
 
   const priceId = getPriceId(env, planId, interval);
+  console.log('[CustomCheckout] resolved priceId', { planId, interval, priceId });
   if (!priceId) {
     const envKey = `STRIPE_PRICE_${planId.toUpperCase()}_${interval === 'yearly' ? 'YEARLY' : 'MONTHLY'}`;
+    console.error('[CustomCheckout] missing price env', envKey);
     return Response.json({
       success: false,
       error: `Stripe price not configured. Set ${envKey} to a recurring price_ id.`,
@@ -260,10 +315,13 @@ export async function handleCustomCheckout(request, env) {
   }
 
   // ── Phase 1: create customer + subscription ────────────────────────────────
+  console.log('[CustomCheckout] phase 1: finding/creating Stripe customer for', email);
   let customerId;
   try {
     customerId = await findOrCreateStripeCustomer(secret, email, paymentMethodId);
+    console.log('[CustomCheckout] Stripe customerId', customerId);
   } catch (e) {
+    console.error('[CustomCheckout] findOrCreateStripeCustomer failed', e);
     return Response.json({ success: false, error: e.message || 'Failed to set up payment method' }, { status: 400 });
   }
 
@@ -295,8 +353,16 @@ export async function handleCustomCheckout(request, env) {
     body: subParams.toString(),
   });
   const sub = await subRes.json();
+  console.log('[CustomCheckout] Stripe subscription response', {
+    httpStatus: subRes.status,
+    id: sub?.id,
+    status: sub?.status,
+    error: sub?.error,
+    latestInvoicePaymentIntentStatus: sub?.latest_invoice?.payment_intent?.status,
+  });
 
   if (sub.error) {
+    console.error('[CustomCheckout] Stripe subscription create failed', sub.error);
     return Response.json({ success: false, error: sub.error.message || 'Failed to create subscription' }, { status: 400 });
   }
 
@@ -338,6 +404,7 @@ export async function handleCustomCheckout(request, env) {
     paymentIntent?.status === 'requires_action' ||
     paymentIntent?.status === 'requires_payment_method'
   ) {
+    console.log('[CustomCheckout] 3DS required — returning clientSecret', { subId: sub.id, piStatus: paymentIntent.status });
     return Response.json({
       success: true,
       requiresAction: true,
@@ -346,5 +413,6 @@ export async function handleCustomCheckout(request, env) {
     });
   }
 
+  console.error('[CustomCheckout] unexpected status', { subStatus, piStatus: paymentIntent?.status, sub });
   return Response.json({ success: false, error: `Unexpected subscription status: ${subStatus}` }, { status: 400 });
 }
