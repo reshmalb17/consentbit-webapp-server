@@ -2,7 +2,8 @@
 // Body: { licenseKey, siteId, organizationId }
 // Links a license key to a site (activates it). Once activated, the key is no longer available for selection.
 
-import { getSessionById, getUserById, activateLicense, getLicenseActivation, getSubscriptionsByOrganization } from '../services/db.js';
+import { getSessionById, getUserById, activateLicense, getLicenseActivation, getSubscriptionsByOrganization, getSiteById } from '../services/db.js';
+import { syncLicenseActivateToLegacy } from '../services/syncLegacy.js';
 
 function getLicenseKeysFromRow(row) {
   let raw = row?.licensekeys ?? row?.licenseKeys ?? row?.license_keys ?? null;
@@ -89,6 +90,21 @@ export async function handleActivateLicense(request, env) {
   const result = await activateLicense(db, { licenseKey, siteId, organizationId, subscriptionId });
   if (!result) {
     return Response.json({ success: false, error: 'Failed to activate license' }, { status: 500 });
+  }
+
+  // Outbound sync → LEGACY_DB + KV
+  try {
+    const site = siteId ? await getSiteById(db, siteId) : null;
+    await syncLicenseActivateToLegacy(env, {
+      email: user?.email || null,
+      licenseKey,
+      domain: site?.domain || null,
+      subscriptionId: sub?.stripeSubscriptionId ?? sub?.stripesubscriptionid ?? null,
+      customerId: sub?.stripeCustomerId ?? sub?.stripecustomerid ?? null,
+      platform: site?.legacySource || null,
+    });
+  } catch (syncErr) {
+    console.warn('[ActivateLicense] Legacy sync failed (non-critical):', syncErr?.message);
   }
 
   return Response.json({ success: true, message: 'License activated' });

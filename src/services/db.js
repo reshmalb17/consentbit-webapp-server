@@ -294,6 +294,9 @@ export async function ensureSchema(db) {
   try {
     await db.prepare(`ALTER TABLE BannerCustomization ADD COLUMN bannerLogoPosition TEXT DEFAULT 'left'`).run();
   } catch (e) { /* Column already exists */ }
+  try {
+    await db.prepare(`ALTER TABLE BannerCustomization ADD COLUMN configJson TEXT`).run();
+  } catch (e) { /* Column already exists */ }
 
   // Consent table (for consent logs)
   await db.prepare(`
@@ -645,6 +648,9 @@ export async function ensureSchema(db) {
       FOREIGN KEY (ownerUserId) REFERENCES User(id)
     )
   `).run();
+  try { await db.prepare(`ALTER TABLE Organization ADD COLUMN updatedAt DATETIME`).run(); } catch (_) {}
+  try { await db.prepare(`ALTER TABLE Organization ADD COLUMN userId TEXT`).run(); } catch (_) {}
+  try { await db.prepare(`ALTER TABLE OrganizationMember ADD COLUMN createdAt DATETIME`).run(); } catch (_) {}
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS OrganizationMember (
       organizationId TEXT NOT NULL,
@@ -670,6 +676,655 @@ export async function ensureSchema(db) {
   try {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_feedback_created ON Feedback(createdAt DESC)`).run();
   } catch (e) {}
+
+  // Legacy user/site tagging — purely additive columns, safe to run on existing tables
+  try { await db.prepare(`ALTER TABLE User ADD COLUMN isLegacy INTEGER DEFAULT 0`).run(); } catch (e) {}
+  try { await db.prepare(`ALTER TABLE Site ADD COLUMN isLegacy INTEGER DEFAULT 0`).run(); } catch (e) {}
+  try { await db.prepare(`ALTER TABLE Site ADD COLUMN legacySource TEXT`).run(); } catch (e) {}
+}
+
+// ---------------------------------------------------------------------------
+// Legacy user seed — imports KV-era paid users into D1
+// Idempotent: keyed by stripeSubscriptionId; safe to run on every cold start.
+// ---------------------------------------------------------------------------
+// Legacy migration — reads all entries from KV stores + LEGACY_DB and upserts
+// into CONSENT_WEBAPP without duplicates.
+// ---------------------------------------------------------------------------
+
+function normalizeDomainStr(raw) {
+  return (raw || '').replace(/^https?:\/\//, '').replace(/\/$/, '').toLowerCase().trim();
+}
+
+/**
+ * Collect every entry from a KV namespace (handles cursor pagination).
+ * Returns array of { domain, email, subscriptionId, customerId, status, active, legacySource }.
+ */
+async function collectKvEntries(kv, legacySource) {
+  if (!kv) return [];
+  const entries = [];
+  let cursor = undefined;
+  let done = false;
+  while (!done) {
+    const listResult = cursor
+      ? await kv.list({ cursor })
+      : await kv.list();
+    for (const key of listResult.keys || []) {
+      try {
+        const raw = await kv.get(key.name, { type: 'json' });
+        if (!raw || !raw.email) continue;
+        if (raw.active === false || raw.active === 0) continue; // skip inactive
+        if (raw.migratedToWebapp === true) continue;            // skip already migrated
+        entries.push({
+          domain: normalizeDomainStr(key.name),
+          email: (raw.email || '').trim().toLowerCase(),
+          subscriptionId: raw.subscriptionId || raw.subscription_id || null,
+          customerId: raw.customerId || raw.customer_id || null,
+          status: raw.status || 'complete',
+          active: raw.active !== false,
+          legacySource,
+        });
+      } catch (err) {
+        console.warn(`[collectKvEntries] Failed to read KV key "${key.name}":`, err?.message);
+      }
+    }
+    done = listResult.list_complete !== false;
+    cursor = listResult.cursor;
+  }
+  return entries;
+}
+
+/**
+ * Enrich a KV entry with richer data from consentbit-licenses (LEGACY_DB).
+ * Falls back to KV values if LEGACY_DB is unavailable or has no matching row.
+ */
+async function enrichFromLegacyDb(legacyDb, entry) {
+  if (!legacyDb) return entry;
+  try {
+    const legacySub = await legacyDb
+      .prepare(
+        `SELECT * FROM subscriptions WHERE user_email = ?1
+         ORDER BY created_at DESC LIMIT 1`
+      )
+      .bind(entry.email)
+      .first();
+
+    if (!legacySub) return entry;
+
+    const subId = legacySub.subscription_id || entry.subscriptionId;
+    const custId = legacySub.customer_id || entry.customerId;
+    const interval = legacySub.billing_period || 'monthly';
+    const status = legacySub.status || entry.status;
+    const cancelAtPeriodEnd = legacySub.cancel_at_period_end ? 1 : 0;
+
+    const legacySite = subId
+      ? await legacyDb
+          .prepare(`SELECT * FROM sites WHERE subscription_id = ?1 ORDER BY created_at DESC LIMIT 1`)
+          .bind(subId)
+          .first()
+      : null;
+
+    const domain = legacySite?.site_domain
+      ? normalizeDomainStr(legacySite.site_domain)
+      : entry.domain;
+    const legacySource = legacySite?.platform || entry.legacySource;
+
+    const legacyLicense = subId
+      ? await legacyDb
+          .prepare(`SELECT license_key FROM licenses WHERE subscription_id = ?1 AND status = 'active' LIMIT 1`)
+          .bind(subId)
+          .first()
+      : null;
+
+    return {
+      ...entry,
+      domain,
+      subscriptionId: subId,
+      customerId: custId,
+      legacySource,
+      interval,
+      status,
+      cancelAtPeriodEnd,
+      licenseKey: legacyLicense?.license_key || null,
+    };
+  } catch (err) {
+    console.warn(`[enrichFromLegacyDb] lookup failed for ${entry.email}:`, err?.message);
+    return entry;
+  }
+}
+
+/**
+ * Upsert one legacy entry into CONSENT_WEBAPP.
+ * - No duplicate users: reuse existing, mark isLegacy=1 on both
+ * - No duplicate sites: if same user owns the domain, tag isLegacy=1; if different owner, create legacy. prefix twin
+ * - No duplicate subscriptions: keyed on stripeSubscriptionId
+ */
+export async function upsertLegacyEntry(db, entry, now) {
+  const { email, domain, subscriptionId, customerId, legacySource, interval, status, cancelAtPeriodEnd, licenseKey } = entry;
+
+  if (!email || !subscriptionId) return { skipped: true, reason: 'missing email or subscriptionId' };
+
+  // Skip if subscription already recorded
+  const existingSub = await db
+    .prepare('SELECT id FROM Subscription WHERE stripeSubscriptionId = ?1')
+    .bind(subscriptionId)
+    .first();
+  if (existingSub) return { skipped: true, reason: 'subscription already exists' };
+
+  // ── 1. User ───────────────────────────────────────────────────────────────
+  let existingUser = await db
+    .prepare('SELECT * FROM User WHERE email = ?1')
+    .bind(email)
+    .first();
+
+  let userId;
+  if (existingUser) {
+    userId = existingUser.id;
+    // User exists in new webapp — mark as both legacy AND new (isLegacy=1 means "has legacy history")
+    await db
+      .prepare(`UPDATE User SET isLegacy = 1, updatedAt = ?1 WHERE id = ?2`)
+      .bind(now, userId)
+      .run();
+  } else {
+    userId = crypto.randomUUID();
+    const nameGuess = email.split('@')[0];
+    try {
+      await db
+        .prepare(
+          `INSERT INTO User (id, email, name, passwordHash, password_hash, isLegacy, createdAt, updatedAt)
+           VALUES (?1, ?2, ?3, 'legacy:no-password', 'legacy:no-password', 1, ?4, ?4)`
+        )
+        .bind(userId, email, nameGuess, now)
+        .run();
+    } catch {
+      await db
+        .prepare(
+          `INSERT INTO User (id, email, name, passwordHash, isLegacy, createdAt, updatedAt)
+           VALUES (?1, ?2, ?3, 'legacy:no-password', 1, ?4, ?4)`
+        )
+        .bind(userId, email, nameGuess, now)
+        .run();
+    }
+  }
+
+  // ── 2. Organization ───────────────────────────────────────────────────────
+  let org = await db
+    .prepare('SELECT * FROM Organization WHERE ownerUserId = ?1')
+    .bind(userId)
+    .first();
+  let orgId;
+  if (org) {
+    orgId = org.id;
+  } else {
+    orgId = crypto.randomUUID();
+    const orgName = `${email.split('@')[0]}'s Organization`;
+    await db
+      .prepare(`INSERT INTO Organization (id, ownerUserId, name, createdAt, updatedAt) VALUES (?1, ?2, ?3, ?4, ?4)`)
+      .bind(orgId, userId, orgName, now)
+      .run();
+    await db
+      .prepare(`INSERT OR IGNORE INTO OrganizationMember (organizationId, userId, role, joinedAt) VALUES (?1, ?2, 'owner', ?3)`)
+      .bind(orgId, userId, now)
+      .run();
+  }
+
+  // ── 3. Site ───────────────────────────────────────────────────────────────
+  const canonicalDomain = normalizeDomainStr(domain);
+  const existingSite = await db
+    .prepare('SELECT * FROM Site WHERE domain = ?1')
+    .bind(canonicalDomain)
+    .first();
+
+  let siteId;
+  if (existingSite) {
+    const ownedByThisUser = existingSite.organizationId &&
+      String(existingSite.organizationId) === String(orgId);
+
+    if (ownedByThisUser) {
+      // Same user registered this domain via the new webapp — tag it as legacy too
+      siteId = existingSite.id;
+      await db
+        .prepare(`UPDATE Site SET isLegacy = 1, legacySource = ?1, updatedAt = ?2 WHERE id = ?3`)
+        .bind(legacySource || 'kv', now, siteId)
+        .run();
+    } else {
+      // Owned by a different user — create a legacy-prefixed twin; don't touch the existing site
+      const legacyDomain = `legacy.${canonicalDomain}`;
+      const twin = await db.prepare('SELECT id FROM Site WHERE domain = ?1').bind(legacyDomain).first();
+      if (twin) {
+        siteId = twin.id;
+      } else {
+        siteId = crypto.randomUUID();
+        await db
+          .prepare(
+            `INSERT INTO Site (id, organizationId, name, domain, cdnScriptId, apiKey, isLegacy, legacySource, createdAt, updatedAt)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?8)`
+          )
+          .bind(siteId, orgId, canonicalDomain, legacyDomain, crypto.randomUUID(), crypto.randomUUID(), legacySource || 'kv', now)
+          .run();
+      }
+    }
+  } else {
+    siteId = crypto.randomUUID();
+    await db
+      .prepare(
+        `INSERT INTO Site (id, organizationId, name, domain, cdnScriptId, apiKey, isLegacy, legacySource, createdAt, updatedAt)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?8)`
+      )
+      .bind(siteId, orgId, canonicalDomain, canonicalDomain, crypto.randomUUID(), crypto.randomUUID(), legacySource || 'kv', now)
+      .run();
+  }
+
+  // ── 4. Subscription ───────────────────────────────────────────────────────
+  const subId = crypto.randomUUID();
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO Subscription
+         (id, organizationId, siteId, stripeSubscriptionId, stripeCustomerId, planType, interval, status, cancelAtPeriodEnd, licenseKey, createdAt, updatedAt)
+       VALUES (?1, ?2, ?3, ?4, ?5, 'single', ?6, ?7, ?8, ?9, ?10, ?10)`
+    )
+    .bind(subId, orgId, siteId, subscriptionId, customerId || null, interval || 'monthly', status || 'active', cancelAtPeriodEnd ? 1 : 0, licenseKey || null, now)
+    .run();
+
+  return { skipped: false, userId, orgId, siteId, domain: canonicalDomain };
+}
+
+/**
+ * Full legacy migration.
+ * Reads every entry from ACTIVE_SITES_CONSENTBIT (webflow) and
+ * ACTIVE_SITES_CONSENTBIT_FRAMER (framer), enriches each with LEGACY_DB data,
+ * then upserts into CONSENT_WEBAPP — no duplicates, fully idempotent.
+ *
+ * @param {D1Database}   db       CONSENT_WEBAPP binding
+ * @param {KVNamespace}  kvWebflow  ACTIVE_SITES_CONSENTBIT binding
+ * @param {KVNamespace}  kvFramer   ACTIVE_SITES_CONSENTBIT_FRAMER binding
+ * @param {D1Database}   legacyDb   LEGACY_DB (consentbit-licenses) binding, optional
+ */
+export async function migrateLegacyUsers(db, kvWebflow, kvFramer, legacyDb = null, limit = 0) {
+  const now = new Date().toISOString();
+  const results = { migrated: [], skipped: [], errors: [], remaining: 0 };
+
+  // Collect all pending (not yet migrated, active only) entries from both KVs
+  const [webflowEntries, framerEntries] = await Promise.all([
+    collectKvEntries(kvWebflow, 'webflow'),
+    collectKvEntries(kvFramer, 'framer'),
+  ]);
+
+  // Deduplicate across KVs by subscriptionId — same user may appear in both
+  const seen = new Set();
+  const allEntries = [];
+  for (const entry of [...webflowEntries, ...framerEntries]) {
+    const key = entry.subscriptionId || `${entry.email}::${entry.domain}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    allEntries.push(entry);
+  }
+
+  // Apply batch limit if set
+  const batchSize = limit > 0 ? limit : allEntries.length;
+  const batch = allEntries.slice(0, batchSize);
+  results.remaining = allEntries.length - batch.length;
+
+  console.log(`[migrateLegacyUsers] Found ${allEntries.length} pending → processing ${batch.length} (remaining: ${results.remaining})`);
+
+  // Map KV key → which namespace it came from so we can write the tag back
+  const kvByKey = new Map();
+  for (const e of webflowEntries) kvByKey.set(e.domain, { kv: kvWebflow, entry: e });
+  for (const e of framerEntries)  kvByKey.set(e.domain, { kv: kvFramer,  entry: e });
+
+  for (const entry of batch) {
+    try {
+      const enriched = await enrichFromLegacyDb(legacyDb, entry);
+      const result = await upsertLegacyEntry(db, enriched, now);
+
+      if (result.skipped) {
+        // Already migrated on a previous run — ensure the KV tag is still set
+        await tagKvAsMigrated(kvByKey, entry);
+        results.skipped.push({ email: entry.email, domain: entry.domain, reason: result.reason });
+      } else {
+        // Freshly migrated — write migratedToWebapp tag back to KV
+        await tagKvAsMigrated(kvByKey, entry);
+        results.migrated.push({ email: entry.email, domain: result.domain, legacySource: enriched.legacySource });
+        console.log(`[migrateLegacyUsers] ✓ ${entry.email} (${enriched.legacySource}) domain=${result.domain}`);
+      }
+    } catch (err) {
+      console.error(`[migrateLegacyUsers] ✗ ${entry.email}:`, err?.message);
+      results.errors.push({ email: entry.email, domain: entry.domain, error: err?.message });
+    }
+  }
+
+  // ── Phase 2: migrate users in LEGACY_DB who have no KV entry ──────────────
+  if (legacyDb) {
+    await migrateLegacyDbOnly(db, legacyDb, results, now);
+  }
+
+  return results;
+}
+
+/**
+ * Phase 2: pull every active subscription from consentbit-licenses D1 that
+ * was not already covered by Phase 1 (KV entries), and upsert into CONSENT_WEBAPP.
+ * Idempotent — skips any subscriptionId already in CONSENT_WEBAPP.
+ */
+async function migrateLegacyDbOnly(db, legacyDb, results, now) {
+  let rows;
+  try {
+    rows = await legacyDb
+      .prepare(
+        `SELECT s.id, s.user_email, s.subscription_id, s.customer_id,
+                s.status, s.billing_period, s.cancel_at_period_end,
+                si.site_domain,
+                l.license_key, l.platform
+         FROM subscriptions s
+         LEFT JOIN sites si ON si.subscription_id = s.subscription_id
+         LEFT JOIN licenses l ON l.subscription_id = s.subscription_id AND l.status = 'active'
+         WHERE s.status != 'deleted'
+         ORDER BY s.created_at ASC`
+      )
+      .all();
+  } catch (err) {
+    console.warn('[migrateLegacyDbOnly] query failed:', err?.message);
+    return;
+  }
+
+  const seenSubs = new Set();
+  for (const row of (rows?.results || [])) {
+    const subId = row.subscription_id;
+    const email = (row.user_email || '').toLowerCase().trim();
+    if (!subId || !email) continue;
+    if (seenSubs.has(subId)) continue;
+    seenSubs.add(subId);
+
+    try {
+      const entry = {
+        email,
+        domain: normalizeDomainStr(row.site_domain || ''),
+        subscriptionId: subId,
+        customerId: row.customer_id || null,
+        status: row.status || 'active',
+        legacySource: row.platform || 'dashboard',
+        interval: row.billing_period || 'monthly',
+        cancelAtPeriodEnd: row.cancel_at_period_end ? 1 : 0,
+        licenseKey: row.license_key || null,
+        active: true,
+      };
+
+      const result = await upsertLegacyEntry(db, entry, now);
+      if (result.skipped) {
+        results.skipped.push({ email, domain: entry.domain, reason: result.reason });
+      } else {
+        results.migrated.push({ email, domain: result.domain, legacySource: entry.legacySource });
+        console.log(`[migrateLegacyDbOnly] ✓ ${email} (${entry.legacySource}) domain=${result.domain}`);
+      }
+    } catch (err) {
+      console.error(`[migrateLegacyDbOnly] ✗ ${email}:`, err?.message);
+      results.errors.push({ email, domain: row.site_url || '', error: err?.message });
+    }
+  }
+}
+
+/**
+ * Upsert a BannerCustomization row in CONSENT_WEBAPP from a webapp-format configJson object.
+ * Used by both Webflow and Framer banner config migrations.
+ */
+async function _upsertBannerCustomizationFromConfig(db, siteId, configJson, now) {
+  const c = configJson.customization || {};
+  const s = configJson.settings || {};
+  const id = `banner-custom-${siteId}`;
+  await db.prepare(`
+    INSERT INTO BannerCustomization (
+      id, siteId, position, backgroundColor, textColor, headingColor,
+      acceptButtonBg, acceptButtonText, rejectButtonBg, rejectButtonText,
+      customiseButtonBg, customiseButtonText, saveButtonBg, saveButtonText,
+      backButtonBg, backButtonText, doNotSellButtonBg, doNotSellButtonText,
+      privacyPolicyUrl, bannerBorderRadius, buttonBorderRadius,
+      stopScroll, footerLink, animationEnabled, preferencePosition, centerAnimationDirection,
+      language, autoDetectLanguage, translations, cookieExpirationDays,
+      showBannerLogo, bannerLogoPosition, configJson, createdAt, updatedAt
+    ) VALUES (
+      ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
+      ?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35
+    )
+    ON CONFLICT(siteId) DO UPDATE SET
+      configJson = ?33,
+      backgroundColor = ?4, textColor = ?5, headingColor = ?6,
+      acceptButtonBg = ?7, acceptButtonText = ?8,
+      rejectButtonBg = ?9, rejectButtonText = ?10,
+      privacyPolicyUrl = ?19,
+      bannerBorderRadius = ?20, buttonBorderRadius = ?21,
+      language = ?27, cookieExpirationDays = ?30,
+      updatedAt = ?35
+  `)
+  .bind(
+    id, siteId,
+    c.bannerAlignment || 'bottom-left',
+    c.colors?.bannerBg || '#ffffff',
+    c.colors?.body || '#334155',
+    c.colors?.title || '#0f172a',
+    c.colors?.btnPrimaryBg || '#0284c7',
+    c.colors?.btnPrimaryText || '#ffffff',
+    c.colors?.btnSecondaryBg || '#ffffff',
+    c.colors?.btnSecondaryText || '#334155',
+    '#ffffff', '#334155', '#ffffff', '#334155',
+    '#ffffff', '#334155', '#ffffff', '#334155',
+    s.privacyUrl || null,
+    String(c.radius?.container ?? '0.375rem'),
+    String(c.radius?.button ?? '0.375rem'),
+    0, 0, 1,
+    'center', 'fade',
+    s.language || 'en', 0, null,
+    s.expires || 30,
+    1, 'left',
+    JSON.stringify(configJson),
+    now, now
+  )
+  .run();
+}
+
+/**
+ * Migrate Webflow banner customization from WEBFLOW_AUTHENTICATION KV
+ * into CONSENT_WEBAPP.BannerCustomization only (skips BANNER_CONFIG_DB).
+ */
+export async function migrateBannerConfigs(bannerConfigDb, kvWebflowAuth, db = null, force = false) {
+  if (!kvWebflowAuth || !db) return { migrated: 0, skipped: 0, errors: [], siteTagged: 0 };
+  const results = { migrated: 0, skipped: 0, errors: [], siteTagged: 0 };
+  const now = new Date().toISOString();
+
+  let cursor;
+  let done = false;
+  const bannerKeys = [];
+  while (!done) {
+    const list = cursor
+      ? await kvWebflowAuth.list({ prefix: 'Banner-Settings:', cursor })
+      : await kvWebflowAuth.list({ prefix: 'Banner-Settings:' });
+    for (const key of list.keys || []) bannerKeys.push(key.name);
+    done = list.list_complete !== false;
+    cursor = list.cursor;
+  }
+
+  console.log(`[migrateBannerConfigs] Found ${bannerKeys.length} Banner-Settings entries`);
+
+  for (const kvKey of bannerKeys) {
+    const webflowSiteId = kvKey.replace('Banner-Settings:', '');
+    try {
+      const bannerRaw = await kvWebflowAuth.get(kvKey, { type: 'json' });
+      const appData = bannerRaw?.appData || bannerRaw;
+      if (!appData) { results.skipped++; continue; }
+
+      const configJson = {
+        customization: {
+          bannerAlignment: appData.selected || 'center',
+          bannerStyle:     'style1',
+          font:            appData.Font || 'Inter',
+          weight:          appData.weight || 'Regular',
+          size:            12,
+          textAlignment:   'left',
+          colors: {
+            bannerBg:         appData.bgColor || '#ffffff',
+            bannerBg2:        appData.bgColors || appData.bgColor || '#ffffff',
+            title:            appData.headColor || '#000000',
+            body:             appData.paraColor || '#4C4A66',
+            btnPrimaryBg:     appData.btnColor || '#000000',
+            btnPrimaryText:   appData.primaryButtonText || '#FFFFFF',
+            btnSecondaryBg:   appData.secondcolor || '#C9C9C9',
+            btnSecondaryText: appData.secondbuttontext || '#000000',
+          },
+          radius: {
+            container: appData.borderRadius || 4,
+            button:    appData.buttonRadius || 3,
+          },
+          brandLogo:   { show: true },
+          closeButton: { show: true },
+          cookieIcon:  { show: false },
+        },
+        checkedCategories: [
+          { name: 'Essentials',   checked: true },
+          { name: 'Marketing',    checked: true },
+          { name: 'Preferences',  checked: true },
+          { name: 'Analytics',    checked: true },
+        ],
+        compliance: ['gdpr'],
+        settings: {
+          expires:           parseInt(appData.cookieExpiration || '30', 10),
+          animation:         appData.animation || 'slide-up',
+          easing:            appData.easing || 'ease',
+          language:          appData.language || 'English',
+          resetInteractions: false,
+          showCloseButton:   true,
+          showCookieIcon:    false,
+          autoLoadCookies:   false,
+          disableScroll:     false,
+          customtoggle:      false,
+          privacyUrl:        appData.privacyUrl || '',
+          hideLogo:          false,
+        },
+      };
+
+      // Resolve domain from auth KV entry
+      const authEntry = await kvWebflowAuth.get(webflowSiteId, { type: 'json' });
+      const rawDomain = authEntry?.customDomain || (authEntry?.domains && authEntry.domains[0]) || null;
+      if (!rawDomain) { results.skipped++; continue; }
+
+      const domain = normalizeDomainStr(rawDomain);
+      const siteRow = await db.prepare('SELECT id FROM Site WHERE domain = ?1').bind(domain).first();
+      if (!siteRow?.id) { results.skipped++; continue; }
+
+      // Tag Site as legacy
+      await db.prepare(`UPDATE Site SET isLegacy = 1, legacySource = 'webflow', updatedAt = ?1 WHERE id = ?2`)
+        .bind(now, siteRow.id).run();
+      results.siteTagged++;
+
+      // Write to BannerCustomization — skip if existing webapp entry and not force
+      const bcExists = await db.prepare('SELECT id FROM BannerCustomization WHERE siteId = ?1').bind(siteRow.id).first();
+      if (bcExists && !force) {
+        console.log(`[migrateBannerConfigs] BannerCustomization exists, skipped domain=${domain}`);
+        results.skipped++;
+        continue;
+      }
+
+      await _upsertBannerCustomizationFromConfig(db, siteRow.id, configJson, now);
+      results.migrated++;
+      console.log(`[migrateBannerConfigs] ✓ domain=${domain} siteId=${siteRow.id}`);
+    } catch (err) {
+      console.error(`[migrateBannerConfigs] ✗ ${webflowSiteId}:`, err?.message);
+      results.errors.push({ webflowSiteId, error: err?.message });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Migrate Framer banner configs from BANNER_KV_FRAMER
+ * into CONSENT_WEBAPP.BannerCustomization only (skips BANNER_CONFIG_DB).
+ */
+export async function migrateFramerBannerConfigs(bannerConfigDb, kvBannerFramer, kvAuthFramer, db = null, force = false) {
+  if (!kvBannerFramer || !db) return { migrated: 0, skipped: 0, errors: [], siteTagged: 0 };
+  const results = { migrated: 0, skipped: 0, errors: [], siteTagged: 0 };
+  const now = new Date().toISOString();
+
+  let cursor;
+  let done = false;
+  const keys = [];
+  while (!done) {
+    const list = cursor ? await kvBannerFramer.list({ cursor }) : await kvBannerFramer.list();
+    for (const key of list.keys || []) keys.push(key.name);
+    done = list.list_complete !== false;
+    cursor = list.cursor;
+  }
+
+  console.log(`[migrateFramerBannerConfigs] Found ${keys.length} entries`);
+
+  for (const framerSiteId of keys) {
+    try {
+      // Skip unpublished sites
+      const authEntry = kvAuthFramer ? await kvAuthFramer.get(framerSiteId, { type: 'json' }) : null;
+      const productionUrl = authEntry?.userData?.productionUrl || '';
+      const isPublished = productionUrl && productionUrl !== 'not published' && productionUrl.startsWith('http');
+      if (!isPublished) {
+        results.skipped++;
+        console.log(`[migrateFramerBannerConfigs] skipped (not published) framerSiteId=${framerSiteId}`);
+        continue;
+      }
+
+      const configData = await kvBannerFramer.get(framerSiteId, { type: 'json' });
+      if (!configData) { results.skipped++; continue; }
+
+      const configJson = {
+        customization: configData.customization,
+        checkedCategories: configData.checkedCategories,
+        compliance: configData.compliance,
+        settings: configData.settings,
+      };
+
+      // Resolve domain and find Site in CONSENT_WEBAPP
+      const domain = normalizeDomainStr(productionUrl);
+      const siteRow = await db.prepare('SELECT id FROM Site WHERE domain = ?1').bind(domain).first();
+      if (!siteRow?.id) { results.skipped++; continue; }
+
+      // Tag Site as legacy
+      await db.prepare(`UPDATE Site SET isLegacy = 1, legacySource = 'framer', updatedAt = ?1 WHERE id = ?2`)
+        .bind(now, siteRow.id).run();
+      results.siteTagged++;
+
+      // Write to BannerCustomization — skip if existing and not force
+      const bcExists = await db.prepare('SELECT id FROM BannerCustomization WHERE siteId = ?1').bind(siteRow.id).first();
+      if (bcExists && !force) {
+        console.log(`[migrateFramerBannerConfigs] BannerCustomization exists, skipped domain=${domain}`);
+        results.skipped++;
+        continue;
+      }
+
+      await _upsertBannerCustomizationFromConfig(db, siteRow.id, configJson, now);
+      results.migrated++;
+      console.log(`[migrateFramerBannerConfigs] ✓ domain=${domain} siteId=${siteRow.id}`);
+    } catch (err) {
+      console.error(`[migrateFramerBannerConfigs] ✗ ${framerSiteId}:`, err?.message);
+      results.errors.push({ framerSiteId, error: err?.message });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Write migratedToWebapp + migratedAt back onto the original KV entry so the
+ * old dashboard-server can see that this site has been moved.
+ */
+async function tagKvAsMigrated(kvByKey, entry) {
+  const ref = kvByKey.get(entry.domain);
+  if (!ref?.kv) return;
+  try {
+    // Read current value, merge tag, write back
+    const current = await ref.kv.get(entry.domain, { type: 'json' });
+    if (!current) return;
+    if (current.migratedToWebapp) return; // already tagged
+    await ref.kv.put(
+      entry.domain,
+      JSON.stringify({ ...current, migratedToWebapp: true, migratedAt: new Date().toISOString() }),
+    );
+  } catch (err) {
+    console.warn(`[tagKvAsMigrated] Failed to tag "${entry.domain}":`, err?.message);
+  }
 }
 
 export async function createEmailVerificationCode(
@@ -1422,6 +2077,14 @@ export async function getSiteById(db, siteId) {
   const row = await db
     .prepare('SELECT * FROM Site WHERE id = ?1')
     .bind(siteId)
+    .first();
+  return row || null;
+}
+
+export async function getSiteByDomain(db, domain) {
+  const row = await db
+    .prepare('SELECT * FROM Site WHERE domain = ?1')
+    .bind((domain || '').toLowerCase())
     .first();
   return row || null;
 }
@@ -2609,10 +3272,10 @@ export async function saveBannerCustomization(db, siteId, customization) {
           privacyPolicyUrl, bannerBorderRadius, buttonBorderRadius,
           stopScroll, footerLink, animationEnabled, preferencePosition, centerAnimationDirection,
           language, autoDetectLanguage, translations, cookieExpirationDays,
-          showBannerLogo, bannerLogoPosition,
+          showBannerLogo, bannerLogoPosition, configJson,
           createdAt, updatedAt
         ) VALUES (
-          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34
+          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35
         )
         ON CONFLICT(siteId) DO UPDATE SET
           position = ?3,
@@ -2645,7 +3308,8 @@ export async function saveBannerCustomization(db, siteId, customization) {
           cookieExpirationDays = ?30,
           showBannerLogo = ?31,
           bannerLogoPosition = ?32,
-          updatedAt = ?34
+          configJson = ?33,
+          updatedAt = ?35
       `)
       .bind(
         id,
@@ -2680,6 +3344,9 @@ export async function saveBannerCustomization(db, siteId, customization) {
         customization.cookieExpirationDays != null ? Math.max(1, Math.min(365, Number(customization.cookieExpirationDays) || 30)) : 30,
         customization.showBannerLogo !== undefined ? (customization.showBannerLogo ? 1 : 0) : 1,
         customization.bannerLogoPosition || 'left',
+        customization.configJson != null
+          ? (typeof customization.configJson === 'string' ? customization.configJson : JSON.stringify(customization.configJson))
+          : null,
         now,
         now
       )

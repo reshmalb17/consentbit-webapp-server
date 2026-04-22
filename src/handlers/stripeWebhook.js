@@ -20,6 +20,11 @@ import {
   markTrialUsed,
 } from '../services/db.js';
 import { sendPaidPlanEmail } from '../services/email.js';
+import {
+  syncPurchaseToLegacy,
+  syncSubscriptionUpdateToLegacy,
+  syncSubscriptionDeletedToLegacy,
+} from '../services/syncLegacy.js';
 
 /** Find existing Stripe customer by email, or create one (Use Case 3 / bulk guest checkout). */
 async function findOrCreateStripeCustomerByEmail(env, email) {
@@ -397,6 +402,21 @@ export async function handleStripeWebhook(request, env, ctx) {
             invoice:  invoiceData,
           });
         }
+
+        // Outbound sync → LEGACY_DB + KV (non-blocking)
+        ctx.waitUntil(
+          syncPurchaseToLegacy(env, {
+            email: session.customer_email || session.customer_details?.email || null,
+            domain: siteDomainMeta || null,
+            subscriptionId: subId,
+            customerId: session.customer,
+            status: subscriptionStatus,
+            platform: null,
+            licenseKey: licenseKey || null,
+            interval,
+            cancelAtPeriodEnd: 0,
+          }).catch((e) => console.warn('[StripeWebhook] syncPurchaseToLegacy failed:', e?.message))
+        );
       }
       return Response.json({ received: true });
     }
@@ -463,6 +483,37 @@ export async function handleStripeWebhook(request, env, ctx) {
         organizationId: orgIdFinal,
         rawPayload: { status: sub.status, cancel_at_period_end: sub.cancel_at_period_end },
       });
+
+      // Outbound sync → LEGACY_DB + KV (non-blocking)
+      {
+        const siteId = existing?.siteId ?? existing?.siteid ?? null;
+        const syncFn = type === 'customer.subscription.deleted'
+          ? syncSubscriptionDeletedToLegacy
+          : syncSubscriptionUpdateToLegacy;
+        ctx.waitUntil(
+          (async () => {
+            try {
+              let domain = null;
+              if (siteId) {
+                const { getSiteById } = await import('../services/db.js');
+                const site = await getSiteById(db, siteId);
+                domain = site?.domain || null;
+              }
+              await syncFn(env, {
+                subscriptionId: sub.id,
+                customerId: sub.customer,
+                domain,
+                status,
+                cancelAtPeriodEnd: sub.cancel_at_period_end ? 1 : 0,
+                interval: intervalFromSub,
+              });
+            } catch (e) {
+              console.warn(`[StripeWebhook] legacy sync failed for ${type}:`, e?.message);
+            }
+          })()
+        );
+      }
+
       return Response.json({ received: true });
     }
 

@@ -4,7 +4,8 @@
 // Sets cancel_at_period_end on Stripe so the plan continues until the subscription date ends.
 // Updates DB with cancelAtPeriodEnd.
 
-import { getSessionById, getUserById, getSubscriptionByStripeId, getSubscriptionById, saveSubscription } from '../services/db.js';
+import { getSessionById, getUserById, getSubscriptionByStripeId, getSubscriptionById, saveSubscription, getSiteById, getSiteByDomain } from '../services/db.js';
+import { syncSubscriptionUpdateToLegacy } from '../services/syncLegacy.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -245,6 +246,24 @@ export async function handleCancelSubscription(request, env) {
     licenseKeys: sub.licenseKeys ?? sub.licensekeys,
     quantity: sub.quantity ?? sub.Quantity,
   });
+
+  // Outbound sync → LEGACY_DB + KV (fire-and-forget, must not block response)
+  try {
+    const siteId = sub.siteId ?? sub.siteid;
+    const site = siteId ? await getSiteById(db, siteId) : null;
+    await syncSubscriptionUpdateToLegacy(env, {
+      email: user?.email || null,
+      domain: site?.domain || null,
+      subscriptionId: subStripeId,
+      customerId: sub.stripeCustomerId ?? sub.stripecustomerid,
+      status: 'active',
+      cancelAtPeriodEnd: true,
+      platform: site?.legacySource || null,
+      interval: sub.interval ?? 'monthly',
+    });
+  } catch (syncErr) {
+    console.warn('[CancelSubscription] Legacy sync failed (non-critical):', syncErr?.message);
+  }
 
   return Response.json({
     success: true,
