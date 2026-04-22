@@ -28,6 +28,9 @@ import { handleUpgradeSubscription } from './handlers/updateSubscription.js';
 import { handleDebugSchema } from './handlers/debugSchema.js';
 import { handleAdminSeedLegacy } from './handlers/adminSeedLegacy.js';
 import { handleAdminSeedBannerConfigs } from './handlers/adminSeedBannerConfigs.js';
+import { handleCheckLegacyScript } from './handlers/checkLegacyScript.js';
+import { handleLegacyConsentLogs } from './handlers/legacyConsentLogs.js';
+import { handleLegacyConsentCsv } from './handlers/legacyConsentCsv.js';
 import { handleSyncEvent } from './handlers/syncEvent.js';
 import { handleBillingSummary, handleBillingPortal, handleBillingInvoices, handleBillingUsage } from './handlers/billing.js';
 import { handleCustomCookieRules } from './handlers/customCookieRules.js';
@@ -228,6 +231,15 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     case '/api/admin/seed-banner-configs':
       response = await handleAdminSeedBannerConfigs(request, env); break;
+
+    case '/api/check-legacy-script':
+      response = await handleCheckLegacyScript(request, env); break;
+
+    case '/api/legacy-consent-logs':
+      response = await handleLegacyConsentLogs(request, env); break;
+
+    case '/api/legacy-consent-csv':
+      response = await handleLegacyConsentCsv(request, env); break;
 
     // — Bidirectional sync: receives events from dashboard-server
     case '/api/sync/event':
