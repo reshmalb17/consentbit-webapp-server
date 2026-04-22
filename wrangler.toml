@@ -11,6 +11,36 @@ binding = "CONSENT_WEBAPP"
 database_name = "consent-webapp"
 database_id = "bc37fa30-5060-491d-b19c-f3eeb7b1fd00"
 
+[[d1_databases]]
+binding = "LEGACY_DB"
+database_name = "consentbit-licenses"
+database_id = "3a0cf7e2-34a9-4d06-a5b7-c1238d13290e"
+
+[[d1_databases]]
+binding = "BANNER_CONFIG_DB"
+database_name = "banner-config-db"
+database_id = "8b467c8c-2ff8-43b5-9338-a4e9191e6014"
+
+[[kv_namespaces]]
+binding = "WEBFLOW_AUTHENTICATION"
+id = "aa64050ef7804e7783fe9680daae80c5"
+
+[[kv_namespaces]]
+binding = "AUTH_STORE_FRAMER"
+id = "6bf69f88af4e4f7ebe19f811e8b232b9"
+
+[[kv_namespaces]]
+binding = "BANNER_KV_FRAMER"
+id = "d63b31eee44245b2a039b8f9566a6f44"
+
+[[kv_namespaces]]
+binding = "ACTIVE_SITES_CONSENTBIT"
+id = "66c7aa5c7fcb4c2a8dfec5463e86a293"
+
+[[kv_namespaces]]
+binding = "ACTIVE_SITES_CONSENTBIT_FRAMER"
+id = "f89c8bbb2dd843b8aebf30a745723a2c"
+
 [vars]
 JWT_SECRET="x7K9pL2mQ5vR8tY1nB4jH7uF0zA3eD6cK9pL2mQ5vR8tY1nB4jH7uF0zA3eD6cK9p"
 

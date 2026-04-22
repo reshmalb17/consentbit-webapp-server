@@ -26,6 +26,9 @@ import { handleActivateLicense } from './handlers/activateLicense.js';
 import { handleCancelSubscription } from './handlers/cancelSubscription.js';
 import { handleUpgradeSubscription } from './handlers/updateSubscription.js';
 import { handleDebugSchema } from './handlers/debugSchema.js';
+import { handleAdminSeedLegacy } from './handlers/adminSeedLegacy.js';
+import { handleAdminSeedBannerConfigs } from './handlers/adminSeedBannerConfigs.js';
+import { handleSyncEvent } from './handlers/syncEvent.js';
 import { handleBillingSummary, handleBillingPortal, handleBillingInvoices, handleBillingUsage } from './handlers/billing.js';
 import { handleCustomCookieRules } from './handlers/customCookieRules.js';
 import { handleScanPending } from './handlers/scanPending.js';
@@ -218,6 +221,17 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     // — Debug (should be disabled in production via env guard inside the handler)
     case '/api/debug/schema':
       response = await handleDebugSchema(request, env); break;
+
+    // — Admin: one-time / idempotent data migrations
+    case '/api/admin/seed-legacy-users':
+      response = await handleAdminSeedLegacy(request, env); break;
+
+    case '/api/admin/seed-banner-configs':
+      response = await handleAdminSeedBannerConfigs(request, env); break;
+
+    // — Bidirectional sync: receives events from dashboard-server
+    case '/api/sync/event':
+      response = await handleSyncEvent(request, env); break;
 
     default:
       response = Response.json({ success: false, error: 'Not Found' }, { status: 404 });
