@@ -40,6 +40,7 @@ import { handleAuthLogout } from './handlers/authLogout.js';
 import { handleOnboardingFirstSetup } from './handlers/onboardingFirstSetup.js';
 import { handleCheckDomainAvailability } from './handlers/checkDomainAvailability.js';
 import { handleFeedback } from './handlers/feedback.js';
+import { handleCustomCheckout } from './handlers/customeCheeckout.js';
 
 import { handleOptions, withCors, withPublicCors } from './utils/cors.js';
 import {
@@ -210,6 +211,10 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     // — Webhooks (own auth mechanism — Stripe signature)
     case '/api/webhooks/stripe':
       response = await handleStripeWebhook(request, env, ctx); break;
+
+    // — Custom checkout (Stripe.js direct flow)
+    case '/api/custom-checkout':
+      response = await handleCustomCheckout(request, env); break;
 
     // — Feedback
     case '/api/feedback':
