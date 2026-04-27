@@ -67,6 +67,34 @@ export async function ensureSchema(db) {
     // Column already exists, ignore
   }
 
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN platformSiteId TEXT`).run();
+  } catch (_) {}
+
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN complianceType TEXT`).run();
+  } catch (_) {}
+
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN platform TEXT`).run();
+  } catch (_) {}
+
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN isLegacy INTEGER DEFAULT 0`).run();
+  } catch (_) {}
+
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN legacySource TEXT`).run();
+  } catch (_) {}
+
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN customDomain TEXT`).run();
+  } catch (_) {}
+
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN stagingUrl TEXT`).run();
+  } catch (_) {}
+
   // Create Script table if it doesn't exist
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS Script (
@@ -1199,31 +1227,30 @@ export async function migrateBannerConfigs(bannerConfigDb, kvWebflowAuth, db = n
         },
       };
 
-      // Resolve domain from auth KV entry
-      const authEntry = await kvWebflowAuth.get(webflowSiteId, { type: 'json' });
-      const rawDomain = authEntry?.customDomain || (authEntry?.domains && authEntry.domains[0]) || null;
-      if (!rawDomain) { results.skipped++; continue; }
-
-      const domain = normalizeDomainStr(rawDomain);
-      const siteRow = await db.prepare('SELECT id FROM Site WHERE domain = ?1').bind(domain).first();
+      // Find Site by platformSiteId (wfSiteId set during KV migration)
+      const siteRow = await db.prepare('SELECT id FROM Site WHERE platformSiteId = ?1').bind(webflowSiteId).first();
       if (!siteRow?.id) { results.skipped++; continue; }
 
-      // Tag Site as legacy
-      await db.prepare(`UPDATE Site SET isLegacy = 1, legacySource = 'webflow', updatedAt = ?1 WHERE id = ?2`)
-        .bind(now, siteRow.id).run();
+      // Ensure platform details, banner type (compliance), and legacy flag are set on Site
+      const wfCompliance = Array.isArray(configJson.compliance) ? configJson.compliance : [];
+      const wfBannerType = wfCompliance.length > 1 ? 'both' : (wfCompliance[0] || 'gdpr');
+      await db.prepare(
+        `UPDATE Site SET isLegacy=1, legacySource='webflow', platform='webflow',
+         platformSiteId=COALESCE(platformSiteId,?1), complianceType=COALESCE(complianceType,?2), updatedAt=?3 WHERE id=?4`
+      ).bind(webflowSiteId, wfBannerType, now, siteRow.id).run();
       results.siteTagged++;
 
       // Write to BannerCustomization — skip if existing webapp entry and not force
       const bcExists = await db.prepare('SELECT id FROM BannerCustomization WHERE siteId = ?1').bind(siteRow.id).first();
       if (bcExists && !force) {
-        console.log(`[migrateBannerConfigs] BannerCustomization exists, skipped domain=${domain}`);
+        console.log(`[migrateBannerConfigs] BannerCustomization exists, skipped wfSiteId=${webflowSiteId}`);
         results.skipped++;
         continue;
       }
 
       await _upsertBannerCustomizationFromConfig(db, siteRow.id, configJson, now);
       results.migrated++;
-      console.log(`[migrateBannerConfigs] ✓ domain=${domain} siteId=${siteRow.id}`);
+      console.log(`[migrateBannerConfigs] ✓ wfSiteId=${webflowSiteId} siteId=${siteRow.id}`);
     } catch (err) {
       console.error(`[migrateBannerConfigs] ✗ ${webflowSiteId}:`, err?.message);
       results.errors.push({ webflowSiteId, error: err?.message });
@@ -1256,18 +1283,17 @@ export async function migrateFramerBannerConfigs(bannerConfigDb, kvBannerFramer,
 
   for (const framerSiteId of keys) {
     try {
-      // Skip unpublished sites
-      const authEntry = kvAuthFramer ? await kvAuthFramer.get(framerSiteId, { type: 'json' }) : null;
-      const productionUrl = authEntry?.userData?.productionUrl || '';
+      const configData = await kvBannerFramer.get(framerSiteId, { type: 'json' });
+      if (!configData) { results.skipped++; continue; }
+
+      // Domain comes from latestProduction inside the BANNER_KV_FRAMER entry itself
+      const productionUrl = configData.latestProduction || '';
       const isPublished = productionUrl && productionUrl !== 'not published' && productionUrl.startsWith('http');
       if (!isPublished) {
         results.skipped++;
         console.log(`[migrateFramerBannerConfigs] skipped (not published) framerSiteId=${framerSiteId}`);
         continue;
       }
-
-      const configData = await kvBannerFramer.get(framerSiteId, { type: 'json' });
-      if (!configData) { results.skipped++; continue; }
 
       const configJson = {
         customization: configData.customization,
@@ -1276,27 +1302,30 @@ export async function migrateFramerBannerConfigs(bannerConfigDb, kvBannerFramer,
         settings: configData.settings,
       };
 
-      // Resolve domain and find Site in CONSENT_WEBAPP
-      const domain = normalizeDomainStr(productionUrl);
-      const siteRow = await db.prepare('SELECT id FROM Site WHERE domain = ?1').bind(domain).first();
+      // Find Site by platformSiteId (framerSiteId set during KV migration)
+      const siteRow = await db.prepare('SELECT id FROM Site WHERE platformSiteId = ?1').bind(framerSiteId).first();
       if (!siteRow?.id) { results.skipped++; continue; }
 
-      // Tag Site as legacy
-      await db.prepare(`UPDATE Site SET isLegacy = 1, legacySource = 'framer', updatedAt = ?1 WHERE id = ?2`)
-        .bind(now, siteRow.id).run();
+      // Ensure platform details, banner type (compliance), and legacy flag are set on Site
+      const framerCompliance = Array.isArray(configJson.compliance) ? configJson.compliance : [];
+      const framerBannerType = framerCompliance.length > 1 ? 'both' : (framerCompliance[0] || 'gdpr');
+      await db.prepare(
+        `UPDATE Site SET isLegacy=1, legacySource='framer', platform='framer',
+         platformSiteId=COALESCE(platformSiteId,?1), complianceType=COALESCE(complianceType,?2), updatedAt=?3 WHERE id=?4`
+      ).bind(framerSiteId, framerBannerType, now, siteRow.id).run();
       results.siteTagged++;
 
       // Write to BannerCustomization — skip if existing and not force
       const bcExists = await db.prepare('SELECT id FROM BannerCustomization WHERE siteId = ?1').bind(siteRow.id).first();
       if (bcExists && !force) {
-        console.log(`[migrateFramerBannerConfigs] BannerCustomization exists, skipped domain=${domain}`);
+        console.log(`[migrateFramerBannerConfigs] BannerCustomization exists, skipped framerSiteId=${framerSiteId}`);
         results.skipped++;
         continue;
       }
 
       await _upsertBannerCustomizationFromConfig(db, siteRow.id, configJson, now);
       results.migrated++;
-      console.log(`[migrateFramerBannerConfigs] ✓ domain=${domain} siteId=${siteRow.id}`);
+      console.log(`[migrateFramerBannerConfigs] ✓ framerSiteId=${framerSiteId} siteId=${siteRow.id}`);
     } catch (err) {
       console.error(`[migrateFramerBannerConfigs] ✗ ${framerSiteId}:`, err?.message);
       results.errors.push({ framerSiteId, error: err?.message });

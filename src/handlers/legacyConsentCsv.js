@@ -1,5 +1,7 @@
 // handlers/legacyConsentCsv.js
 import { getSessionById } from '../services/db.js';
+import { buildSearchKeys, getConsentRowsFromR2, getConsentRowsFromKV } from './legacyConsentHelpers.js';
+import { createDownloadToken } from '../utils/signedToken.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -7,12 +9,18 @@ function getSessionIdFromCookie(request) {
   return match ? match[1].trim() : null;
 }
 
-/**
- * GET /api/legacy-consent-csv?siteId=...
- *
- * Fetches consent data and returns a CSV for a legacy site.
- * Generates the CSV directly from the same data as the consent logs endpoint.
- */
+function x(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function cell(value) {
+  return `<Cell><Data ss:Type="String">${x(value)}</Data></Cell>`;
+}
+
+function linkCell(url, text) {
+  return `<Cell ss:HRef="${x(url)}"><Data ss:Type="String">${x(text)}</Data></Cell>`;
+}
+
 export async function handleLegacyConsentCsv(request, env) {
   const db = env.CONSENT_WEBAPP;
 
@@ -27,14 +35,13 @@ export async function handleLegacyConsentCsv(request, env) {
   const siteId = url.searchParams.get('siteId');
   if (!siteId) return new Response('siteId required', { status: 400 });
 
-  // Verify ownership + legacy flag
   const site = await db
     .prepare(
-      `SELECT s.id, s.domain, s.legacySource
+      `SELECT s.id, s.domain, s.platformSiteId as platformsiteid, s.legacySource
        FROM Site s
        INNER JOIN Organization o ON o.id = s.organizationId
-       INNER JOIN User u ON u.id = o.ownerId
-       WHERE s.id = ?1 AND u.id = ?2 AND s.isLegacy = 1`,
+       INNER JOIN User u ON u.id = o.ownerUserId
+       WHERE (s.id = ?1 OR s.platformSiteId = ?1) AND u.id = ?2 AND s.isLegacy = 1`,
     )
     .bind(siteId, userId)
     .first()
@@ -42,64 +49,103 @@ export async function handleLegacyConsentCsv(request, env) {
 
   if (!site) return new Response('Legacy site not found', { status: 404 });
 
-  const domain = site.domain || '';
-  const cbServerBase = (env.CB_SERVER_BASE_URL || 'https://app.consentbit.com').replace(/\/$/, '');
-  const secret = env.LEGACY_API_SECRET || '';
+  const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
+  const kv = env.WEBFLOW_AUTHENTICATION;
+  const r2 = env.R2;
 
-  // Fetch raw visitor data from cb-server
-  const params = new URLSearchParams({ domain });
-  const cbUrl = `${cbServerBase}/api/internal/legacy-consent-logs?${params}`;
+  const searchKeys = await buildSearchKeys(kv, platformSiteId, site.domain);
 
-  let cbData;
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
-    try {
-      const res = await fetch(cbUrl, { headers: { 'X-Internal-Token': secret }, signal: controller.signal });
-      cbData = await res.json();
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch (err) {
-    return new Response('Failed to fetch legacy consent data', { status: 502 });
+  let entries = r2 ? await getConsentRowsFromR2(r2, searchKeys) : [];
+  if (entries.length === 0 && platformSiteId && kv) {
+    entries = await getConsentRowsFromKV(kv, platformSiteId);
   }
 
-  const rows = cbData?.rows || [];
-
-  function esc(v) {
-    const s = String(v ?? '');
-    if (s.includes(',') || s.includes('\n') || s.includes('"')) return `"${s.replace(/"/g, '""')}"`;
-    return s;
+  const year = url.searchParams.get('year');
+  const month = url.searchParams.get('month');
+  if (year && month) {
+    const paddedMonth = month.padStart(2, '0');
+    entries = entries.filter((e) => {
+      const ts = e.timestamp || e.preferences?.lastUpdated || e.metadata?.timestamp;
+      if (!ts) return false;
+      const d = new Date(ts);
+      return String(d.getFullYear()) === String(year) && String(d.getMonth() + 1).padStart(2, '0') === paddedMonth;
+    });
   }
 
-  const headers = ['#', 'Timestamp (UTC)', 'Status', 'Banner Type', 'Country', 'IP Address', 'Necessary', 'Analytics', 'Marketing', 'Personalization', 'Do Not Share', 'Do Not Sell'];
+  entries.sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
 
-  const csvRows = rows.map((row, i) => {
-    const p = row.preferences || {};
-    return [
-      i + 1,
-      row.timestamp || '',
-      row.status || '',
-      row.bannerType || '',
-      row.country || '',
-      row.ipAddress || '',
-      p.necessary ? 'Yes' : 'No',
-      p.analytics ? 'Yes' : 'No',
-      p.marketing ? 'Yes' : 'No',
-      p.personalization ? 'Yes' : 'No',
-      p.doNotShare !== undefined ? (p.doNotShare ? 'Yes' : 'No') : '',
-      p.doNotSell !== undefined ? (p.doNotSell ? 'Yes' : 'No') : '',
-    ].map(esc).join(',');
-  });
+  // PDF links go directly to the worker (token handles auth — no proxy/cookie needed)
+  const workerOrigin = new URL(request.url).origin;
 
-  const csv = [headers.map(esc).join(','), ...csvRows].join('\n');
+  const headers = ['#', 'Visitor ID', 'Timestamp (UTC)', 'Status', 'Banner Type', 'Country', 'Region', 'IP Address', 'User Agent', 'Necessary', 'Analytics', 'Marketing', 'Personalization', 'Do Not Share', 'Do Not Sell', 'Download PDF'];
+
+  const headerRow = `<Row>${headers.map(h => `<Cell ss:StyleID="header"><Data ss:Type="String">${x(h)}</Data></Cell>`).join('')}</Row>`;
+
+  const dataRows = await Promise.all(entries.map(async (entry, i) => {
+    const p = entry.preferences || {};
+    const meta = entry.metadata || {};
+    const isCcpa = entry.bannerType === 'CCPA' || entry.lawType === 'CCPA';
+    const hasMarketing = p.marketing || p.Marketing;
+    const hasAnalytics = p.analytics || p.Analytics;
+    const hasPersonalization = p.personalization || p.Personalization;
+    const isAccepted = entry.action === 'acceptance' || !!(hasAnalytics || hasMarketing || hasPersonalization);
+    const doNotShare = p.doNotShare ?? p.donotshare;
+    const doNotSell = p.doNotSell ?? p.donotselldata;
+    const visitorId = entry._visitorId || entry.visitorId || '';
+    const token = await createDownloadToken(env.JWT_SECRET, siteId, visitorId);
+    const pdfUrl = `${workerOrigin}/api/legacy-consent-pdf?siteId=${encodeURIComponent(siteId)}&visitorId=${encodeURIComponent(visitorId)}&token=${encodeURIComponent(token)}`;
+
+    return `<Row>
+      ${cell(i + 1)}
+      ${cell(visitorId)}
+      ${cell(entry.timestamp || '')}
+      ${cell(isAccepted ? 'Accepted' : 'Rejected')}
+      ${cell(entry.bannerType || entry.lawType || 'GDPR')}
+      ${cell(entry.country || meta.country || '')}
+      ${cell(entry.state || meta.state || '')}
+      ${cell(meta.ip || p.ip || '')}
+      ${cell(meta.userAgent || '')}
+      ${cell(isCcpa ? '' : (Boolean(p.necessary ?? true) ? 'Yes' : 'No'))}
+      ${cell(isCcpa ? '' : (hasAnalytics ? 'Yes' : 'No'))}
+      ${cell(isCcpa ? '' : (hasMarketing ? 'Yes' : 'No'))}
+      ${cell(isCcpa ? '' : (hasPersonalization ? 'Yes' : 'No'))}
+      ${cell(isCcpa ? (doNotShare !== undefined ? (doNotShare ? 'Yes' : 'No') : '') : '')}
+      ${cell(isCcpa ? (doNotSell !== undefined ? (doNotSell ? 'Yes' : 'No') : '') : '')}
+      ${linkCell(pdfUrl, 'Download PDF')}
+    </Row>`;
+  }));
+
   const date = new Date().toISOString().split('T')[0];
-  const filename = `legacy_consent_${siteId}_${date}.csv`;
+  const suffix = (year && month) ? `_${year}-${month.padStart(2, '0')}` : `_${date}`;
+  const filename = `legacy_consent_${siteId}${suffix}.xls`;
 
-  return new Response(csv, {
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+  xmlns:o="urn:schemas-microsoft-com:office:office"
+  xmlns:x="urn:schemas-microsoft-com:office:excel"
+  xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+  <Styles>
+    <Style ss:ID="header">
+      <Font ss:Bold="1"/>
+      <Interior ss:Color="#E6F1FD" ss:Pattern="Solid"/>
+    </Style>
+    <Style ss:ID="link">
+      <Font ss:Color="#1D4ED8" ss:Underline="Single"/>
+    </Style>
+  </Styles>
+  <Worksheet ss:Name="Consent Logs">
+    <Table>
+      ${headerRow}
+      ${dataRows.join('\n')}
+    </Table>
+  </Worksheet>
+</Workbook>`;
+
+  return new Response(xml, {
     status: 200,
     headers: {
-      'Content-Type': 'text/csv',
+      'Content-Type': 'application/vnd.ms-excel',
       'Content-Disposition': `attachment; filename="${filename}"`,
     },
   });

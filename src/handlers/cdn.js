@@ -2238,7 +2238,7 @@ ${inlineConfig}
       "color:#334155!important;" +
       "border:1px solid #334155!important;" +
       "font-size:13px!important;" +
-      "padding:2px 12px!important;" +
+      "padding:10px 12px!important;" +
       "font-weight:600!important;" +
     "}" +
     "#cb-initial-banner.cb-banner #cb-reject-all-btn," +
@@ -2247,7 +2247,7 @@ ${inlineConfig}
       "color:#ffffff!important;" +
       "border-color:#007aff!important;" +
       "font-size:13px!important;" +
-      "padding:2px 12px!important;" +
+      "padding:10px 12px!important;" +
       "font-weight:600!important;" +
     "}" +
     "#cb-floating-trigger{" +

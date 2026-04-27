@@ -25,6 +25,10 @@ database_id = "8b467c8c-2ff8-43b5-9338-a4e9191e6014"
 binding = "WEBFLOW_AUTHENTICATION"
 id = "aa64050ef7804e7783fe9680daae80c5"
 
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "cookies-data"
+
 [[kv_namespaces]]
 binding = "AUTH_STORE_FRAMER"
 id = "6bf69f88af4e4f7ebe19f811e8b232b9"

@@ -174,7 +174,7 @@ export async function handleAuthDashboardInit(request, env) {
     const embed = site?.embedScriptUrl ?? site?.embedscripturl;
     const scriptUrl = embed || buildEmbedScriptUrl(embedOrigin, cdnId);
     const sub = siteId ? (subscriptionMap[siteId] ?? null) : null;
-    const sitePlanId = String(sub?.planId ?? sub?.planid ?? 'free').toLowerCase();
+    const sitePlanId = String(sub?.planType ?? sub?.plantype ?? sub?.planId ?? sub?.planid ?? 'free').toLowerCase();
 
     const stats = cookieStatsMap[siteId] ?? {};
     const pageStats = pageStatsMap[siteId] ?? pageStatsMap[String(siteId)] ?? {};

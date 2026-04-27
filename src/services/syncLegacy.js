@@ -12,6 +12,56 @@ function nowUnix() {
 }
 
 // ---------------------------------------------------------------------------
+// Webflow site ID resolution via data-wf-site attribute
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetches the public HTML of a domain and extracts the Webflow site ID
+ * from the `data-wf-site` attribute on the <html> element.
+ * Returns null if the site is not a Webflow site or the fetch fails.
+ */
+async function resolveWfSiteId(domain) {
+  if (!domain) return null;
+  const url = domain.startsWith('http') ? domain : `https://${domain}`;
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const match = html.match(/data-wf-site="([^"]+)"/);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetches the public HTML of a domain and extracts the Framer site ID
+ * from the data-fid attribute on the Framer events script tag.
+ * Returns null if the site is not a Framer site or the fetch fails.
+ */
+async function resolveFramerSiteId(domain) {
+  if (!domain) return null;
+  const url = domain.startsWith('http') ? domain : `https://${domain}`;
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const match = html.match(/<script[^>]*src="https:\/\/events\.framer\.com\/script\?v=2"[^>]*data-fid="([^"]+)"/i);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // KV helpers
 // ---------------------------------------------------------------------------
 
@@ -123,6 +173,15 @@ export async function syncPurchaseToLegacy(env, {
   const legacyDb = env.LEGACY_DB || null;
   const canonicalDomain = normalizeDomain(domain);
 
+  // Resolve platform-specific site ID from the site's public HTML
+  const isFramer = (platform || '').toLowerCase() === 'framer';
+  const [wfSiteId, framerSiteId] = await Promise.all([
+    isFramer ? null : resolveWfSiteId(canonicalDomain).catch(() => null),
+    isFramer ? resolveFramerSiteId(canonicalDomain).catch(() => null) : null,
+  ]);
+  if (wfSiteId) console.log(`[syncLegacy] Detected Webflow site — domain: ${canonicalDomain}, wfSiteId: ${wfSiteId}`);
+  if (framerSiteId) console.log(`[syncLegacy] Detected Framer site — domain: ${canonicalDomain}, framerSiteId: ${framerSiteId}`);
+
   await Promise.allSettled([
     // LEGACY_DB
     (async () => {
@@ -134,7 +193,7 @@ export async function syncPurchaseToLegacy(env, {
         await upsertLegacyLicense(legacyDb, { licenseKey, customerId, subscriptionId, domain: canonicalDomain, platform, status: 'active' });
       }
     })(),
-    // KV
+    // KV — include platform site ID if resolved
     writeKvSiteEntry(env, platform, canonicalDomain, {
       email,
       subscriptionId,
@@ -143,6 +202,8 @@ export async function syncPurchaseToLegacy(env, {
       active: true,
       lastUpdated: new Date().toISOString(),
       cancelAtPeriodEnd: cancelAtPeriodEnd ? true : false,
+      ...(wfSiteId ? { wfSiteId } : {}),
+      ...(framerSiteId ? { framerSiteId } : {}),
     }),
   ]);
 }

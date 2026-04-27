@@ -12,6 +12,8 @@ export async function handleConsentLogs(request, env) {
   const siteId = url.searchParams.get('siteId');
   const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '100', 10), 1), 500);
   const offset = Math.max(parseInt(url.searchParams.get('offset') || '0', 10), 0);
+  const year = url.searchParams.get('year');   // e.g. "2025"
+  const month = url.searchParams.get('month'); // e.g. "04"
 
   if (!siteId) {
     return Response.json({ success: false, error: 'siteId is required' }, { status: 400 });
@@ -20,19 +22,43 @@ export async function handleConsentLogs(request, env) {
   try {
     await ensureSchema(db);
 
-    const { results: consents } = await db
-      .prepare(
-        `SELECT id, siteId, deviceId, ipAddress, userAgent, country, region, is_eu,
-                createdAt, updatedAt, regulation, bannerType, consentMethod, status, expiresAt, consent_categories
-         FROM Consent WHERE siteId = ?1 ORDER BY createdAt DESC LIMIT ?2 OFFSET ?3`
-      )
-      .bind(siteId, limit, offset)
-      .all();
+    const hasDateFilter = year && month;
+    const paddedMonth = hasDateFilter ? month.padStart(2, '0') : '';
 
-    const totalStmt = await db
-      .prepare('SELECT COUNT(*) as total FROM Consent WHERE siteId = ?1')
-      .bind(siteId)
-      .first();
+    const { results: consents } = hasDateFilter
+      ? await db
+          .prepare(
+            `SELECT id, siteId, deviceId, ipAddress, userAgent, country, region, is_eu,
+                    createdAt, updatedAt, regulation, bannerType, consentMethod, status, expiresAt, consent_categories
+             FROM Consent WHERE siteId = ?1
+               AND strftime('%Y', createdAt) = ?4
+               AND strftime('%m', createdAt) = ?5
+             ORDER BY createdAt DESC LIMIT ?2 OFFSET ?3`
+          )
+          .bind(siteId, limit, offset, year, paddedMonth)
+          .all()
+      : await db
+          .prepare(
+            `SELECT id, siteId, deviceId, ipAddress, userAgent, country, region, is_eu,
+                    createdAt, updatedAt, regulation, bannerType, consentMethod, status, expiresAt, consent_categories
+             FROM Consent WHERE siteId = ?1 ORDER BY createdAt DESC LIMIT ?2 OFFSET ?3`
+          )
+          .bind(siteId, limit, offset)
+          .all();
+
+    const totalStmt = hasDateFilter
+      ? await db
+          .prepare(
+            `SELECT COUNT(*) as total FROM Consent WHERE siteId = ?1
+               AND strftime('%Y', createdAt) = ?2
+               AND strftime('%m', createdAt) = ?3`
+          )
+          .bind(siteId, year, paddedMonth)
+          .first()
+      : await db
+          .prepare('SELECT COUNT(*) as total FROM Consent WHERE siteId = ?1')
+          .bind(siteId)
+          .first();
 
     const total = totalStmt?.total ?? 0;
 
