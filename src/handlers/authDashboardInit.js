@@ -174,7 +174,9 @@ export async function handleAuthDashboardInit(request, env) {
     const embed = site?.embedScriptUrl ?? site?.embedscripturl;
     const scriptUrl = embed || buildEmbedScriptUrl(embedOrigin, cdnId);
     const sub = siteId ? (subscriptionMap[siteId] ?? null) : null;
-    const sitePlanId = String(sub?.planType ?? sub?.plantype ?? sub?.planId ?? sub?.planid ?? 'free').toLowerCase();
+    // planId ('basic'/'essential'/'growth') takes precedence over planType ('tier'/'single') —
+    // tier subscriptions store the tier name in planId, not planType.
+    const sitePlanId = (sub?.planId ?? sub?.planid ?? sub?.planType ?? sub?.plantype ?? null)?.toLowerCase() ?? null;
 
     const stats = cookieStatsMap[siteId] ?? {};
     const pageStats = pageStatsMap[siteId] ?? pageStatsMap[String(siteId)] ?? {};
@@ -201,6 +203,6 @@ export async function handleAuthDashboardInit(request, env) {
     user: { id: user.id, email: user.email, name: user.name },
     organizations: orgs,
     sites: sitesWithPlan,
-    effectivePlanId: effectivePlanId || 'free',
+    effectivePlanId: effectivePlanId ?? null,
   }, { status: 200 });
 }

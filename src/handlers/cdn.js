@@ -1974,7 +1974,7 @@ ${inlineConfig}
         "#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto;width:auto;min-width:80px;max-width:140px;}"
       : "") +
     ".cb-banner button{" +
-      "padding:10px 32px;" +
+      "padding:12px 32px;" +
       "border-radius:0.375rem;" +
       "cursor:pointer;" +
       "font-size:14px;" +
@@ -2024,7 +2024,7 @@ ${inlineConfig}
       "#cb-preferences-banner.cb-banner .cb-banner-body > p," +
       ".cb-gdpr-cat-desc{font-size:12px!important;}" +
       "#cb-initial-banner.cb-banner .cb-banner-footer button," +
-      "#cb-preferences-banner.cb-banner .cb-banner-footer button{font-size:12px!important;padding:8px 16px!important;}" +
+      "#cb-preferences-banner.cb-banner .cb-banner-footer button{font-size:12px!important;padding:10px 16px!important;}" +
     "}" +
     ".cb-banner button:hover:not(.cb-pref-toggle-track){" +
       "opacity:0.8;" +
