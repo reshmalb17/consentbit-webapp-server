@@ -7,7 +7,8 @@
 const DEV_ORIGINS = [
   'http://localhost:3000',
   'http://localhost:5173',
-  
+  'https://localhost:3000',
+  'https://localhost:5173',
 ];
 
 // Known production frontends (kept minimal; env.WEBAPP_PUBLIC_URL remains the primary source of truth).
