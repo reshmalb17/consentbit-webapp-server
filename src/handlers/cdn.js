@@ -32,7 +32,7 @@ async function _handleCDNScript(request, env, url) {
 
   const site = await db
     .prepare(
-      'SELECT id, organizationId, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id, pendingScan, updatedAt FROM Site WHERE cdnScriptId = ?1'
+      'SELECT id, organizationId, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id, pendingScan, updatedAt, platform FROM Site WHERE cdnScriptId = ?1'
     )
     .bind(cdnScriptId)
     .first();
@@ -44,7 +44,7 @@ async function _handleCDNScript(request, env, url) {
   if (!resolvedSite) {
     resolvedSite = await db
       .prepare(
-        'SELECT id, organizationId, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id, pendingScan, updatedAt FROM Site WHERE id = ?1'
+        'SELECT id, organizationId, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id, pendingScan, updatedAt, platform FROM Site WHERE id = ?1'
       )
       .bind(cdnScriptId)
       .first();
@@ -1410,7 +1410,12 @@ ${inlineConfig}
     }
   }
 
-  function releaseBlockedScripts() {
+  function releaseBlockedScripts(cats) {
+    if (window.__CB_WEBFLOW_MODE__) {
+      // Delegate unblocking to consent.js via consentUpdated event
+      notifyWebflowConsent(cats || { analytics: true, marketing: true, preferences: true, essential: true });
+      return;
+    }
     var list = document.querySelectorAll('script[type="javascript/blocked"][data-cb-blocked-src]');
     var released = 0;
     var stillBlocked = 0;
@@ -1566,7 +1571,15 @@ ${inlineConfig}
     }
   }
 
+  function notifyWebflowConsent(cats) {
+    if (!window.__CB_WEBFLOW_MODE__) return;
+    var detail = cats || {};
+    window.userConsent = detail;
+    try { document.dispatchEvent(new CustomEvent('consentUpdated', { detail: detail, bubbles: true })); } catch (e) {}
+  }
+
   function installConsentScriptBlocker() {
+    if (window.__CB_WEBFLOW_MODE__) return; // consent.js handles blocking for Webflow sites
     if (window.__cbCreateElementHookInstalled) return;
     window.__cbCreateElementHookInstalled = true;
     try {
@@ -1623,6 +1636,11 @@ ${inlineConfig}
   }
 
   function blockNonEssentialScripts() {
+    if (window.__CB_WEBFLOW_MODE__) {
+      // consent.js handles data-category blocking for Webflow sites
+      try { document.dispatchEvent(new CustomEvent('cbBlockScripts', { detail: {}, bubbles: true })); } catch (e) {}
+      return;
+    }
     // NOTE: This function runs at DOMContentLoaded. Scripts that were already parsed
     // and in the HTML *before* the ConsentBit <script> tag have already executed by this point —
     // setting type='javascript/blocked' on them has no effect on already-executed scripts.
@@ -1974,7 +1992,7 @@ ${inlineConfig}
         "#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto;width:auto;min-width:80px;max-width:140px;}"
       : "") +
     ".cb-banner button{" +
-      "padding:10px 32px;" +
+      "padding:12px 32px;" +
       "border-radius:0.375rem;" +
       "cursor:pointer;" +
       "font-size:14px;" +
@@ -2024,7 +2042,7 @@ ${inlineConfig}
       "#cb-preferences-banner.cb-banner .cb-banner-body > p," +
       ".cb-gdpr-cat-desc{font-size:12px!important;}" +
       "#cb-initial-banner.cb-banner .cb-banner-footer button," +
-      "#cb-preferences-banner.cb-banner .cb-banner-footer button{font-size:12px!important;padding:8px 16px!important;}" +
+      "#cb-preferences-banner.cb-banner .cb-banner-footer button{font-size:12px!important;padding:10px 16px!important;}" +
     "}" +
     ".cb-banner button:hover:not(.cb-pref-toggle-track){" +
       "opacity:0.8;" +
@@ -3055,6 +3073,7 @@ ${inlineConfig}
       sendConsentToServer(consentR, { status: 'rejected' });
       savePreferenceToggles(consentR.categories);
       updateGtagConsentFromCategories(consentR.categories, '[PrefsReject]');
+      notifyWebflowConsent(consentR.categories);
       hideAll();
     });
 
@@ -3104,8 +3123,8 @@ ${inlineConfig}
         saveConsent(consentR);
         sendConsentToServer(consentR, { status: 'rejected' });
         savePreferenceToggles(consentR.categories);
-
         updateGtagConsentFromCategories(consentR.categories, '[Reject]');
+        notifyWebflowConsent(consentR.categories);
       }
       hideAll();
     });
@@ -3122,10 +3141,7 @@ ${inlineConfig}
         };
         saveConsent(consent);
         sendConsentToServer(consent, { status: 'given' });
-
-        releaseBlockedScripts();
-        // enableDelayedFonts({ analytics: true, marketing: true });
-        // enableDelayedEmbeds({ analytics: true, marketing: true });
+        releaseBlockedScripts({ analytics: true, marketing: true, preferences: true, essential: true });
       } else {
         var consentG = {
           accepted: true,
@@ -3140,8 +3156,7 @@ ${inlineConfig}
         saveConsent(consentG);
         sendConsentToServer(consentG, { status: 'given' });
         savePreferenceToggles(consentG.categories);
-
-        releaseBlockedScripts();
+        releaseBlockedScripts(consentG.categories);
         updateGtagConsentFromCategories(consentG.categories, '[Accept]');
       }
       hideAll();
@@ -3163,9 +3178,7 @@ ${inlineConfig}
         sendConsentToServer(consentC, { status: optout ? 'rejected' : 'given' });
 
         if (!optout) {
-          releaseBlockedScripts();
-          // enableDelayedFonts({ analytics: true, marketing: true });
-          // enableDelayedEmbeds({ analytics: true, marketing: true });
+          releaseBlockedScripts({ analytics: true, marketing: true, preferences: true, essential: true });
         }
       } else {
         var elAnalytics = document.getElementById("cb-pref-analytics");
@@ -3185,8 +3198,9 @@ ${inlineConfig}
         sendConsentToServer(consentG, { status: 'partial' });
         savePreferenceToggles(consentG.categories);
 
-        releaseBlockedScripts();
+        releaseBlockedScripts(consentG.categories);
         updateGtagConsentFromCategories(consentG.categories, '[Save]');
+        notifyWebflowConsent(consentG.categories);
       }
       hideAll();
     });
@@ -4532,16 +4546,96 @@ function ensureConsentUiShell() {
   }
 })();`
 
+  // loaderWebflow: standard banner behaviour with script blocking delegated to consent.js.
+  // Sets window.__CB_WEBFLOW_MODE__ = true before the main IIFE so that
+  // installConsentScriptBlocker / blockNonEssentialScripts become no-ops and
+  // releaseBlockedScripts / notifyWebflowConsent dispatch 'consentUpdated' events instead.
+  // consent.js is served from the same CDN origin as a static asset (public/consent.js).
+  const consentJsSrc = (env.CDN_BASE_URL || apiBase) + '/consent.js';
+  const loaderWebflow = `
+(function(){
+  window.__CB_WEBFLOW_MODE__ = true;
+
+  // Load consent.js (UP_Script) from the CDN — handles data-category script blocking,
+  // unblocking, and gtag consent mode for Webflow/Framer sites.
+  var CONSENT_JS_SRC = ${JSON.stringify(consentJsSrc)};
+  if (!document.querySelector('script[src="' + CONSENT_JS_SRC + '"]')) {
+    var _s = document.createElement('script');
+    _s.src = CONSENT_JS_SRC;
+    _s.async = true;
+    _s.setAttribute('data-display-name', 'ConsentBitScript2025');
+    document.head.appendChild(_s);
+  }
+})();
+` + loader;
+
+  // loaderIabWebflow: IAB/TCF banner with script blocking delegated to consent.js.
+  // Built by patching loaderIab's 3 blocking functions + injecting notifyWebflowConsent.
+  // loaderIab itself is never modified.
+  const loaderIabWebflow = (() => {
+    const webflowSetup = `
+(function(){
+  window.__CB_WEBFLOW_MODE__ = true;
+  var CONSENT_JS_SRC = ${JSON.stringify(consentJsSrc)};
+  if (!document.querySelector('script[src="' + CONSENT_JS_SRC + '"]')) {
+    var _s = document.createElement('script');
+    _s.src = CONSENT_JS_SRC;
+    _s.async = true;
+    _s.setAttribute('data-display-name', 'ConsentBitScript2025');
+    document.head.appendChild(_s);
+  }
+})();
+`;
+    const notifyFn = `
+  function notifyWebflowConsent(cats) {
+    if (!window.__CB_WEBFLOW_MODE__) return;
+    var detail = cats || {};
+    window.userConsent = detail;
+    try { document.dispatchEvent(new CustomEvent('consentUpdated', { detail: detail, bubbles: true })); } catch(e) {}
+  }
+`;
+    const installGuard =
+      `function installConsentScriptBlocker() {\n    if (window.__CB_WEBFLOW_MODE__) return;`;
+    const blockGuard =
+      `function blockNonEssentialScripts() {\n    if (window.__CB_WEBFLOW_MODE__) { try { document.dispatchEvent(new CustomEvent('cbBlockScripts', { bubbles: true })); } catch(e) {} return; }`;
+    const releaseGuard =
+      `function releaseBlockedScripts() {\n    if (window.__CB_WEBFLOW_MODE__) { notifyWebflowConsent((window.__cbConsentState && (window.__cbConsentState.categories || window.__cbConsentState)) || { analytics: true, marketing: true, preferences: true, essential: true }); return; }`;
+
+    // Use regex so newlines match regardless of \n vs real newline in the template
+    let patched = loaderIab
+      .replace(
+        /function installConsentScriptBlocker\(\) \{\s*if \(window\.__cbCreateElementHookInstalled\) return;/,
+        installGuard + '\n    if (window.__cbCreateElementHookInstalled) return;'
+      )
+      .replace(
+        /function blockNonEssentialScripts\(\) \{\s*var scripts = Array\.from/,
+        blockGuard + '\n    var scripts = Array.from'
+      )
+      .replace(
+        /function releaseBlockedScripts\(\) \{\s*var list = Array\.from/,
+        releaseGuard + '\n    var list = Array.from'
+      )
+      // inject notifyWebflowConsent before installConsentScriptBlocker (after first replace)
+      .replace(
+        /function installConsentScriptBlocker\(\) \{\s*if \(window\.__CB_WEBFLOW_MODE__\) return;/,
+        notifyFn + '  function installConsentScriptBlocker() {\n    if (window.__CB_WEBFLOW_MODE__) return;'
+      );
+    return webflowSetup + patched;
+  })();
+
   // IAB/TCF banner requires a paid tier that includes IAB (Essential or Growth).
   // If the site was downgraded to a lower plan, fall back to the standard GDPR banner
   // so the IAB UI is never served.
   const iabAllowed = effectivePlanId === 'growth' || effectivePlanId === 'essential';
   const wantsIab = String(resolvedSite.banner_type || '').toLowerCase() === 'iab';
-  console.log('[ConsentBit] Banner type decision:', { wantsIab, iabAllowed, effectivePlanId, siteBannerType: resolvedSite.banner_type });
-  const serveKind = (wantsIab ) ? 'iab' : 'standard';
+  const isWebflow = String(resolvedSite.platform || '').toLowerCase() === 'webflow' ||
+                    String(resolvedSite.platform || '').toLowerCase() === 'framer';
+  console.log('[ConsentBit] Banner type decision:', { wantsIab, iabAllowed, isWebflow, effectivePlanId, siteBannerType: resolvedSite.banner_type, platform: resolvedSite.platform });
+  const serveKind = (wantsIab && isWebflow) ? 'iabwebflow' : wantsIab ? 'iab' : isWebflow ? 'webflow' : 'standard';
   const why = {
     wantsIab,
     iabAllowed,
+    isWebflow,
     plan: effectivePlanId,
     orgId: orgIdForDebug,
     subscriptionStatus: subStatusForDebug,
@@ -4549,11 +4643,12 @@ function ensureConsentUiShell() {
     cdnScriptId: resolvedSite.cdnScriptId,
     bannerType: resolvedSite.banner_type,
     regionMode: resolvedSite.region_mode,
+    platform: resolvedSite.platform,
     bannerEnabled,
   };
   const scriptToServe =
     `// ConsentBit loader=${serveKind}\n` +
-    ((serveKind === 'iab') ? loaderIab : loader);
+    (serveKind === 'iab' ? loaderIab : serveKind === 'iabwebflow' ? loaderIabWebflow : serveKind === 'webflow' ? loaderWebflow : loader);
 
   return new Response(scriptToServe, {
     status: 200,
@@ -4566,6 +4661,7 @@ function ensureConsentUiShell() {
       'X-ConsentBit-Plan': String(effectivePlanId || 'free'),
       'X-ConsentBit-IabAllowed': iabAllowed ? '1' : '0',
       'X-ConsentBit-OrgId': orgIdForDebug ? String(orgIdForDebug) : 'none',
+      'X-ConsentBit-Webflow': isWebflow ? '1' : '0',
     },
   });
 }

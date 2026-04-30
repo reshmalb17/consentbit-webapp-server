@@ -75,7 +75,7 @@ export async function handleCancelSubscription(request, env) {
     sub = await getSubscriptionById(db, subscriptionId);
   }
   if (!sub) {
-    return Response.json({ success: false, error: 'Subscription not found. Provide stripeSubscriptionId or subscriptionId.' }, { status: 400 });
+    return Response.json({ success: false, error: 'No active subscription found for this account.' }, { status: 400 });
   }
 
   const subStripeId = sub.stripeSubscriptionId ?? sub.stripesubscriptionid ?? null;
