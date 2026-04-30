@@ -34,6 +34,7 @@ import { handleAdminBackfillWfSiteId } from './handlers/adminBackfillWfSiteId.js
 import { handleAdminBackfillFramerSiteId } from './handlers/adminBackfillFramerSiteId.js';
 import { handleAdminClearWebappData } from './handlers/adminClearWebappData.js';
 import { handleAdminMigrateFromKv } from './handlers/adminMigrateFromKv.js';
+import { handleAdminMigrateSingleSite } from './handlers/adminMigrateSingleSite.js';
 import { handleCheckLegacyScript } from './handlers/checkLegacyScript.js';
 import { handleLegacyConsentLogs } from './handlers/legacyConsentLogs.js';
 import { handleLegacyConsentCsv } from './handlers/legacyConsentCsv.js';
@@ -133,6 +134,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/admin/backfill-framer-site-id',
   '/api/admin/clear-webapp-data',
   '/api/admin/migrate-from-kv',
+  '/api/admin/migrate-single-site',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -272,6 +274,9 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     case '/api/admin/migrate-from-kv':
       response = await handleAdminMigrateFromKv(request, env); break;
+
+    case '/api/admin/migrate-single-site':
+      response = await handleAdminMigrateSingleSite(request, env); break;
 
     case '/api/check-legacy-script':
       response = await handleCheckLegacyScript(request, env); break;

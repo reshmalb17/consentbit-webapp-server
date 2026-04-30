@@ -74,12 +74,30 @@ function kvForPlatform(env, platform) {
 async function writeKvSiteEntry(env, platform, domain, data) {
   const kv = kvForPlatform(env, platform);
   if (!kv || !domain) return;
-  const key = `https://${domain}`;
+  // Try both key formats — entries may be stored with or without https:// prefix
+  const keyWithProtocol = `https://${domain}`;
+  const keyBare = domain;
   try {
-    const existing = await kv.get(key, { type: 'json' }) || {};
+    // Prefer bare key if it exists, fall back to protocol-prefixed
+    let existing = null;
+    let key = keyBare;
+    const rawBare = await kv.get(keyBare);
+    if (rawBare) {
+      try { existing = JSON.parse(rawBare); } catch { existing = {}; }
+      key = keyBare;
+    } else {
+      const rawProtocol = await kv.get(keyWithProtocol);
+      if (rawProtocol) {
+        try { existing = JSON.parse(rawProtocol); } catch { existing = {}; }
+        key = keyWithProtocol;
+      } else {
+        existing = {};
+        key = keyBare;
+      }
+    }
     await kv.put(key, JSON.stringify({ ...existing, ...data }));
   } catch (err) {
-    console.warn(`[syncLegacy] KV write failed for "${key}":`, err?.message);
+    console.warn(`[syncLegacy] KV write failed for domain="${domain}":`, err?.message);
   }
 }
 
