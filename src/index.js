@@ -57,6 +57,7 @@ import { handleOnboardingFirstSetup } from './handlers/onboardingFirstSetup.js';
 import { handleCheckDomainAvailability } from './handlers/checkDomainAvailability.js';
 import { handleFeedback } from './handlers/feedback.js';
 import { handleCustomCheckout } from './handlers/customeCheeckout.js';
+import { handleSyncPlugin, handleSyncPluginCustomization } from './handlers/SyncPlugin.js';
 
 import { handleOptions, withCors, withPublicCors } from './utils/cors.js';
 import {
@@ -126,6 +127,8 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/auth/dashboard-init',
   '/api/checkout-success-redirect',
   '/api/custom-checkout',
+  '/api/sync-plugin',
+  '/api/sync-plugin-customization',
   '/api/admin/seed-legacy-users',
   '/api/admin/seed-banner-configs',
   '/api/admin/check-missed-banners',
@@ -241,6 +244,12 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     // — Custom checkout (Stripe.js direct flow)
     case '/api/custom-checkout':
       response = await handleCustomCheckout(request, env); break;
+
+    // — Plugin sync (publish from platform plugin)
+    case '/api/sync-plugin':
+      response = await handleSyncPlugin(request, env); break;
+    case '/api/sync-plugin-customization':
+      response = await handleSyncPluginCustomization(request, env); break;
 
     // — Feedback
     case '/api/feedback':
