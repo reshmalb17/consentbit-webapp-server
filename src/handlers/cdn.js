@@ -207,11 +207,14 @@ async function _handleCDNScript(request, env, url) {
     if (_radiusPx > 30) { _rawRadius = '1.875rem'; }
     const bannerRadius = _rawRadius;
     const buttonRadius = customization.buttonBorderRadius || '0.375rem';
-    /** Accept/Reject share primary colors; Preferences/Save share customise colors (dashboard parity). */
     var acceptBg = customization.acceptButtonBg || '#007aff';
     var acceptTx = customization.acceptButtonText || '#ffffff';
+    var rejectBg = customization.rejectButtonBg || acceptBg;
+    var rejectTx = customization.rejectButtonText || acceptTx;
     var custBg = customization.customiseButtonBg || '#ffffff';
     var custTx = customization.customiseButtonText || '#334155';
+    var saveBg = customization.saveButtonBg || custBg;
+    var saveTx = customization.saveButtonText || custTx;
 
     /** Typography from stored translations (dashboard Type tab). */
     try {
@@ -387,9 +390,9 @@ async function _handleCDNScript(request, env, url) {
         "border-color:" + acceptBg + ";" +
       "}" +
       ".cb-banner button#cb-reject-all-btn{" +
-        "background-color:" + acceptBg + ";" +
-        "color:" + acceptTx + ";" +
-        "border-color:" + acceptBg + ";" +
+        "background-color:" + rejectBg + ";" +
+        "color:" + rejectTx + ";" +
+        "border-color:" + rejectBg + ";" +
       "}" +
       ".cb-banner button#cb-preferences-btn," +
       ".cb-banner button#cb-ccpa-donotsell-link{" +
@@ -398,9 +401,9 @@ async function _handleCDNScript(request, env, url) {
         "border-color:#e2e8f0;" +
       "}" +
       ".cb-banner button#cb-prefs-reject-btn{" +
-        "background-color:" + acceptBg + ";" +
-        "color:" + acceptTx + ";" +
-        "border-color:" + acceptBg + ";" +
+        "background-color:" + rejectBg + ";" +
+        "color:" + rejectTx + ";" +
+        "border-color:" + rejectBg + ";" +
       "}" +
       "#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{" +
         "background-color:" + custBg + ";" +
@@ -408,13 +411,13 @@ async function _handleCDNScript(request, env, url) {
         "border-color:#e2e8f0;" +
       "}" +
       "#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-save-prefs-btn{" +
-        "background-color:" + custBg + ";" +
-        "color:" + custTx + ";" +
+        "background-color:" + saveBg + ";" +
+        "color:" + saveTx + ";" +
         "border-color:#e2e8f0;" +
       "}" +
       "#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{" +
-        "background-color:" + custBg + ";" +
-        "color:" + custTx + ";" +
+        "background-color:" + saveBg + ";" +
+        "color:" + saveTx + ";" +
         "border-color:#e2e8f0;" +
       "}" +
       /* Initial banner actions — right-aligned; nowrap lets width grow with button row (wrap on small screens via base @media) */
@@ -441,7 +444,14 @@ async function _handleCDNScript(request, env, url) {
         "padding:10px 32px!important;" +
         "font-weight:600!important;" +
       "}" +
-      "#cb-initial-banner.cb-banner #cb-reject-all-btn," +
+      "#cb-initial-banner.cb-banner #cb-reject-all-btn{" +
+        "background:" + rejectBg + "!important;" +
+        "color:" + rejectTx + "!important;" +
+        "border-color:" + rejectBg + "!important;" +
+        "font-size:13px!important;" +
+        "padding:10px 32px!important;" +
+        "font-weight:600!important;" +
+      "}" +
       "#cb-initial-banner.cb-banner #cb-accept-all-btn{" +
         "background:" + acceptBg + "!important;" +
         "color:" + acceptTx + "!important;" +
@@ -563,8 +573,20 @@ async function _handleCDNScript(request, env, url) {
           bannerEntranceAnimation: (enTrans && enTrans.bannerEntranceAnimation) ? String(enTrans.bannerEntranceAnimation) : 'fade-in',
           bannerFontWeight: (enTrans && enTrans.bannerFontWeight) ? String(enTrans.bannerFontWeight) : '600',
           bannerBorderRadius: customization.bannerBorderRadius || '0.375rem',
-           textAlign : enTrans.bannerTextAlign||'left',
-           
+          textAlign: enTrans.bannerTextAlign || 'left',
+          showBannerLogo: customization.showBannerLogo != null ? customization.showBannerLogo !== 0 && customization.showBannerLogo !== false : true,
+          bannerLogoPosition: customization.bannerLogoPosition || 'left',
+          rejectButtonBg: customization.rejectButtonBg || '#ffffff',
+          rejectButtonText: customization.rejectButtonText || '#334155',
+          saveButtonBg: customization.saveButtonBg || '#ffffff',
+          saveButtonText: customization.saveButtonText || '#334155',
+          buttonBorderRadius: customization.buttonBorderRadius || '0.375rem',
+          font: (enTrans && enTrans.bannerFontFamily) ? String(enTrans.bannerFontFamily) : (customization.font || 'Manrope'),
+          fontWeight: (enTrans && enTrans.bannerFontWeight) ? String(enTrans.bannerFontWeight) : (customization.fontWeight || 'Regular'),
+          fontSize: (enTrans && enTrans.bannerFontSize) ? Number(enTrans.bannerFontSize) : (customization.fontSize || 16),
+          textAlignment: (enTrans && enTrans.bannerTextAlign) ? String(enTrans.bannerTextAlign) : (customization.textAlignment || 'left'),
+          bannerBg2: (enTrans && enTrans.bannerBg2) ? String(enTrans.bannerBg2) : (customization.bannerBg2 || '#798EFF'),
+          stopScroll: customization.stopScroll === 1 || customization.stopScroll === true,
         }
       : null,
     floatingLogoUrl: resolveFloatingLogoUrl(),
@@ -2793,6 +2815,9 @@ ${inlineConfig}
 
   function isFloatingButtonEnabled() {
     try {
+      // showBannerLogo from customization takes priority
+      if (CUSTOMIZATION && CUSTOMIZATION.showBannerLogo === false) return false;
+      if (CUSTOMIZATION && (CUSTOMIZATION.showBannerLogo === 0)) return false;
       var lang = getBannerLanguage();
       var row = TRANSLATIONS[lang] || TRANSLATIONS['en'] || {};
       var v = row['floatingButtonEnabled'];
@@ -2807,6 +2832,10 @@ ${inlineConfig}
 
   function getFloatingButtonPosition() {
     try {
+      // bannerLogoPosition from customization takes priority
+      if (CUSTOMIZATION && CUSTOMIZATION.bannerLogoPosition) {
+        return CUSTOMIZATION.bannerLogoPosition === 'right' ? 'right' : 'left';
+      }
       var lang = getBannerLanguage();
       var row = TRANSLATIONS[lang] || TRANSLATIONS['en'] || {};
       return row['floatingButtonPosition'] === 'right' ? 'right' : 'left';
@@ -3421,21 +3450,31 @@ ${inlineConfig}
   var PRIVACY_POLICY_URL = CUSTOMIZATION.privacyPolicyUrl || '';
 
   const styleConfig = {
-    bannerBg:          CUSTOMIZATION.backgroundColor     || "#FFFFFF",
-    textColor:         CUSTOMIZATION.textColor           || "#334155",
-    headingColor:      CUSTOMIZATION.headingColor        || "#0f172a",
-    buttonColor:       CUSTOMIZATION.customiseButtonBg   || "#ffffff",
-    buttonTextColor:   CUSTOMIZATION.customiseButtonText || "#334155",
-    SecButtonColor:    CUSTOMIZATION.acceptButtonBg      || "#007AFF",
-    SecButtonTextColor:CUSTOMIZATION.acceptButtonText    || "#ffffff",
-    textAlign:         CUSTOMIZATION.textAlign     || "left",
-    fontWeight:        CUSTOMIZATION.bannerFontWeight    || "400",
-    borderRadius:     CUSTOMIZATION.bannerBorderRadius != null
-  ? parseFloat(CUSTOMIZATION.bannerBorderRadius) *
-    (String(CUSTOMIZATION.bannerBorderRadius).includes("rem") ? 16 : 1): 12,
-    bannerType:        CUSTOMIZATION.bannerLayoutVisual  || "box",
-    boxAlignment:      CUSTOMIZATION.position            || "bottom-left",
-    animation:         (CUSTOMIZATION && CUSTOMIZATION.bannerEntranceAnimation) || "fade-in",
+    bannerBg:            CUSTOMIZATION.backgroundColor      || "#FFFFFF",
+    bannerBg2:           CUSTOMIZATION.bannerBg2            || "#798EFF",
+    textColor:           CUSTOMIZATION.textColor            || "#334155",
+    headingColor:        CUSTOMIZATION.headingColor         || "#0f172a",
+    buttonColor:         CUSTOMIZATION.acceptButtonBg       || "#007AFF",
+    buttonTextColor:     CUSTOMIZATION.acceptButtonText     || "#ffffff",
+    rejectButtonBg:      CUSTOMIZATION.rejectButtonBg       || "#ffffff",
+    rejectButtonText:    CUSTOMIZATION.rejectButtonText     || "#334155",
+    SecButtonColor:      CUSTOMIZATION.customiseButtonBg    || "#ffffff",
+    SecButtonTextColor:  CUSTOMIZATION.customiseButtonText  || "#334155",
+    saveButtonBg:        CUSTOMIZATION.saveButtonBg         || CUSTOMIZATION.customiseButtonBg || "#ffffff",
+    saveButtonText:      CUSTOMIZATION.saveButtonText       || CUSTOMIZATION.customiseButtonText || "#334155",
+    textAlign:           CUSTOMIZATION.textAlign            || CUSTOMIZATION.textAlignment || "left",
+    fontFamily:          CUSTOMIZATION.font                 || "Manrope",
+    fontWeight:          CUSTOMIZATION.bannerFontWeight     || CUSTOMIZATION.fontWeight || "400",
+    fontSize:            CUSTOMIZATION.fontSize             || 16,
+    borderRadius:        CUSTOMIZATION.bannerBorderRadius != null
+      ? parseFloat(CUSTOMIZATION.bannerBorderRadius) *
+        (String(CUSTOMIZATION.bannerBorderRadius).includes("rem") ? 16 : 1) : 12,
+    buttonBorderRadius:  CUSTOMIZATION.buttonBorderRadius   || "0.375rem",
+    bannerType:          CUSTOMIZATION.bannerLayoutVisual   || "box",
+    boxAlignment:        CUSTOMIZATION.position             || "bottom-left",
+    animation:           CUSTOMIZATION.bannerEntranceAnimation || "fade-in",
+    showBannerLogo:      CUSTOMIZATION.showBannerLogo !== false && CUSTOMIZATION.showBannerLogo !== 0,
+    bannerLogoPosition:  CUSTOMIZATION.bannerLogoPosition   || "left",
   };
 
   // ─── Banner Animation ────────────────────────────────────────────────────────
@@ -3515,8 +3554,8 @@ function injectStyles() {
 .consentBit-notice-btn-wrapper{display:flex;gap:8px;padding-top:16px;border-top:1px solid #f0f0f0;justify-content:\${s.textAlign === 'center' ? 'center' : s.textAlign === 'right' ? 'flex-end' : 'flex-start'}}
 .consentBit-btn{padding:11px 20px;border-radius:\${brSm};font-size:14px;font-weight:\${s.fontWeight};cursor:pointer;transition:opacity .2s ease;border:2px solid transparent;text-align:center;min-height:44px;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap}
 .consentBit-btn:hover,.cb-btn:hover{opacity:.85}
-.consentBit-btn-customize , .cb-btn-accept{color:\${s.buttonTextColor};background:\${s.buttonColor};border-color:\${s.buttonTextColor}}
-.consentBit-btn-reject,.consentBit-btn-accept,.cb-btn-reject, .cb-btn-preferences{color:\${s.SecButtonTextColor};background:\${s.SecButtonColor};border-color:\${s.SecButtonColor}}
+.consentBit-btn-reject,.consentBit-btn-accept,.cb-btn-reject,.cb-btn-accept{color:\${s.buttonTextColor};background:\${s.buttonColor};border-color:\${s.buttonColor}}
+.consentBit-btn-customize,.cb-btn-preferences{color:\${s.SecButtonTextColor};background:\${s.SecButtonColor};border-color:\${s.SecButtonColor}}
 .cb-modal{position:fixed;top:0;left:0;width:100%;height:100%;background-color:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000000;padding:20px;box-sizing:border-box}
 .cb-modal.cb-modal-hidden{display:none!important}
 .cb-preference-center{background-color:\${s.bannerBg};border:1px solid #f4f4f4;border-radius:\${br};max-width:720px;width:100%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 4px 20px rgba(0,0,0,.15)}
@@ -3587,7 +3626,7 @@ function injectStyles() {
 .cb-footer-shadow{display:block;height:20px;margin-top:-20px;background:linear-gradient(180deg,rgba(255,255,255,0) 0%,\${s.bannerBg} 100%)}
 .cb-prefrence-btn-wrapper{padding:14px 22px;display:flex;gap:10px;justify-content:\${s.textAlign === 'center' ? 'center' : s.textAlign === 'right' ? 'flex-start' : 'flex-end'};flex-wrap:wrap}
 .cb-btn{padding:9px 20px;border-radius:\${brSm};font-size:13px;font-weight:\${s.fontWeight};cursor:pointer;transition:opacity .2s;border:2px solid;white-space:nowrap}
-.cb-btn-reject,.cb-btn-preferences{border:none};border-color:\${s.buttonTextColor}}
+.cb-btn-reject,.cb-btn-accept{border:none}
 @media(max-width:768px){.consentBit-type-box-bottom-left,.consentBit-type-box-bottom-right{left:10px;right:10px;max-width:calc(100% - 20px)}.consentBit-type-box-bottom-left,.consentBit-type-box-bottom-right{bottom:10px}.consentBit-consent-bar{padding:18px}.consentBit-title{font-size:16px}.consentBit-notice-btn-wrapper,.cb-prefrence-btn-wrapper{flex-direction:column}.consentBit-btn,.cb-btn{width:100%}.consentBit-type-banner .consentBit-notice,.consentBit-type-banner .consentBit-notice-group{flex-direction:column}.cb-iab-navbar{flex-direction:column}.cb-switch-wrapper{flex-direction:column;align-items:flex-start;gap:6px}.cb-switch-separator{border-right:none;padding-right:0;padding-bottom:6px;border-bottom:1px solid #ddd}}
 \`;
 

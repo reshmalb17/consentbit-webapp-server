@@ -828,7 +828,8 @@ window.gtag('consent', 'default', {
   
     function isTokenExpired(token) {
       if (!token) return true;
-      const [payloadBase64] = token.split('.');
+      const parts = token.split('.');
+      const payloadBase64 = parts[1]; // index 1 = payload (index 0 = header)
       if (!payloadBase64) return true;
       try {
         const payload = JSON.parse(atob(payloadBase64));
@@ -967,6 +968,21 @@ window.gtag('consent', 'default', {
   
    async function fetchCookieExpirationDays() {
   try {
+    // For webapp-migrated sites: read expires from data-config on the script tag (no API call needed)
+    const scriptEl = document.querySelector('script[data-config]');
+    if (scriptEl) {
+      try {
+        const raw = scriptEl.getAttribute('data-config');
+        const decoded = raw
+          .replace(/&quot;/g, '"').replace(/&amp;/g, '&')
+          .replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+        const cfg = JSON.parse(decoded);
+        if (cfg && cfg.settings && cfg.settings.expires != null) {
+          return parseInt(cfg.settings.expires, 10) || 180;
+        }
+      } catch {}
+    }
+    // Legacy non-migrated sites: fall back to API
     const siteName = window.location.hostname.replace(/^www\./, '').split('.')[0];
     const apiUrl = `https://app.consentbit.com/api/app-data?siteName=${encodeURIComponent(siteName)}`;
     const response = await fetch(apiUrl, {
@@ -1659,8 +1675,8 @@ async function showAppropriateBanner() {
         const visitorId = localStorage.getItem("_cb_vid_");
         const policyVersion = "1.2";
         const timestamp = new Date().toISOString();
-        const sessionToken = localStorage.getItem("_cb_vst_");
-  
+        const sessionToken = await getVisitorSessionToken();
+
         if (!sessionToken) {
           return;
         }
