@@ -27,7 +27,7 @@ function scriptFoundInHead(headHtml, { legacySource, cdnScriptId, siteId }) {
 
   if (legacySource === 'webflow') {
     if (!cdnScriptId) return false;
-    // Match the CDN runtime URL
+    // Only the legacy CDN runtime URL counts as verified for legacy sites
     const pattern = `/api/v2/cdn/runtime/${cdnScriptId.toLowerCase()}.js`;
     return lower.includes(pattern);
   }
@@ -92,6 +92,11 @@ export async function handleCheckLegacyScript(request, env) {
 
   // Also check full page (for framer where script may be anywhere)
   const inBody = !inHead && scriptFoundInHead(html, { legacySource, cdnScriptId, siteId });
+
+  // Extract all script src values from head for debugging
+  const scriptSrcs = [...headHtml.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map(m => m[1]);
+  console.log('[checkLegacyScript] domain=%s legacySource=%s cdnScriptId=%s inHead=%s inBody=%s scriptSrcs=%s',
+    domain, legacySource, cdnScriptId, inHead, inBody, JSON.stringify(scriptSrcs));
 
   return Response.json({
     success: true,

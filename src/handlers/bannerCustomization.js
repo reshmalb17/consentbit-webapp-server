@@ -74,8 +74,28 @@ export async function handleBannerCustomization(request, env) {
         console.log('[BannerCustomization] Existing KV key=%s found=%s', kvKey, existing ? 'YES' : 'NO (first write)');
         const prevAppData = existing?.appData ?? {};
 
+        // Parse translations to extract content fields and toggle states
+        let enTrans = {};
+        try {
+          const rawTrans = customization.translations;
+          const parsed = typeof rawTrans === 'string' ? JSON.parse(rawTrans) : rawTrans;
+          enTrans = parsed?.en ?? {};
+        } catch (_) {}
+
+        // Convert rem/px border radius string to integer pixels for the Designer App
+        const parseBorderRadius = (val) => {
+          if (val == null) return null;
+          const s = String(val).trim();
+          const n = parseFloat(s);
+          if (isNaN(n)) return 0;
+          // rem suffix, OR small decimal (< 10 and not a whole number) stored with any suffix — treat as rem
+          if (s.endsWith('rem') || (n < 10 && n % 1 !== 0)) return Math.round(n * 16);
+          return Math.round(n) || 0;
+        };
+
         const appData = {
           ...prevAppData,
+          // Colors
           color: customization.backgroundColor ?? prevAppData.color,
           bgColor: customization.backgroundColor ?? prevAppData.bgColor,
           btnColor: customization.acceptButtonBg ?? prevAppData.btnColor,
@@ -88,8 +108,10 @@ export async function handleBannerCustomization(request, env) {
           customiseButtonText: customization.customiseButtonText ?? prevAppData.customiseButtonText,
           saveButtonBg: customization.saveButtonBg ?? prevAppData.saveButtonBg,
           saveButtonText: customization.saveButtonText ?? prevAppData.saveButtonText,
-          borderRadius: customization.bannerBorderRadius != null ? parseFloat(customization.bannerBorderRadius) : prevAppData.borderRadius,
-          buttonRadius: customization.buttonBorderRadius != null ? parseFloat(customization.buttonBorderRadius) : prevAppData.buttonRadius,
+          // Radii — converted to px integers
+          borderRadius: customization.bannerBorderRadius != null ? parseBorderRadius(customization.bannerBorderRadius) : prevAppData.borderRadius,
+          buttonRadius: customization.buttonBorderRadius != null ? parseBorderRadius(customization.buttonBorderRadius) : prevAppData.buttonRadius,
+          // Layout & settings
           selected: customization.position?.includes('right') ? 'right'
             : customization.position?.includes('center') ? 'center'
             : prevAppData.selected,
@@ -98,6 +120,19 @@ export async function handleBannerCustomization(request, env) {
           language: customization.language ?? prevAppData.language,
           privacyUrl: customization.privacyPolicyUrl ?? prevAppData.privacyUrl,
           hideLogo: customization.showBannerLogo != null ? !customization.showBannerLogo : prevAppData.hideLogo,
+          // Toggle states from translations.en
+          closebutton: enTrans.closeButtonEnabled != null ? (enTrans.closeButtonEnabled === '1' || enTrans.closeButtonEnabled === true) : (prevAppData.closebutton ?? false),
+          // Webapp-edited content fields (English only — always overwrite from translations.en)
+          webappContent: {
+            title: enTrans.title ?? prevAppData.webappContent?.title ?? '',
+            description: enTrans.description ?? prevAppData.webappContent?.description ?? '',
+            acceptAll: enTrans.acceptAll ?? prevAppData.webappContent?.acceptAll ?? 'Accept',
+            rejectAll: enTrans.rejectAll ?? prevAppData.webappContent?.rejectAll ?? 'Reject',
+            customise: enTrans.customise ?? prevAppData.webappContent?.customise ?? 'Preference',
+            saveMyPreferences: enTrans.saveMyPreferences ?? prevAppData.webappContent?.saveMyPreferences ?? 'Save my preferences',
+          },
+          // Flag: content was edited from webapp
+          contentEditedFromWebapp: customization.contentEditedFromWebapp === true ? true : (prevAppData.contentEditedFromWebapp ?? false),
           isWebappMigrated: true,
         };
 
