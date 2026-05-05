@@ -57,7 +57,7 @@ import { handleOnboardingFirstSetup } from './handlers/onboardingFirstSetup.js';
 import { handleCheckDomainAvailability } from './handlers/checkDomainAvailability.js';
 import { handleFeedback } from './handlers/feedback.js';
 import { handleCustomCheckout } from './handlers/customeCheeckout.js';
-import { handleSyncPlugin, handleSyncPluginCustomization } from './handlers/SyncPlugin.js';
+import { handleSyncPlugin, handleSyncPluginCustomization, handleGetPluginData } from './handlers/SyncPlugin.js';
 
 import { handleOptions, withCors, withPublicCors } from './utils/cors.js';
 import {
@@ -129,6 +129,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/custom-checkout',
   '/api/sync-plugin',
   '/api/sync-plugin-customization',
+  '/api/sync-plugin-data',
   '/api/admin/seed-legacy-users',
   '/api/admin/seed-banner-configs',
   '/api/admin/check-missed-banners',
@@ -250,6 +251,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleSyncPlugin(request, env); break;
     case '/api/sync-plugin-customization':
       response = await handleSyncPluginCustomization(request, env); break;
+    case '/api/sync-plugin-data':
+      response = await handleGetPluginData(request, env); break;
 
     // — Feedback
     case '/api/feedback':

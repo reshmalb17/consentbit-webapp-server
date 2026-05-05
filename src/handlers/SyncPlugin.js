@@ -31,6 +31,7 @@ import {
   getSubscriptionBySiteId,
   createSite,
   saveBannerCustomization,
+  getBannerCustomization,
   canonicalEmbedOrigin,
 } from '../services/db.js';
 
@@ -309,5 +310,70 @@ export async function handleSyncPluginCustomization(request, env) {
     siteId: webAppSiteId,
     cdnScriptId,
     platformSiteId,
+  }, { status: 200 });
+}
+
+// GET  /api/sync-plugin-data?webAppSiteId=...
+// POST /api/sync-plugin-data       (body: { webAppSiteId })
+//
+// Fetches the banner customization row for the given webAppSiteId.
+//
+// Returns: { success: true, webAppSiteId, customization }
+//   404 NOT_FOUND — no customization row for this site
+export async function handleGetPluginData(request, env) {
+  console.log('[GetPluginData] >>> request received', { method: request.method, url: request.url });
+
+  const db = env.CONSENT_WEBAPP;
+
+  if (!db) {
+    console.error('[GetPluginData] CONSENT_WEBAPP DB binding missing');
+    return Response.json({ success: false, error: 'Database not available' }, { status: 503 });
+  }
+
+  // Accept webAppSiteId from query (GET) or JSON body (POST)
+  let webAppSiteId = '';
+  if (request.method === 'GET') {
+    const url = new URL(request.url);
+    webAppSiteId = (url.searchParams.get('webAppSiteId') || '').trim();
+  } else if (request.method === 'POST') {
+    let body;
+    try {
+      body = await request.json();
+    } catch (err) {
+      console.error('[GetPluginData] invalid JSON body', err);
+      return Response.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
+    }
+    webAppSiteId = (body?.webAppSiteId || '').trim();
+  } else {
+    return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
+  }
+
+  console.log('[GetPluginData] input', { webAppSiteId });
+
+  if (!webAppSiteId) {
+    return Response.json({ success: false, error: 'webAppSiteId is required' }, { status: 400 });
+  }
+
+  let customization = null;
+  try {
+    customization = await getBannerCustomization(db, webAppSiteId);
+  } catch (e) {
+    console.error('[GetPluginData] getBannerCustomization failed', e);
+    return Response.json({ success: false, error: 'Failed to fetch customization' }, { status: 500 });
+  }
+
+  if (!customization) {
+    console.warn('[GetPluginData] no customization for webAppSiteId', webAppSiteId);
+    return Response.json({
+      success: false,
+      code: 'NOT_FOUND',
+      error: 'No customization data found for this site.',
+    }, { status: 404 });
+  }
+
+  return Response.json({
+    success: true,
+    webAppSiteId,
+    customization,
   }, { status: 200 });
 }
