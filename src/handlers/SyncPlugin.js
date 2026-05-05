@@ -32,6 +32,8 @@ import {
   createSite,
   saveBannerCustomization,
   getBannerCustomization,
+  getSiteById,
+  inferTierPlanIdFromStripePriceId,
   canonicalEmbedOrigin,
 } from '../services/db.js';
 
@@ -375,5 +377,107 @@ export async function handleGetPluginData(request, env) {
     success: true,
     webAppSiteId,
     customization,
+  }, { status: 200 });
+}
+
+// GET  /api/sync-plugin-plan?webAppSiteId=...
+// POST /api/sync-plugin-plan       (body: { webAppSiteId })
+//
+// Returns the plan tier for a given site:
+//   - 'free'      → no active subscription on this site
+//   - 'basic'     → tier subscription (active/trialing)
+//   - 'essential' → tier subscription (active/trialing)
+//   - 'growth'    → tier subscription (active/trialing)
+//
+// Response: { success: true, webAppSiteId, planId, status, subscription }
+//   404 SITE_NOT_FOUND — webAppSiteId does not match any Site row
+export async function handleGetPluginPlan(request, env) {
+  console.log('[GetPluginPlan] >>> request received', { method: request.method, url: request.url });
+
+  const db = env.CONSENT_WEBAPP;
+  if (!db) {
+    console.error('[GetPluginPlan] CONSENT_WEBAPP DB binding missing');
+    return Response.json({ success: false, error: 'Database not available' }, { status: 503 });
+  }
+
+  let webAppSiteId = '';
+  if (request.method === 'GET') {
+    const url = new URL(request.url);
+    webAppSiteId = (url.searchParams.get('webAppSiteId') || '').trim();
+  } else if (request.method === 'POST') {
+    let body;
+    try {
+      body = await request.json();
+    } catch (err) {
+      console.error('[GetPluginPlan] invalid JSON body', err);
+      return Response.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
+    }
+    webAppSiteId = (body?.webAppSiteId || '').trim();
+  } else {
+    return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
+  }
+
+  console.log('[GetPluginPlan] input', { webAppSiteId });
+
+  if (!webAppSiteId) {
+    return Response.json({ success: false, error: 'webAppSiteId is required' }, { status: 400 });
+  }
+
+  // Verify site exists
+  let site;
+  try {
+    site = await getSiteById(db, webAppSiteId);
+  } catch (e) {
+    console.error('[GetPluginPlan] getSiteById failed', e);
+    return Response.json({ success: false, error: 'Failed to look up site' }, { status: 500 });
+  }
+  if (!site) {
+    return Response.json({
+      success: false,
+      code: 'SITE_NOT_FOUND',
+      error: 'Site not found.',
+    }, { status: 404 });
+  }
+
+  // Look up the active/trialing subscription for this site
+  let sub = null;
+  try {
+    sub = await getSubscriptionBySiteId(db, webAppSiteId);
+  } catch (e) {
+    console.error('[GetPluginPlan] getSubscriptionBySiteId failed', e);
+    return Response.json({ success: false, error: 'Failed to look up subscription' }, { status: 500 });
+  }
+
+  let planId = 'free';
+  let status = 'inactive';
+
+  if (sub) {
+    status = String(sub.status ?? 'active').toLowerCase();
+    let resolved = String(sub.planId ?? sub.planid ?? '').toLowerCase();
+    if (!['basic', 'essential', 'growth'].includes(resolved)) {
+      // Fall back to inferring from Stripe price id when planId column is empty
+      const priceId = sub.stripePriceId ?? sub.stripepriceid ?? null;
+      const inferred = inferTierPlanIdFromStripePriceId(env, priceId);
+      if (inferred) resolved = inferred;
+    }
+    planId = ['basic', 'essential', 'growth'].includes(resolved) ? resolved : 'free';
+  }
+
+  console.log('[GetPluginPlan] resolved', { webAppSiteId, planId, status });
+
+  return Response.json({
+    success: true,
+    webAppSiteId,
+    planId,
+    status,
+    subscription: sub
+      ? {
+          id: sub.id,
+          stripeSubscriptionId: sub.stripeSubscriptionId ?? sub.stripesubscriptionid ?? null,
+          interval: sub.interval ?? null,
+          currentPeriodEnd: sub.currentPeriodEnd ?? sub.currentperiodend ?? null,
+          cancelAtPeriodEnd: Number(sub.cancelAtPeriodEnd ?? sub.cancelatperiodend ?? 0) === 1 ? 1 : 0,
+        }
+      : null,
   }, { status: 200 });
 }
