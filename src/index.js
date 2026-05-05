@@ -55,6 +55,7 @@ import { handleAuthVerifyCode } from './handlers/authVerifyCode.js';
 import { handleAuthLogout } from './handlers/authLogout.js';
 import { handleOnboardingFirstSetup } from './handlers/onboardingFirstSetup.js';
 import { handleCheckDomainAvailability } from './handlers/checkDomainAvailability.js';
+import { handleWebflowFreeRegister } from './handlers/webflowFreeRegister.js';
 import { handleFeedback } from './handlers/feedback.js';
 import { handleCustomCheckout } from './handlers/customeCheeckout.js';
 import { handleSyncPlugin, handleSyncPluginCustomization, handleGetPluginData, handleGetPluginPlan } from './handlers/SyncPlugin.js';
@@ -188,6 +189,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     // — Onboarding
     case '/api/onboarding/first-setup':
       response = await handleOnboardingFirstSetup(request, env, ctx); break;
+    case '/api/internal/webflow-free-register':
+      response = await handleWebflowFreeRegister(request, env); break;
     case '/api/sites/check-domain':
       response = await handleCheckDomainAvailability(request, env); break;
 
