@@ -8,6 +8,7 @@ import {
   getEffectivePlanForOrganization,
   getScanUsageForSite,
   incrementScanUsage,
+  markSiteVerified,
 } from '../services/db.js';
 import {
   categorizeCookie,
@@ -281,17 +282,59 @@ export async function handleScanSite(request, env, ctx) {
     }
 
     // Only allow scanning if the ConsentBit script has been verified on the site.
-    // This prevents users from scanning domains they don't own.
     const isVerified = site.verified === 1 || site.verified === true || site.VERIFIED === 1;
+    const isWebappMigrated = !!(site.platformSiteId ?? site.platformsiteid);
+
     if (!isVerified) {
-      return Response.json(
-        {
-          success: false,
-          error: 'Site not verified. Please install the ConsentBit script on your site before scanning.',
-          code: 'SITE_NOT_VERIFIED',
-        },
-        { status: 403 },
-      );
+      if (isWebappMigrated) {
+        // For migrated sites, verify the script is actually present in the site's <head>
+        // before allowing scan — checks both legacy and new CDN patterns.
+        const domain = site.domain ?? site.DOMAIN ?? '';
+        const cdnScriptId = site.cdnScriptId ?? site.cdnscriptid ?? '';
+        let scriptFound = false;
+        try {
+          const url = domain.startsWith('http') ? domain : `https://${domain}`;
+          const resp = await fetch(url, {
+            redirect: 'follow',
+            signal: AbortSignal.timeout(10000),
+            headers: { 'User-Agent': 'ConsentBit-ScriptChecker/1.0' },
+          });
+          if (resp.ok) {
+            const html = await resp.text();
+            const lower = html.toLowerCase();
+            const id = cdnScriptId.toLowerCase();
+            if (
+              lower.includes(`/api/v2/cdn/runtime/${id}.js`) ||
+              lower.includes(`/consentbit/${id}/script.js`) ||
+              lower.includes('consentbitscript')
+            ) {
+              scriptFound = true;
+              // Mark site as verified so future scans skip this HTTP check
+              try { await markSiteVerified(db, siteId); } catch { /* best-effort */ }
+            }
+          }
+        } catch { /* network error — fall through to block */ }
+
+        if (!scriptFound) {
+          return Response.json(
+            {
+              success: false,
+              error: 'ConsentBit script not detected on your site. Please ensure the script is installed and your site is published.',
+              code: 'SITE_NOT_VERIFIED',
+            },
+            { status: 403 },
+          );
+        }
+      } else {
+        return Response.json(
+          {
+            success: false,
+            error: 'Site not verified. Please install the ConsentBit script on your site before scanning.',
+            code: 'SITE_NOT_VERIFIED',
+          },
+          { status: 403 },
+        );
+      }
     }
 
     const organizationId = site.organizationId ?? site.organizationid ?? null;

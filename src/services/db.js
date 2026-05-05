@@ -262,6 +262,7 @@ export async function ensureSchema(db) {
       autoDetectLanguage INTEGER DEFAULT 0,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      contentEditedFromWebapp INTEGER DEFAULT 0,
       FOREIGN KEY (siteId) REFERENCES Site(id) ON DELETE CASCADE
     )
   `).run();
@@ -324,6 +325,9 @@ export async function ensureSchema(db) {
   } catch (e) { /* Column already exists */ }
   try {
     await db.prepare(`ALTER TABLE BannerCustomization ADD COLUMN configJson TEXT`).run();
+  } catch (e) { /* Column already exists */ }
+  try {
+    await db.prepare(`ALTER TABLE BannerCustomization ADD COLUMN contentEditedFromWebapp INTEGER DEFAULT 0`).run();
   } catch (e) { /* Column already exists */ }
 
   // Consent table (for consent logs)
@@ -3302,9 +3306,10 @@ export async function saveBannerCustomization(db, siteId, customization) {
           stopScroll, footerLink, animationEnabled, preferencePosition, centerAnimationDirection,
           language, autoDetectLanguage, translations, cookieExpirationDays,
           showBannerLogo, bannerLogoPosition, configJson,
+          contentEditedFromWebapp,
           createdAt, updatedAt
         ) VALUES (
-          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35
+          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36
         )
         ON CONFLICT(siteId) DO UPDATE SET
           position = ?3,
@@ -3338,7 +3343,8 @@ export async function saveBannerCustomization(db, siteId, customization) {
           showBannerLogo = ?31,
           bannerLogoPosition = ?32,
           configJson = ?33,
-          updatedAt = ?35
+          contentEditedFromWebapp = ?34,
+          updatedAt = ?36
       `)
       .bind(
         id,
@@ -3376,6 +3382,7 @@ export async function saveBannerCustomization(db, siteId, customization) {
         customization.configJson != null
           ? (typeof customization.configJson === 'string' ? customization.configJson : JSON.stringify(customization.configJson))
           : null,
+        customization.contentEditedFromWebapp ? 1 : 0,
         now,
         now
       )
