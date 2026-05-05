@@ -305,8 +305,7 @@ export async function handleScanSite(request, env, ctx) {
             const id = cdnScriptId.toLowerCase();
             if (
               lower.includes(`/api/v2/cdn/runtime/${id}.js`) ||
-              lower.includes(`/consentbit/${id}/script.js`) ||
-              lower.includes('consentbitscript')
+              lower.includes(`/consentbit/${id}/script.js`)
             ) {
               scriptFound = true;
               // Mark site as verified so future scans skip this HTTP check

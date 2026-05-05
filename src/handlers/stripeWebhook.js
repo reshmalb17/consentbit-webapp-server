@@ -152,7 +152,7 @@ async function injectWebflowScript(accessToken, wfSiteId, scriptSrc) {
   // Remove old ConsentBit scripts (ConsentBitBanner* from cb-server, consentbitscript2025 from previous runs)
   const filtered = existingScripts.filter(s => {
     const id = (s.id || '').toLowerCase();
-    return !id.startsWith('consentbitbanner') && id !== 'consentbitscript2025';
+    return !id.startsWith('consentbitbanner') && !id.startsWith('consentbitscript2025');
   });
   console.log(`[injectWebflowScript] existing=${existingScripts.length} after removing old ConsentBit=${filtered.length}`);
 
