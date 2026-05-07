@@ -672,7 +672,10 @@ ${inlineConfig}
   function getTranslation(key) {
     var lang = getBannerLanguage();
     var t = TRANSLATIONS[lang] || TRANSLATIONS['en'];
-    return t[key] || TRANSLATIONS['en'][key] || key;
+    var val = (t[key] != null) ? t[key] : ((TRANSLATIONS['en'][key] != null) ? TRANSLATIONS['en'][key] : '');
+    if (val === '' && key === 'title') return 'We value your privacy';
+    if (val === '' && key === 'description') return 'We use cookies to provide you with the best possible experience. They also allow us to analyze user behavior in order to constantly improve the website for you.';
+    return val;
   }
 
   // For button labels: if the stored value is longer than 80 chars it's likely

@@ -137,6 +137,8 @@ async function provisionAccount(db, env, request, {
   currentPeriodStart,
   currentPeriodEnd,
   amountCents,
+  billingEmail,
+  wfSiteId,
 }) {
   const [existingUser] = await Promise.all([getUserByEmail(db, email)]);
   const isNewUser = !existingUser;
@@ -177,6 +179,19 @@ async function provisionAccount(db, env, request, {
     licenseKey,
     amountCents: amountCents ?? null,
   });
+
+  // Store billingEmail and platformSiteId on Site
+  const billingEmailToStore = billingEmail || null;
+  const platformSiteIdToStore = wfSiteId || null;
+  if (billingEmailToStore || platformSiteIdToStore) {
+    const sets = [];
+    const binds = [];
+    if (billingEmailToStore) { sets.push(`billingEmail = ?${binds.length + 1}`); binds.push(billingEmailToStore); }
+    if (platformSiteIdToStore) { sets.push(`platformSiteId = COALESCE(platformSiteId, ?${binds.length + 1}), platform = COALESCE(platform, ?${binds.length + 2})`); binds.push(platformSiteIdToStore, 'webflow'); }
+    sets.push(`updatedAt = ?${binds.length + 1}`); binds.push(new Date().toISOString());
+    binds.push(site.id);
+    await db.prepare(`UPDATE Site SET ${sets.join(', ')} WHERE id = ?${binds.length}`).bind(...binds).run().catch(() => {});
+  }
 
   const session = await createSession(db, { userId: user.id });
   return { user, isNewUser, session, org, site };
@@ -235,6 +250,8 @@ export async function handleCustomCheckout(request, env) {
   const interval = body.interval === 'yearly' ? 'yearly' : 'monthly';
   const paymentMethodId = (body.paymentMethodId || '').trim() || null;
   const subscriptionId = (body.subscriptionId || '').trim() || null;
+  const wfSiteId = (body.wfSiteId || body.platformId || '').trim() || null;
+  const billingEmail = (body.billingEmail || '').trim().toLowerCase() || null;
 
   console.log('[CustomCheckout] normalized input', { email, rawDomain, siteName, planId, interval, hasPM: !!paymentMethodId, hasSubId: !!subscriptionId });
 
@@ -300,6 +317,8 @@ export async function handleCustomCheckout(request, env) {
         currentPeriodStart: toTimestamp(sub.current_period_start),
         currentPeriodEnd: toTimestamp(sub.current_period_end),
         amountCents: sub.items?.data?.[0]?.price?.unit_amount ?? null,
+        billingEmail,
+        wfSiteId,
       });
       return Response.json(
         { success: true, provisioned: true, isNewUser, user: { id: user.id, email: user.email, name: user.name }, siteId: site.id, subscriptionId },
@@ -341,6 +360,11 @@ export async function handleCustomCheckout(request, env) {
   subParams.set('metadata[siteName]', siteName);
   subParams.set('metadata[planId]', planId);
   subParams.set('metadata[interval]', interval);
+  if (wfSiteId) {
+    subParams.set('metadata[platformId]', wfSiteId);
+    subParams.set('metadata[platform]', 'webflow');
+  }
+  if (billingEmail) subParams.set('metadata[billingEmail]', billingEmail);
 
   console.log('[CustomCheckout] creating subscription', { email, domain: rawDomain, planId, interval });
 
@@ -385,6 +409,8 @@ export async function handleCustomCheckout(request, env) {
         currentPeriodStart: toTimestamp(sub.current_period_start),
         currentPeriodEnd: toTimestamp(sub.current_period_end),
         amountCents: sub.items?.data?.[0]?.price?.unit_amount ?? null,
+        billingEmail,
+        wfSiteId,
       });
       return Response.json(
         { success: true, provisioned: true, isNewUser, user: { id: user.id, email: user.email, name: user.name }, siteId: site.id, subscriptionId: sub.id },

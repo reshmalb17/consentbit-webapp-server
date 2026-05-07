@@ -25,13 +25,11 @@ export async function handleWebflowFreeRegister(request, env) {
   }
 
   // ── Auth ─────────────────────────────────────────────────────────────────
+  // Accepts either X-Admin-Key (internal cb-server calls) or open access (direct from Webflow app)
   const adminKey = request.headers.get('X-Admin-Key') || request.headers.get('X-Internal-Secret');
   const expectedKey = env.ADMIN_KEY || env.INTERNAL_SECRET;
-  if (!expectedKey || adminKey !== expectedKey) {
-    console.warn(`${TAG} Rejected: invalid or missing admin key`);
-    return Response.json({ success: false, error: 'Unauthorized' }, { status: 401 });
-  }
-  console.log(`${TAG} Auth: admin key verified`);
+  const isAdminCall = expectedKey && adminKey === expectedKey;
+  console.log(`${TAG} Auth: ${isAdminCall ? 'admin key verified' : 'open access (Webflow app direct call)'}`);
 
   if (!db) {
     console.error(`${TAG} CONSENT_WEBAPP D1 binding is missing`);
@@ -55,6 +53,35 @@ export async function handleWebflowFreeRegister(request, env) {
   if (!email || !domain) {
     console.warn(`${TAG} Rejected: missing email or domain`);
     return Response.json({ success: false, error: 'email and domain are required' }, { status: 400 });
+  }
+
+  // ── Short-circuit if already registered ──────────────────────────────────
+  if (wfSiteId) {
+    const kvRaw = await env.WEBFLOW_AUTHENTICATION?.get(wfSiteId);
+    if (kvRaw) {
+      const kvEntry = JSON.parse(kvRaw);
+      if (kvEntry.webappSiteId && kvEntry.webappScriptUrl) {
+        // Verify the site still exists in D1 — KV can be stale after data deletion
+        const siteExists = await db.prepare('SELECT id FROM Site WHERE id = ?1 LIMIT 1').bind(kvEntry.webappSiteId).first();
+        if (siteExists) {
+          console.log(`${TAG} Already registered — webappSiteId=${kvEntry.webappSiteId} scriptUrl=${kvEntry.webappScriptUrl}`);
+          return Response.json({
+            success: true,
+            alreadyRegistered: true,
+            webappSiteId: kvEntry.webappSiteId,
+            scriptUrl: kvEntry.webappScriptUrl,
+            cdnScriptId: kvEntry.cdnScriptId,
+          });
+        }
+        // Site was deleted — clear stale KV fields and fall through to re-register
+        console.log(`${TAG} KV has webappSiteId=${kvEntry.webappSiteId} but Site not found in D1 — clearing stale KV and re-registering`);
+        const cleanedKv = { ...kvEntry };
+        delete cleanedKv.webappSiteId;
+        delete cleanedKv.webappScriptUrl;
+        delete cleanedKv.cdnScriptId;
+        await env.WEBFLOW_AUTHENTICATION.put(wfSiteId, JSON.stringify(cleanedKv)).catch(() => {});
+      }
+    }
   }
 
   const now = new Date().toISOString();
@@ -205,8 +232,49 @@ export async function handleWebflowFreeRegister(request, env) {
 
   console.log(`${TAG} Step 6: CDN script URL (loaderWebflow will be served): ${scriptUrl}`);
 
+  // ── Step 7: Inject script into Webflow site head via Webflow REST API ────
+  let injectedIntoHead = false;
+  if (wfSiteId) {
+    console.log(`${TAG} Step 7: Injecting script into Webflow site head for wfSiteId=${wfSiteId}`);
+    try {
+      const kvRaw = await env.WEBFLOW_AUTHENTICATION?.get(wfSiteId);
+      if (!kvRaw) {
+        console.warn(`${TAG} Step 7: No KV entry found for wfSiteId=${wfSiteId} — skipping injection`);
+      } else {
+        const kvEntry = JSON.parse(kvRaw);
+        const accessToken = kvEntry.accessToken;
+        if (!accessToken) {
+          console.warn(`${TAG} Step 7: No accessToken in KV — skipping injection`);
+        } else {
+          // Read stored Webflow script ID from D1 so we reuse it instead of creating a new registered script
+          let storedWebflowScriptId = null;
+          try {
+            const siteRow = await db.prepare('SELECT webflowScriptId FROM Site WHERE id = ?1').bind(site.id).first();
+            storedWebflowScriptId = siteRow?.webflowScriptId ?? null;
+          } catch (_) {}
+
+          const result = await injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG, storedWebflowScriptId);
+          injectedIntoHead = result.success;
+
+          // Persist the Webflow registered script ID back to D1 for future reuse
+          if (result.webflowScriptId && result.webflowScriptId !== storedWebflowScriptId) {
+            await db.prepare('UPDATE Site SET webflowScriptId = ?1, updatedAt = ?2 WHERE id = ?3')
+              .bind(result.webflowScriptId, new Date().toISOString(), site.id).run().catch(() => {});
+          }
+
+          // Update KV with webappSiteId + scriptUrl
+          const updatedKv = { ...kvEntry, webappSiteId: site.id, webappScriptUrl: scriptUrl, cdnScriptId: site.cdnScriptId, registeredThroughApp: true, isWebappMigrated: true };
+          await env.WEBFLOW_AUTHENTICATION?.put(wfSiteId, JSON.stringify(updatedKv));
+          console.log(`${TAG} Step 7: KV updated with webappSiteId=${site.id}`);
+        }
+      }
+    } catch (err) {
+      console.error(`${TAG} Step 7: Script injection error:`, err?.message || err);
+    }
+  }
+
   console.log(`${TAG} ── ACCOUNT CREATION COMPLETE ────────────────────`);
-  console.log(`${TAG} userId=${user.id} orgId=${org.id} siteId=${site.id} cdnScriptId=${site.cdnScriptId} domain=${site.domain} scriptUrl=${scriptUrl}`);
+  console.log(`${TAG} userId=${user.id} orgId=${org.id} siteId=${site.id} cdnScriptId=${site.cdnScriptId} domain=${site.domain} scriptUrl=${scriptUrl} injectedIntoHead=${injectedIntoHead}`);
 
   return Response.json({
     success: true,
@@ -216,5 +284,100 @@ export async function handleWebflowFreeRegister(request, env) {
     domain: site.domain,
     userId: user.id,
     organizationId: org.id,
+    injectedIntoHead,
   });
+}
+
+// ── Webflow script injection via REST API ──────────────────────────────────
+
+async function injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG, storedWebflowScriptId = null) {
+  const WEBFLOW_API = 'https://api.webflow.com/v2';
+  const headers = {
+    'Authorization': `Bearer ${accessToken}`,
+    'Content-Type': 'application/json',
+    'accept-version': '1.0.0',
+  };
+
+  const inlineCode = `(function(){var h=document.head||document.getElementsByTagName("head")[0]||document.documentElement;var s=document.createElement("script");s.src=${JSON.stringify(scriptUrl)};s.type="text/javascript";s.setAttribute("consentbit","consentbit");s.setAttribute("data-site-id",${JSON.stringify(wfSiteId)});h.appendChild(s);})();`;
+
+  // 1. Get existing applied scripts
+  let existingScripts = [];
+  let appliedConsentBitId = null;
+  try {
+    const existingRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/custom_code`, { headers });
+    if (existingRes.ok) {
+      const existingData = await existingRes.json();
+      const allScripts = existingData.scripts || [];
+      const existing = allScripts.find(s => s.id?.toLowerCase().includes('consentbitbanner'));
+      if (existing) appliedConsentBitId = existing.id;
+      existingScripts = allScripts.filter(s => !s.id?.toLowerCase().includes('consentbitbanner'));
+    }
+  } catch { /* start fresh */ }
+
+  // 2. Determine which script ID to use — prefer stored D1 scriptId, then applied one
+  const candidateId = storedWebflowScriptId || appliedConsentBitId;
+
+  // 3. If we have a stored/applied script ID, verify its URL is correct — if so, just re-apply it
+  if (candidateId) {
+    try {
+      const scriptRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/registered_scripts/${candidateId}`, { headers });
+      if (scriptRes.ok) {
+        const scriptData = await scriptRes.json();
+        if (scriptData.sourceCode?.includes(scriptUrl)) {
+          // URL is correct — just ensure it's applied in the head
+          const alreadyApplied = appliedConsentBitId === candidateId;
+          if (!alreadyApplied) {
+            existingScripts.push({ id: candidateId, location: 'header', version: '1.0.0' });
+            await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/custom_code`, {
+              method: 'PUT', headers, body: JSON.stringify({ scripts: existingScripts }),
+            });
+          }
+          console.log(`${TAG} Step 7: Reused existing script ${candidateId} — ${alreadyApplied ? 'already applied' : 're-applied'}`);
+          return { success: true, webflowScriptId: candidateId };
+        }
+        console.log(`${TAG} Step 7: Stored script ${candidateId} has stale URL — registering new one`);
+      }
+    } catch { /* proceed to register new */ }
+  }
+
+  // 4. Register new inline script
+  const displayName = `ConsentBitBanner${Date.now()}`;
+  console.log(`${TAG} Step 7: Registering new inline script displayName=${displayName}`);
+  const registerRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/registered_scripts/inline`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ sourceCode: inlineCode, displayName, version: '1.0.0' }),
+  });
+
+  if (!registerRes.ok) {
+    const err = await registerRes.text();
+    console.error(`${TAG} Step 7: registerInline failed status=${registerRes.status} body=${err}`);
+    return { success: false, webflowScriptId: null };
+  }
+
+  const registered = await registerRes.json();
+  const scriptId = registered.id;
+  if (!scriptId) {
+    console.error(`${TAG} Step 7: No scriptId returned from registerInline`);
+    return { success: false, webflowScriptId: null };
+  }
+  console.log(`${TAG} Step 7: New inline script registered scriptId=${scriptId}`);
+
+  // 5. Apply to header (old ConsentBit scripts already filtered out)
+  existingScripts.push({ id: scriptId, location: 'header', version: '1.0.0' });
+
+  const upsertRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/custom_code`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ scripts: existingScripts }),
+  });
+
+  if (!upsertRes.ok) {
+    const err = await upsertRes.text();
+    console.error(`${TAG} Step 7: upsertCustomCode failed status=${upsertRes.status} body=${err}`);
+    return { success: false, webflowScriptId: scriptId };
+  }
+
+  console.log(`${TAG} Step 7: Script injected into Webflow site head ✓`);
+  return { success: true, webflowScriptId: scriptId };
 }

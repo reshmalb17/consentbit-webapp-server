@@ -266,13 +266,16 @@ async function handleLegacyWebflowUpgrade(env, db, siteId, newSubId, resolvedPla
     try {
       const raw = await env.WEBFLOW_AUTHENTICATION.get(wfSiteId);
       const existing = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : {};
+      console.log(`[legacyUpgrade] WEBFLOW_AUTHENTICATION existing flags — isLegacyUser=${existing.isLegacyUser} upgradedThroughApp=${existing.upgradedThroughApp} isWebappMigrated=${existing.isWebappMigrated} webappSiteId=${existing.webappSiteId}`);
       await env.WEBFLOW_AUTHENTICATION.put(wfSiteId, JSON.stringify({
         ...existing,
         cdnScriptId,
         webappSiteId: siteId,
         plan: resolvedPlanId,
+        upgradedThroughApp: true,
+        isWebappMigrated: true,
       }));
-      console.log(`[legacyUpgrade] WEBFLOW_AUTHENTICATION updated — cdnScriptId=${cdnScriptId} siteId=${siteId} plan=${resolvedPlanId}`);
+      console.log(`[legacyUpgrade] WEBFLOW_AUTHENTICATION updated — cdnScriptId=${cdnScriptId} webappSiteId=${siteId} plan=${resolvedPlanId} upgradedThroughApp=true isWebappMigrated=true`);
     } catch (e) {
       console.warn('[legacyUpgrade] WEBFLOW_AUTHENTICATION update failed', e.message);
     }
@@ -435,6 +438,9 @@ export async function handleStripeWebhook(request, env, ctx) {
       const sessionMeta = session.metadata || {};
       let orgId = session.client_reference_id || sessionMeta.organizationId;
       let siteId = sessionMeta.siteId && String(sessionMeta.siteId).trim() ? String(sessionMeta.siteId).trim() : null;
+      let platformSiteId = sessionMeta.platformId?.trim() || sessionMeta.wfSiteId?.trim() || null;
+      let platform = sessionMeta.platform?.trim() || null;
+      let billingEmailMeta = sessionMeta.billingEmail?.trim().toLowerCase() || null;
       let siteNameMeta = sessionMeta.siteName && String(sessionMeta.siteName).trim() ? String(sessionMeta.siteName).trim() : null;
       let siteDomainMeta = sessionMeta.siteDomain && String(sessionMeta.siteDomain).trim() ? String(sessionMeta.siteDomain).trim() : null;
       let currentPeriodStart = null;
@@ -465,6 +471,9 @@ export async function handleStripeWebhook(request, env, ctx) {
           if (!siteId && subMeta.siteId) siteId = String(subMeta.siteId).trim() || null;
           if (!siteNameMeta && subMeta.siteName) siteNameMeta = String(subMeta.siteName).trim() || null;
           if (!siteDomainMeta && subMeta.siteDomain) siteDomainMeta = String(subMeta.siteDomain).trim() || null;
+          if (!platformSiteId && (subMeta.platformId || subMeta.wfSiteId)) platformSiteId = String(subMeta.platformId || subMeta.wfSiteId).trim() || null;
+          if (!platform && subMeta.platform) platform = String(subMeta.platform).trim() || null;
+          if (!billingEmailMeta && subMeta.billingEmail) billingEmailMeta = String(subMeta.billingEmail).trim().toLowerCase() || null;
           stripePriceFromSub = subData.items?.data?.[0]?.price?.id || null;
           if (!subMeta.planId && stripePriceFromSub) {
             const inferred = inferTierPlanIdFromStripePriceId(env, stripePriceFromSub);
@@ -506,6 +515,19 @@ export async function handleStripeWebhook(request, env, ctx) {
 
       // Single plan: session has subscription id — save it with site license (siteId, licenseKey, expiry)
       if (subId && orgId) {
+        // If wfSiteId passed, look up existing Site by platformSiteId first — avoids creating a duplicate
+        if (!siteId && platformSiteId && db) {
+          try {
+            const existingByPlatform = await db.prepare('SELECT id FROM Site WHERE platformSiteId = ?1 LIMIT 1').bind(platformSiteId).first();
+            if (existingByPlatform) {
+              siteId = existingByPlatform.id;
+              console.log('[StripeWebhook] checkout.session.completed: found existing site by platformSiteId=%s → siteId=%s', platformSiteId, siteId);
+            }
+          } catch (e) {
+            console.warn('[StripeWebhook] platformSiteId lookup failed', e.message);
+          }
+        }
+
         // If no existing siteId but we have siteName/siteDomain from checkout, create the Site now
         if (!siteId && siteDomainMeta && db) {
           try {
@@ -524,6 +546,15 @@ export async function handleStripeWebhook(request, env, ctx) {
           } catch (e) {
             console.error('[StripeWebhook] Failed to create site from checkout metadata', e);
           }
+        }
+
+        // Update Site.platformSiteId if we have a wfSiteId and the site exists
+        if (siteId && platformSiteId && db) {
+          db.prepare('UPDATE Site SET platformSiteId = ?1, platform = COALESCE(platform, ?2), updatedAt = ?3 WHERE id = ?4 AND (platformSiteId IS NULL OR platformSiteId = "")')
+            .bind(platformSiteId, platform || 'webflow', new Date().toISOString(), siteId)
+            .run()
+            .then(() => console.log('[StripeWebhook] updated platformSiteId=%s on siteId=%s', platformSiteId, siteId))
+            .catch(() => {});
         }
 
         await savePaymentEvent(db, {
@@ -558,6 +589,41 @@ export async function handleStripeWebhook(request, env, ctx) {
           licenseKey,
           amountCents: session.amount_total ?? null,
         });
+
+        // Store billingEmail on Site — prefer explicit billing email, fall back to account email
+        const checkoutEmailRaw = (session.customer_email || session.customer_details?.email || subMeta.email || sessionMeta.email || '').trim().toLowerCase();
+        const billingEmailToStore = billingEmailMeta || checkoutEmailRaw || null;
+        if (siteId && billingEmailToStore) {
+          db.prepare('UPDATE Site SET billingEmail = ?1, updatedAt = ?2 WHERE id = ?3')
+            .bind(billingEmailToStore, new Date().toISOString(), siteId)
+            .run()
+            .catch((e) => console.warn('[StripeWebhook] billingEmail update failed:', e.message));
+        }
+
+        // Sync email: if checkout email differs from stored User email, update User + WEBFLOW_AUTHENTICATION KV
+        const checkoutEmail = checkoutEmailRaw;
+        if (checkoutEmail && orgId) {
+          try {
+            const userRow = await db.prepare(
+              'SELECT u.id, u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
+            ).bind(orgId).first();
+            if (userRow && userRow.email !== checkoutEmail) {
+              console.log('[StripeWebhook] email changed: %s → %s for userId=%s', userRow.email, checkoutEmail, userRow.id);
+              await db.prepare('UPDATE User SET email = ?1, updatedAt = ?2 WHERE id = ?3').bind(checkoutEmail, new Date().toISOString(), userRow.id).run();
+              // Update WEBFLOW_AUTHENTICATION KV if wfSiteId known
+              if (platformSiteId && env.WEBFLOW_AUTHENTICATION) {
+                const kvRaw = await env.WEBFLOW_AUTHENTICATION.get(platformSiteId);
+                if (kvRaw) {
+                  const kvEntry = JSON.parse(kvRaw);
+                  await env.WEBFLOW_AUTHENTICATION.put(platformSiteId, JSON.stringify({ ...kvEntry, email: checkoutEmail }));
+                  console.log('[StripeWebhook] updated email in WEBFLOW_AUTHENTICATION KV for wfSiteId=%s', platformSiteId);
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('[StripeWebhook] email sync failed:', e.message);
+          }
+        }
 
         // Mark trial as used on the site so it can never be granted again
         if (subscriptionStatus === 'trialing' && siteId) {

@@ -63,20 +63,29 @@ async function upsertSite(db, { organizationId, domain, name, stagingUrl, custom
 }
 
 async function upsertSubscription(db, { organizationId, siteId, subscriptionId, customerId, status, cancelAtPeriodEnd, interval, currentPeriodEnd, now }) {
-  if (!subscriptionId) return;
-  const existing = await db.prepare('SELECT id FROM Subscription WHERE stripeSubscriptionId = ?1').bind(subscriptionId).first();
-  if (existing) {
-    await db.prepare(
-      `UPDATE Subscription SET status=?1, cancelAtPeriodEnd=?2, planId='basic', updatedAt=?3 WHERE id=?4`
-    ).bind(status || 'active', cancelAtPeriodEnd ? 1 : 0, now, existing.id).run();
-    return;
+  if (subscriptionId) {
+    const existing = await db.prepare('SELECT id FROM Subscription WHERE stripeSubscriptionId = ?1').bind(subscriptionId).first();
+    if (existing) {
+      await db.prepare(
+        `UPDATE Subscription SET status=?1, cancelAtPeriodEnd=?2, planId='basic', updatedAt=?3 WHERE id=?4`
+      ).bind(status || 'active', cancelAtPeriodEnd ? 1 : 0, now, existing.id).run();
+      return;
+    }
+  } else {
+    const existing = await db.prepare('SELECT id FROM Subscription WHERE siteId = ?1 LIMIT 1').bind(siteId).first();
+    if (existing) {
+      await db.prepare(
+        `UPDATE Subscription SET status=?1, cancelAtPeriodEnd=?2, planId='basic', updatedAt=?3 WHERE id=?4`
+      ).bind(status || 'active', cancelAtPeriodEnd ? 1 : 0, now, existing.id).run();
+      return;
+    }
   }
   const id = crypto.randomUUID();
   await db.prepare(
     `INSERT INTO Subscription (id, organizationId, siteId, stripeSubscriptionId, stripeCustomerId,
       planType, planId, interval, status, cancelAtPeriodEnd, currentPeriodEnd, createdAt, updatedAt)
      VALUES (?1,?2,?3,?4,?5,'single','basic',?6,?7,?8,?9,?10,?10)`
-  ).bind(id, organizationId, siteId, subscriptionId, customerId || null,
+  ).bind(id, organizationId, siteId, subscriptionId || null, customerId || null,
     interval || 'monthly', status || 'active', cancelAtPeriodEnd ? 1 : 0,
     currentPeriodEnd || null, now).run();
 }

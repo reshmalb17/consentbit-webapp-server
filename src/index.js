@@ -35,6 +35,7 @@ import { handleAdminBackfillFramerSiteId } from './handlers/adminBackfillFramerS
 import { handleAdminClearWebappData } from './handlers/adminClearWebappData.js';
 import { handleAdminMigrateFromKv } from './handlers/adminMigrateFromKv.js';
 import { handleAdminMigrateSingleSite } from './handlers/adminMigrateSingleSite.js';
+import { handleAdminMigrateCustomization } from './handlers/adminMigrateCustomization.js';
 import { handleCheckLegacyScript } from './handlers/checkLegacyScript.js';
 import { handleLegacyConsentLogs } from './handlers/legacyConsentLogs.js';
 import { handleLegacyConsentCsv } from './handlers/legacyConsentCsv.js';
@@ -59,6 +60,7 @@ import { handleWebflowFreeRegister } from './handlers/webflowFreeRegister.js';
 import { handleFeedback } from './handlers/feedback.js';
 import { handleCustomCheckout } from './handlers/customeCheeckout.js';
 import { handleSyncPlugin, handleSyncPluginCustomization, handleGetPluginData } from './handlers/SyncPlugin.js';
+import { handlePaymentSubscription } from './handlers/paymentSubscription.js';
 
 import { handleOptions, withCors, withPublicCors } from './utils/cors.js';
 import {
@@ -100,6 +102,9 @@ const PUBLIC_PATHS = new Set([
   '/api/pageview',
   '/api/scan-site',
   '/api/scan-pending',
+  '/api/v2/webflow-free-register',
+  '/api/payment/subscription',
+  '/api/banner-customization',
 ]);
 
 /**
@@ -131,6 +136,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/sync-plugin',
   '/api/sync-plugin-customization',
   '/api/sync-plugin-data',
+  '/api/v2/webflow-free-register',
   '/api/admin/seed-legacy-users',
   '/api/admin/seed-banner-configs',
   '/api/admin/check-missed-banners',
@@ -140,6 +146,8 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/admin/clear-webapp-data',
   '/api/admin/migrate-from-kv',
   '/api/admin/migrate-single-site',
+  '/api/admin/migrate-customization',
+  '/api/payment/subscription',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -189,6 +197,7 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     case '/api/onboarding/first-setup':
       response = await handleOnboardingFirstSetup(request, env, ctx); break;
     case '/api/internal/webflow-free-register':
+    case '/api/v2/webflow-free-register':
       response = await handleWebflowFreeRegister(request, env); break;
     case '/api/sites/check-domain':
       response = await handleCheckDomainAvailability(request, env); break;
@@ -212,6 +221,10 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     // — Consent logs
     case '/api/consent-logs':
       response = await handleConsentLogs(request, env); break;
+
+    // — Payment subscription check (Webflow app)
+    case '/api/payment/subscription':
+      response = await handlePaymentSubscription(request, env); break;
 
     // — Billing / payments
     case '/api/validate-promo':
@@ -292,6 +305,9 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     case '/api/admin/migrate-single-site':
       response = await handleAdminMigrateSingleSite(request, env); break;
+
+    case '/api/admin/migrate-customization':
+      response = await handleAdminMigrateCustomization(request, env); break;
 
     case '/api/check-legacy-script':
       response = await handleCheckLegacyScript(request, env); break;

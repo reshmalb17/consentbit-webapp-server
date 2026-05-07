@@ -9,6 +9,7 @@ const DEV_ORIGINS = [
   'http://localhost:5173',
   'https://localhost:3000',
   'https://localhost:5173',
+  'http://localhost:1337',
 ];
 
 // Known production frontends (kept minimal; env.WEBAPP_PUBLIC_URL remains the primary source of truth).
@@ -35,7 +36,7 @@ function getAllowedOrigins(env) {
 
 // Headers that the webapp is allowed to send with credentialed requests.
 // X-Requested-With is required for CSRF protection.
-const ALLOW_HEADERS  = 'Content-Type, X-Requested-With, X-CB-Client';
+const ALLOW_HEADERS  = 'Content-Type, X-Requested-With, X-CB-Client, Authorization';
 const ALLOW_METHODS  = 'GET, HEAD, POST, OPTIONS';
 const MAX_AGE        = '86400'; // 24 h preflight cache
 
@@ -94,6 +95,9 @@ export function handleOptions(request, env) {
     '/api/pageview',
     '/api/scan-site',
     '/api/scan-pending',
+    '/api/v2/webflow-free-register',
+    '/api/payment/subscription',
+    '/api/banner-customization',
   ]);
 
   const isPublic = PUBLIC_PATHS.has(url.pathname);

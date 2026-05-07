@@ -105,10 +105,22 @@ export async function handleUpgradeSubscription(request, env) {
     ? (existingSub.stripeSubscriptionId ?? existingSub.stripesubscriptionid ?? null)
     : null;
 
-  console.log('[UpgradeSubscription]', {
-    siteId, planId, interval, newPriceId,
+  console.log('[UpgradeSubscription] request received', {
+    siteId, organizationId, planId, interval, newPriceId,
     oldStripeSubscriptionId: oldStripeSubscriptionId || '(none — first subscription)',
+    email,
   });
+
+  // Fetch site info to log isLegacy + platform
+  try {
+    const siteInfo = await db.prepare('SELECT domain, platform, isLegacy, platformSiteId FROM Site WHERE id = ?1').bind(siteId).first();
+    console.log('[UpgradeSubscription] site info', siteInfo
+      ? { domain: siteInfo.domain, platform: siteInfo.platform, isLegacy: siteInfo.isLegacy, platformSiteId: siteInfo.platformSiteId }
+      : 'NOT FOUND in D1'
+    );
+  } catch (e) {
+    console.warn('[UpgradeSubscription] could not fetch site info', e?.message);
+  }
 
   // Build Stripe Checkout Session — subscription mode with new plan
   const params = new URLSearchParams();

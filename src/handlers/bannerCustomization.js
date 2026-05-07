@@ -6,10 +6,48 @@ export async function handleBannerCustomization(request, env) {
 
   if (request.method === 'GET') {
     const url = new URL(request.url);
-    const siteId = url.searchParams.get('siteId');
+    let siteId = url.searchParams.get('siteId');
+    const wfSiteId = url.searchParams.get('wfSiteId');
+
+    // wfSiteId lookup — resolve D1 internal siteId from Webflow platform siteId
+    if (!siteId && wfSiteId) {
+      try {
+        // 1. Fast path: direct platformSiteId match
+        const siteRow = await db.prepare('SELECT id FROM Site WHERE platformSiteId = ?1 LIMIT 1').bind(wfSiteId).first();
+        if (siteRow) {
+          siteId = siteRow.id;
+        } else {
+          // 2. Fallback: get domain from WEBFLOW_AUTHENTICATION KV → find Site by domain → auto-link
+          // Handles new users who paid via checkout (Site created with domain only, no platformSiteId yet)
+          const kvRaw = await env.WEBFLOW_AUTHENTICATION?.get(wfSiteId);
+          if (kvRaw) {
+            const kvEntry = JSON.parse(kvRaw);
+            const rawDomain = kvEntry.customDomain || kvEntry.stagingUrl || kvEntry.domain || null;
+            if (rawDomain) {
+              const cleanDomain = rawDomain.replace(/^https?:\/\//, '').replace(/\/$/, '').toLowerCase();
+              const domainRow = await db.prepare(
+                'SELECT id, platform FROM Site WHERE LOWER(REPLACE(domain, "https://", "")) = ?1 LIMIT 1'
+              ).bind(cleanDomain).first();
+              if (domainRow) {
+                siteId = domainRow.id;
+                // Auto-update platformSiteId + platform so future lookups hit the fast path
+                db.prepare(
+                  'UPDATE Site SET platformSiteId = ?1, platform = COALESCE(platform, ?2), updatedAt = ?3 WHERE id = ?4'
+                ).bind(wfSiteId, 'webflow', new Date().toISOString(), siteId).run().catch(() => {});
+                console.log('[BannerCustomization] auto-linked platformSiteId=%s to siteId=%s via domain=%s', wfSiteId, siteId, cleanDomain);
+              }
+            }
+          }
+        }
+      } catch (_) { /* non-critical */ }
+    }
 
     if (!siteId) {
-      return Response.json({ success: false, error: 'siteId is required' }, { status: 400 });
+      // wfSiteId passed but no D1 record found — site not registered yet
+      if (wfSiteId) {
+        return Response.json({ success: true, customization: null, platform: null, isLegacy: 0, isWebappMigrated: false, isWebflowFree: false });
+      }
+      return Response.json({ success: false, error: 'siteId or wfSiteId is required' }, { status: 400 });
     }
 
     try {
@@ -23,8 +61,19 @@ export async function handleBannerCustomization(request, env) {
         }
       }
       const customization = row ? { ...row, translations } : null;
-      console.log('[BannerCustomization] GET siteId=%s customization=%s', siteId, JSON.stringify(customization));
-      return Response.json({ success: true, customization });
+
+      // Fetch Site flags so callers can distinguish new-free Webflow users from legacy migrated users
+      let siteFlags = { platform: null, isLegacy: 0 };
+      try {
+        const siteRow = await db.prepare('SELECT platform, isLegacy FROM Site WHERE id = ?1').bind(siteId).first();
+        if (siteRow) siteFlags = { platform: siteRow.platform ?? null, isLegacy: Number(siteRow.isLegacy ?? 0) };
+      } catch (_) { /* non-critical */ }
+
+      const isWebappMigrated = true; // site exists in D1
+      const isWebflowFree = siteFlags.platform === 'webflow' && siteFlags.isLegacy === 0;
+
+      console.log('[BannerCustomization] GET siteId=%s platform=%s isLegacy=%s isWebflowFree=%s', siteId, siteFlags.platform, siteFlags.isLegacy, isWebflowFree);
+      return Response.json({ success: true, customization, platform: siteFlags.platform, isLegacy: siteFlags.isLegacy, isWebappMigrated, isWebflowFree });
     } catch (error) {
       console.error('[BannerCustomization] Error fetching:', error);
       return Response.json(
@@ -42,8 +91,28 @@ export async function handleBannerCustomization(request, env) {
       return Response.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
     }
 
-    const siteId = body?.siteId;
+    const postUrl = new URL(request.url);
+    let siteId = body?.siteId;
     const customization = body?.customization;
+    const wfSiteId = body?.wfSiteId || postUrl.searchParams.get('wfSiteId') || null;
+
+    // If siteId provided but doesn't exist in D1, resolve via wfSiteId or platformSiteId
+    if (siteId) {
+      try {
+        const exists = await db.prepare('SELECT id FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
+        if (!exists) {
+          console.warn('[BannerCustomization] POST siteId=%s not found in D1 — attempting wfSiteId fallback', siteId);
+          const fallbackWfId = wfSiteId || siteId; // siteId might actually be a wfSiteId
+          const byPlatform = await db.prepare('SELECT id FROM Site WHERE platformSiteId = ?1 LIMIT 1').bind(fallbackWfId).first();
+          if (byPlatform) {
+            console.log('[BannerCustomization] POST resolved stale siteId=%s → %s via platformSiteId', siteId, byPlatform.id);
+            siteId = byPlatform.id;
+          } else {
+            return Response.json({ success: false, error: 'Site not found — please re-register', stale: true }, { status: 404 });
+          }
+        }
+      } catch (_) {}
+    }
 
     if (!siteId) {
       return Response.json({ success: false, error: 'siteId is required' }, { status: 400 });

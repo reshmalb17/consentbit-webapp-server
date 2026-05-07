@@ -95,6 +95,14 @@ export async function ensureSchema(db) {
     await db.prepare(`ALTER TABLE Site ADD COLUMN stagingUrl TEXT`).run();
   } catch (_) {}
 
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN billingEmail TEXT`).run();
+  } catch (_) {}
+
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN webflowScriptId TEXT`).run();
+  } catch (_) {}
+
   // Create Script table if it doesn't exist
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS Script (
@@ -2240,33 +2248,30 @@ export async function createSite(
         throw e;
       }
 
-      // Existing subscription is not active — transfer ownership to this org and regenerate credentials.
+      // Transfer ownership to this org — preserve cdnScriptId and apiKey so the already-injected
+      // script URL stays valid (regenerating would break live Webflow sites).
       const now = new Date().toISOString();
-      const newCdnScriptId = crypto.randomUUID();
-      const newApiKey = crypto.randomUUID();
-      const embedScriptUrl = buildEmbedScriptUrl(origin, newCdnScriptId);
+      const keptCdnScriptId = existing.cdnScriptId;
+      const keptApiKey = existing.apiKey;
+      const backfillEmbedUrl = existing.embedScriptUrl || buildEmbedScriptUrl(origin, keptCdnScriptId);
       await db
         .prepare(
           `UPDATE Site
            SET organizationId = ?1,
                name = ?2,
-               cdnScriptId = ?3,
-               apiKey = ?4,
-               banner_type = ?5,
-               region_mode = ?6,
-               updatedAt = ?7,
-               embedScriptUrl = ?8
-           WHERE id = ?9`,
+               banner_type = ?3,
+               region_mode = ?4,
+               updatedAt = ?5,
+               embedScriptUrl = COALESCE(embedScriptUrl, ?6)
+           WHERE id = ?7`,
         )
         .bind(
           organizationId,
           name,
-          newCdnScriptId,
-          newApiKey,
           bannerType,
           regionMode,
           now,
-          embedScriptUrl,
+          backfillEmbedUrl,
           existing.id,
         )
         .run();
@@ -2275,12 +2280,12 @@ export async function createSite(
         ...existing,
         organizationId,
         name,
-        cdnScriptId: newCdnScriptId,
-        apiKey: newApiKey,
+        cdnScriptId: keptCdnScriptId,
+        apiKey: keptApiKey,
         banner_type: bannerType,
         region_mode: regionMode,
         updatedAt: now,
-        embedScriptUrl,
+        embedScriptUrl: backfillEmbedUrl,
       };
     }
     const backfillEmbed =
