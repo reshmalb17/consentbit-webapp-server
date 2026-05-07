@@ -30,7 +30,9 @@ import {
   markTrialUsed,
   generateUniqueLicenseKey,
   canonicalEmbedOrigin,
+  buildEmbedScriptUrl,
 } from '../services/db.js';
+import { injectScriptIntoWebflowHead } from './webflowFreeRegister.js';
 
 const VALID_PLAN_IDS = ['basic', 'essential', 'growth'];
 
@@ -197,6 +199,39 @@ async function provisionAccount(db, env, request, {
   return { user, isNewUser, session, org, site };
 }
 
+async function postCheckoutWebflowInject(env, { wfSiteId, site, request }) {
+  if (!wfSiteId || !env.WEBFLOW_AUTHENTICATION) return;
+  try {
+    const kvRaw = await env.WEBFLOW_AUTHENTICATION.get(wfSiteId);
+    if (!kvRaw) { console.warn('[CustomCheckout] no KV entry for wfSiteId=%s — skipping script inject', wfSiteId); return; }
+    const kvEntry = JSON.parse(kvRaw);
+    const accessToken = kvEntry.accessToken;
+    if (!accessToken) { console.warn('[CustomCheckout] no accessToken in KV for wfSiteId=%s', wfSiteId); return; }
+
+    const embedOrigin = canonicalEmbedOrigin(request, env);
+    const scriptUrl = buildEmbedScriptUrl(embedOrigin, site.cdnScriptId)
+      || `${new URL(request.url).origin}/consentbit/${site.cdnScriptId}/script.js`;
+
+    const result = await injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, '[CustomCheckout]', kvEntry.webflowScriptId ?? null);
+    console.log('[CustomCheckout] Webflow script inject result=%s scriptUrl=%s', result.success, scriptUrl);
+
+    // Update KV with webapp linkage flags
+    const updatedKv = {
+      ...kvEntry,
+      webappSiteId: site.id,
+      webappScriptUrl: scriptUrl,
+      cdnScriptId: site.cdnScriptId,
+      registeredThroughApp: true,
+      isWebappMigrated: true,
+      ...(result.webflowScriptId ? { webflowScriptId: result.webflowScriptId } : {}),
+    };
+    await env.WEBFLOW_AUTHENTICATION.put(wfSiteId, JSON.stringify(updatedKv));
+    console.log('[CustomCheckout] KV updated for wfSiteId=%s webappSiteId=%s', wfSiteId, site.id);
+  } catch (e) {
+    console.error('[CustomCheckout] postCheckoutWebflowInject failed', e?.message);
+  }
+}
+
 export async function handleCustomCheckout(request, env) {
   console.log('[CustomCheckout] >>> request received', { method: request.method, url: request.url });
 
@@ -320,6 +355,7 @@ export async function handleCustomCheckout(request, env) {
         billingEmail,
         wfSiteId,
       });
+      if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request }).catch(() => {});
       return Response.json(
         { success: true, provisioned: true, isNewUser, user: { id: user.id, email: user.email, name: user.name }, siteId: site.id, subscriptionId },
         { status: 200, headers: { 'Content-Type': 'application/json', 'Set-Cookie': `sid=${session.id}; ${cookieFlags}` } },
@@ -412,6 +448,7 @@ export async function handleCustomCheckout(request, env) {
         billingEmail,
         wfSiteId,
       });
+      if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request }).catch(() => {});
       return Response.json(
         { success: true, provisioned: true, isNewUser, user: { id: user.id, email: user.email, name: user.name }, siteId: site.id, subscriptionId: sub.id },
         { status: 201, headers: { 'Content-Type': 'application/json', 'Set-Cookie': `sid=${session.id}; ${cookieFlags}` } },

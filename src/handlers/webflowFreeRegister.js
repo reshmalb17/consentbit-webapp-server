@@ -290,7 +290,7 @@ export async function handleWebflowFreeRegister(request, env) {
 
 // ── Webflow script injection via REST API ──────────────────────────────────
 
-async function injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG, storedWebflowScriptId = null) {
+export async function injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG, storedWebflowScriptId = null) {
   const WEBFLOW_API = 'https://api.webflow.com/v2';
   const headers = {
     'Authorization': `Bearer ${accessToken}`,
