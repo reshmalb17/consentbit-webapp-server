@@ -32,7 +32,7 @@ import {
   createSite,
   saveBannerCustomization,
   getBannerCustomization,
-  getSiteById,
+  getSiteByDomain,
   inferTierPlanIdFromStripePriceId,
   canonicalEmbedOrigin,
 } from '../services/db.js';
@@ -96,6 +96,93 @@ export async function handleSyncPlugin(request, env) {
   }
   if (!platformSiteId) {
     return Response.json({ success: false, error: 'platformSiteId is required' }, { status: 400 });
+  }
+
+  // ── 0. Fast path: site already exists in DB (added via webApp earlier) ───
+  //     Don't create a new user/org/site. Just establish the platformSiteId
+  //     → webAppSiteId mapping in KV and return.
+  try {
+    const existingSite = await getSiteByDomain(db, rawDomain);
+    if (existingSite && existingSite.id) {
+      console.log('[SyncPlugin] domain already exists in DB — skipping create flow', {
+        webAppSiteId: existingSite.id,
+        domain: rawDomain,
+      });
+
+      // Resolve owner userId from the site's organization
+      const siteOrgId = existingSite.organizationId ?? existingSite.organizationid ?? null;
+      let ownerUserId = null;
+      if (siteOrgId) {
+        try {
+          const orgRow = await db.prepare('SELECT ownerUserId FROM Organization WHERE id = ?1').bind(siteOrgId).first();
+          ownerUserId = orgRow ? (orgRow.ownerUserId ?? orgRow.owneruserid ?? null) : null;
+        } catch (e) {
+          console.warn('[SyncPlugin] failed to resolve owner userId (non-fatal)', e?.message);
+        }
+      }
+
+      // Determine plan ('free' if no active sub, else the tier)
+      let plan = 'free';
+      try {
+        const sub = await getSubscriptionBySiteId(db, existingSite.id);
+        if (sub) {
+          let resolved = String(sub.planId ?? sub.planid ?? '').toLowerCase();
+          if (!['basic', 'essential', 'growth'].includes(resolved)) {
+            const priceId = sub.stripePriceId ?? sub.stripepriceid ?? null;
+            const inferred = inferTierPlanIdFromStripePriceId(env, priceId);
+            if (inferred) resolved = inferred;
+          }
+          plan = ['basic', 'essential', 'growth'].includes(resolved) ? resolved : 'free';
+        }
+      } catch (e) {
+        console.warn('[SyncPlugin] plan lookup failed (non-fatal)', e?.message);
+      }
+
+      const cdnScriptId = existingSite.cdnScriptId ?? existingSite.cdnscriptid ?? null;
+
+      // Merge into KV without disturbing existing fields
+      try {
+        let existingKv = null;
+        try {
+          existingKv = await kv.get(platformSiteId, { type: 'json' });
+        } catch (e) {
+          console.warn('[SyncPlugin] KV get failed (treating as empty)', e?.message);
+        }
+        const newFields = {
+          userId: ownerUserId,
+          webAppSiteId: existingSite.id,
+          cdnScriptId,
+          organizationId: siteOrgId,
+          domain: rawDomain,
+          platformSiteId,
+          plan,
+          paid: plan !== 'free',
+          updatedAt: new Date().toISOString(),
+        };
+        const kvValue = existingKv && typeof existingKv === 'object'
+          ? { ...existingKv, ...newFields }
+          : newFields;
+        await kv.put(platformSiteId, JSON.stringify(kvValue));
+        console.log('[SyncPlugin] KV mapping written for existing site', { platformSiteId, mergedWithExisting: !!existingKv });
+      } catch (e) {
+        console.error('[SyncPlugin] KV put failed for existing site', e);
+        return Response.json({ success: false, error: 'Failed to persist platform mapping' }, { status: 500 });
+      }
+
+      return Response.json({
+        success: true,
+        existingSite: true,
+        isNewUser: false,
+        userId: ownerUserId,
+        siteId: existingSite.id,
+        cdnScriptId,
+        organizationId: siteOrgId,
+        plan,
+        platformSiteId,
+      }, { status: 200 });
+    }
+  } catch (e) {
+    console.warn('[SyncPlugin] getSiteByDomain failed (continuing with normal flow)', e?.message);
   }
 
   // ── 1. Find or create user ───────────────────────────────────────────────
@@ -423,23 +510,9 @@ export async function handleGetPluginPlan(request, env) {
     return Response.json({ success: false, error: 'webAppSiteId is required' }, { status: 400 });
   }
 
-  // Verify site exists
-  let site;
-  try {
-    site = await getSiteById(db, webAppSiteId);
-  } catch (e) {
-    console.error('[GetPluginPlan] getSiteById failed', e);
-    return Response.json({ success: false, error: 'Failed to look up site' }, { status: 500 });
-  }
-  if (!site) {
-    return Response.json({
-      success: false,
-      code: 'SITE_NOT_FOUND',
-      error: 'Site not found.',
-    }, { status: 404 });
-  }
-
-  // Look up the active/trialing subscription for this site
+  // Single query — fetch the active/trialing subscription for this site.
+  // We skip getSiteById entirely (it isn't needed for the plan answer and was
+  // adding a second sequential D1 read).
   let sub = null;
   try {
     sub = await getSubscriptionBySiteId(db, webAppSiteId);
@@ -447,6 +520,7 @@ export async function handleGetPluginPlan(request, env) {
     console.error('[GetPluginPlan] getSubscriptionBySiteId failed', e);
     return Response.json({ success: false, error: 'Failed to look up subscription' }, { status: 500 });
   }
+  console.log('[GetPluginPlan] lookup result', { subFound: !!sub });
 
   let planId = 'free';
   let status = 'inactive';
