@@ -114,8 +114,4 @@ export async function reportStripeMeteredUsage(env) {
       console.error('[ReportStripeUsage] Error for subscription', stripeSubId, err);
     }
   }
-
-  if (reported > 0) {
-    console.log('[ReportStripeUsage] Reported usage for', reported, 'subscription item(s)');
-  }
 }

@@ -103,6 +103,10 @@ export async function ensureSchema(db) {
     await db.prepare(`ALTER TABLE Site ADD COLUMN webflowScriptId TEXT`).run();
   } catch (_) {}
 
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN scanLimitNotifiedMonth TEXT`).run();
+  } catch (_) {}
+
   // Create Script table if it doesn't exist
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS Script (
@@ -1004,8 +1008,6 @@ export async function migrateLegacyUsers(db, kvWebflow, kvFramer, legacyDb = nul
   const batch = allEntries.slice(0, batchSize);
   results.remaining = allEntries.length - batch.length;
 
-  console.log(`[migrateLegacyUsers] Found ${allEntries.length} pending → processing ${batch.length} (remaining: ${results.remaining})`);
-
   // Map KV key → which namespace it came from so we can write the tag back
   const kvByKey = new Map();
   for (const e of webflowEntries) kvByKey.set(e.domain, { kv: kvWebflow, entry: e });
@@ -1024,7 +1026,6 @@ export async function migrateLegacyUsers(db, kvWebflow, kvFramer, legacyDb = nul
         // Freshly migrated — write migratedToWebapp tag back to KV
         await tagKvAsMigrated(kvByKey, entry);
         results.migrated.push({ email: entry.email, domain: result.domain, legacySource: enriched.legacySource });
-        console.log(`[migrateLegacyUsers] ✓ ${entry.email} (${enriched.legacySource}) domain=${result.domain}`);
       }
     } catch (err) {
       console.error(`[migrateLegacyUsers] ✗ ${entry.email}:`, err?.message);
@@ -1093,7 +1094,6 @@ async function migrateLegacyDbOnly(db, legacyDb, results, now) {
         results.skipped.push({ email, domain: entry.domain, reason: result.reason });
       } else {
         results.migrated.push({ email, domain: result.domain, legacySource: entry.legacySource });
-        console.log(`[migrateLegacyDbOnly] ✓ ${email} (${entry.legacySource}) domain=${result.domain}`);
       }
     } catch (err) {
       console.error(`[migrateLegacyDbOnly] ✗ ${email}:`, err?.message);
@@ -1181,8 +1181,6 @@ export async function migrateBannerConfigs(bannerConfigDb, kvWebflowAuth, db = n
     cursor = list.cursor;
   }
 
-  console.log(`[migrateBannerConfigs] Found ${bannerKeys.length} Banner-Settings entries`);
-
   for (const kvKey of bannerKeys) {
     const webflowSiteId = kvKey.replace('Banner-Settings:', '');
     try {
@@ -1255,14 +1253,12 @@ export async function migrateBannerConfigs(bannerConfigDb, kvWebflowAuth, db = n
       // Write to BannerCustomization — skip if existing webapp entry and not force
       const bcExists = await db.prepare('SELECT id FROM BannerCustomization WHERE siteId = ?1').bind(siteRow.id).first();
       if (bcExists && !force) {
-        console.log(`[migrateBannerConfigs] BannerCustomization exists, skipped wfSiteId=${webflowSiteId}`);
         results.skipped++;
         continue;
       }
 
       await _upsertBannerCustomizationFromConfig(db, siteRow.id, configJson, now);
       results.migrated++;
-      console.log(`[migrateBannerConfigs] ✓ wfSiteId=${webflowSiteId} siteId=${siteRow.id}`);
     } catch (err) {
       console.error(`[migrateBannerConfigs] ✗ ${webflowSiteId}:`, err?.message);
       results.errors.push({ webflowSiteId, error: err?.message });
@@ -1291,8 +1287,6 @@ export async function migrateFramerBannerConfigs(bannerConfigDb, kvBannerFramer,
     cursor = list.cursor;
   }
 
-  console.log(`[migrateFramerBannerConfigs] Found ${keys.length} entries`);
-
   for (const framerSiteId of keys) {
     try {
       const configData = await kvBannerFramer.get(framerSiteId, { type: 'json' });
@@ -1303,7 +1297,6 @@ export async function migrateFramerBannerConfigs(bannerConfigDb, kvBannerFramer,
       const isPublished = productionUrl && productionUrl !== 'not published' && productionUrl.startsWith('http');
       if (!isPublished) {
         results.skipped++;
-        console.log(`[migrateFramerBannerConfigs] skipped (not published) framerSiteId=${framerSiteId}`);
         continue;
       }
 
@@ -1330,14 +1323,12 @@ export async function migrateFramerBannerConfigs(bannerConfigDb, kvBannerFramer,
       // Write to BannerCustomization — skip if existing and not force
       const bcExists = await db.prepare('SELECT id FROM BannerCustomization WHERE siteId = ?1').bind(siteRow.id).first();
       if (bcExists && !force) {
-        console.log(`[migrateFramerBannerConfigs] BannerCustomization exists, skipped framerSiteId=${framerSiteId}`);
         results.skipped++;
         continue;
       }
 
       await _upsertBannerCustomizationFromConfig(db, siteRow.id, configJson, now);
       results.migrated++;
-      console.log(`[migrateFramerBannerConfigs] ✓ framerSiteId=${framerSiteId} siteId=${siteRow.id}`);
     } catch (err) {
       console.error(`[migrateFramerBannerConfigs] ✗ ${framerSiteId}:`, err?.message);
       results.errors.push({ framerSiteId, error: err?.message });
@@ -1422,7 +1413,6 @@ export async function consumeEmailVerificationCode(db, id) {
 // --- Promo helpers ---
 export async function getPromoByCode(db, code, productType = 'pro_single') {
   if (!code || !code.trim()) {
-    console.log('[getPromoByCode] empty code');
     return null;
   }
   const normalized = code.trim().toLowerCase();
@@ -1432,7 +1422,6 @@ export async function getPromoByCode(db, code, productType = 'pro_single') {
     )
     .bind(normalized, productType)
     .first();
-  console.log('[getPromoByCode]', { code: normalized, productType, found: !!row });
   return row || null;
 }
 
@@ -1440,15 +1429,12 @@ export async function isPromoValid(db, promo, interval) {
   if (!promo) return false;
   const now = new Date().toISOString();
   if (promo.validFrom && now < promo.validFrom) {
-    console.log('[isPromoValid] not yet valid', { validFrom: promo.validFrom, now });
     return false;
   }
   if (promo.validUntil && now > promo.validUntil) {
-    console.log('[isPromoValid] expired', { validUntil: promo.validUntil, now });
     return false;
   }
   if (promo.maxRedemptions != null && (promo.redemptionCount || 0) >= promo.maxRedemptions) {
-    console.log('[isPromoValid] max redemptions reached', { redemptionCount: promo.redemptionCount, maxRedemptions: promo.maxRedemptions });
     return false;
   }
   return true;
@@ -1820,6 +1806,29 @@ export async function getScanUsageForSite(db, siteId, date = new Date()) {
   return { yearMonth, scanCount: Number(row?.total ?? 0) };
 }
 
+/** Returns the email of the owner user for an organization. */
+export async function getOrgOwnerEmail(db, organizationId) {
+  if (!organizationId) return null;
+  const row = await db
+    .prepare(
+      `SELECT u.email, u.name
+       FROM Organization o
+       JOIN User u ON u.id = o.ownerUserId
+       WHERE o.id = ?1`
+    )
+    .bind(organizationId)
+    .first();
+  return row ? { email: row.email, name: row.name } : null;
+}
+
+/** Records that a scan-limit notification was sent for a site this month. */
+export async function markScanLimitNotified(db, siteId, yearMonth) {
+  await db
+    .prepare(`UPDATE Site SET scanLimitNotifiedMonth = ?1 WHERE id = ?2`)
+    .bind(yearMonth, siteId)
+    .run();
+}
+
 /** Number of sites for an organization. */
 export async function getSitesCountByOrganization(db, organizationId) {
   const row = await db
@@ -2001,9 +2010,6 @@ export async function generateUniqueLicenseKey(db) {
       const inQueue = await db.prepare('SELECT 1 FROM SubscriptionQueue WHERE licenseKey = ?1 LIMIT 1').bind(key).first();
       if (inQueue) continue;
 
-      if (i > 0) {
-        console.log(`[generateUniqueLicenseKey] Generated unique key after ${i + 1} attempt(s): ${key.substring(0, 10)}...`);
-      }
       return key;
     } catch (e) {
       console.error(`[generateUniqueLicenseKey] Database error (attempt ${i + 1}):`, e.message);

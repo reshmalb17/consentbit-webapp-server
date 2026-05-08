@@ -1896,38 +1896,6 @@ function clearConsentState() {
     }
   
   
-    // --- Load Consent Styles (Non-blocking) ---
-    function loadConsentStyles() {
-      try {
-        // Load CSS asynchronously to avoid blocking render
-        // Use media="print" trick to load CSS without blocking, then switch to "all"
-        const link = document.createElement("link");
-        link.rel = "stylesheet";
-        link.href = "https://api.consentbit.com/consentbitstyle.css";
-        link.type = "text/css";
-        link.media = "print"; // Load without blocking
-        link.onload = function() { 
-          this.media = "all"; // Switch to all media after load
-        };
-        link.onerror = function () {};
-        
-        const link2 = document.createElement("link");
-        link2.rel = "stylesheet";
-        link2.href = "https://api.consentbit.com/consentbit.css";
-        link2.type = "text/css";
-        link2.media = "print"; // Load without blocking
-        link2.onload = function() { 
-          this.media = "all"; // Switch to all media after load
-        };
-        link2.onerror = function () {};
-        
-        // Append both links (non-blocking)
-        document.head.appendChild(link2);
-        document.head.appendChild(link);
-      } catch (error) {
-        // Silent error handling
-      }
-    }
     function monitorDynamicScripts() {
       const observer = new MutationObserver(function (mutations) {
         mutations.forEach(function (mutation) {
@@ -2032,10 +2000,6 @@ function clearConsentState() {
         // Unblock Google scripts again during DOMContentLoaded to catch any scripts added dynamically
         unblockGoogleScripts();
         
-        // Defer CSS loading slightly to avoid blocking initial render
-        requestAnimationFrame(function() {
-          loadConsentStyles();
-        });
         monitorDynamicScripts();
       });
     } else {

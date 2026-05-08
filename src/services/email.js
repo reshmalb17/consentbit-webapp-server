@@ -55,7 +55,6 @@ export async function sendBrevoEmail(env, { to, name, subject, html, text }) {
     const body = await res.text().catch(() => '');
     console.error('[Email] Brevo send failed', { status: res.status, to, subject, snippet: body.slice(0, 300) });
   } else {
-    console.log('[Email] Sent', { subject, to });
   }
 }
 
@@ -422,6 +421,77 @@ ConsentBit Team
 
   const send = sendBrevoEmail(env, { to, name, subject, html, text })
     .catch(e => console.error('[Email] sendPaidPlanEmail failed:', e?.message));
+
+  if (ctx?.waitUntil) ctx.waitUntil(send);
+}
+
+// ---------------------------------------------------------------------------
+// 4. Scan limit reached — sent once per month when scheduled scans are blocked
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {object} env
+ * @param {ExecutionContext|null} ctx
+ * @param {{ to: string, name: string, domain: string, scansLimit: number, upgradeUrl?: string }} opts
+ */
+export function sendScanLimitEmail(env, ctx, { to, name, domain, scansLimit, upgradeUrl }) {
+  const displayName   = name || 'there';
+  const displayDomain = domain || 'your website';
+  const billingUrl    = upgradeUrl || ((env.WEBAPP_PUBLIC_URL || 'https://app.consentbit.com').replace(/\/$/, '') + '/billing');
+
+  const subject = `Your scheduled scan was paused — scan limit reached`;
+
+  const html = layout(
+    `Your scheduled cookie scan for ${displayDomain} was paused because you've reached your monthly scan limit.`,
+    `
+    <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi ${displayName},</p>
+    <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
+      Your scheduled cookie scan for <strong style="color:#111827;">${displayDomain}</strong> was paused
+      because you've used all <strong style="color:#111827;">${scansLimit} scans</strong> included in your plan this month.
+    </p>
+    <p style="margin:0 0 22px;color:#6b7280;font-size:15px;line-height:1.6;">
+      Your scan schedule is still saved — it will automatically resume at the start of next month when your quota resets,
+      or immediately if you upgrade your plan.
+    </p>
+
+    ${HR}
+
+    <p style="margin:0 0 12px;color:#111827;font-size:14px;font-weight:600;">What you can do:</p>
+    <ul style="margin:0 0 22px;padding-left:18px;color:#374151;font-size:14px;line-height:1.7;">
+      <li>Wait until the 1st of next month — your schedule resumes automatically</li>
+      <li>Upgrade your plan now to unlock more scans immediately</li>
+    </ul>
+
+    <a href="${billingUrl}" style="${BTN}">Upgrade plan →</a>
+
+    ${HR}
+
+    <p style="margin:0;color:#9ca3af;font-size:13px;line-height:1.6;">
+      Questions? Just reply to this email and we'll help you out.
+    </p>
+    `
+  );
+
+  const text = `Hi ${displayName},
+
+Your scheduled cookie scan for ${displayDomain} was paused because you've used all ${scansLimit} scans included in your plan this month.
+
+Your scan schedule is still saved — it will automatically resume at the start of next month when your quota resets, or immediately if you upgrade your plan.
+
+What you can do:
+- Wait until the 1st of next month — your schedule resumes automatically
+- Upgrade your plan now to unlock more scans immediately
+
+Upgrade your plan: ${billingUrl}
+
+Questions? Just reply to this email and we'll help you out.
+
+Best,
+ConsentBit Team
+`;
+
+  const send = sendBrevoEmail(env, { to, name, subject, html, text })
+    .catch(e => console.error('[Email] sendScanLimitEmail failed:', e?.message));
 
   if (ctx?.waitUntil) ctx.waitUntil(send);
 }

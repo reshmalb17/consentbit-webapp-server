@@ -267,15 +267,6 @@ export async function handleVerifyScript(request, env) {
       scriptUrlPreview: scriptUrl.substring(0, 160),
     };
 
-    console.log(
-      '[VerifyScript] result',
-      JSON.stringify({
-        found,
-        ...debugPayload,
-        perTag: debugPayload.perTag?.length,
-      }),
-    );
-
     if (!found) {
       console.warn('[VerifyScript] not found — check expectedSiteIds vs script tags on page', {
         expectedSiteIds,

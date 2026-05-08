@@ -96,7 +96,6 @@ export async function handlePageview(request, env) {
   }
 
   if (preCheckOverLimit) {
-    console.log('[Pageview] over limit — skipping storage', { siteId, limit });
     return Response.json(
       { success: true, overLimit: true, pageviewCount: limit },
       { status: 200 },
@@ -110,15 +109,6 @@ export async function handlePageview(request, env) {
     const orgUsage = await getPageviewUsageForOrganization(db, organizationId);
     overLimit = orgUsage.pageviewCount >= limit;
   }
-
-  console.log('[Pageview]', {
-    siteId,
-    pageUrl,
-    yearMonth: usage.yearMonth,
-    pageviewCount: usage.pageviewCount,
-    overLimit,
-    timestamp: new Date().toISOString(),
-  });
 
   return Response.json(
     {

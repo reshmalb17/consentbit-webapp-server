@@ -23,7 +23,6 @@ export async function handlePaymentSubscription(request, env) {
     const platformRow = await db.prepare('SELECT id FROM Site WHERE platformSiteId = ?1 LIMIT 1').bind(siteId).first();
     if (platformRow) {
       resolvedSiteId = platformRow.id;
-      console.log('[paymentSubscription] resolved wfSiteId=%s → D1 siteId=%s', siteId, resolvedSiteId);
     }
 
     // 1. Try direct site → subscription link

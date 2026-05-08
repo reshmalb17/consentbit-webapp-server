@@ -1,4 +1,4 @@
-// POST /api/webhooks/stripe - raw body required for signature verification
+﻿// POST /api/webhooks/stripe - raw body required for signature verification
 //
 // Subscribe to: checkout.session.completed, payment_intent.succeeded, customer.subscription.updated, customer.subscription.deleted, invoice.payment_failed
 //
@@ -90,10 +90,6 @@ async function verifyStripeSignature(payload, signature, secret) {
 }
 
 async function injectWebflowScript(accessToken, wfSiteId, scriptSrc) {
-  console.log(`[injectWebflowScript] START wfSiteId=${wfSiteId}`);
-  console.log(`[injectWebflowScript] scriptSrc="${scriptSrc}"`);
-  console.log(`[injectWebflowScript] accessToken present=${!!accessToken} length=${accessToken?.length}`);
-
   // Step 1: register the script (idempotent)
   const registerBody = {
     sourceCode: `(function(){var s=document.createElement('script');s.src=${JSON.stringify(scriptSrc)};s.async=true;s.setAttribute('data-display-name','ConsentBitScript2025');(document.head||document.getElementsByTagName('head')[0]).appendChild(s);})();`,
@@ -102,8 +98,6 @@ async function injectWebflowScript(accessToken, wfSiteId, scriptSrc) {
     location: 'header',
     canCopy: false,
   };
-  console.log(`[injectWebflowScript] POST registered_scripts/inline body=`, JSON.stringify(registerBody));
-
   const registerRes = await fetch(`https://api.webflow.com/v2/sites/${wfSiteId}/registered_scripts/inline`, {
     method: 'POST',
     headers: {
@@ -114,10 +108,8 @@ async function injectWebflowScript(accessToken, wfSiteId, scriptSrc) {
     body: JSON.stringify(registerBody),
   });
   const registerData = await registerRes.json();
-  console.log(`[injectWebflowScript] register response status=${registerRes.status} body=${JSON.stringify(registerData)}`);
 
   if (registerRes.status === 401 || registerRes.status === 403) {
-    console.warn(`[injectWebflowScript] auth error ${registerRes.status} — accessToken may be expired or missing custom_code:write scope`);
     return false;
   }
 
@@ -126,27 +118,22 @@ async function injectWebflowScript(accessToken, wfSiteId, scriptSrc) {
   // Script already registered — derive the id from displayName (Webflow lowercases it)
   if (!scriptId && registerData.code === 'duplicate_registered_script') {
     scriptId = registerBody.displayName.toLowerCase().replace(/\s+/g, '');
-    console.log(`[injectWebflowScript] duplicate script — reusing existing scriptId="${scriptId}"`);
   }
 
   if (!scriptId) {
-    console.warn(`[injectWebflowScript] no scriptId in register response — full response: ${JSON.stringify(registerData)}`);
     return false;
   }
-  console.log(`[injectWebflowScript] scriptId="${scriptId}" — applying to site header...`);
 
   // Step 2: fetch existing applied scripts, remove old ConsentBit ones, add new
-  console.log(`[injectWebflowScript] fetching existing custom_code scripts...`);
   let existingScripts = [];
   try {
     const listRes = await fetch(`https://api.webflow.com/v2/sites/${wfSiteId}/custom_code`, {
       headers: { Authorization: `Bearer ${accessToken}`, 'accept-version': '1.0.0' },
     });
     const listData = await listRes.json();
-    console.log(`[injectWebflowScript] existing custom_code status=${listRes.status} body=${JSON.stringify(listData)}`);
     existingScripts = listData.scripts || [];
   } catch (e) {
-    console.warn(`[injectWebflowScript] could not fetch existing scripts: ${e.message}`);
+    // could not fetch existing scripts
   }
 
   // Remove old ConsentBit scripts (ConsentBitBanner* from cb-server, consentbitscript2025 from previous runs)
@@ -154,10 +141,7 @@ async function injectWebflowScript(accessToken, wfSiteId, scriptSrc) {
     const id = (s.id || '').toLowerCase();
     return !id.startsWith('consentbitbanner') && !id.startsWith('consentbitscript2025');
   });
-  console.log(`[injectWebflowScript] existing=${existingScripts.length} after removing old ConsentBit=${filtered.length}`);
-
   const applyBody = { scripts: [...filtered, { id: scriptId, location: 'header', version: registerBody.version }] };
-  console.log(`[injectWebflowScript] PUT /custom_code body=`, JSON.stringify(applyBody));
 
   const applyRes = await fetch(`https://api.webflow.com/v2/sites/${wfSiteId}/custom_code`, {
     method: 'PUT',
@@ -169,14 +153,10 @@ async function injectWebflowScript(accessToken, wfSiteId, scriptSrc) {
     body: JSON.stringify(applyBody),
   });
   const applyData = await applyRes.json();
-  console.log(`[injectWebflowScript] apply response status=${applyRes.status} body=${JSON.stringify(applyData)}`);
 
   if (!applyRes.ok) {
-    console.warn(`[injectWebflowScript] apply failed status=${applyRes.status}: ${applyData.msg || applyData.error || JSON.stringify(applyData)}`);
     return false;
   }
-
-  console.log(`[injectWebflowScript] script applied — publishing site...`);
 
   // Publish site so custom code changes go live immediately
   const publishRes = await fetch(`https://api.webflow.com/v2/sites/${wfSiteId}/publish`, {
@@ -188,29 +168,19 @@ async function injectWebflowScript(accessToken, wfSiteId, scriptSrc) {
     },
     body: JSON.stringify({ publishToWebflowSubdomain: true }),
   });
-  const publishData = await publishRes.json();
-  console.log(`[injectWebflowScript] publish response status=${publishRes.status} body=${JSON.stringify(publishData)}`);
-
-  if (!publishRes.ok) {
-    console.warn(`[injectWebflowScript] publish failed: ${publishData.msg || publishData.message || JSON.stringify(publishData)}`);
-  } else {
-    console.log(`[injectWebflowScript] site published successfully`);
-  }
-
-  console.log(`[injectWebflowScript] SUCCESS — script applied to wfSiteId=${wfSiteId}`);
+  await publishRes.json();
   return true;
 }
 
 async function handleLegacyWebflowUpgrade(env, db, siteId, newSubId, resolvedPlanId) {
-  console.log(`[legacyUpgrade] starting — siteId=${siteId} newSubId=${newSubId} plan=${resolvedPlanId}`);
 
   const siteRow = await db.prepare(
     'SELECT domain, platform, isLegacy, platformSiteId, cdnScriptId FROM Site WHERE id = ?1'
   ).bind(siteId).first();
 
-  if (!siteRow) { console.warn(`[legacyUpgrade] no Site row found for siteId=${siteId}`); return; }
-  if (!siteRow.isLegacy) { console.log(`[legacyUpgrade] site is not legacy — skipping`); return; }
-  if (!['webflow', 'framer'].includes(siteRow.platform)) { console.log(`[legacyUpgrade] platform="${siteRow.platform}" not webflow/framer — skipping`); return; }
+  if (!siteRow) { return; }
+  if (!siteRow.isLegacy) { return; }
+  if (!['webflow', 'framer'].includes(siteRow.platform)) { return; }
 
   const domain = siteRow.domain;
   const wfSiteId = siteRow.platformSiteId;
@@ -218,47 +188,27 @@ async function handleLegacyWebflowUpgrade(env, db, siteId, newSubId, resolvedPla
   const isFramer = siteRow.platform === 'framer';
   const kv = isFramer ? env.ACTIVE_SITES_CONSENTBIT_FRAMER : env.ACTIVE_SITES_CONSENTBIT;
 
-  console.log(`[legacyUpgrade] domain="${domain}" platform="${siteRow.platform}" wfSiteId="${wfSiteId}" cdnScriptId="${cdnScriptId}"`);
 
   // 1. Update plan in KV
   if (kv && domain) {
     const existing = await kv.get(domain, { type: 'json' });
     if (existing) {
       await kv.put(domain, JSON.stringify({ ...existing, plan: resolvedPlanId }));
-      console.log(`[legacyUpgrade] KV plan updated to "${resolvedPlanId}" for domain="${domain}"`);
 
       // Cancel old legacy Stripe subscription
       const oldLegacySubId = existing.subscriptionId;
       if (oldLegacySubId && oldLegacySubId !== newSubId && env.STRIPE_SECRET_KEY) {
-        console.log(`[legacyUpgrade] cancelling old legacy sub ${oldLegacySubId}...`);
         try {
           const cancelRes = await fetch(`https://api.stripe.com/v1/subscriptions/${encodeURIComponent(oldLegacySubId)}`, {
             method: 'DELETE',
             headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
           });
-          const cancelData = await cancelRes.json();
-          if (cancelData.error) {
-            if (cancelData.error.code === 'resource_missing') {
-              console.log(`[legacyUpgrade] old legacy sub ${oldLegacySubId} already cancelled — skipping`);
-            } else {
-              console.warn(`[legacyUpgrade] cancel old sub failed: ${cancelData.error.message}`);
-            }
-          } else {
-            console.log(`[legacyUpgrade] old legacy sub ${oldLegacySubId} cancelled`);
-          }
+          await cancelRes.json();
         } catch (e) {
-          console.warn('[legacyUpgrade] exception cancelling old legacy sub', e.message);
+          // exception cancelling old legacy sub
         }
-      } else if (oldLegacySubId === newSubId) {
-        console.log(`[legacyUpgrade] old sub same as new sub — skip cancel`);
-      } else {
-        console.log(`[legacyUpgrade] no old legacy sub to cancel`);
       }
-    } else {
-      console.warn(`[legacyUpgrade] no KV entry found for domain="${domain}" — plan not updated in KV`);
     }
-  } else {
-    console.warn(`[legacyUpgrade] KV or domain missing — skipping KV plan update`);
   }
 
   // 2. Write cdnScriptId, siteId, plan to WEBFLOW_AUTHENTICATION KV (keyed by platformSiteId)
@@ -266,7 +216,6 @@ async function handleLegacyWebflowUpgrade(env, db, siteId, newSubId, resolvedPla
     try {
       const raw = await env.WEBFLOW_AUTHENTICATION.get(wfSiteId);
       const existing = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : {};
-      console.log(`[legacyUpgrade] WEBFLOW_AUTHENTICATION existing flags — isLegacyUser=${existing.isLegacyUser} upgradedThroughApp=${existing.upgradedThroughApp} isWebappMigrated=${existing.isWebappMigrated} webappSiteId=${existing.webappSiteId}`);
       await env.WEBFLOW_AUTHENTICATION.put(wfSiteId, JSON.stringify({
         ...existing,
         cdnScriptId,
@@ -275,37 +224,32 @@ async function handleLegacyWebflowUpgrade(env, db, siteId, newSubId, resolvedPla
         upgradedThroughApp: true,
         isWebappMigrated: true,
       }));
-      console.log(`[legacyUpgrade] WEBFLOW_AUTHENTICATION updated — cdnScriptId=${cdnScriptId} webappSiteId=${siteId} plan=${resolvedPlanId} upgradedThroughApp=true isWebappMigrated=true`);
     } catch (e) {
-      console.warn('[legacyUpgrade] WEBFLOW_AUTHENTICATION update failed', e.message);
+      // WEBFLOW_AUTHENTICATION update failed
     }
   }
 
   // 3. Inject CDN script into Webflow site via Webflow API (Webflow only, not Framer)
   if (isFramer) {
-    console.log(`[legacyUpgrade] Framer site — skipping Webflow script inject`);
     return;
   }
-  if (!wfSiteId) { console.warn(`[legacyUpgrade] no platformSiteId on Site — cannot inject script`); return; }
-  if (!cdnScriptId) { console.warn(`[legacyUpgrade] no cdnScriptId on Site — cannot inject script`); return; }
-  if (!env.WEBFLOW_AUTHENTICATION) { console.warn(`[legacyUpgrade] WEBFLOW_AUTHENTICATION KV not bound`); return; }
+  if (!wfSiteId) { return; }
+  if (!cdnScriptId) { return; }
+  if (!env.WEBFLOW_AUTHENTICATION) { return; }
 
-  console.log(`[legacyUpgrade] looking up accessToken in WEBFLOW_AUTHENTICATION for wfSiteId=${wfSiteId}...`);
   try {
     const raw = await env.WEBFLOW_AUTHENTICATION.get(wfSiteId);
-    if (!raw) { console.warn(`[legacyUpgrade] no WEBFLOW_AUTHENTICATION entry for wfSiteId=${wfSiteId}`); return; }
+    if (!raw) { return; }
     const wfData = typeof raw === 'string' ? JSON.parse(raw) : raw;
     const accessToken = wfData.accessToken;
-    if (!accessToken) { console.warn('[legacyUpgrade] accessToken missing in WEBFLOW_AUTHENTICATION entry'); return; }
-    console.log(`[legacyUpgrade] accessToken found — injecting script...`);
+    if (!accessToken) { return; }
 
-    const cdnBase = env.CDN_BASE_URL || 'https://consent-webapp-manager.web-8fb.workers.dev';
+    const cdnBase = env.CDN_BASE_URL || 'https://manager.consentbit.com';
     const scriptSrc = `${cdnBase}/consentbit/${cdnScriptId}/script.js`;
 
-    const ok = await injectWebflowScript(accessToken, wfSiteId, scriptSrc);
-    console.log(`[legacyUpgrade] script inject ${ok ? 'SUCCESS' : 'FAILED'} for wfSiteId=${wfSiteId}`);
+    await injectWebflowScript(accessToken, wfSiteId, scriptSrc);
   } catch (e) {
-    console.warn('[legacyUpgrade] exception during Webflow script inject', e.message);
+    // exception during Webflow script inject
   }
 }
 
@@ -340,7 +284,6 @@ export async function handleStripeWebhook(request, env, ctx) {
   await ensureSchema(db);
   const eventId = event.id;
   const type = event.type;
-  console.log('[StripeWebhook] received', type, eventId);
 
   try {
     // payment_intent.succeeded: bulk one-time payment — create license keys and add to queue (cron creates subscriptions, 4 at a time)
@@ -357,9 +300,8 @@ export async function handleStripeWebhook(request, env, ctx) {
           const fetched = await res.json();
           if (fetched.metadata && Object.keys(fetched.metadata).length > 0) meta = fetched.metadata;
           if (fetched.customer) pi = { ...pi, customer: fetched.customer };
-          if (fetched.customer) console.log('[StripeWebhook] payment_intent.succeeded: got customer from API');
         } catch (e) {
-          console.warn('[StripeWebhook] payment_intent.succeeded: fetch PI failed', e.message);
+          // fetch PI failed
         }
       }
 
@@ -371,17 +313,11 @@ export async function handleStripeWebhook(request, env, ctx) {
     // Use Case 3 / bulk guest checkout: no customer at PaymentIntent creation; find or create by email
     if (isBulk && !customerId && meta.email) {
       customerId = await findOrCreateStripeCustomerByEmail(env, meta.email);
-      if (customerId) {
-        console.log('[StripeWebhook] payment_intent.succeeded: found/created customer by email for bulk', customerId);
-      }
     }
-
-    console.log('[StripeWebhook] payment_intent.succeeded', { piId: pi.id, planType, orgId, hasCustomer: !!customerId, isBulk });
 
     if (isBulk) {
       const already = await markPaymentIntentProcessed(db, pi.id);
       if (!already) {
-        console.log('[StripeWebhook] payment_intent.succeeded already processed', pi.id);
         return Response.json({ received: true });
       }
       const quantity = Math.max(1, parseInt(meta.quantity, 10) || 1);
@@ -389,10 +325,8 @@ export async function handleStripeWebhook(request, env, ctx) {
       const recurringPriceId = interval === 'yearly'
         ? (env.STRIPE_PRICE_YEARLY || env.STRIPE_PRICE_MONTHLY)
         : env.STRIPE_PRICE_MONTHLY;
-      if (!recurringPriceId) {
-        console.error('[StripeWebhook] payment_intent.succeeded: STRIPE_PRICE_MONTHLY/YEARLY not set');
-      } else if (!customerId) {
-        console.warn('[StripeWebhook] payment_intent.succeeded: bulk but no customer (pass email in checkout or ensure Stripe attached customer)');
+      if (!recurringPriceId || !customerId) {
+        // missing price or customer
       } else {
         try {
           const nowSec = Math.floor(Date.now() / 1000);
@@ -405,9 +339,7 @@ export async function handleStripeWebhook(request, env, ctx) {
             interval,
             trialEnd,
           });
-          console.log('[StripeWebhook] payment_intent.succeeded: enqueued', quantity, 'license jobs for org', orgId);
         } catch (err) {
-          console.error('[StripeWebhook] payment_intent.succeeded: enqueue failed', err);
           throw err;
         }
       }
@@ -417,8 +349,6 @@ export async function handleStripeWebhook(request, env, ctx) {
         organizationId: orgId,
         rawPayload: { paymentIntentId: pi.id, planType: 'bulk', quantity },
       });
-    } else {
-      console.log('[StripeWebhook] payment_intent.succeeded: skipped (not bulk or missing orgId)');
     }
       return Response.json({ received: true });
     }
@@ -429,7 +359,6 @@ export async function handleStripeWebhook(request, env, ctx) {
         `SELECT id FROM PaymentEvent WHERE stripeEventId = ?1 LIMIT 1`
       ).bind(eventId).first();
       if (alreadyProcessed) {
-        console.log(`[StripeWebhook] checkout.session.completed: already processed eventId=${eventId}, skipping`);
         return Response.json({ received: true });
       }
 
@@ -479,9 +408,8 @@ export async function handleStripeWebhook(request, env, ctx) {
             const inferred = inferTierPlanIdFromStripePriceId(env, stripePriceFromSub);
             if (inferred) subMeta = { ...subMeta, planId: inferred };
           }
-          console.log('[StripeWebhook] checkout.session.completed: sub metadata', { planType: planTypeMeta, siteId, siteNameMeta, siteDomainMeta, orgId });
         } catch (e) {
-          console.warn('[StripeWebhook] Could not fetch subscription', e.message);
+          // Could not fetch subscription
         }
       }
 
@@ -489,7 +417,6 @@ export async function handleStripeWebhook(request, env, ctx) {
       if (subId && orgId && planTypeMeta === 'quantity') {
         const qty = Math.max(10, Math.min(100, parseInt(String(sessionMeta.quantity || subMeta.quantity || '10'), 10) || 10));
         const licenseKeys = await generateLicenseKeys(qty, db);
-        console.log('[StripeWebhook] checkout.session.completed: quantity plan', { qty, licenseKeysCount: licenseKeys.length });
         await savePaymentEvent(db, {
           eventType: 'checkout.session.completed',
           stripeEventId: eventId,
@@ -521,10 +448,9 @@ export async function handleStripeWebhook(request, env, ctx) {
             const existingByPlatform = await db.prepare('SELECT id FROM Site WHERE platformSiteId = ?1 LIMIT 1').bind(platformSiteId).first();
             if (existingByPlatform) {
               siteId = existingByPlatform.id;
-              console.log('[StripeWebhook] checkout.session.completed: found existing site by platformSiteId=%s → siteId=%s', platformSiteId, siteId);
             }
           } catch (e) {
-            console.warn('[StripeWebhook] platformSiteId lookup failed', e.message);
+            // platformSiteId lookup failed
           }
         }
 
@@ -542,9 +468,8 @@ export async function handleStripeWebhook(request, env, ctx) {
               regionMode: 'gdpr',
             });
             siteId = createdSite.id;
-            console.log('[StripeWebhook] checkout.session.completed: created site', siteId, name);
           } catch (e) {
-            console.error('[StripeWebhook] Failed to create site from checkout metadata', e);
+            // Failed to create site from checkout metadata
           }
         }
 
@@ -553,7 +478,6 @@ export async function handleStripeWebhook(request, env, ctx) {
           db.prepare('UPDATE Site SET platformSiteId = ?1, platform = COALESCE(platform, ?2), updatedAt = ?3 WHERE id = ?4 AND (platformSiteId IS NULL OR platformSiteId = "")')
             .bind(platformSiteId, platform || 'webflow', new Date().toISOString(), siteId)
             .run()
-            .then(() => console.log('[StripeWebhook] updated platformSiteId=%s on siteId=%s', platformSiteId, siteId))
             .catch(() => {});
         }
 
@@ -569,11 +493,6 @@ export async function handleStripeWebhook(request, env, ctx) {
         if (!resolvedPlanId && stripePriceFromSub) {
           resolvedPlanId = inferTierPlanIdFromStripePriceId(env, stripePriceFromSub);
         }
-        console.log('[StripeWebhook] checkout.session.completed: saving subscription', {
-          siteId,
-          planId: resolvedPlanId,
-          licenseKey: licenseKey ? `${licenseKey.substring(0, 12)}...` : null,
-        });
         await saveSubscription(db, {
           organizationId: orgId,
           siteId: siteId || null,
@@ -597,7 +516,7 @@ export async function handleStripeWebhook(request, env, ctx) {
           db.prepare('UPDATE Site SET billingEmail = ?1, updatedAt = ?2 WHERE id = ?3')
             .bind(billingEmailToStore, new Date().toISOString(), siteId)
             .run()
-            .catch((e) => console.warn('[StripeWebhook] billingEmail update failed:', e.message));
+            .catch(() => {});
         }
 
         // Sync email: if checkout email differs from stored User email, update User + WEBFLOW_AUTHENTICATION KV
@@ -608,7 +527,6 @@ export async function handleStripeWebhook(request, env, ctx) {
               'SELECT u.id, u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
             ).bind(orgId).first();
             if (userRow && userRow.email !== checkoutEmail) {
-              console.log('[StripeWebhook] email changed: %s → %s for userId=%s', userRow.email, checkoutEmail, userRow.id);
               await db.prepare('UPDATE User SET email = ?1, updatedAt = ?2 WHERE id = ?3').bind(checkoutEmail, new Date().toISOString(), userRow.id).run();
               // Update WEBFLOW_AUTHENTICATION KV if wfSiteId known
               if (platformSiteId && env.WEBFLOW_AUTHENTICATION) {
@@ -616,19 +534,18 @@ export async function handleStripeWebhook(request, env, ctx) {
                 if (kvRaw) {
                   const kvEntry = JSON.parse(kvRaw);
                   await env.WEBFLOW_AUTHENTICATION.put(platformSiteId, JSON.stringify({ ...kvEntry, email: checkoutEmail }));
-                  console.log('[StripeWebhook] updated email in WEBFLOW_AUTHENTICATION KV for wfSiteId=%s', platformSiteId);
                 }
               }
             }
           } catch (e) {
-            console.warn('[StripeWebhook] email sync failed:', e.message);
+            // email sync failed
           }
         }
 
         // Mark trial as used on the site so it can never be granted again
         if (subscriptionStatus === 'trialing' && siteId) {
           try { await markTrialUsed(db, siteId); } catch (e) {
-            console.warn('[StripeWebhook] markTrialUsed failed', e.message);
+            // markTrialUsed failed
           }
         }
 
@@ -646,13 +563,8 @@ export async function handleStripeWebhook(request, env, ctx) {
               },
             );
             const cancelData = await cancelRes.json();
-            if (cancelData.error) {
-              console.warn('[StripeWebhook] checkout.session.completed: failed to cancel old subscription', oldStripeSubscriptionId, cancelData.error.message);
-            } else {
-              console.log('[StripeWebhook] checkout.session.completed: cancelled old subscription', oldStripeSubscriptionId);
-            }
           } catch (e) {
-            console.warn('[StripeWebhook] checkout.session.completed: error cancelling old subscription', e.message);
+            // error cancelling old subscription
           }
         }
 
@@ -683,7 +595,7 @@ export async function handleStripeWebhook(request, env, ctx) {
                 };
               }
             } catch (e) {
-              console.warn('[StripeWebhook] Could not fetch invoice for email', e.message);
+              // Could not fetch invoice for email
             }
           }
           sendPaidPlanEmail(env, ctx, {
@@ -698,9 +610,7 @@ export async function handleStripeWebhook(request, env, ctx) {
         // Legacy Webflow upgrade: if site is isLegacy=1 + platform=webflow/framer,
         // sync plan to KV and inject CDN script into Webflow site via Webflow API
         if (siteId && resolvedPlanId && ['essential', 'growth'].includes(resolvedPlanId)) {
-          ctx.waitUntil(handleLegacyWebflowUpgrade(env, db, siteId, subId, resolvedPlanId).catch(
-            (e) => console.warn('[StripeWebhook] legacy upgrade failed', e.message)
-          ));
+          ctx.waitUntil(handleLegacyWebflowUpgrade(env, db, siteId, subId, resolvedPlanId).catch(() => {}));
         }
 
         // Outbound sync → LEGACY_DB + KV (non-blocking)
@@ -715,7 +625,7 @@ export async function handleStripeWebhook(request, env, ctx) {
             licenseKey: licenseKey || null,
             interval,
             cancelAtPeriodEnd: 0,
-          }).catch((e) => console.warn('[StripeWebhook] syncPurchaseToLegacy failed:', e?.message))
+          }).catch(() => {})
         );
       }
       return Response.json({ received: true });

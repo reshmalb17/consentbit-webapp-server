@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "obfuscate": "node scripts/obfuscate-loader.mjs",
+    "obfuscate:dry": "node scripts/obfuscate-loader.mjs --dry-run"
   },
   "keywords": [],
   "author": "",
@@ -16,6 +18,7 @@
   "devDependencies": {
     "@cloudflare/puppeteer": "^1.0.6",
     "@cloudflare/workers-types": "^4.20260131.0",
+    "terser": "^5.47.1",
     "uuid": "^13.0.0",
     "wrangler": "^4.61.1"
   }

@@ -141,7 +141,25 @@ export async function handleSites(request, env) {
       }
     }
 
-    return Response.json({ success: true, sites, effectivePlanId });
+    // Enrich sites with stagingDomain from KV where platformSiteId is set
+    const kv = env.WEBFLOW_AUTHENTICATION;
+    if (kv && sites && sites.length > 0) {
+      await Promise.all(sites.map(async (s) => {
+        const platformSiteId = s.platformSiteId ?? s.platformsiteid ?? null;
+        if (!platformSiteId) return;
+        try {
+          const raw = await kv.get(platformSiteId);
+          if (raw) {
+            const data = JSON.parse(raw);
+            if (data.stagingUrl) {
+              s.stagingDomain = data.stagingUrl.replace(/^https?:\/\//, '').split('/')[0];
+            }
+          }
+        } catch { /* ignore */ }
+      }));
+    }
+
+    return Response.json({ success: true, sites, effectivePlanId });
   }
 
   

@@ -95,9 +95,6 @@ export async function handleCheckLegacyScript(request, env) {
 
   // Extract all script src values from head for debugging
   const scriptSrcs = [...headHtml.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map(m => m[1]);
-  console.log('[checkLegacyScript] domain=%s legacySource=%s cdnScriptId=%s inHead=%s inBody=%s scriptSrcs=%s',
-    domain, legacySource, cdnScriptId, inHead, inBody, JSON.stringify(scriptSrcs));
-
   return Response.json({
     success: true,
     found: inHead || inBody,

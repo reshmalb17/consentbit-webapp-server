@@ -9,8 +9,10 @@ function getDomainFromUrl(url) {
  * Build search keys for a site from its WEBFLOW_AUTHENTICATION KV entry.
  * Returns [siteName, stagingShort, stagingDomain, customDomain, fallbackDomain].
  */
-export async function buildSearchKeys(kv, platformSiteId, fallbackDomain) {
-  if (!platformSiteId || !kv) return [fallbackDomain].filter(Boolean);
+export async function buildSearchKeys(kv, platformSiteId, fallbackDomain, fallbackName) {
+  if (!platformSiteId || !kv) {
+    return [...new Set([fallbackDomain, fallbackName].filter(Boolean))];
+  }
   try {
     const raw = await kv.get(platformSiteId);
     if (raw) {
@@ -19,10 +21,10 @@ export async function buildSearchKeys(kv, platformSiteId, fallbackDomain) {
       const stagingDomain = siteData.stagingUrl ? getDomainFromUrl(siteData.stagingUrl) : '';
       const stagingShort = stagingDomain.split('.')[0] || '';
       const customDomain = siteData.customDomain ? siteData.customDomain.replace(/^https?:\/\//, '') : '';
-      return [...new Set([siteName, stagingShort, stagingDomain, customDomain, fallbackDomain || ''].filter(Boolean))];
+      return [...new Set([siteName, stagingShort, stagingDomain, customDomain, fallbackDomain || '', fallbackName || ''].filter(Boolean))];
     }
   } catch { /* ignore */ }
-  return [fallbackDomain].filter(Boolean);
+  return [...new Set([fallbackDomain, fallbackName].filter(Boolean))];
 }
 
 /**

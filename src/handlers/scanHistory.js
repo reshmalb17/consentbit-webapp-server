@@ -42,6 +42,7 @@ export async function handleScanHistory(request, env) {
       // Column already exists, ignore
     }
 
+
     const { results } = await db
       .prepare(
         'SELECT * FROM ScanHistory WHERE siteId = ?1 ORDER BY createdAt DESC LIMIT 50'

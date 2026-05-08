@@ -141,19 +141,6 @@ export async function handleCreateCheckoutSession(request, env) {
   const cancelUrl = body.cancelUrl || `${request.url.replace(/\/api\/.*$/, '')}/pro-plan?canceled=true`;
   const stripeCouponId = body.stripeCouponId && body.stripeCouponId.trim() ? body.stripeCouponId.trim() : null;
 
-  console.log(
-    '[CREATE CHECK OUT SESSION]:',
-    organizationId,
-    planType,
-    interval,
-    quantity,
-    siteId,
-    successUrl,
-    stripeCouponId,
-    email,
-    body.planId || '(no planId)',
-  );
-
   if (!organizationId) {
     return Response.json({ success: false, error: 'organizationId required' }, { status: 400 });
   }
