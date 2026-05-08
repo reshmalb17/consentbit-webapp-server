@@ -32,8 +32,6 @@ export async function handleAuthLogin(request, env) {
   let passwordHash = (body.passwordHash || '').trim();
   const password = (body.password || '').trim();
 
-  console.log('[AuthLogin] Attempt', { email: email ? `${email.slice(0, 3)}***@${email.split('@')[1] || '?'}` : 'missing' });
-
   if (!email) {
     return Response.json(
       { success: false, error: 'email required' },
@@ -45,7 +43,6 @@ export async function handleAuthLogin(request, env) {
     passwordHash = await computeClientHash(email, password);
   }
   if (!passwordHash) {
-    console.log('[AuthLogin] Rejected: missing passwordHash (and no password)');
     return Response.json(
       { success: false, error: 'passwordHash required' },
       { status: 400 }
@@ -62,10 +59,6 @@ export async function handleAuthLogin(request, env) {
     (passKey ? user[passKey] : undefined)
   );
   if (!user || !stored) {
-    console.log('[AuthLogin] Rejected: user not found or no stored hash', {
-      email: email ? `${email.slice(0, 3)}***` : 'n/a',
-      userKeys: user ? Object.keys(user).filter((k) => k.toLowerCase().includes('pass')).join(',') : 'none',
-    });
     return Response.json(
       { success: false, error: 'Invalid credentials' },
       { status: 401 }
@@ -74,15 +67,12 @@ export async function handleAuthLogin(request, env) {
   // Diagnostic: lengths only (no hash values)
   const storedPrefix = typeof stored === 'string' ? stored.slice(0, 7) : 'n/a';
   const storedHashLen = typeof stored === 'string' && stored.startsWith('client:') ? stored.length - 7 : 0;
-  console.log('[AuthLogin] Hash check', { storedPrefix, storedHashLen, sentHashLen: passwordHash.length });
-
   let valid = false;
   if (stored.startsWith('client:')) {
     // New accounts: verify with client-sent SHA-256 hash (case-insensitive hex)
     const storedHash = stored.slice(7).toLowerCase();
     valid = passwordHash.toLowerCase() === storedHash;
   } else {
-    console.log('[AuthLogin] Rejected: legacy account', { userId: user.id });
     // Legacy accounts (PBKDF2): we no longer accept plain password; user must reset
     return Response.json(
       { success: false, error: 'This account uses an older sign-in method. Please use “Forgot password” to set a new password.' },
@@ -90,7 +80,6 @@ export async function handleAuthLogin(request, env) {
     );
   }
   if (!valid) {
-    console.log('[AuthLogin] Rejected: hash mismatch', { email: email ? `${email.slice(0, 3)}***` : 'n/a' });
     return Response.json(
       { success: false, error: 'Invalid credentials' },
       { status: 401 }
@@ -98,7 +87,6 @@ export async function handleAuthLogin(request, env) {
   }
 
   const session = await createSession(db, { userId: user.id });
-  console.log('[AuthLogin] Success', { userId: user.id, email: email ? `${email.slice(0, 3)}***@${email.split('@')[1] || '?'}` : 'n/a' });
 
   const isProd = env.NODE_ENV === 'production';
 

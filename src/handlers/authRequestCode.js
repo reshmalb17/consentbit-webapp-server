@@ -64,23 +64,7 @@ export async function handleAuthRequestCode(request, env, ctx) {
   const email = (body?.email || '').trim().toLowerCase();
   const purpose = body?.purpose === 'signup' ? 'signup' : 'login';
   const name = purpose === 'signup' ? (body?.name || '').trim() : null;
-  try {
-    const origin = request.headers.get('Origin') || request.headers.get('origin') || '';
-    const referer = request.headers.get('Referer') || request.headers.get('referer') || '';
-    console.log('[AuthRequestCode] debug headers', { origin, referer });
-  } catch {}
-
   const emailDomain = email.includes('@') ? email.split('@')[1] : '';
-  console.log('[AuthRequestCode] request', {
-    purpose,
-    emailDomain,
-    hasBrevoApiKey: Boolean(env.BREVO_API_KEY),
-    hasBrevoFrom: Boolean(env.BREVO_FROM_EMAIL),
-    otpTtlMinutes: env.OTP_TTL_MINUTES,
-    otpMaxAttempts: env.OTP_MAX_ATTEMPTS,
-    nodeEnv: env.NODE_ENV,
-    returnOtpInResponse: String(env.RETURN_OTP_IN_RESPONSE || '').toLowerCase() === 'true',
-  });
 
   if (!isValidEmail(email)) {
     return Response.json({ success: false, error: 'Valid email is required' }, { status: 400 });
@@ -115,14 +99,6 @@ export async function handleAuthRequestCode(request, env, ctx) {
 
   const hasBrevoConfig = Boolean(env.BREVO_API_KEY && env.BREVO_FROM_EMAIL);
   const allowReturn = String(env.RETURN_OTP_IN_RESPONSE || '').toLowerCase() === 'true';
-  console.log('[AuthRequestCode] created otp', {
-    purpose,
-    emailDomain,
-    requestId: row?.id,
-    expiresAt: row?.expiresAt,
-    willReturnCode: (!hasBrevoConfig || allowReturn),
-  });
-
   // If Brevo is not configured, fall back to returning the code in the response (dev only)
   if (!hasBrevoConfig || allowReturn) {
     return Response.json(

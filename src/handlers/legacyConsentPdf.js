@@ -154,15 +154,15 @@ export async function handleLegacyConsentPdf(request, env) {
 
   const site = await (userId
     ? db.prepare(
-        `SELECT s.id, s.domain, s.platformSiteId as platformsiteid
+        `SELECT s.id, s.name, s.domain, s.platformSiteId as platformsiteid
          FROM Site s
          INNER JOIN Organization o ON o.id = s.organizationId
          INNER JOIN User u ON u.id = o.ownerUserId
-         WHERE (s.id = ?1 OR s.platformSiteId = ?1) AND u.id = ?2 AND s.isLegacy = 1`,
+         WHERE (s.id = ?1 OR s.platformSiteId = ?1) AND u.id = ?2 AND (s.isLegacy = 1 OR s.platformSiteId IS NOT NULL)`,
       ).bind(siteId, userId).first()
     : db.prepare(
-        `SELECT s.id, s.domain, s.platformSiteId as platformsiteid
-         FROM Site s WHERE (s.id = ?1 OR s.platformSiteId = ?1) AND s.isLegacy = 1`,
+        `SELECT s.id, s.name, s.domain, s.platformSiteId as platformsiteid
+         FROM Site s WHERE (s.id = ?1 OR s.platformSiteId = ?1) AND (s.isLegacy = 1 OR s.platformSiteId IS NOT NULL)`,
       ).bind(siteId).first()
   ).catch(() => null);
 
@@ -172,7 +172,7 @@ export async function handleLegacyConsentPdf(request, env) {
   const kv = env.WEBFLOW_AUTHENTICATION;
   const r2 = env.R2;
 
-  const searchKeys = await buildSearchKeys(kv, platformSiteId, site.domain);
+  const searchKeys = await buildSearchKeys(kv, platformSiteId, site.domain, site.name);
 
   let entries = r2 ? await getConsentRowsFromR2(r2, searchKeys) : [];
   if (entries.length === 0 && platformSiteId && kv) {

@@ -197,9 +197,6 @@ export async function syncPurchaseToLegacy(env, {
     isFramer ? null : resolveWfSiteId(canonicalDomain).catch(() => null),
     isFramer ? resolveFramerSiteId(canonicalDomain).catch(() => null) : null,
   ]);
-  if (wfSiteId) console.log(`[syncLegacy] Detected Webflow site — domain: ${canonicalDomain}, wfSiteId: ${wfSiteId}`);
-  if (framerSiteId) console.log(`[syncLegacy] Detected Framer site — domain: ${canonicalDomain}, framerSiteId: ${framerSiteId}`);
-
   await Promise.allSettled([
     // LEGACY_DB
     (async () => {

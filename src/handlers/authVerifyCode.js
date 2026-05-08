@@ -94,12 +94,6 @@ export async function handleAuthVerifyCode(request, env, ctx) {
   const email = (body?.email || '').trim().toLowerCase();
   const purpose = body?.purpose === 'signup' ? 'signup' : 'login';
   const code = String(body?.code || '').trim();
-  try {
-    const origin = request.headers.get('Origin') || request.headers.get('origin') || '';
-    const referer = request.headers.get('Referer') || request.headers.get('referer') || '';
-    console.log('[AuthVerifyCode] debug', { purpose, emailDomain: email.includes('@') ? email.split('@')[1] : '', codeLen: code.length, origin, referer });
-  } catch {}
-
   if (!isValidEmail(email)) {
     return Response.json({ success: false, error: 'Valid email is required' }, { status: 400 });
   }

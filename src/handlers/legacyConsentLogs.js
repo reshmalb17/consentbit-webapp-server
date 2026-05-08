@@ -31,11 +31,11 @@ export async function handleLegacyConsentLogs(request, env) {
 
   const site = await db
     .prepare(
-      `SELECT s.id, s.domain, s.platformSiteId as platformsiteid, s.legacySource
+      `SELECT s.id, s.name, s.domain, s.platformSiteId as platformsiteid, s.legacySource
        FROM Site s
        INNER JOIN Organization o ON o.id = s.organizationId
        INNER JOIN User u ON u.id = o.ownerUserId
-       WHERE (s.id = ?1 OR s.platformSiteId = ?1) AND u.id = ?2 AND s.isLegacy = 1`,
+       WHERE (s.id = ?1 OR s.platformSiteId = ?1) AND u.id = ?2 AND (s.isLegacy = 1 OR s.platformSiteId IS NOT NULL)`,
     )
     .bind(siteId, userId)
     .first()
@@ -52,8 +52,10 @@ export async function handleLegacyConsentLogs(request, env) {
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 500);
   const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
-  // Resolve search keys from KV site details
-  const searchKeys = await buildSearchKeys(kv, platformSiteId, site.domain);
+  // Resolve search keys from KV site details.
+  // site.name is the Webflow shortName (e.g. "biaw-stage") stored during migration —
+  // R2 keys are indexed under that shortName, so include it as an extra fallback.
+  const searchKeys = await buildSearchKeys(kv, platformSiteId, site.domain, site.name);
 
   // 1. Read R2 (Cookie-Preferences.json + consent-v2/ per-visitor keys)
   let entries = r2 ? await getConsentRowsFromR2(r2, searchKeys) : [];

@@ -76,8 +76,6 @@ export async function handleScanCookies(request, env) {
   const pageUrl = body?.pageUrl || '';
   const createNewScan = body?.createNewScan === true;
 
-  console.log('[ScanCookies] Received scan for siteId:', siteId, 'cookies:', cookies.length, 'scripts:', scripts.length, 'createNewScan:', createNewScan);
-
   if (!siteId) {
     return Response.json({ success: false, error: 'siteId is required' }, { status: 400 });
   }
@@ -345,17 +343,9 @@ export async function handleScanCookies(request, env) {
         for (const [k, val] of Object.entries(flat)) {
           if (val === undefined) console.error('[ScanCookies] undefined field:', k);
         }
-        console.log('[ScanCookies] upsertCookie input:', JSON.stringify(flat));
-
         await upsertCookie(db, cookiePayload);
 
         storedCount++;
-        console.log(
-          '[ScanCookies] Storing actual cookie detected:',
-          parsedCookie.name,
-          'from',
-          typeof cookieData === 'string' ? 'document.cookie' : cookieData.source || 'document.cookie'
-        );
       } catch (error) {
         console.error('[ScanCookies] Failed to store cookie:', error, cookieData);
       }

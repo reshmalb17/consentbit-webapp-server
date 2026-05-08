@@ -1,5 +1,6 @@
-// handlers/bannerCustomization.js
+﻿// handlers/bannerCustomization.js
 import { getBannerCustomization, saveBannerCustomization } from '../services/db.js';
+import { injectScriptIntoWebflowHead } from './webflowFreeRegister.js';
 
 export async function handleBannerCustomization(request, env) {
   const db = env.CONSENT_WEBAPP;
@@ -34,7 +35,6 @@ export async function handleBannerCustomization(request, env) {
                 db.prepare(
                   'UPDATE Site SET platformSiteId = ?1, platform = COALESCE(platform, ?2), updatedAt = ?3 WHERE id = ?4'
                 ).bind(wfSiteId, 'webflow', new Date().toISOString(), siteId).run().catch(() => {});
-                console.log('[BannerCustomization] auto-linked platformSiteId=%s to siteId=%s via domain=%s', wfSiteId, siteId, cleanDomain);
               }
             }
           }
@@ -63,17 +63,17 @@ export async function handleBannerCustomization(request, env) {
       const customization = row ? { ...row, translations } : null;
 
       // Fetch Site flags so callers can distinguish new-free Webflow users from legacy migrated users
-      let siteFlags = { platform: null, isLegacy: 0 };
+      let siteFlags = { platform: null, isLegacy: 0, bannerType: 'gdpr' };
       try {
-        const siteRow = await db.prepare('SELECT platform, isLegacy FROM Site WHERE id = ?1').bind(siteId).first();
-        if (siteRow) siteFlags = { platform: siteRow.platform ?? null, isLegacy: Number(siteRow.isLegacy ?? 0) };
+        const siteRow = await db.prepare('SELECT platform, isLegacy, banner_type FROM Site WHERE id = ?1').bind(siteId).first();
+        if (siteRow) siteFlags = { platform: siteRow.platform ?? null, isLegacy: Number(siteRow.isLegacy ?? 0), bannerType: siteRow.banner_type ?? 'gdpr' };
       } catch (_) { /* non-critical */ }
 
       const isWebappMigrated = true; // site exists in D1
       const isWebflowFree = siteFlags.platform === 'webflow' && siteFlags.isLegacy === 0;
+      const iabActivated = siteFlags.bannerType === 'iab';
 
-      console.log('[BannerCustomization] GET siteId=%s platform=%s isLegacy=%s isWebflowFree=%s', siteId, siteFlags.platform, siteFlags.isLegacy, isWebflowFree);
-      return Response.json({ success: true, customization, platform: siteFlags.platform, isLegacy: siteFlags.isLegacy, isWebappMigrated, isWebflowFree });
+      return Response.json({ success: true, customization, platform: siteFlags.platform, isLegacy: siteFlags.isLegacy, isWebappMigrated, isWebflowFree, iabActivated });
     } catch (error) {
       console.error('[BannerCustomization] Error fetching:', error);
       return Response.json(
@@ -101,11 +101,9 @@ export async function handleBannerCustomization(request, env) {
       try {
         const exists = await db.prepare('SELECT id FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
         if (!exists) {
-          console.warn('[BannerCustomization] POST siteId=%s not found in D1 — attempting wfSiteId fallback', siteId);
           const fallbackWfId = wfSiteId || siteId; // siteId might actually be a wfSiteId
           const byPlatform = await db.prepare('SELECT id FROM Site WHERE platformSiteId = ?1 LIMIT 1').bind(fallbackWfId).first();
           if (byPlatform) {
-            console.log('[BannerCustomization] POST resolved stale siteId=%s → %s via platformSiteId', siteId, byPlatform.id);
             siteId = byPlatform.id;
           } else {
             return Response.json({ success: false, error: 'Site not found — please re-register', stale: true }, { status: 404 });
@@ -123,24 +121,20 @@ export async function handleBannerCustomization(request, env) {
     }
 
     try {
-      console.log('[BannerCustomization] POST siteId=%s customization=%s', siteId, JSON.stringify(customization));
       await saveBannerCustomization(db, siteId, customization);
 
       // Sync customization to WEBFLOW_AUTHENTICATION KV so the Webflow Designer App
       // always reads fresh data from Banner-Settings:{platformSiteId}.
       try {
-        const siteRow = await db.prepare('SELECT platformSiteId FROM Site WHERE id = ?1').bind(siteId).first();
+        const siteRow = await db.prepare('SELECT platformSiteId, cdnScriptId, webflowScriptId, embedScriptUrl, banner_type FROM Site WHERE id = ?1').bind(siteId).first();
         const webflowSiteId = siteRow?.platformSiteId ?? null;
-        console.log('[BannerCustomization] webappSiteId=%s → platformSiteId(webflowSiteId)=%s', siteId, webflowSiteId ?? 'NOT FOUND (not a Webflow site)');
 
         if (!webflowSiteId) {
-          console.log('[BannerCustomization] No platformSiteId for siteId=%s — skipping KV sync', siteId);
           return Response.json({ success: true });
         }
 
         const kvKey = `Banner-Settings:${webflowSiteId}`;
         const existing = await env.WEBFLOW_AUTHENTICATION.get(kvKey, { type: 'json' });
-        console.log('[BannerCustomization] Existing KV key=%s found=%s', kvKey, existing ? 'YES' : 'NO (first write)');
         const prevAppData = existing?.appData ?? {};
 
         // Parse translations to extract content fields and toggle states
@@ -206,12 +200,37 @@ export async function handleBannerCustomization(request, env) {
         };
 
         const dataToStore = { appData, siteId: webflowSiteId, updatedAt: new Date().toISOString() };
-        console.log('[BannerCustomization] Writing to KV key=%s data=%s', kvKey, JSON.stringify(dataToStore));
         await env.WEBFLOW_AUTHENTICATION.put(kvKey, JSON.stringify(dataToStore));
 
-        // Verify the write by reading back immediately
-        const verify = await env.WEBFLOW_AUTHENTICATION.get(kvKey, { type: 'json' });
-        console.log('[BannerCustomization] KV verify read key=%s result=%s', kvKey, JSON.stringify(verify));
+        // ── Script swap: replace legacy Webflow head script with CDN script ──
+        // Runs once per site (scriptSwapped flag prevents re-running).
+        try {
+          const mainKvRaw = await env.WEBFLOW_AUTHENTICATION.get(webflowSiteId);
+          if (mainKvRaw) {
+            const mainKvEntry = JSON.parse(mainKvRaw);
+            if (!mainKvEntry.scriptSwapped && mainKvEntry.accessToken) {
+              await swapLegacyWebflowScript(env, db, siteId, webflowSiteId, mainKvEntry, siteRow);
+            }
+          }
+        } catch (swapErr) {
+          console.error('[BannerCustomization] Script swap error (non-fatal):', swapErr?.message || swapErr);
+        }
+
+        // ── iabActivated flag: reflect site banner_type in main auth KV ──
+        // This lets the Webflow app check whether an IAB/TCF banner was activated
+        // from the webapp dashboard before overwriting it with a normal banner.
+        try {
+          const iabActivated = String(siteRow?.banner_type || '').toLowerCase() === 'iab';
+          const mainKvForIab = await env.WEBFLOW_AUTHENTICATION.get(webflowSiteId);
+          if (mainKvForIab) {
+            const mainKvEntryForIab = JSON.parse(mainKvForIab);
+            if (mainKvEntryForIab.iabActivated !== iabActivated) {
+              await env.WEBFLOW_AUTHENTICATION.put(webflowSiteId, JSON.stringify({ ...mainKvEntryForIab, iabActivated }));
+            }
+          }
+        } catch (iabFlagErr) {
+          console.warn('[BannerCustomization] iabActivated flag update failed (non-fatal):', iabFlagErr?.message);
+        }
       } catch (kvErr) {
         console.error('[BannerCustomization] Failed to sync Banner-Settings KV:', kvErr);
       }
@@ -227,4 +246,51 @@ export async function handleBannerCustomization(request, env) {
   }
 
   return Response.json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
+}
+
+async function swapLegacyWebflowScript(env, db, siteId, wfSiteId, kvEntry, siteRow) {
+  const TAG = '[BannerCustomization][ScriptSwap]';
+  const accessToken = kvEntry.accessToken;
+  const cdnScriptId = siteRow?.cdnScriptId ?? null;
+  const storedWebflowScriptId = siteRow?.webflowScriptId ?? null;
+
+  if (!cdnScriptId) {
+    return;
+  }
+
+  const scriptUrl = siteRow?.embedScriptUrl ||
+    `https://manager.consentbit.com/consentbit/${cdnScriptId}/script.js`;
+
+  const result = await injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG, storedWebflowScriptId);
+
+  if (result.success) {
+    let userId = null;
+    try {
+      const ownerRow = await db.prepare(
+        `SELECT om.userId FROM OrganizationMember om
+         JOIN Site s ON s.organizationId = om.organizationId
+         WHERE s.id = ?1 LIMIT 1`
+      ).bind(siteId).first();
+      userId = ownerRow?.userId ?? null;
+    } catch (_) {}
+
+    const updatedKv = {
+      ...kvEntry,
+      scriptSwapped: true,
+      scriptSwappedAt: new Date().toISOString(),
+      webappSiteId: siteId,
+      webappScriptUrl: scriptUrl,
+      cdnScriptId,
+      isWebappMigrated: true,
+      ...(userId ? { userId } : {}),
+    };
+    await env.WEBFLOW_AUTHENTICATION.put(wfSiteId, JSON.stringify(updatedKv));
+
+    if (result.webflowScriptId && result.webflowScriptId !== storedWebflowScriptId) {
+      await db.prepare('UPDATE Site SET webflowScriptId = ?1, updatedAt = ?2 WHERE id = ?3')
+        .bind(result.webflowScriptId, new Date().toISOString(), siteId)
+        .run()
+        .catch(() => {});
+    }
+  }
 }

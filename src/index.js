@@ -36,6 +36,7 @@ import { handleAdminClearWebappData } from './handlers/adminClearWebappData.js';
 import { handleAdminMigrateFromKv } from './handlers/adminMigrateFromKv.js';
 import { handleAdminMigrateSingleSite } from './handlers/adminMigrateSingleSite.js';
 import { handleAdminMigrateCustomization } from './handlers/adminMigrateCustomization.js';
+import { handleAdminInjectScript } from './handlers/adminInjectScript.js';
 import { handleCheckLegacyScript } from './handlers/checkLegacyScript.js';
 import { handleLegacyConsentLogs } from './handlers/legacyConsentLogs.js';
 import { handleLegacyConsentCsv } from './handlers/legacyConsentCsv.js';
@@ -84,7 +85,10 @@ import {
   getSiteById,
   getScanUsageForSite,
   getEffectivePlanForOrganization,
+  getOrgOwnerEmail,
+  markScanLimitNotified,
 } from './services/db.js';
+import { sendScanLimitEmail } from './services/email.js';
 
 // ---------------------------------------------------------------------------
 // Endpoint classification sets
@@ -148,6 +152,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/admin/migrate-from-kv',
   '/api/admin/migrate-single-site',
   '/api/admin/migrate-customization',
+  '/api/admin/inject-script',
   '/api/payment/subscription',
 ]);
 
@@ -312,6 +317,9 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     case '/api/admin/migrate-customization':
       response = await handleAdminMigrateCustomization(request, env); break;
 
+    case '/api/admin/inject-script':
+      response = await handleAdminInjectScript(request, env); break;
+
     case '/api/check-legacy-script':
       response = await handleCheckLegacyScript(request, env); break;
 
@@ -371,7 +379,21 @@ async function executeScheduledScans(env, ctx) {
           ]);
           const scansLimit = plan ? (plan.scansIncluded ?? plan.scansincluded ?? 100) : 100;
           if (scanUsage.scanCount >= scansLimit) {
-            console.log(`[Cron] Skipping scheduled scan ${scheduledScan.id} — scan limit reached for site (${scanUsage.scanCount}/${scansLimit})`);
+            // Send one notification email per site per month
+            const alreadyNotified = site.scanLimitNotifiedMonth === scanUsage.yearMonth;
+            if (!alreadyNotified) {
+              const owner = await getOrgOwnerEmail(db, organizationId);
+              if (owner?.email) {
+                sendScanLimitEmail(env, ctx, {
+                  to: owner.email,
+                  name: owner.name,
+                  domain: site.domain,
+                  scansLimit,
+                });
+                await markScanLimitNotified(db, scheduledScan.siteId, scanUsage.yearMonth);
+              }
+            }
+
             executed.push({ id: scheduledScan.id, status: 'skipped', reason: 'scan_limit_reached' });
             continue;
           }
@@ -396,7 +418,6 @@ async function executeScheduledScans(env, ctx) {
         executed.push({ id: scheduledScan.id, status: 'failed', error: err.message });
       }
     }
-    console.log(`[Cron] Executed ${executed.length} scheduled scans`);
   } catch (err) {
     console.error('[Cron] Error executing scheduled scans:', err);
   }
@@ -419,7 +440,6 @@ async function processSubscriptionQueue(env) {
     return;
   }
   const pending = await getPendingSubscriptionQueue(db, 4);
-  console.log('[Cron] subscription queue:', pending.length, 'pending');
   if (pending.length === 0) return;
   for (const row of pending) {
     const id               = getRow(row, 'id');
@@ -459,7 +479,6 @@ async function processSubscriptionQueue(env) {
           licenseKey,
         });
         await deleteSubscriptionQueueRow(db, id);
-        console.log('[Cron] Created subscription', data.id, 'licenseKey', licenseKey);
       } else {
         console.error('[Cron] Stripe subscription create failed', data.error?.message || data);
         await markSubscriptionQueueFailed(db, id, data.error?.message || JSON.stringify(data));

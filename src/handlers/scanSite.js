@@ -77,7 +77,6 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
  * all script URLs loaded by the page, and the page HTML.
  */
 async function scanWithBrowser(browserBinding, scanUrl) {
-  console.log('[ScanSite] scanWithBrowser starting for:', scanUrl);
   const browser = await puppeteer.launch(browserBinding);
   try {
     const page = await browser.newPage();
@@ -104,9 +103,7 @@ async function scanWithBrowser(browserBinding, scanUrl) {
       } catch (_) {}
     });
 
-    console.log('[ScanSite] navigating to:', scanUrl);
     await page.goto(scanUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-    console.log('[ScanSite] page loaded, waiting 8s for ad pixels to fire...');
     // Scroll to trigger lazy-loaded ad scripts, then wait again
     try {
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
@@ -120,12 +117,10 @@ async function scanWithBrowser(browserBinding, scanUrl) {
       const client = await page.createCDPSession();
       const { cookies } = await client.send('Network.getAllCookies');
       rawCookies = cookies;
-      console.log('[ScanSite] CDP getAllCookies got:', rawCookies.length, 'cookies');
     } catch (cdpErr) {
       console.warn('[ScanSite] CDP getAllCookies failed, falling back to page.cookies():', cdpErr.message);
       try {
         rawCookies = await page.cookies();
-        console.log('[ScanSite] page.cookies() got:', rawCookies.length, 'cookies');
       } catch (e2) {
         console.error('[ScanSite] page.cookies() also failed:', e2.message);
       }
@@ -236,9 +231,9 @@ async function performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId,
       `UPDATE ScanHistory SET cookiesFound = ?1, scriptsFound = ?2, scanDuration = ?3, scanStatus = 'completed', categories = ?5 WHERE id = ?4`
     ).bind(cookies.length, scripts.length, scanDuration, scanHistoryId, categoriesJson).run();
 
-    console.log(`[ScanSite] Browser scan done: ${cookies.length} cookies, ${scripts.length} scripts`);
   } catch (err) {
     console.error('[ScanSite] performBrowserScan failed:', err);
+    console.error('[ScanSite] performBrowserScan error:', err?.message || err);
     await db.prepare(`UPDATE ScanHistory SET scanStatus = 'failed' WHERE id = ?1`)
       .bind(scanHistoryId).run().catch(() => {});
   }
@@ -287,44 +282,49 @@ export async function handleScanSite(request, env, ctx) {
 
     if (!isVerified) {
       if (isWebappMigrated) {
-        // For migrated sites, verify the script is actually present in the site's <head>
-        // before allowing scan — checks both legacy and new CDN patterns.
         const domain = site.domain ?? site.DOMAIN ?? '';
         const cdnScriptId = site.cdnScriptId ?? site.cdnscriptid ?? '';
-        let scriptFound = false;
-        try {
-          const url = domain.startsWith('http') ? domain : `https://${domain}`;
-          const resp = await fetch(url, {
-            redirect: 'follow',
-            signal: AbortSignal.timeout(10000),
-            headers: { 'User-Agent': 'ConsentBit-ScriptChecker/1.0' },
-          });
-          if (resp.ok) {
-            const html = await resp.text();
-            const lower = html.toLowerCase();
-            const id = cdnScriptId.toLowerCase();
-            if (
-              lower.includes(`/api/v2/cdn/runtime/${id}.js`) ||
-              lower.includes(`/consentbit/${id}/script.js`)
-            ) {
-              scriptFound = true;
-              // Mark site as verified so future scans skip this HTTP check
-              try { await markSiteVerified(db, siteId); } catch { /* best-effort */ }
-            }
-          }
-        } catch { /* network error — fall through to block */ }
 
-        if (!scriptFound) {
-          return Response.json(
-            {
-              success: false,
-              error: 'ConsentBit script not detected on your site. Please ensure the script is installed and your site is published.',
-              code: 'SITE_NOT_VERIFIED',
-            },
-            { status: 403 },
-          );
+        // If the site has a cdnScriptId it was registered via the Webflow API — trust it.
+        // The HTML check is unreliable for staging domains (Webflow returns a 2KB placeholder).
+        if (cdnScriptId) {
+          try { await markSiteVerified(db, siteId); } catch { /* best-effort */ }
+        } else {
+          // No cdnScriptId — fall back to HTML check
+          let scriptFound = false;
+          try {
+            const url = domain.startsWith('http') ? domain : `https://${domain}`;
+            const resp = await fetch(url, {
+              redirect: 'follow',
+              signal: AbortSignal.timeout(10000),
+              headers: { 'User-Agent': 'ConsentBit-ScriptChecker/1.0' },
+            });
+            if (resp.ok) {
+              const html = await resp.text();
+              const lower = html.toLowerCase();
+              if (lower.includes('consentbit') || lower.includes('/consentbit/') || lower.includes('/cdn/runtime/')) {
+                scriptFound = true;
+                try { await markSiteVerified(db, siteId); } catch { /* best-effort */ }
+              }
+            }
+          } catch (fetchErr) {
+            console.error(`[ScanSite] verification fetch failed domain=${domain}:`, fetchErr?.message);
+          }
+
+          if (!scriptFound) {
+            console.warn(`[ScanSite] SITE_NOT_VERIFIED siteId=${siteId} domain=${domain}`);
+            return Response.json(
+              {
+                success: false,
+                error: 'ConsentBit script not detected on your site. Please ensure the script is installed and your site is published.',
+                code: 'SITE_NOT_VERIFIED',
+              },
+              { status: 403 },
+            );
+          }
         }
       } else {
+        console.warn(`[ScanSite] SITE_NOT_VERIFIED (not migrated) siteId=${siteId}`);
         return Response.json(
           {
             success: false,
@@ -404,7 +404,6 @@ export async function handleScanSite(request, env, ctx) {
     if (env.BROWSER) {
       // ── Full browser scan (Cloudflare Browser Rendering) ──────────────────
       // Captures ALL cookies from ALL domains including third-party ad/tracking cookies.
-      console.log('[ScanSite] Using Cloudflare Browser Rendering for full scan');
       const browserResult = await scanWithBrowser(env.BROWSER, scanUrl);
       html = browserResult.html;
       for (const s of browserResult.scripts) scripts.push(s);
@@ -425,7 +424,6 @@ export async function handleScanSite(request, env, ctx) {
     } else {
       // ── Fallback: fetch-based scan ─────────────────────────────────────────
       // Only captures first-party Set-Cookie response headers.
-      console.log('[ScanSite] BROWSER binding not available, falling back to fetch scan');
       let setCookieHeaders = [];
 
       try {
@@ -436,7 +434,7 @@ export async function handleScanSite(request, env, ctx) {
           setCookieHeaders.push(...(headResponse.headers.getSetCookie?.() || []));
         }
       } catch (headError) {
-        console.log('[ScanSite] HEAD request failed, will try GET:', headError.message);
+        // HEAD request failed, will try GET
       }
 
       try {

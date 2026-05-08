@@ -54,8 +54,6 @@ async function findFreePlanSite(db, organizationId) {
 }
 
 export async function handleSyncPlugin(request, env) {
-  console.log('[SyncPlugin] >>> request received', { method: request.method, url: request.url });
-
   if (request.method !== 'POST') {
     return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
   }
@@ -85,8 +83,6 @@ export async function handleSyncPlugin(request, env) {
   const siteName = (body?.siteName || '').trim() || rawDomain;
   const platformSiteId = (body?.platformSiteId || '').trim();
   const customization = body?.customization && typeof body.customization === 'object' ? body.customization : null;
-
-  console.log('[SyncPlugin] normalized input', { email, rawDomain, siteName, platformSiteId, hasCustomization: !!customization });
 
   if (!isValidEmail(email)) {
     return Response.json({ success: false, error: 'Valid email is required' }, { status: 400 });
@@ -189,10 +185,7 @@ export async function handleSyncPlugin(request, env) {
   let user = await getUserByEmail(db, email);
   const isNewUser = !user;
   if (!user) {
-    console.log('[SyncPlugin] creating new user for', email);
     user = await createUser(db, { email, name: null });
-  } else {
-    console.log('[SyncPlugin] existing user found', { userId: user.id });
   }
 
   // ── 2. Resolve organization (one per user — created on demand) ───────────
@@ -203,8 +196,6 @@ export async function handleSyncPlugin(request, env) {
     console.error('[SyncPlugin] could not resolve organization for user', user.id);
     return Response.json({ success: false, error: 'Could not resolve organization' }, { status: 500 });
   }
-  console.log('[SyncPlugin] organizationId', organizationId);
-
   // ── 3. Existing user: enforce one-free-site-per-account rule ─────────────
   if (!isNewUser) {
     const existingFreeSite = await findFreePlanSite(db, organizationId);
@@ -220,7 +211,6 @@ export async function handleSyncPlugin(request, env) {
           existingFreeSite: { id: existingFreeSite.id, domain: existingFreeSite.domain, name: existingFreeSite.name },
         }, { status: 409 });
       }
-      console.log('[SyncPlugin] re-sync of same free-site domain — proceeding');
     }
   }
 
@@ -236,7 +226,6 @@ export async function handleSyncPlugin(request, env) {
       bannerType: 'gdpr',
       regionMode: 'gdpr',
     });
-    console.log('[SyncPlugin] site upserted', { siteId: site.id, domain: site.domain });
   } catch (e) {
     if (e.code === 'DOMAIN_EXISTS') {
       return Response.json({
@@ -253,7 +242,6 @@ export async function handleSyncPlugin(request, env) {
   if (customization) {
     try {
       await saveBannerCustomization(db, site.id, customization);
-      console.log('[SyncPlugin] customization saved for site', site.id);
     } catch (e) {
       console.error('[SyncPlugin] saveBannerCustomization failed (non-fatal)', e);
     }
@@ -287,7 +275,6 @@ export async function handleSyncPlugin(request, env) {
       : newFields;
 
     await kv.put(platformSiteId, JSON.stringify(kvValue));
-    console.log('[SyncPlugin] KV (AUTH_STORE_FRAMER) updated for', platformSiteId, { mergedWithExisting: !!existingKv });
   } catch (e) {
     console.error('[SyncPlugin] KV put failed', e);
     return Response.json({ success: false, error: 'Failed to persist platform mapping' }, { status: 500 });
@@ -320,8 +307,6 @@ export async function handleSyncPlugin(request, env) {
 //
 // Returns: { success: true, siteId, cdnScriptId, platformSiteId }
 export async function handleSyncPluginCustomization(request, env) {
-  console.log('[SyncPluginCustomization] >>> request received', { method: request.method, url: request.url });
-
   if (request.method !== 'POST') {
     return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
   }
@@ -348,8 +333,6 @@ export async function handleSyncPluginCustomization(request, env) {
 
   const platformSiteId = (body?.platformSiteId || '').trim();
   const customization = body?.customization && typeof body.customization === 'object' ? body.customization : null;
-
-  console.log('[SyncPluginCustomization] input', { platformSiteId, hasCustomization: !!customization });
 
   if (!platformSiteId) {
     return Response.json({ success: false, error: 'platformSiteId is required' }, { status: 400 });
@@ -381,7 +364,6 @@ export async function handleSyncPluginCustomization(request, env) {
 
   try {
     await saveBannerCustomization(db, webAppSiteId, customization);
-    console.log('[SyncPluginCustomization] customization saved for site', webAppSiteId);
   } catch (e) {
     console.error('[SyncPluginCustomization] saveBannerCustomization failed', e);
     return Response.json({ success: false, error: 'Failed to save customization' }, { status: 500 });
@@ -410,8 +392,6 @@ export async function handleSyncPluginCustomization(request, env) {
 // Returns: { success: true, webAppSiteId, customization }
 //   404 NOT_FOUND — no customization row for this site
 export async function handleGetPluginData(request, env) {
-  console.log('[GetPluginData] >>> request received', { method: request.method, url: request.url });
-
   const db = env.CONSENT_WEBAPP;
 
   if (!db) {
@@ -436,8 +416,6 @@ export async function handleGetPluginData(request, env) {
   } else {
     return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
   }
-
-  console.log('[GetPluginData] input', { webAppSiteId });
 
   if (!webAppSiteId) {
     return Response.json({ success: false, error: 'webAppSiteId is required' }, { status: 400 });
@@ -479,8 +457,6 @@ export async function handleGetPluginData(request, env) {
 // Response: { success: true, webAppSiteId, planId, status, subscription }
 //   404 SITE_NOT_FOUND — webAppSiteId does not match any Site row
 export async function handleGetPluginPlan(request, env) {
-  console.log('[GetPluginPlan] >>> request received', { method: request.method, url: request.url });
-
   const db = env.CONSENT_WEBAPP;
   if (!db) {
     console.error('[GetPluginPlan] CONSENT_WEBAPP DB binding missing');
@@ -503,8 +479,6 @@ export async function handleGetPluginPlan(request, env) {
   } else {
     return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
   }
-
-  console.log('[GetPluginPlan] input', { webAppSiteId });
 
   if (!webAppSiteId) {
     return Response.json({ success: false, error: 'webAppSiteId is required' }, { status: 400 });
@@ -536,8 +510,6 @@ export async function handleGetPluginPlan(request, env) {
     }
     planId = ['basic', 'essential', 'growth'].includes(resolved) ? resolved : 'free';
   }
-
-  console.log('[GetPluginPlan] resolved', { webAppSiteId, planId, status });
 
   return Response.json({
     success: true,

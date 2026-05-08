@@ -66,6 +66,7 @@ export async function handleScheduledScan(request, env) {
               success: false,
               error: `Scan limit reached (${scansLimit} scans/month for this site). Upgrade your plan to schedule more scans.`,
               code: 'SCAN_LIMIT_REACHED',
+              scansLimit,
             },
             { status: 402 }
           );

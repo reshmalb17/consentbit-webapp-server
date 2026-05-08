@@ -208,7 +208,7 @@ export async function handleAdminMigrateSingleSite(request, env) {
   if (!activeKv) return Response.json({ success: false, error: 'ACTIVE_SITES_CONSENTBIT KV not configured' }, { status: 503 });
 
   const logs = [];
-  const log = (msg) => { console.log(`[migrate-single-site] ${msg}`); logs.push(msg); };
+  const log = (msg) => { logs.push(msg); };
 
   // --- 1. Resolve KV entry ---
   let domain = inputDomain;

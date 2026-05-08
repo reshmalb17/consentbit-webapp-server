@@ -62,20 +62,17 @@ function getPriceId(env, planId, interval) {
 async function findOrCreateStripeCustomer(secret, email, paymentMethodId) {
   const normalized = email.trim().toLowerCase();
   const query = encodeURIComponent(`email:'${normalized}'`);
-  console.log('[CustomCheckout/Stripe] searching customer by email', normalized);
   const searchRes = await fetch(
     `https://api.stripe.com/v1/customers/search?query=${query}&limit=1`,
     { headers: { Authorization: `Bearer ${secret}` } },
   );
   const searchData = await searchRes.json();
-  console.log('[CustomCheckout/Stripe] customer search result', { httpStatus: searchRes.status, found: searchData?.data?.length || 0, error: searchData?.error });
   if (searchData.error) {
     throw new Error(searchData.error.message || 'Stripe customer search failed');
   }
   if (searchData.data?.length > 0 && searchData.data[0].id) {
     const customerId = searchData.data[0].id;
     if (paymentMethodId) {
-      console.log('[CustomCheckout/Stripe] attaching PM to existing customer', { customerId, paymentMethodId });
       const attachRes = await fetch(`https://api.stripe.com/v1/payment_methods/${paymentMethodId}/attach`, {
         method: 'POST',
         headers: {
@@ -85,7 +82,6 @@ async function findOrCreateStripeCustomer(secret, email, paymentMethodId) {
         body: new URLSearchParams({ customer: customerId }).toString(),
       });
       const attachData = await attachRes.json();
-      console.log('[CustomCheckout/Stripe] attach result', { httpStatus: attachRes.status, error: attachData?.error });
       if (attachData.error) {
         if (attachData.error.code === 'payment_method_already_attached') {
           // Already attached to this customer — safe to proceed
@@ -105,7 +101,6 @@ async function findOrCreateStripeCustomer(secret, email, paymentMethodId) {
   const params = new URLSearchParams();
   params.set('email', normalized);
   if (paymentMethodId) params.set('payment_method', paymentMethodId);
-  console.log('[CustomCheckout/Stripe] creating new customer', normalized);
   const createRes = await fetch('https://api.stripe.com/v1/customers', {
     method: 'POST',
     headers: {
@@ -115,7 +110,6 @@ async function findOrCreateStripeCustomer(secret, email, paymentMethodId) {
     body: params.toString(),
   });
   const created = await createRes.json();
-  console.log('[CustomCheckout/Stripe] customer create result', { httpStatus: createRes.status, id: created?.id, error: created?.error });
   if (created.error) {
     throw new Error(created.error.message || 'Failed to create Stripe customer');
   }
@@ -257,8 +251,6 @@ async function postCheckoutWebflowInject(env, { wfSiteId, site, request }) {
       || `${new URL(request.url).origin}/consentbit/${site.cdnScriptId}/script.js`;
 
     const result = await injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, '[CustomCheckout]', kvEntry.webflowScriptId ?? null);
-    console.log('[CustomCheckout] Webflow script inject result=%s scriptUrl=%s', result.success, scriptUrl);
-
     // Update KV with webapp linkage flags
     const updatedKv = {
       ...kvEntry,
@@ -270,15 +262,12 @@ async function postCheckoutWebflowInject(env, { wfSiteId, site, request }) {
       ...(result.webflowScriptId ? { webflowScriptId: result.webflowScriptId } : {}),
     };
     await env.WEBFLOW_AUTHENTICATION.put(wfSiteId, JSON.stringify(updatedKv));
-    console.log('[CustomCheckout] KV updated for wfSiteId=%s webappSiteId=%s', wfSiteId, site.id);
   } catch (e) {
     console.error('[CustomCheckout] postCheckoutWebflowInject failed', e?.message);
   }
 }
 
 export async function handleCustomCheckout(request, env) {
-  console.log('[CustomCheckout] >>> request received', { method: request.method, url: request.url });
-
   if (request.method !== 'POST') {
     console.warn('[CustomCheckout] rejected: method not POST');
     return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
@@ -286,15 +275,6 @@ export async function handleCustomCheckout(request, env) {
 
   const secret = trimEnv(env.STRIPE_SECRET_KEY);
   const db = env.CONSENT_WEBAPP;
-
-  console.log('[CustomCheckout] env check', {
-    hasStripeSecret: Boolean(secret),
-    hasDB: Boolean(db),
-    hasBasicMonthly: Boolean(trimEnv(env.STRIPE_PRICE_BASIC_MONTHLY)),
-    hasEssentialMonthly: Boolean(trimEnv(env.STRIPE_PRICE_ESSENTIAL_MONTHLY)),
-    hasEssentialYearly: Boolean(trimEnv(env.STRIPE_PRICE_ESSENTIAL_YEARLY)),
-    hasGrowthMonthly: Boolean(trimEnv(env.STRIPE_PRICE_GROWTH_MONTHLY)),
-  });
 
   if (!secret) {
     console.error('[CustomCheckout] STRIPE_SECRET_KEY not set');
@@ -308,15 +288,6 @@ export async function handleCustomCheckout(request, env) {
   let body;
   try {
     body = await request.json();
-    console.log('[CustomCheckout] parsed body', {
-      hasPaymentMethodId: Boolean(body?.paymentMethodId),
-      hasSubscriptionId: Boolean(body?.subscriptionId),
-      email: body?.email,
-      domain: body?.domain,
-      siteName: body?.siteName,
-      planId: body?.planId,
-      interval: body?.interval,
-    });
   } catch (err) {
     console.error('[CustomCheckout] invalid JSON body', err);
     return Response.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
@@ -332,8 +303,6 @@ export async function handleCustomCheckout(request, env) {
   const wfSiteId = (body.wfSiteId || body.platformId || '').trim() || null;
   const billingEmail = (body.billingEmail || '').trim().toLowerCase() || null;
   const platform = ((body.platform || '').trim().toLowerCase()) || (wfSiteId ? 'webflow' : null);
-
-  console.log('[CustomCheckout] normalized input', { email, rawDomain, siteName, planId, interval, hasPM: !!paymentMethodId, hasSubId: !!subscriptionId });
 
   if (!isValidEmail(email)) {
     console.warn('[CustomCheckout] validation failed: invalid email', email);
@@ -353,7 +322,6 @@ export async function handleCustomCheckout(request, env) {
   }
 
   const priceId = getPriceId(env, planId, interval);
-  console.log('[CustomCheckout] resolved priceId', { planId, interval, priceId });
   if (!priceId) {
     const envKey = `STRIPE_PRICE_${planId.toUpperCase()}_${interval === 'yearly' ? 'YEARLY' : 'MONTHLY'}`;
     console.error('[CustomCheckout] missing price env', envKey);
@@ -416,11 +384,9 @@ export async function handleCustomCheckout(request, env) {
   }
 
   // ── Phase 1: create customer + subscription ────────────────────────────────
-  console.log('[CustomCheckout] phase 1: finding/creating Stripe customer for', email);
   let customerId;
   try {
     customerId = await findOrCreateStripeCustomer(secret, email, paymentMethodId);
-    console.log('[CustomCheckout] Stripe customerId', customerId);
   } catch (e) {
     console.error('[CustomCheckout] findOrCreateStripeCustomer failed', e);
     return Response.json({ success: false, error: e.message || 'Failed to set up payment method' }, { status: 400 });
@@ -448,8 +414,6 @@ export async function handleCustomCheckout(request, env) {
   }
   if (billingEmail) subParams.set('metadata[billingEmail]', billingEmail);
 
-  console.log('[CustomCheckout] creating subscription', { email, domain: rawDomain, planId, interval });
-
   const subRes = await fetch('https://api.stripe.com/v1/subscriptions', {
     method: 'POST',
     headers: {
@@ -459,13 +423,6 @@ export async function handleCustomCheckout(request, env) {
     body: subParams.toString(),
   });
   const sub = await subRes.json();
-  console.log('[CustomCheckout] Stripe subscription response', {
-    httpStatus: subRes.status,
-    id: sub?.id,
-    status: sub?.status,
-    error: sub?.error,
-    latestInvoicePaymentIntentStatus: sub?.latest_invoice?.payment_intent?.status,
-  });
 
   if (sub.error) {
     console.error('[CustomCheckout] Stripe subscription create failed', sub.error);
@@ -514,7 +471,6 @@ export async function handleCustomCheckout(request, env) {
     paymentIntent?.status === 'requires_action' ||
     paymentIntent?.status === 'requires_payment_method'
   ) {
-    console.log('[CustomCheckout] 3DS required — returning clientSecret', { subId: sub.id, piStatus: paymentIntent.status });
     return Response.json({
       success: true,
       requiresAction: true,
