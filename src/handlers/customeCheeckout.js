@@ -237,7 +237,51 @@ async function persistPaidStatusToKv(env, { platform, platformSiteId, site, user
   }
 }
 
-async function postCheckoutWebflowInject(env, { wfSiteId, site, request }) {
+/**
+ * Merge paid-plan flags onto the platform's KV entry without changing existing fields.
+ * - Webflow → WEBFLOW_AUTHENTICATION
+ * - Framer  → AUTH_STORE_FRAMER
+ *
+ * Adds (or overwrites only these keys):
+ *   webAppSiteId, userId, cdnScriptId, paid: true
+ * Everything else in the existing KV value is preserved.
+ */
+// async function persistPaidStatusToKv(env, { platform, platformSiteId, site, user }) {
+//   if (!platformSiteId) return;
+//   const p = String(platform || '').toLowerCase();
+//   const kv = p === 'framer' ? env.AUTH_STORE_FRAMER : env.WEBFLOW_AUTHENTICATION;
+//   if (!kv) {
+//     console.warn('[CustomCheckout] KV binding missing for platform=%s', p || 'webflow');
+//     return;
+//   }
+
+//   try {
+//     let existing = null;
+//     try {
+//       const raw = await kv.get(platformSiteId);
+//       existing = raw ? JSON.parse(raw) : null;
+//     } catch (e) {
+//       console.warn('[CustomCheckout] KV get failed (treating as empty)', e?.message);
+//     }
+
+//     const newFields = {
+//       webAppSiteId: site.id,
+//       userId: user.id,
+//       cdnScriptId: site.cdnScriptId ?? site.cdnscriptid ?? null,
+//       paid: true,
+//     };
+//     const merged = existing && typeof existing === 'object'
+//       ? { ...existing, ...newFields }
+//       : newFields;
+
+//     await kv.put(platformSiteId, JSON.stringify(merged));
+//     console.log('[CustomCheckout] paid-status KV updated', { platform: p || 'webflow', platformSiteId, mergedWithExisting: !!existing });
+//   } catch (e) {
+//     console.error('[CustomCheckout] persistPaidStatusToKv failed', e?.message);
+//   }
+// }
+
+async function postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }) {
   if (!wfSiteId || !env.WEBFLOW_AUTHENTICATION) return;
   try {
     const kvRaw = await env.WEBFLOW_AUTHENTICATION.get(wfSiteId);
@@ -260,6 +304,8 @@ async function postCheckoutWebflowInject(env, { wfSiteId, site, request }) {
       registeredThroughApp: true,
       isWebappMigrated: true,
       ...(result.webflowScriptId ? { webflowScriptId: result.webflowScriptId } : {}),
+      ...(user?.email ? { email: user.email } : {}),
+      ...(billingEmail ? { billingEmail } : {}),
     };
     await env.WEBFLOW_AUTHENTICATION.put(wfSiteId, JSON.stringify(updatedKv));
   } catch (e) {
@@ -368,7 +414,7 @@ export async function handleCustomCheckout(request, env) {
         billingEmail,
         wfSiteId,
       });
-      if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request }).catch(() => {});
+      if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(() => {});
       if (platform && wfSiteId) persistPaidStatusToKv(env, { platform, platformSiteId: wfSiteId, site, user }).catch(() => {});
       return Response.json(
         { success: true, provisioned: true, isNewUser, user: { id: user.id, email: user.email, name: user.name }, siteId: site.id, subscriptionId },
@@ -451,7 +497,7 @@ export async function handleCustomCheckout(request, env) {
         billingEmail,
         wfSiteId,
       });
-      if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request }).catch(() => {});
+      if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(() => {});
       if (platform && wfSiteId) persistPaidStatusToKv(env, { platform, platformSiteId: wfSiteId, site, user }).catch(() => {});
       return Response.json(
         { success: true, provisioned: true, isNewUser, user: { id: user.id, email: user.email, name: user.name }, siteId: site.id, subscriptionId: sub.id },

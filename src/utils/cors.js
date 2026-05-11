@@ -66,9 +66,9 @@ export function withPublicCors(response, request) {
   const origin  = request.headers.get('Origin');
   const headers = new Headers(response.headers);
 
-  // Do not reflect Origin on error responses (prevents "allow any origin" on 4xx/5xx).
-  // Successful public calls still get per-origin CORS so customer sites can call from their own domains.
-  if (origin && response.status < 400) {
+  // Always reflect Origin on public endpoints — callers (CDN scripts, Webflow extension) must be
+  // able to read error responses to handle failures gracefully. Error bodies contain no secrets.
+  if (origin) {
     headers.set('Access-Control-Allow-Origin',  origin);
     headers.set('Access-Control-Allow-Methods', ALLOW_METHODS);
     headers.set('Access-Control-Allow-Headers', ALLOW_HEADERS);

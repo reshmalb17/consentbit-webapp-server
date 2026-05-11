@@ -167,7 +167,7 @@ async function migrateWebflow(env, db, dryRun, results, domainFilter = null) {
         });
 
         // Write back to ACTIVE_SITES_CONSENTBIT
-        const updatedActive = { ...entry, plan: 'basic', cdnScriptId, webappSiteId: siteId, orgId };
+        const updatedActive = { ...entry, plan: 'basic', cdnScriptId, webappSiteId: siteId, orgId, userEmail: email };
         await kv.put(key, JSON.stringify(updatedActive));
 
         // Write back to WEBFLOW_AUTHENTICATION
@@ -181,6 +181,7 @@ async function migrateWebflow(env, db, dryRun, results, domainFilter = null) {
               webappSiteId: siteId,
               organizationId: orgId,
               userId,
+              userEmail: email,
               isLegacyUser: true,
               upgradedThroughApp: false,
             }));
@@ -195,7 +196,7 @@ async function migrateWebflow(env, db, dryRun, results, domainFilter = null) {
   }
 }
 
-async function migrateFramer(env, db, dryRun, results) {
+async function migrateFramer(env, db, dryRun, results, emailFilter = null) {
   const kv = env.ACTIVE_SITES_CONSENTBIT_FRAMER;
   const authKv = env.AUTH_STORE_FRAMER;
   if (!kv) { results.push({ platform: 'framer', status: 'skipped', reason: 'KV not configured' }); return; }
@@ -229,6 +230,7 @@ async function migrateFramer(env, db, dryRun, results) {
       }
 
       if (!email) { results.push({ key, platform: 'framer', status: 'skipped', reason: 'no email' }); continue; }
+      if (emailFilter && email.toLowerCase() !== emailFilter.toLowerCase()) continue;
 
       if (!dryRun) {
         const userId = await upsertUser(db, email, nowIso());
@@ -280,6 +282,7 @@ export async function handleAdminMigrateFromKv(request, env) {
   const dryRun = url.searchParams.get('dryRun') === 'true';
   const platformFilter = url.searchParams.get('platform'); // 'webflow' | 'framer' | null (both)
   const domainFilter = url.searchParams.get('domain') || null; // e.g. 'migration-b64514.webflow.io'
+  const emailFilter = url.searchParams.get('email') || null;   // e.g. 'narendra@seattlenewmedia.com'
 
   const results = [];
 
@@ -287,7 +290,7 @@ export async function handleAdminMigrateFromKv(request, env) {
     await migrateWebflow(env, db, dryRun, results, domainFilter);
   }
   if (!platformFilter || platformFilter === 'framer') {
-    await migrateFramer(env, db, dryRun, results);
+    await migrateFramer(env, db, dryRun, results, emailFilter);
   }
 
   const migrated = results.filter(r => r.status === 'migrated' || r.status === 'dry-run').length;

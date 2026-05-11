@@ -200,7 +200,7 @@ export async function handleAuthDashboardInit(request, env) {
   return Response.json({
     authenticated: true,
     success: true,
-    user: { id: user.id, email: user.email, name: user.name },
+    user: { id: user.id, email: user.email, name: user.name, billingEmail: user.billingEmail ?? null },
     organizations: orgs,
     sites: sitesWithPlan,
     effectivePlanId: effectivePlanId ?? null,

@@ -216,6 +216,17 @@ async function handleLegacyWebflowUpgrade(env, db, siteId, newSubId, resolvedPla
     try {
       const raw = await env.WEBFLOW_AUTHENTICATION.get(wfSiteId);
       const existing = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : {};
+
+      let userEmail = null;
+      let userBillingEmail = null;
+      try {
+        const userRow = await db.prepare(
+          'SELECT u.email, u.billingEmail FROM User u JOIN OrganizationMember om ON om.userId = u.id JOIN Site s ON s.organizationId = om.organizationId WHERE s.id = ?1 LIMIT 1'
+        ).bind(siteId).first();
+        userEmail = userRow?.email ?? null;
+        userBillingEmail = userRow?.billingEmail ?? null;
+      } catch (_) {}
+
       await env.WEBFLOW_AUTHENTICATION.put(wfSiteId, JSON.stringify({
         ...existing,
         cdnScriptId,
@@ -223,6 +234,8 @@ async function handleLegacyWebflowUpgrade(env, db, siteId, newSubId, resolvedPla
         plan: resolvedPlanId,
         upgradedThroughApp: true,
         isWebappMigrated: true,
+        ...(userEmail ? { email: userEmail } : {}),
+        ...(userBillingEmail ? { billingEmail: userBillingEmail } : {}),
       }));
     } catch (e) {
       // WEBFLOW_AUTHENTICATION update failed
@@ -519,6 +532,13 @@ export async function handleStripeWebhook(request, env, ctx) {
             .catch(() => {});
         }
 
+        // Store billingEmail on User if explicitly provided at checkout
+        if (billingEmailMeta && orgId) {
+          db.prepare(
+            'UPDATE User SET billingEmail = ?1, updatedAt = ?2 WHERE id = (SELECT userId FROM OrganizationMember WHERE organizationId = ?3 LIMIT 1)'
+          ).bind(billingEmailMeta, new Date().toISOString(), orgId).run().catch(() => {});
+        }
+
         // Sync email: if checkout email differs from stored User email, update User + WEBFLOW_AUTHENTICATION KV
         const checkoutEmail = checkoutEmailRaw;
         if (checkoutEmail && orgId) {
@@ -573,6 +593,19 @@ export async function handleStripeWebhook(request, env, ctx) {
         const customerName  = session.customer_details?.name || '';
         const planName      = resolvedPlanId || subMeta.planId || 'Basic';
         if (customerEmail) {
+          // Resolve billing email: use user's billingEmail if set, else fall back to checkout email
+          let emailTo = customerEmail;
+          if (orgId) {
+            try {
+              const userForEmail = await db.prepare(
+                'SELECT u.billingEmail FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
+              ).bind(orgId).first();
+              if (userForEmail?.billingEmail) emailTo = userForEmail.billingEmail;
+            } catch (e) {
+              // billingEmail lookup failed, use customerEmail
+            }
+          }
+
           // Fetch the latest invoice for this subscription to include in the email
           let invoiceData = null;
           if (subId && env.STRIPE_SECRET_KEY) {
@@ -599,7 +632,7 @@ export async function handleStripeWebhook(request, env, ctx) {
             }
           }
           sendPaidPlanEmail(env, ctx, {
-            to:       customerEmail,
+            to:       emailTo,
             name:     customerName,
             domain:   siteDomainMeta || '',
             planName,
@@ -633,7 +666,24 @@ export async function handleStripeWebhook(request, env, ctx) {
 
     if (type === 'customer.subscription.updated' || type === 'customer.subscription.deleted') {
       const sub = event.data.object;
-      const existing = await getSubscriptionByStripeId(db, sub.id);
+      let existing = await getSubscriptionByStripeId(db, sub.id);
+
+      // Fallback: migrated legacy users have stripeSubscriptionId = null in D1 so the lookup
+      // above returns nothing. Try matching by stripeCustomerId instead so their D1 row gets
+      // updated when Stripe fires cancellation / update webhooks.
+      if (!existing && sub.customer) {
+        existing = await db.prepare(
+          `SELECT * FROM Subscription WHERE stripeCustomerId = ?1 ORDER BY updatedAt DESC LIMIT 1`
+        ).bind(sub.customer).first() ?? null;
+
+        // Stamp the real stripeSubscriptionId onto the row so future webhooks hit the fast path
+        if (existing && sub.id) {
+          db.prepare(
+            `UPDATE Subscription SET stripeSubscriptionId = ?1, updatedAt = ?2 WHERE id = ?3`
+          ).bind(sub.id, new Date().toISOString(), existing.id).run().catch(() => {});
+        }
+      }
+
       const orgIdFromEvent = sub.metadata?.organizationId;
       const orgIdFinal = existing?.organizationId ?? existing?.organizationid ?? orgIdFromEvent ?? null;
       const status = sub.status === 'canceled' || sub.status === 'unpaid' ? sub.status : 'active';

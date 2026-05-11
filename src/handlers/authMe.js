@@ -102,6 +102,7 @@ export async function handleAuthMe(request, env) {
         id: user.id,
         email: user.email,
         name: user.name,
+        billingEmail: user.billingEmail ?? null,
       },
       organizations: orgs,
     },
