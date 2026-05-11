@@ -41,6 +41,9 @@ import { handleCheckLegacyScript } from './handlers/checkLegacyScript.js';
 import { handleLegacyConsentLogs } from './handlers/legacyConsentLogs.js';
 import { handleLegacyConsentCsv } from './handlers/legacyConsentCsv.js';
 import { handleLegacyConsentPdf } from './handlers/legacyConsentPdf.js';
+import { handleLegacyConsentLogsFramer } from './handlers/legacyConsentLogsFramer.js';
+import { handleLegacyConsentCsvFramer } from './handlers/legacyConsentCsvFramer.js';
+import { handleLegacyConsentPdfFramer } from './handlers/legacyConsentPdfFramer.js';
 import { handleConsentPdf } from './handlers/consentPdf.js';
 import { handleConsentCsv } from './handlers/consentCsv.js';
 import { handleSyncEvent } from './handlers/syncEvent.js';
@@ -332,6 +335,16 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     case '/api/legacy-consent-pdf':
       response = await handleLegacyConsentPdf(request, env); break;
+
+    case '/api/legacy-consent-logs-framer':
+    case '/api/legacy-consent-monthly-framer':
+      response = await handleLegacyConsentLogsFramer(request, env); break;
+
+    case '/api/legacy-consent-csv-framer':
+      response = await handleLegacyConsentCsvFramer(request, env); break;
+
+    case '/api/legacy-consent-pdf-framer':
+      response = await handleLegacyConsentPdfFramer(request, env); break;
 
     case '/api/consent-pdf':
       response = await handleConsentPdf(request, env); break;

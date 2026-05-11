@@ -38,6 +38,10 @@ binding = "BANNER_KV_FRAMER"
 id = "d63b31eee44245b2a039b8f9566a6f44"
 
 [[kv_namespaces]]
+binding = "CONSENT_STORE_FRAMER"
+id = "0ad4a627265c43279493720bf7532f77"
+
+[[kv_namespaces]]
 binding = "ACTIVE_SITES_CONSENTBIT"
 id = "66c7aa5c7fcb4c2a8dfec5463e86a293"
 
