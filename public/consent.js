@@ -2006,10 +2006,6 @@ function clearConsentState() {
       // DOM already loaded, unblock Google scripts immediately
       unblockGoogleScripts();
       
-      // Defer CSS loading slightly to avoid blocking initial render
-      requestAnimationFrame(function() {
-        loadConsentStyles();
-      });
       monitorDynamicScripts();
     }
   

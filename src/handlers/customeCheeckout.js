@@ -193,7 +193,7 @@ async function provisionAccount(db, env, request, {
   return { user, isNewUser, session, org, site };
 }
 
-async function postCheckoutWebflowInject(env, { wfSiteId, site, request }) {
+async function postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }) {
   if (!wfSiteId || !env.WEBFLOW_AUTHENTICATION) return;
   try {
     const kvRaw = await env.WEBFLOW_AUTHENTICATION.get(wfSiteId);
@@ -216,6 +216,8 @@ async function postCheckoutWebflowInject(env, { wfSiteId, site, request }) {
       registeredThroughApp: true,
       isWebappMigrated: true,
       ...(result.webflowScriptId ? { webflowScriptId: result.webflowScriptId } : {}),
+      ...(user?.email ? { email: user.email } : {}),
+      ...(billingEmail ? { billingEmail } : {}),
     };
     await env.WEBFLOW_AUTHENTICATION.put(wfSiteId, JSON.stringify(updatedKv));
   } catch (e) {
@@ -323,7 +325,7 @@ export async function handleCustomCheckout(request, env) {
         billingEmail,
         wfSiteId,
       });
-      if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request }).catch(() => {});
+      if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(() => {});
       return Response.json(
         { success: true, provisioned: true, isNewUser, user: { id: user.id, email: user.email, name: user.name }, siteId: site.id, subscriptionId },
         { status: 200, headers: { 'Content-Type': 'application/json', 'Set-Cookie': `sid=${session.id}; ${cookieFlags}` } },
@@ -405,7 +407,7 @@ export async function handleCustomCheckout(request, env) {
         billingEmail,
         wfSiteId,
       });
-      if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request }).catch(() => {});
+      if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(() => {});
       return Response.json(
         { success: true, provisioned: true, isNewUser, user: { id: user.id, email: user.email, name: user.name }, siteId: site.id, subscriptionId: sub.id },
         { status: 201, headers: { 'Content-Type': 'application/json', 'Set-Cookie': `sid=${session.id}; ${cookieFlags}` } },

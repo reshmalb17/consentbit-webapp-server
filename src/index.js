@@ -33,6 +33,7 @@ import { handleAdminUpdateLegacyPlans } from './handlers/adminUpdateLegacyPlans.
 import { handleAdminBackfillWfSiteId } from './handlers/adminBackfillWfSiteId.js';
 import { handleAdminBackfillFramerSiteId } from './handlers/adminBackfillFramerSiteId.js';
 import { handleAdminClearWebappData } from './handlers/adminClearWebappData.js';
+import { handleAdminResetLegacyWebflow } from './handlers/adminResetLegacyWebflow.js';
 import { handleAdminMigrateFromKv } from './handlers/adminMigrateFromKv.js';
 import { handleAdminMigrateSingleSite } from './handlers/adminMigrateSingleSite.js';
 import { handleAdminMigrateCustomization } from './handlers/adminMigrateCustomization.js';
@@ -52,6 +53,7 @@ import { handleAuthDashboardInit } from './handlers/authDashboardInit.js';
 import { handleAuthLogin } from './handlers/authLogin.js';
 import { handleAuthSignup } from './handlers/authSignup.js';
 import { handleAuthMe } from './handlers/authMe.js';
+import { handleAuthProfile } from './handlers/authProfile.js';
 import { handleAuthRequestCode } from './handlers/authRequestCode.js';
 import { handleAuthVerifyCode } from './handlers/authVerifyCode.js';
 import { handleAuthLogout } from './handlers/authLogout.js';
@@ -149,6 +151,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/admin/backfill-wf-site-id',
   '/api/admin/backfill-framer-site-id',
   '/api/admin/clear-webapp-data',
+  '/api/admin/reset-legacy-webflow',
   '/api/admin/migrate-from-kv',
   '/api/admin/migrate-single-site',
   '/api/admin/migrate-customization',
@@ -198,6 +201,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleAuthDashboardInit(request, env); break;
     case '/api/auth/me':
       response = await handleAuthMe(request, env); break;
+    case '/api/auth/profile':
+      response = await handleAuthProfile(request, env); break;
 
     // — Onboarding
     case '/api/onboarding/first-setup':
@@ -307,6 +312,9 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     case '/api/admin/clear-webapp-data':
       response = await handleAdminClearWebappData(request, env); break;
+
+    case '/api/admin/reset-legacy-webflow':
+      response = await handleAdminResetLegacyWebflow(request, env); break;
 
     case '/api/admin/migrate-from-kv':
       response = await handleAdminMigrateFromKv(request, env); break;

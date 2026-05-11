@@ -10,6 +10,7 @@ import {
   buildEmbedScriptUrl,
   normalizeDomain,
   markSiteVerified,
+  saveBannerCustomization,
 } from '../services/db.js';
 
 const TAG = '[webflow-free-register][webapp]';
@@ -44,6 +45,7 @@ export async function handleWebflowFreeRegister(request, env) {
   const email = (body.email || '').trim().toLowerCase();
   const domain = (body.domain || '').trim();
   const wfSiteId = (body.wfSiteId || '').trim();
+  const initialCustomization = body.initialCustomization ?? null;
 
   if (!email || !domain) {
     console.warn(`${TAG} Rejected: missing email or domain`);
@@ -122,12 +124,60 @@ export async function handleWebflowFreeRegister(request, env) {
 
   // ── Step 3: Check free plan site limit (1 site per account) ──────────────
   const existingSites = await db
-    .prepare('SELECT id, domain FROM Site WHERE organizationId = ?1 LIMIT 2')
+    .prepare('SELECT id, domain, platformSiteId, cdnScriptId, embedScriptUrl, webflowScriptId FROM Site WHERE organizationId = ?1 LIMIT 5')
     .bind(org.id)
     .all();
 
   const normalizedDomain = normalizeDomain(domain);
   const siteList = existingSites?.results || [];
+
+  // Idempotency: if any existing site already has this wfSiteId as platformSiteId, return success
+  if (wfSiteId) {
+    const platformMatch = siteList.find((s) => s.platformSiteId === wfSiteId);
+    if (platformMatch) {
+      console.log(`${TAG} Step 3: platformSiteId match — already registered, returning idempotent success for site=${platformMatch.id}`);
+      const embedOriginForMatch = canonicalEmbedOrigin(request, env);
+      const scriptUrlMatch =
+        platformMatch.embedScriptUrl ||
+        buildEmbedScriptUrl(embedOriginForMatch || new URL(request.url).origin, platformMatch.cdnScriptId) ||
+        `${new URL(request.url).origin}/consentbit/${platformMatch.cdnScriptId}/script.js`;
+
+      // Save current customization payload so this publish's settings are persisted
+      if (initialCustomization?.customization) {
+        try {
+          await saveBannerCustomization(db, platformMatch.id, initialCustomization.customization);
+        } catch (saveErr) {
+          console.warn(`${TAG} Step 3: saveBannerCustomization failed (non-fatal):`, saveErr?.message || saveErr);
+        }
+      }
+
+      // Stamp KV with webappSiteId + scriptUrl if missing so the short-circuit fires next time
+      try {
+        const kvRaw = await env.WEBFLOW_AUTHENTICATION?.get(wfSiteId);
+        if (kvRaw) {
+          const kvEntry = JSON.parse(kvRaw);
+          if (!kvEntry.webappSiteId || !kvEntry.webappScriptUrl) {
+            const updatedKv = {
+              ...kvEntry,
+              webappSiteId: platformMatch.id,
+              webappScriptUrl: scriptUrlMatch,
+              cdnScriptId: platformMatch.cdnScriptId,
+              isWebappMigrated: true,
+            };
+            await env.WEBFLOW_AUTHENTICATION.put(wfSiteId, JSON.stringify(updatedKv));
+          }
+        }
+      } catch (_) { /* best-effort */ }
+
+      return Response.json({
+        success: true,
+        alreadyRegistered: true,
+        webappSiteId: platformMatch.id,
+        scriptUrl: scriptUrlMatch,
+        cdnScriptId: platformMatch.cdnScriptId,
+      });
+    }
+  }
 
   const existingOnDifferentDomain = siteList.find(
     (s) => s.domain && s.domain !== normalizedDomain
@@ -194,6 +244,80 @@ export async function handleWebflowFreeRegister(request, env) {
       .run();
   }
 
+  // ── Step 5b: Save initial banner customization + sync to KV ─────────────
+  if (initialCustomization?.customization) {
+    try {
+      const custData = initialCustomization.customization;
+
+      // Save to D1
+      await saveBannerCustomization(db, site.id, custData);
+
+      // Sync to Banner-Settings:{wfSiteId} KV so the Webflow app reads it immediately
+      if (wfSiteId && env.WEBFLOW_AUTHENTICATION) {
+        try {
+          const parseBorderRadius = (val) => {
+            if (val == null) return null;
+            const s = String(val).trim();
+            const n = parseFloat(s);
+            if (isNaN(n)) return 0;
+            if (s.endsWith('rem') || (n < 10 && n % 1 !== 0)) return Math.round(n * 16);
+            return Math.round(n) || 0;
+          };
+
+          let enTrans = {};
+          let configTrans = {};
+          try {
+            const rawTrans = custData.translations;
+            const parsed = typeof rawTrans === 'string' ? JSON.parse(rawTrans) : rawTrans;
+            enTrans = parsed?.en ?? {};
+            configTrans = parsed?.config ?? {};
+          } catch (_) {}
+
+          const appData = {
+            color: custData.backgroundColor ?? '#ffffff',
+            bgColor: custData.backgroundColor ?? '#ffffff',
+            btnColor: custData.acceptButtonBg ?? '#0284c7',
+            headColor: custData.headingColor ?? '#0f172a',
+            paraColor: custData.textColor ?? '#334155',
+            secondcolor: custData.rejectButtonBg ?? '#0284c7',
+            secondbuttontext: custData.rejectButtonText ?? '#ffffff',
+            primaryButtonText: custData.acceptButtonText ?? '#ffffff',
+            customiseButtonBg: custData.customiseButtonBg ?? '#ffffff',
+            customiseButtonText: custData.customiseButtonText ?? '#0284c7',
+            saveButtonBg: custData.saveButtonBg ?? '#ffffff',
+            saveButtonText: custData.saveButtonText ?? '#0284c7',
+            borderRadius: parseBorderRadius(custData.bannerBorderRadius),
+            selected: custData.position?.includes('right') ? 'right'
+              : custData.position?.includes('center') ? 'center'
+              : 'left',
+            privacyUrl: custData.privacyPolicyUrl ?? '',
+            animation: custData.centerAnimationDirection ?? 'fade',
+            language: custData.language ?? 'en',
+            closebutton: (() => { const v = configTrans.closeButtonEnabled ?? enTrans.closeButtonEnabled; return v != null ? (v === '1' || v === true) : false; })(),
+            webappContent: {
+              title: enTrans.title ?? 'We value your privacy',
+              description: enTrans.description ?? '',
+              acceptAll: enTrans.acceptAll ?? 'Accept',
+              rejectAll: enTrans.rejectAll ?? 'Reject',
+              customise: enTrans.customise ?? 'Preference',
+              saveMyPreferences: enTrans.saveMyPreferences ?? 'Save my preferences',
+            },
+            contentEditedFromWebapp: true,
+            isWebappMigrated: true,
+          };
+
+          const kvKey = `Banner-Settings:${wfSiteId}`;
+          const dataToStore = { appData, siteId: wfSiteId, updatedAt: now };
+          await env.WEBFLOW_AUTHENTICATION.put(kvKey, JSON.stringify(dataToStore));
+        } catch (kvErr) {
+          console.warn(`${TAG} Step 5b: Banner-Settings KV sync failed (non-fatal):`, kvErr?.message || kvErr);
+        }
+      }
+    } catch (err) {
+      console.warn(`${TAG} Step 5b: saveBannerCustomization failed (non-fatal):`, err?.message || err);
+    }
+  }
+
   // ── Step 6: Build CDN script URL ─────────────────────────────────────────
   const scriptUrl =
     site.embedScriptUrl ||
@@ -235,7 +359,7 @@ export async function handleWebflowFreeRegister(request, env) {
           }
 
           // Update KV with webappSiteId + scriptUrl
-          const updatedKv = { ...kvEntry, webappSiteId: site.id, webappScriptUrl: scriptUrl, cdnScriptId: site.cdnScriptId, userId: user.id, registeredThroughApp: true, isWebappMigrated: true };
+          const updatedKv = { ...kvEntry, webappSiteId: site.id, webappScriptUrl: scriptUrl, cdnScriptId: site.cdnScriptId, userId: user.id, email: user.email, registeredThroughApp: true, isWebappMigrated: true };
           await env.WEBFLOW_AUTHENTICATION?.put(wfSiteId, JSON.stringify(updatedKv));
         }
       }
