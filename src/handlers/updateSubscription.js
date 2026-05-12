@@ -40,6 +40,7 @@ async function validatePriceIsRecurring(secret, priceId) {
 }
 
 export async function handleUpgradeSubscription(request, env) {
+  console.log('[UPGRADE] POST /api/subscriptions/upgrade called');
   if (request.method !== 'POST') {
     return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
   }
@@ -47,8 +48,8 @@ export async function handleUpgradeSubscription(request, env) {
   const secret = env.STRIPE_SECRET_KEY;
   const db = env.CONSENT_WEBAPP;
 
-  if (!secret) return Response.json({ success: false, error: 'Stripe not configured.' }, { status: 503 });
-  if (!db) return Response.json({ success: false, error: 'Database not available.' }, { status: 503 });
+  if (!secret) { console.error('[UPGRADE] Missing STRIPE_SECRET_KEY'); return Response.json({ success: false, error: 'Stripe not configured.' }, { status: 503 }); }
+  if (!db) { console.error('[UPGRADE] Missing CONSENT_WEBAPP binding'); return Response.json({ success: false, error: 'Database not available.' }, { status: 503 }); }
 
   // Auth
   const sid = getSessionIdFromCookie(request);
@@ -76,9 +77,11 @@ export async function handleUpgradeSubscription(request, env) {
     : `${rawSuccessUrl}?session_id={CHECKOUT_SESSION_ID}`;
   const cancelUrl = body.cancelUrl || `${request.url.replace(/\/api\/.*$/, '')}/dashboard`;
 
-  if (!siteId) return Response.json({ success: false, error: 'siteId required' }, { status: 400 });
-  if (!organizationId) return Response.json({ success: false, error: 'organizationId required' }, { status: 400 });
-  if (!planId) return Response.json({ success: false, error: 'planId must be basic, essential, or growth' }, { status: 400 });
+  console.log('[UPGRADE] body parsed — siteId:', siteId, '| orgId:', organizationId, '| planId:', planId, '| interval:', interval);
+
+  if (!siteId) { console.error('[UPGRADE] Missing siteId'); return Response.json({ success: false, error: 'siteId required' }, { status: 400 }); }
+  if (!organizationId) { console.error('[UPGRADE] Missing organizationId'); return Response.json({ success: false, error: 'organizationId required' }, { status: 400 }); }
+  if (!planId) { console.error('[UPGRADE] Invalid planId:', body.planId); return Response.json({ success: false, error: 'planId must be basic, essential, or growth' }, { status: 400 }); }
 
   // Resolve the new Stripe price id
   const tierPriceMap = {
@@ -87,7 +90,9 @@ export async function handleUpgradeSubscription(request, env) {
     growth:    { monthly: trimEnv(env.STRIPE_PRICE_GROWTH_MONTHLY),     yearly: trimEnv(env.STRIPE_PRICE_GROWTH_YEARLY) },
   };
   const newPriceId = tierPriceMap[planId][interval] || tierPriceMap[planId].monthly;
+  console.log('[UPGRADE] resolved priceId:', newPriceId, 'for plan:', planId, 'interval:', interval);
   if (!newPriceId) {
+    console.error('[UPGRADE] Missing price env var for', planId, interval);
     return Response.json(
       { success: false, error: `Missing env STRIPE_PRICE_${planId.toUpperCase()}_${interval.toUpperCase()}.` },
       { status: 503 },
@@ -95,7 +100,9 @@ export async function handleUpgradeSubscription(request, env) {
   }
 
   const priceCheck = await validatePriceIsRecurring(secret, newPriceId);
+  console.log('[UPGRADE] priceCheck:', priceCheck);
   if (!priceCheck.ok) {
+    console.error('[UPGRADE] price validation failed:', priceCheck.error);
     return Response.json({ success: false, error: priceCheck.error }, { status: 400 });
   }
 
@@ -104,7 +111,17 @@ export async function handleUpgradeSubscription(request, env) {
   const oldStripeSubscriptionId = existingSub
     ? (existingSub.stripeSubscriptionId ?? existingSub.stripesubscriptionid ?? null)
     : null;
+  console.log('[UPGRADE] existingSub:', existingSub ? { planId: existingSub.planId, status: existingSub.status } : null, '| oldStripeSubId:', oldStripeSubscriptionId);
 
+  // Look up platformSiteId so the webhook can update WEBFLOW_AUTHENTICATION KV
+  let platformSiteId = null;
+  try {
+    const siteRow = await db.prepare('SELECT platformSiteId FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
+    platformSiteId = siteRow?.platformSiteId ?? null;
+    console.log('[UPGRADE] platformSiteId from DB:', platformSiteId);
+  } catch (e) {
+    console.error('[UPGRADE] platformSiteId lookup failed:', e?.message);
+  }
 
   // Build Stripe Checkout Session — subscription mode with new plan
   const params = new URLSearchParams();
@@ -121,16 +138,24 @@ export async function handleUpgradeSubscription(request, env) {
   params.set('subscription_data[metadata][planType]', 'tier');
   params.set('subscription_data[metadata][interval]', interval);
   params.set('subscription_data[metadata][siteId]', siteId);
+  if (platformSiteId) {
+    params.set('subscription_data[metadata][platformId]', platformSiteId);
+    console.log('[UPGRADE] stamping platformId in Stripe metadata:', platformSiteId);
+  } else {
+    console.warn('[UPGRADE] platformSiteId not found — KV plan stamp will fall back to DB lookup in webhook');
+  }
   // Pass old subscription id so the webhook can cancel it after payment succeeds
   if (oldStripeSubscriptionId) {
     params.set('subscription_data[metadata][oldStripeSubscriptionId]', oldStripeSubscriptionId);
   }
   // Only give free trial if: no existing paid subscription AND trial has never been used before
   const trialAlreadyUsed = await getSiteTrialUsed(db, siteId);
+  console.log('[UPGRADE] trialAlreadyUsed:', trialAlreadyUsed, '| will offer trial:', !oldStripeSubscriptionId && !trialAlreadyUsed);
   if (!oldStripeSubscriptionId && !trialAlreadyUsed) {
     params.set('subscription_data[trial_period_days]', '14');
   }
 
+  console.log('[UPGRADE] creating Stripe checkout session...');
   const res = await fetch('https://api.stripe.com/v1/checkout/sessions', {
     method: 'POST',
     headers: {
@@ -142,11 +167,14 @@ export async function handleUpgradeSubscription(request, env) {
 
   const data = await res.json();
   if (data.error) {
+    console.error('[UPGRADE] Stripe error:', data.error);
     return Response.json({ success: false, error: data.error.message || 'Stripe error' }, { status: 400 });
   }
   if (!data.id || !data.url) {
+    console.error('[UPGRADE] No session id/url in Stripe response:', data);
     return Response.json({ success: false, error: 'No session URL returned from Stripe' }, { status: 502 });
   }
 
+  console.log('[UPGRADE] checkout session created:', data.id);
   return Response.json({ success: true, sessionId: data.id, url: data.url });
 }

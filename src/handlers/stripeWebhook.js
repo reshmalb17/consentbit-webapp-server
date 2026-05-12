@@ -378,6 +378,7 @@ export async function handleStripeWebhook(request, env, ctx) {
       const session = event.data.object;
       const subId = session.subscription;
       const sessionMeta = session.metadata || {};
+      console.log('[WEBHOOK] checkout.session.completed — sessionId:', session.id, '| subId:', subId, '| sessionMeta:', JSON.stringify(sessionMeta));
       let orgId = session.client_reference_id || sessionMeta.organizationId;
       let siteId = sessionMeta.siteId && String(sessionMeta.siteId).trim() ? String(sessionMeta.siteId).trim() : null;
       let platformSiteId = sessionMeta.platformId?.trim() || sessionMeta.wfSiteId?.trim() || null;
@@ -506,6 +507,7 @@ export async function handleStripeWebhook(request, env, ctx) {
         if (!resolvedPlanId && stripePriceFromSub) {
           resolvedPlanId = inferTierPlanIdFromStripePriceId(env, stripePriceFromSub);
         }
+        console.log('[WEBHOOK] resolved — orgId:', orgId, '| siteId:', siteId, '| platformSiteId:', platformSiteId, '| planId:', resolvedPlanId, '| status:', subscriptionStatus);
         await saveSubscription(db, {
           organizationId: orgId,
           siteId: siteId || null,
@@ -638,6 +640,33 @@ export async function handleStripeWebhook(request, env, ctx) {
             planName,
             invoice:  invoiceData,
           });
+        }
+
+        // Stamp plan into WEBFLOW_AUTHENTICATION KV so the Webflow Designer Extension can
+        // read it directly. platformSiteId may be null for webapp upgrades (not in metadata),
+        // so fall back to looking it up from the Site table.
+        if (resolvedPlanId && env.WEBFLOW_AUTHENTICATION) {
+          ctx.waitUntil((async () => {
+            try {
+              let wfId = platformSiteId || null;
+              console.log('[WEBHOOK] KV stamp — starting. platformSiteId:', wfId, '| siteId:', siteId);
+              if (!wfId && siteId) {
+                const siteRow = await db.prepare('SELECT platformSiteId FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
+                wfId = siteRow?.platformSiteId ?? null;
+                console.log('[WEBHOOK] KV stamp — platformSiteId from DB lookup:', wfId);
+              }
+              if (wfId) {
+                const raw = await env.WEBFLOW_AUTHENTICATION.get(wfId);
+                const existing = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : {};
+                await env.WEBFLOW_AUTHENTICATION.put(wfId, JSON.stringify({ ...existing, plan: resolvedPlanId }));
+                console.log('[WEBHOOK] KV stamp — success. wfId:', wfId, '| plan:', resolvedPlanId);
+              } else {
+                console.warn('[WEBHOOK] KV stamp — skipped: no platformSiteId found for siteId:', siteId);
+              }
+            } catch (e) {
+              console.error('[WEBHOOK] KV stamp — error:', e?.message);
+            }
+          })());
         }
 
         // Legacy Webflow upgrade: if site is isLegacy=1 + platform=webflow/framer,

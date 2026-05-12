@@ -361,6 +361,39 @@ export async function handleWebflowFreeRegister(request, env) {
           // Update KV with webappSiteId + scriptUrl
           const updatedKv = { ...kvEntry, webappSiteId: site.id, webappScriptUrl: scriptUrl, cdnScriptId: site.cdnScriptId, userId: user.id, email: user.email, registeredThroughApp: true, isWebappMigrated: true };
           await env.WEBFLOW_AUTHENTICATION?.put(wfSiteId, JSON.stringify(updatedKv));
+
+          // Publish the Webflow site so the injected script goes live immediately.
+          if (result.success && accessToken) {
+            try {
+              const WEBFLOW_API = 'https://api.webflow.com/v2';
+              const pubHeaders = {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+                'accept-version': '1.0.0',
+              };
+              let customDomains = [];
+              try {
+                const siteInfoRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}`, { headers: pubHeaders });
+                if (siteInfoRes.ok) {
+                  const siteInfo = await siteInfoRes.json();
+                  customDomains = (siteInfo.customDomains || []).map(d => d.url || d.name).filter(Boolean);
+                }
+              } catch (_) {}
+              const publishRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/publish`, {
+                method: 'POST',
+                headers: pubHeaders,
+                body: JSON.stringify({ publishToWebflowSubdomain: true, customDomains }),
+              });
+              if (!publishRes.ok) {
+                const err = await publishRes.text();
+                console.warn(`${TAG} Step 7: Webflow publish failed status=${publishRes.status} body=${err}`);
+              } else {
+                console.log(`${TAG} Step 7: Webflow site published successfully wfSiteId=${wfSiteId}`);
+              }
+            } catch (publishErr) {
+              console.warn(`${TAG} Step 7: Webflow publish error (non-fatal):`, publishErr?.message || publishErr);
+            }
+          }
         }
       }
     } catch (err) {

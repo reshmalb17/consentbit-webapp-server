@@ -60,7 +60,7 @@ export async function handleBannerCustomization(request, env) {
     if (!siteId) {
       // wfSiteId passed but no D1 record found — site not registered yet
       if (wfSiteId) {
-        return Response.json({ success: true, customization: null, platform: null, isLegacy: 0, isWebappMigrated: false, isWebflowFree: false, isBannerAdded: false });
+        return Response.json({ success: true, customization: null, platform: null, isLegacy: 0, isWebappMigrated: false, isWebflowFree: false, isBannerAdded: false, plan: null, webappSiteId: null });
       }
       return Response.json({ success: false, error: 'siteId or wfSiteId is required' }, { status: 400 });
     }
@@ -96,10 +96,10 @@ export async function handleBannerCustomization(request, env) {
       }
 
       // Fetch Site flags so callers can distinguish new-free Webflow users from legacy migrated users
-      let siteFlags = { platform: null, isLegacy: 0, bannerType: 'gdpr', webflowScriptId: null };
+      let siteFlags = { platform: null, isLegacy: 0, bannerType: 'gdpr', regionMode: 'gdpr', webflowScriptId: null, platformSiteId: null };
       try {
-        const siteRow = await db.prepare('SELECT platform, isLegacy, banner_type, webflowScriptId FROM Site WHERE id = ?1').bind(siteId).first();
-        if (siteRow) siteFlags = { platform: siteRow.platform ?? null, isLegacy: Number(siteRow.isLegacy ?? 0), bannerType: siteRow.banner_type ?? 'gdpr', webflowScriptId: siteRow.webflowScriptId ?? null };
+        const siteRow = await db.prepare('SELECT platform, isLegacy, banner_type, region_mode, webflowScriptId, platformSiteId FROM Site WHERE id = ?1').bind(siteId).first();
+        if (siteRow) siteFlags = { platform: siteRow.platform ?? null, isLegacy: Number(siteRow.isLegacy ?? 0), bannerType: siteRow.banner_type ?? 'gdpr', regionMode: siteRow.region_mode ?? 'gdpr', webflowScriptId: siteRow.webflowScriptId ?? null, platformSiteId: siteRow.platformSiteId ?? null };
       } catch (_) { /* non-critical */ }
 
       const isWebappMigrated = true; // site exists in D1
@@ -108,7 +108,61 @@ export async function handleBannerCustomization(request, env) {
       // Legacy users had the banner added via the old OAuth flow; new users only have it added once the script is published (webflowScriptId set)
       const isBannerAdded = siteFlags.isLegacy === 1 || !!siteFlags.webflowScriptId;
 
-      return Response.json({ success: true, customization, platform: siteFlags.platform, isLegacy: siteFlags.isLegacy, isWebappMigrated, isWebflowFree, iabActivated, isBannerAdded });
+      // Derive compliance from DB region_mode (set whenever POST includes compliance).
+      // KV Banner-Settings takes precedence if present (stores last value sent from Webflow Designer App).
+      // Content-based inference is the last-resort fallback for sites that have never published
+      // compliance explicitly (region_mode still at default 'gdpr' but CCPA content is present).
+      const regionModeToCompliance = (rm) => {
+        if (rm === 'both') return ['gdpr', 'us'];
+        if (rm === 'ccpa') return ['us'];
+        return null; // null = not explicitly set — allow content fallback below
+      };
+      let compliance = iabActivated ? ['gdpr', 'us'] : regionModeToCompliance(siteFlags.regionMode);
+      let kvPlan = null;
+      let kvWebappSiteId = null;
+      try {
+        const resolvedWfSiteId = siteFlags.platformSiteId ?? wfSiteId ?? null;
+        if (resolvedWfSiteId) {
+          const kvEntry = await env.WEBFLOW_AUTHENTICATION?.get(`Banner-Settings:${resolvedWfSiteId}`, { type: 'json' });
+          if (Array.isArray(kvEntry?.appData?.compliance) && kvEntry.appData.compliance.length) {
+            // Only trust KV if it was explicitly set (not just the default ['gdpr'])
+            const kvC = kvEntry.appData.compliance;
+            if (kvC.includes('us') || kvC.includes('ccpa') || kvC.includes('both')) {
+              compliance = kvC; // explicitly set to CCPA or both
+            } else if (compliance === null) {
+              compliance = kvC; // use KV gdpr-only as the explicit value
+            }
+          }
+          // Read plan + webappSiteId from root WEBFLOW_AUTHENTICATION entry (stamped by Stripe webhook after checkout)
+          try {
+            const rootKvRaw = await env.WEBFLOW_AUTHENTICATION?.get(resolvedWfSiteId);
+            if (rootKvRaw) {
+              const rootKvEntry = typeof rootKvRaw === 'string' ? JSON.parse(rootKvRaw) : rootKvRaw;
+              if (rootKvEntry?.plan && ['basic', 'essential', 'growth'].includes(rootKvEntry.plan)) {
+                kvPlan = rootKvEntry.plan;
+              }
+              if (rootKvEntry?.webappSiteId) {
+                kvWebappSiteId = rootKvEntry.webappSiteId;
+              }
+            }
+          } catch (_) { /* non-critical */ }
+        }
+      } catch (_) { /* non-critical */ }
+
+      // Content-based fallback: if compliance is still null (region_mode was 'gdpr' default and KV
+      // had no explicit CCPA), check if CCPA content exists in translations — indicates user selected US.
+      if (compliance === null) {
+        try {
+          const tr = customization?.translations;
+          const en = (typeof tr === 'string' ? JSON.parse(tr) : tr)?.en ?? {};
+          const hasCcpaContent = !!(en.doNotSell?.trim() || en.ccpaDescription?.trim());
+          compliance = hasCcpaContent ? ['us'] : ['gdpr'];
+        } catch (_) {
+          compliance = ['gdpr'];
+        }
+      }
+
+      return Response.json({ success: true, customization, platform: siteFlags.platform, isLegacy: siteFlags.isLegacy, isWebappMigrated, isWebflowFree, iabActivated, isBannerAdded, compliance, plan: kvPlan, webappSiteId: kvWebappSiteId });
     } catch (error) {
       console.error('[BannerCustomization] Error fetching:', error);
       return Response.json(
@@ -131,6 +185,8 @@ export async function handleBannerCustomization(request, env) {
     const customization = body?.customization;
     const wfSiteId = body?.wfSiteId || postUrl.searchParams.get('wfSiteId') || null;
     const skipScriptSwap = body?.skipScriptSwap === true;
+    // compliance: ['gdpr'], ['us'], ['gdpr','us'] — from Webflow Designer App publish
+    const compliance = Array.isArray(body?.compliance) && body.compliance.length ? body.compliance : null;
 
     let _postTrans = null;
     try { _postTrans = customization?.translations ? (typeof customization.translations === 'string' ? JSON.parse(customization.translations) : customization.translations) : null; } catch (_) {}
@@ -191,14 +247,38 @@ export async function handleBannerCustomization(request, env) {
     try {
       await saveBannerCustomization(db, siteId, customization);
 
+      // Update Site.banner_type and region_mode when compliance is set from the Webflow Designer App.
+      // App always includes 'gdpr' (GDPR is forced), so:
+      //   gdpr only          → banner_type='gdpr', region_mode='gdpr'
+      //   gdpr + us (both)   → banner_type='gdpr', region_mode='both'  (CDN routes by country)
+      //   us only            → banner_type='ccpa', region_mode='ccpa'
+      if (compliance) {
+        const hasUs = compliance.includes('us') || compliance.includes('ccpa');
+        const hasGdpr = compliance.includes('gdpr');
+        const newBannerType = hasUs && !hasGdpr ? 'ccpa' : 'gdpr';
+        const newRegionMode = hasUs && hasGdpr ? 'both' : hasUs ? 'ccpa' : 'gdpr';
+        console.log('[BannerCustomization][POST] compliance:', compliance, '→ banner_type:', newBannerType, 'region_mode:', newRegionMode);
+        db.prepare('UPDATE Site SET banner_type = ?1, region_mode = ?2, updatedAt = ?3 WHERE id = ?4')
+          .bind(newBannerType, newRegionMode, new Date().toISOString(), siteId).run().catch(() => {});
+      }
+
       // Sync customization to WEBFLOW_AUTHENTICATION KV so the Webflow Designer App
       // always reads fresh data from Banner-Settings:{platformSiteId}.
       try {
         const siteRow = await db.prepare('SELECT platformSiteId, cdnScriptId, webflowScriptId, embedScriptUrl, banner_type FROM Site WHERE id = ?1').bind(siteId).first();
-        const webflowSiteId = siteRow?.platformSiteId ?? null;
+        // Fall back to wfSiteId from request body if platformSiteId is not yet stamped in DB.
+        const webflowSiteId = siteRow?.platformSiteId ?? wfSiteId ?? null;
+        console.log('[BannerCustomization][POST] webflowSiteId resolved:', webflowSiteId, '| platformSiteId in DB:', siteRow?.platformSiteId, '| wfSiteId from request:', wfSiteId);
 
         if (!webflowSiteId) {
+          console.warn('[BannerCustomization][POST] No webflowSiteId — skipping KV sync and script injection');
           return Response.json({ success: true });
+        }
+
+        // Stamp platformSiteId if it was missing so future lookups skip this fallback path.
+        if (!siteRow?.platformSiteId && webflowSiteId) {
+          db.prepare('UPDATE Site SET platformSiteId = ?1, updatedAt = ?2 WHERE id = ?3')
+            .bind(webflowSiteId, new Date().toISOString(), siteId).run().catch(() => {});
         }
 
         const kvKey = `Banner-Settings:${webflowSiteId}`;
@@ -267,6 +347,8 @@ export async function handleBannerCustomization(request, env) {
           // Flag: content was edited from webapp
           contentEditedFromWebapp: customization.contentEditedFromWebapp === true ? true : (prevAppData.contentEditedFromWebapp ?? false),
           isWebappMigrated: true,
+          // Persist compliance so Webflow Designer App reloads the correct selection
+          compliance: compliance ?? prevAppData.compliance ?? ['gdpr'],
         };
 
         const dataToStore = { appData, siteId: webflowSiteId, updatedAt: new Date().toISOString() };
@@ -274,14 +356,21 @@ export async function handleBannerCustomization(request, env) {
 
         // ── Script swap: replace legacy Webflow head script with CDN script ──
         // Skipped when request originates from the webapp (skipScriptSwap flag).
+        console.log('[BannerCustomization][POST] skipScriptSwap:', skipScriptSwap, '| cdnScriptId:', siteRow?.cdnScriptId);
         if (!skipScriptSwap) {
           try {
             const mainKvRaw = await env.WEBFLOW_AUTHENTICATION.get(webflowSiteId);
+            console.log('[BannerCustomization][POST] mainKv found:', !!mainKvRaw, '| webflowSiteId used for lookup:', webflowSiteId);
             if (mainKvRaw) {
               const mainKvEntry = JSON.parse(mainKvRaw);
+              console.log('[BannerCustomization][POST] accessToken present:', !!mainKvEntry.accessToken);
               if (mainKvEntry.accessToken) {
                 await swapLegacyWebflowScript(env, db, siteId, webflowSiteId, mainKvEntry, siteRow);
+              } else {
+                console.warn('[BannerCustomization][POST] No accessToken in KV — script injection skipped');
               }
+            } else {
+              console.warn('[BannerCustomization][POST] No KV entry found for webflowSiteId:', webflowSiteId);
             }
           } catch (swapErr) {
             console.error('[BannerCustomization] Script swap error (non-fatal):', swapErr?.message || swapErr);
@@ -367,6 +456,38 @@ async function swapLegacyWebflowScript(env, db, siteId, wfSiteId, kvEntry, siteR
         .bind(result.webflowScriptId, new Date().toISOString(), siteId)
         .run()
         .catch(() => {});
+    }
+
+    // Publish the Webflow site so the injected script goes live immediately.
+    // Fetch the site's custom domains first so we publish to all of them.
+    try {
+      const WEBFLOW_API = 'https://api.webflow.com/v2';
+      const headers = {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'accept-version': '1.0.0',
+      };
+      let customDomains = [];
+      try {
+        const siteInfoRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}`, { headers });
+        if (siteInfoRes.ok) {
+          const siteInfo = await siteInfoRes.json();
+          customDomains = (siteInfo.customDomains || []).map(d => d.url || d.name).filter(Boolean);
+        }
+      } catch (_) {}
+      const publishRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/publish`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ publishToWebflowSubdomain: true, customDomains }),
+      });
+      if (!publishRes.ok) {
+        const err = await publishRes.text();
+        console.warn(`${TAG} Webflow publish failed status=${publishRes.status} body=${err}`);
+      } else {
+        console.log(`${TAG} Webflow site published successfully wfSiteId=${wfSiteId}`);
+      }
+    } catch (publishErr) {
+      console.warn(`${TAG} Webflow publish error (non-fatal):`, publishErr?.message || publishErr);
     }
   }
 }
