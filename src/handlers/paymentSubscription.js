@@ -28,7 +28,17 @@ export async function handlePaymentSubscription(request, env) {
 
     // Resolve wfSiteId (Webflow platform siteId) → D1 internal siteId via platformSiteId
     let resolvedSiteId = siteId;
-    const platformRow = await db.prepare('SELECT id FROM Site WHERE platformSiteId = ?1 LIMIT 1').bind(siteId).first();
+
+    // Fast path: siteId is already a direct D1 internal siteId (e.g. passed from extension using webappSiteId)
+    const directRow = await db.prepare('SELECT id FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
+    if (directRow) {
+      resolvedSiteId = directRow.id;
+      console.log('[SUB-CHECK] resolved as direct internal siteId (webappSiteId path)');
+    }
+
+    const platformRow = !directRow
+      ? await db.prepare('SELECT id FROM Site WHERE platformSiteId = ?1 LIMIT 1').bind(siteId).first()
+      : null;
     if (platformRow) {
       resolvedSiteId = platformRow.id;
       console.log('[SUB-CHECK] resolved via platformSiteId →', resolvedSiteId);
@@ -37,7 +47,7 @@ export async function handlePaymentSubscription(request, env) {
     }
 
     // KV fallback: if platformSiteId not set, resolve via WEBFLOW_AUTHENTICATION KV
-    if (resolvedSiteId === siteId && env.WEBFLOW_AUTHENTICATION) {
+    if (!directRow && resolvedSiteId === siteId && env.WEBFLOW_AUTHENTICATION) {
       try {
         const kvRaw = await env.WEBFLOW_AUTHENTICATION.get(siteId);
         if (kvRaw) {

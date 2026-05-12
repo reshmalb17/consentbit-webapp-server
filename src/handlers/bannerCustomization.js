@@ -60,7 +60,7 @@ export async function handleBannerCustomization(request, env) {
     if (!siteId) {
       // wfSiteId passed but no D1 record found — site not registered yet
       if (wfSiteId) {
-        return Response.json({ success: true, customization: null, platform: null, isLegacy: 0, isWebappMigrated: false, isWebflowFree: false, isBannerAdded: false, plan: null });
+        return Response.json({ success: true, customization: null, platform: null, isLegacy: 0, isWebappMigrated: false, isWebflowFree: false, isBannerAdded: false, plan: null, webappSiteId: null });
       }
       return Response.json({ success: false, error: 'siteId or wfSiteId is required' }, { status: 400 });
     }
@@ -119,6 +119,7 @@ export async function handleBannerCustomization(request, env) {
       };
       let compliance = iabActivated ? ['gdpr', 'us'] : regionModeToCompliance(siteFlags.regionMode);
       let kvPlan = null;
+      let kvWebappSiteId = null;
       try {
         const resolvedWfSiteId = siteFlags.platformSiteId ?? wfSiteId ?? null;
         if (resolvedWfSiteId) {
@@ -132,13 +133,16 @@ export async function handleBannerCustomization(request, env) {
               compliance = kvC; // use KV gdpr-only as the explicit value
             }
           }
-          // Read plan from root WEBFLOW_AUTHENTICATION entry (stamped by Stripe webhook after checkout)
+          // Read plan + webappSiteId from root WEBFLOW_AUTHENTICATION entry (stamped by Stripe webhook after checkout)
           try {
             const rootKvRaw = await env.WEBFLOW_AUTHENTICATION?.get(resolvedWfSiteId);
             if (rootKvRaw) {
               const rootKvEntry = typeof rootKvRaw === 'string' ? JSON.parse(rootKvRaw) : rootKvRaw;
               if (rootKvEntry?.plan && ['basic', 'essential', 'growth'].includes(rootKvEntry.plan)) {
                 kvPlan = rootKvEntry.plan;
+              }
+              if (rootKvEntry?.webappSiteId) {
+                kvWebappSiteId = rootKvEntry.webappSiteId;
               }
             }
           } catch (_) { /* non-critical */ }
@@ -158,7 +162,7 @@ export async function handleBannerCustomization(request, env) {
         }
       }
 
-      return Response.json({ success: true, customization, platform: siteFlags.platform, isLegacy: siteFlags.isLegacy, isWebappMigrated, isWebflowFree, iabActivated, isBannerAdded, compliance, plan: kvPlan });
+      return Response.json({ success: true, customization, platform: siteFlags.platform, isLegacy: siteFlags.isLegacy, isWebappMigrated, isWebflowFree, iabActivated, isBannerAdded, compliance, plan: kvPlan, webappSiteId: kvWebappSiteId });
     } catch (error) {
       console.error('[BannerCustomization] Error fetching:', error);
       return Response.json(
