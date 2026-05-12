@@ -193,6 +193,94 @@ async function provisionAccount(db, env, request, {
   return { user, isNewUser, session, org, site };
 }
 
+/**
+ * Merge paid-plan flags onto the platform's KV entry without changing existing fields.
+ * - Webflow → WEBFLOW_AUTHENTICATION
+ * - Framer  → AUTH_STORE_FRAMER
+ *
+ * Adds (or overwrites only these keys):
+ *   webAppSiteId, userId, cdnScriptId, paid: true
+ * Everything else in the existing KV value is preserved.
+ */
+async function persistPaidStatusToKv(env, { platform, platformSiteId, site, user }) {
+  if (!platformSiteId) return;
+  const p = String(platform || '').toLowerCase();
+  const kv = p === 'framer' ? env.AUTH_STORE_FRAMER : env.WEBFLOW_AUTHENTICATION;
+  if (!kv) {
+    console.warn('[CustomCheckout] KV binding missing for platform=%s', p || 'webflow');
+    return;
+  }
+
+  try {
+    let existing = null;
+    try {
+      const raw = await kv.get(platformSiteId);
+      existing = raw ? JSON.parse(raw) : null;
+    } catch (e) {
+      console.warn('[CustomCheckout] KV get failed (treating as empty)', e?.message);
+    }
+
+    const newFields = {
+      webAppSiteId: site.id,
+      userId: user.id,
+      cdnScriptId: site.cdnScriptId ?? site.cdnscriptid ?? null,
+      paid: true,
+    };
+    const merged = existing && typeof existing === 'object'
+      ? { ...existing, ...newFields }
+      : newFields;
+
+    await kv.put(platformSiteId, JSON.stringify(merged));
+    console.log('[CustomCheckout] paid-status KV updated', { platform: p || 'webflow', platformSiteId, mergedWithExisting: !!existing });
+  } catch (e) {
+    console.error('[CustomCheckout] persistPaidStatusToKv failed', e?.message);
+  }
+}
+
+/**
+ * Merge paid-plan flags onto the platform's KV entry without changing existing fields.
+ * - Webflow → WEBFLOW_AUTHENTICATION
+ * - Framer  → AUTH_STORE_FRAMER
+ *
+ * Adds (or overwrites only these keys):
+ *   webAppSiteId, userId, cdnScriptId, paid: true
+ * Everything else in the existing KV value is preserved.
+ */
+// async function persistPaidStatusToKv(env, { platform, platformSiteId, site, user }) {
+//   if (!platformSiteId) return;
+//   const p = String(platform || '').toLowerCase();
+//   const kv = p === 'framer' ? env.AUTH_STORE_FRAMER : env.WEBFLOW_AUTHENTICATION;
+//   if (!kv) {
+//     console.warn('[CustomCheckout] KV binding missing for platform=%s', p || 'webflow');
+//     return;
+//   }
+
+//   try {
+//     let existing = null;
+//     try {
+//       const raw = await kv.get(platformSiteId);
+//       existing = raw ? JSON.parse(raw) : null;
+//     } catch (e) {
+//       console.warn('[CustomCheckout] KV get failed (treating as empty)', e?.message);
+//     }
+
+//     const newFields = {
+//       webAppSiteId: site.id,
+//       userId: user.id,
+//       cdnScriptId: site.cdnScriptId ?? site.cdnscriptid ?? null,
+//       paid: true,
+//     };
+//     const merged = existing && typeof existing === 'object'
+//       ? { ...existing, ...newFields }
+//       : newFields;
+
+//     await kv.put(platformSiteId, JSON.stringify(merged));
+//     console.log('[CustomCheckout] paid-status KV updated', { platform: p || 'webflow', platformSiteId, mergedWithExisting: !!existing });
+//   } catch (e) {
+//     console.error('[CustomCheckout] persistPaidStatusToKv failed', e?.message);
+//   }
+// }
+
 async function postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }) {
   if (!wfSiteId || !env.WEBFLOW_AUTHENTICATION) return;
   try {
@@ -260,6 +348,7 @@ export async function handleCustomCheckout(request, env) {
   const subscriptionId = (body.subscriptionId || '').trim() || null;
   const wfSiteId = (body.wfSiteId || body.platformId || '').trim() || null;
   const billingEmail = (body.billingEmail || '').trim().toLowerCase() || null;
+  const platform = ((body.platform || '').trim().toLowerCase()) || (wfSiteId ? 'webflow' : null);
 
   if (!isValidEmail(email)) {
     console.warn('[CustomCheckout] validation failed: invalid email', email);
@@ -326,6 +415,7 @@ export async function handleCustomCheckout(request, env) {
         wfSiteId,
       });
       if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(() => {});
+      if (platform && wfSiteId) persistPaidStatusToKv(env, { platform, platformSiteId: wfSiteId, site, user }).catch(() => {});
       return Response.json(
         { success: true, provisioned: true, isNewUser, user: { id: user.id, email: user.email, name: user.name }, siteId: site.id, subscriptionId },
         { status: 200, headers: { 'Content-Type': 'application/json', 'Set-Cookie': `sid=${session.id}; ${cookieFlags}` } },
@@ -408,6 +498,7 @@ export async function handleCustomCheckout(request, env) {
         wfSiteId,
       });
       if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(() => {});
+      if (platform && wfSiteId) persistPaidStatusToKv(env, { platform, platformSiteId: wfSiteId, site, user }).catch(() => {});
       return Response.json(
         { success: true, provisioned: true, isNewUser, user: { id: user.id, email: user.email, name: user.name }, siteId: site.id, subscriptionId: sub.id },
         { status: 201, headers: { 'Content-Type': 'application/json', 'Set-Cookie': `sid=${session.id}; ${cookieFlags}` } },
