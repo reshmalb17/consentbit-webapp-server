@@ -187,6 +187,9 @@ export async function handleBannerCustomization(request, env) {
     const skipScriptSwap = body?.skipScriptSwap === true;
     // compliance: ['gdpr'], ['us'], ['gdpr','us'] — from Webflow Designer App publish
     const compliance = Array.isArray(body?.compliance) && body.compliance.length ? body.compliance : null;
+    // iabEnabled: true means the webapp dashboard activated the IAB/TCF CMP for this site.
+    // Passed by the extension on publish so the worker preserves banner_type='iab' in the DB.
+    const iabEnabled = body?.iabEnabled === true;
 
     let _postTrans = null;
     try { _postTrans = customization?.translations ? (typeof customization.translations === 'string' ? JSON.parse(customization.translations) : customization.translations) : null; } catch (_) {}
@@ -255,9 +258,10 @@ export async function handleBannerCustomization(request, env) {
       if (compliance) {
         const hasUs = compliance.includes('us') || compliance.includes('ccpa');
         const hasGdpr = compliance.includes('gdpr');
-        const newBannerType = hasUs && !hasGdpr ? 'ccpa' : 'gdpr';
+        // Preserve 'iab' banner_type when the extension signals IAB is active (set from webapp dashboard).
+        const newBannerType = iabEnabled ? 'iab' : (hasUs && !hasGdpr ? 'ccpa' : 'gdpr');
         const newRegionMode = hasUs && hasGdpr ? 'both' : hasUs ? 'ccpa' : 'gdpr';
-        console.log('[BannerCustomization][POST] compliance:', compliance, '→ banner_type:', newBannerType, 'region_mode:', newRegionMode);
+        console.log('[BannerCustomization][POST] compliance:', compliance, 'iabEnabled:', iabEnabled, '→ banner_type:', newBannerType, 'region_mode:', newRegionMode);
         db.prepare('UPDATE Site SET banner_type = ?1, region_mode = ?2, updatedAt = ?3 WHERE id = ?4')
           .bind(newBannerType, newRegionMode, new Date().toISOString(), siteId).run().catch(() => {});
       }
