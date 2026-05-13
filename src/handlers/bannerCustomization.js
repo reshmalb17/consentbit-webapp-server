@@ -278,8 +278,12 @@ export async function handleBannerCustomization(request, env) {
           : (hasUs && !hasGdpr ? 'ccpa' : 'gdpr');
         const newRegionMode = hasUs && hasGdpr ? 'both' : hasUs ? 'ccpa' : 'gdpr';
         console.log('[BannerCustomization][POST] compliance:', compliance, 'iab_enabled (from translations.en):', iabEnabledField, 'currentBannerType:', currentBannerType, '→ banner_type:', newBannerType, 'region_mode:', newRegionMode);
-        db.prepare('UPDATE Site SET banner_type = ?1, region_mode = ?2, updatedAt = ?3 WHERE id = ?4')
-          .bind(newBannerType, newRegionMode, new Date().toISOString(), siteId).run().catch(() => {});
+        try {
+          await db.prepare('UPDATE Site SET banner_type = ?1, region_mode = ?2, updatedAt = ?3 WHERE id = ?4')
+            .bind(newBannerType, newRegionMode, new Date().toISOString(), siteId).run();
+        } catch (updateErr) {
+          console.warn('[BannerCustomization][POST] Failed to update banner_type/region_mode:', updateErr?.message);
+        }
       }
 
       // Sync customization to WEBFLOW_AUTHENTICATION KV so the Webflow Designer App
