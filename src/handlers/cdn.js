@@ -829,7 +829,20 @@ ${inlineConfig}
   const wantsIab = String(resolvedSite.banner_type || '').toLowerCase() === 'iab';
   const isWebflow = String(resolvedSite.platform || '').toLowerCase() === 'webflow' ||
                     String(resolvedSite.platform || '').toLowerCase() === 'framer';
-  const serveKind = (wantsIab && isWebflow) ? 'iabwebflow' : wantsIab ? 'iab' : isWebflow ? 'webflow' : 'standard';
+  const serveKind = (wantsIab && iabAllowed && isWebflow) ? 'iabwebflow'
+                 : (wantsIab && iabAllowed)               ? 'iab'
+                 : isWebflow                              ? 'webflow'
+                 : 'standard';
+  console.log('[CDN] IAB decision:', {
+    serveKind,
+    wantsIab,
+    iabAllowed,
+    isWebflow,
+    banner_type: resolvedSite.banner_type,
+    platform: resolvedSite.platform,
+    plan: effectivePlanId,
+    siteId: resolvedSite.id,
+  });
   const why = {
     wantsIab,
     iabAllowed,
