@@ -100,7 +100,7 @@ export async function handleAdminResetLegacyWebflow(request, env) {
         ).bind(userId).first();
         if (!otherOrgs && userRow?.isLegacy === 1) {
           await db.prepare('DELETE FROM Session WHERE userId = ?1').bind(userId).run();
-          await db.prepare('DELETE FROM EmailVerificationCode WHERE userId = ?1').bind(userId).run();
+          await db.prepare('DELETE FROM EmailVerificationCode WHERE email = ?1').bind(email).run();
           await db.prepare('DELETE FROM User WHERE id = ?1').bind(userId).run();
         }
       }

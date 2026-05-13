@@ -770,13 +770,17 @@ ${getLoaderIabScript(customization)}
 })();
 ` + loader;
 
-  // loaderIabWebflow: IAB/TCF banner with script blocking delegated to consent.js.
-  // Built by patching loaderIab's 3 blocking functions + injecting notifyWebflowConsent.
-  // loaderIab itself is never modified.
-  const loaderIabWebflow = (() => {
-    const webflowSetup = `
+  // loaderIabWebflow: IAB/TCF banner for Webflow/Framer sites.
+  // Strategy: load consent.js (handles data-category script blocking), then run the IAB CMP.
+  // A TCF API listener bridges TCF consent events → consentUpdated DOM event so consent.js
+  // releases blocked scripts after the user interacts with the IAB banner.
+  // The old regex-patch approach is replaced because the IAB CMP script does not contain the
+  // standard banner functions (installConsentScriptBlocker etc.) — patches were no-ops.
+  const loaderIabWebflow = `
 (function(){
   window.__CB_WEBFLOW_MODE__ = true;
+
+  // 1. Load consent.js — handles data-category script blocking for Webflow sites.
   var CONSENT_JS_SRC = ${JSON.stringify(consentJsSrc)};
   if (!document.querySelector('script[src="' + CONSENT_JS_SRC + '"]')) {
     var _s = document.createElement('script');
@@ -785,44 +789,32 @@ ${getLoaderIabScript(customization)}
     _s.setAttribute('data-display-name', 'ConsentBitScript2025');
     document.head.appendChild(_s);
   }
-})();
-`;
-    const notifyFn = `
-  function notifyWebflowConsent(cats) {
-    if (!window.__CB_WEBFLOW_MODE__) return;
-    var detail = cats || {};
-    window.userConsent = detail;
-    try { document.dispatchEvent(new CustomEvent('consentUpdated', { detail: detail, bubbles: true })); } catch(e) {}
-  }
-`;
-    const installGuard =
-      `function installConsentScriptBlocker() {\n    if (window.__CB_WEBFLOW_MODE__) return;`;
-    const blockGuard =
-      `function blockNonEssentialScripts() {\n    if (window.__CB_WEBFLOW_MODE__) { try { document.dispatchEvent(new CustomEvent('cbBlockScripts', { bubbles: true })); } catch(e) {} return; }`;
-    const releaseGuard =
-      `function releaseBlockedScripts() {\n    if (window.__CB_WEBFLOW_MODE__) { notifyWebflowConsent((window.__cbConsentState && (window.__cbConsentState.categories || window.__cbConsentState)) || { analytics: true, marketing: true, preferences: true, essential: true }); return; }`;
 
-    // Use regex so newlines match regardless of \n vs real newline in the template
-    let patched = loaderIab
-      .replace(
-        /function installConsentScriptBlocker\(\) \{\s*if \(window\.__cbCreateElementHookInstalled\) return;/,
-        installGuard + '\n    if (window.__cbCreateElementHookInstalled) return;'
-      )
-      .replace(
-        /function blockNonEssentialScripts\(\) \{\s*var scripts = Array\.from/,
-        blockGuard + '\n    var scripts = Array.from'
-      )
-      .replace(
-        /function releaseBlockedScripts\(\) \{\s*var list = Array\.from/,
-        releaseGuard + '\n    var list = Array.from'
-      )
-      // inject notifyWebflowConsent before installConsentScriptBlocker (after first replace)
-      .replace(
-        /function installConsentScriptBlocker\(\) \{\s*if \(window\.__CB_WEBFLOW_MODE__\) return;/,
-        notifyFn + '  function installConsentScriptBlocker() {\n    if (window.__CB_WEBFLOW_MODE__) return;'
-      );
-    return webflowSetup + patched;
-  })();
+  // 2. TCF → consentUpdated bridge.
+  // When the IAB CMP records user action (useractioncomplete), fire the consentUpdated
+  // event so consent.js unblocks data-category scripts and gtag consent mode updates.
+  function _cbInstallTcfBridge() {
+    if (!window.__tcfapi) { setTimeout(_cbInstallTcfBridge, 150); return; }
+    try {
+      window.__tcfapi('addEventListener', 2, function(tc, success) {
+        if (!success) return;
+        if (tc.eventStatus === 'useractioncomplete' || tc.eventStatus === 'tcloaded') {
+          var granted = !!(tc.purpose && tc.purpose.consents && tc.purpose.consents[1]);
+          var detail = {
+            essential:    true,
+            analytics:    granted,
+            marketing:    granted,
+            preferences:  granted,
+          };
+          window.userConsent = detail;
+          try { document.dispatchEvent(new CustomEvent('consentUpdated', { detail: detail, bubbles: true })); } catch(e) {}
+        }
+      });
+    } catch(e) {}
+  }
+  _cbInstallTcfBridge();
+})();
+` + loaderIab;
 
   // IAB/TCF banner requires a paid tier that includes IAB (Essential or Growth).
   // If the site was downgraded to a lower plan, fall back to the standard GDPR banner
@@ -831,8 +823,18 @@ ${getLoaderIabScript(customization)}
   const wantsIab = String(resolvedSite.banner_type || '').toLowerCase() === 'iab';
   const isWebflow = String(resolvedSite.platform || '').toLowerCase() === 'webflow' ||
                     String(resolvedSite.platform || '').toLowerCase() === 'framer';
-                    console.log('CDN request for site', resolvedSite.id, 'wantsIab:', wantsIab, 'isWebflow:', isWebflow, 'effectivePlanId:', effectivePlanId,"bannerType:", resolvedSite.banner_type, "platform:", resolvedSite.platform);
-  const serveKind = (wantsIab && isWebflow) ? 'iabwebflow' : wantsIab ? 'iab' : isWebflow ? 'webflow' : 'standard';
+  const serveKind = (wantsIab && iabAllowed && isWebflow) ? 'iabwebflow'
+    : (wantsIab && iabAllowed) ? 'iab'
+    : isWebflow ? 'webflow'
+    : 'standard';
+  console.log('[CDN] banner selection — siteId:', resolvedSite.id,
+    '| bannerType:', resolvedSite.banner_type,
+    '| platform:', resolvedSite.platform,
+    '| plan:', effectivePlanId,
+    '| wantsIab:', wantsIab,
+    '| iabAllowed:', iabAllowed,
+    '| isWebflow:', isWebflow,
+    '| → serveKind:', serveKind);
   const why = {
     wantsIab,
     iabAllowed,
