@@ -187,9 +187,6 @@ export async function handleBannerCustomization(request, env) {
     const skipScriptSwap = body?.skipScriptSwap === true;
     // compliance: ['gdpr'], ['us'], ['gdpr','us'] — from Webflow Designer App publish
     const compliance = Array.isArray(body?.compliance) && body.compliance.length ? body.compliance : null;
-    // iabEnabled: true means the webapp dashboard activated the IAB/TCF CMP for this site.
-    // Passed by the extension on publish so the worker preserves banner_type='iab' in the DB.
-    const iabEnabled = body?.iabEnabled === true;
 
     let _postTrans = null;
     try { _postTrans = customization?.translations ? (typeof customization.translations === 'string' ? JSON.parse(customization.translations) : customization.translations) : null; } catch (_) {}
@@ -258,10 +255,29 @@ export async function handleBannerCustomization(request, env) {
       if (compliance) {
         const hasUs = compliance.includes('us') || compliance.includes('ccpa');
         const hasGdpr = compliance.includes('gdpr');
-        // Preserve 'iab' banner_type when the extension signals IAB is active (set from webapp dashboard).
-        const newBannerType = iabEnabled ? 'iab' : (hasUs && !hasGdpr ? 'ccpa' : 'gdpr');
+        // Default: preserve 'iab' banner_type unless the caller explicitly sends iabEnabled: false.
+        // This protects sites configured via the webapp dashboard — they don't send iabEnabled at all
+        // (body.iabEnabled is undefined, so iabExplicitlyDisabled = false → 'iab' is kept).
+        // The Webflow extension sends iabEnabled: false only when the user accepted the "Continue & Replace"
+        // warning, signalling they intentionally want to switch from IAB to a standard banner.
+        // iab_enabled lives inside translations.en (JSON blob — no schema change).
+        // true  → site has IAB active; preserve banner_type='iab' in the Site table.
+        // false → user explicitly chose to replace IAB with a standard banner.
+        // undefined/missing → default: preserve 'iab' if it was already set (safe for webapp saves).
+        let parsedTrans = null;
+        try {
+          const rawTrans = customization?.translations;
+          parsedTrans = typeof rawTrans === 'string' ? JSON.parse(rawTrans) : rawTrans;
+        } catch (_) {}
+        const iabEnabledField = parsedTrans?.en?.iab_enabled;
+        const iabExplicitlyDisabled = iabEnabledField === false;
+        const currentSiteRow = await db.prepare('SELECT banner_type FROM Site WHERE id = ?1').bind(siteId).first();
+        const currentBannerType = currentSiteRow?.banner_type ?? 'gdpr';
+        const newBannerType = (currentBannerType === 'iab' && !iabExplicitlyDisabled)
+          ? 'iab'
+          : (hasUs && !hasGdpr ? 'ccpa' : 'gdpr');
         const newRegionMode = hasUs && hasGdpr ? 'both' : hasUs ? 'ccpa' : 'gdpr';
-        console.log('[BannerCustomization][POST] compliance:', compliance, 'iabEnabled:', iabEnabled, '→ banner_type:', newBannerType, 'region_mode:', newRegionMode);
+        console.log('[BannerCustomization][POST] compliance:', compliance, 'iab_enabled (from translations.en):', iabEnabledField, 'currentBannerType:', currentBannerType, '→ banner_type:', newBannerType, 'region_mode:', newRegionMode);
         db.prepare('UPDATE Site SET banner_type = ?1, region_mode = ?2, updatedAt = ?3 WHERE id = ?4')
           .bind(newBannerType, newRegionMode, new Date().toISOString(), siteId).run().catch(() => {});
       }
