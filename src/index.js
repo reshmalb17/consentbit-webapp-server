@@ -37,6 +37,7 @@ import { handleAdminResetLegacyWebflow } from './handlers/adminResetLegacyWebflo
 import { handleAdminMigrateFromKv } from './handlers/adminMigrateFromKv.js';
 import { handleAdminMigrateSingleSite } from './handlers/adminMigrateSingleSite.js';
 import { handleAdminMigrateCustomization } from './handlers/adminMigrateCustomization.js';
+import { handleAdminBackfillDescriptions } from './handlers/adminBackfillDescriptions.js';
 import { handleAdminInjectScript } from './handlers/adminInjectScript.js';
 import { handleCheckLegacyScript } from './handlers/checkLegacyScript.js';
 import { handleLegacyConsentLogs } from './handlers/legacyConsentLogs.js';
@@ -158,6 +159,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/admin/migrate-from-kv',
   '/api/admin/migrate-single-site',
   '/api/admin/migrate-customization',
+  '/api/admin/backfill-descriptions',
   '/api/admin/inject-script',
   '/api/payment/subscription',
 ]);
@@ -327,6 +329,9 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     case '/api/admin/migrate-customization':
       response = await handleAdminMigrateCustomization(request, env); break;
+
+    case '/api/admin/backfill-descriptions':
+      response = await handleAdminBackfillDescriptions(request, env); break;
 
     case '/api/admin/inject-script':
       response = await handleAdminInjectScript(request, env); break;
