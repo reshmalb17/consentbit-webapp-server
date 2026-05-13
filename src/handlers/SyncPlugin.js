@@ -53,6 +53,47 @@ async function findFreePlanSite(db, organizationId) {
   return null;
 }
 
+/**
+ * Derive Site.banner_type + Site.region_mode from the plugin's customization payload.
+ * The plugin sends `compliance` (GDPR | CCPA | BOTH) and `isIab` (true/false) inside
+ * customization.translations.en. Mapping rules:
+ *   isIab=true        → banner_type='iab',  region_mode='gdpr'
+ *   compliance=CCPA   → banner_type='ccpa', region_mode='ccpa'
+ *   compliance=BOTH   → banner_type='gdpr', region_mode='both'
+ *   otherwise/GDPR    → banner_type='gdpr', region_mode='gdpr'
+ * Returns null if no signal is present (so the caller can skip updating the row).
+ */
+function deriveBannerTypeAndRegionMode(customization) {
+  if (!customization || typeof customization !== 'object') return null;
+  let en = customization.translations?.en;
+  if (typeof en === 'string') {
+    try { en = JSON.parse(en); } catch { en = null; }
+  }
+  if (!en || typeof en !== 'object') return null;
+
+  const isIab = en.isIab === true || en.isIab === 'true' || en.isIab === 1 || en.isIab === '1';
+  const compliance = String(en.compliance ?? '').toUpperCase();
+
+  if (isIab) return { bannerType: 'iab', regionMode: 'gdpr' };
+  if (compliance === 'CCPA') return { bannerType: 'ccpa', regionMode: 'ccpa' };
+  if (compliance === 'BOTH') return { bannerType: 'gdpr', regionMode: 'both' };
+  if (compliance === 'GDPR') return { bannerType: 'gdpr', regionMode: 'gdpr' };
+  return null;
+}
+
+/** UPDATE Site SET banner_type, region_mode for an existing row. Silent on failure. */
+async function updateSiteBannerType(db, siteId, derived) {
+  if (!siteId || !derived) return;
+  try {
+    await db
+      .prepare('UPDATE Site SET banner_type = ?1, region_mode = ?2, updatedAt = ?3 WHERE id = ?4')
+      .bind(derived.bannerType, derived.regionMode, new Date().toISOString(), siteId)
+      .run();
+  } catch (e) {
+    console.warn('[SyncPlugin] updateSiteBannerType failed (non-fatal)', e?.message);
+  }
+}
+
 export async function handleSyncPlugin(request, env) {
   if (request.method !== 'POST') {
     return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
@@ -136,6 +177,12 @@ export async function handleSyncPlugin(request, env) {
 
       const cdnScriptId = existingSite.cdnScriptId ?? existingSite.cdnscriptid ?? null;
 
+      // If customization specifies compliance / isIab, sync banner_type + region_mode on Site.
+      const derivedExisting = deriveBannerTypeAndRegionMode(customization);
+      if (derivedExisting) {
+        await updateSiteBannerType(db, existingSite.id, derivedExisting);
+      }
+
       // Merge into KV without disturbing existing fields
       try {
         let existingKv = null;
@@ -216,6 +263,7 @@ export async function handleSyncPlugin(request, env) {
 
   // ── 4. Create or upsert the Site ─────────────────────────────────────────
   const embedOrigin = canonicalEmbedOrigin(request, env);
+  const derivedNew = deriveBannerTypeAndRegionMode(customization);
   let site;
   try {
     site = await createSite(db, {
@@ -223,8 +271,8 @@ export async function handleSyncPlugin(request, env) {
       name: siteName,
       domain: rawDomain,
       origin: embedOrigin,
-      bannerType: 'gdpr',
-      regionMode: 'gdpr',
+      bannerType: derivedNew?.bannerType ?? 'gdpr',
+      regionMode: derivedNew?.regionMode ?? 'gdpr',
     });
   } catch (e) {
     if (e.code === 'DOMAIN_EXISTS') {
@@ -367,6 +415,13 @@ export async function handleSyncPluginCustomization(request, env) {
   } catch (e) {
     console.error('[SyncPluginCustomization] saveBannerCustomization failed', e);
     return Response.json({ success: false, error: 'Failed to save customization' }, { status: 500 });
+  }
+
+  // Sync Site.banner_type + Site.region_mode from customization.translations.en
+  // (compliance / isIab fields). No-op if neither field is present.
+  const derivedFromCustomization = deriveBannerTypeAndRegionMode(customization);
+  if (derivedFromCustomization) {
+    await updateSiteBannerType(db, webAppSiteId, derivedFromCustomization);
   }
 
   // Bump KV updatedAt timestamp
