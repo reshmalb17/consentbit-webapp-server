@@ -120,6 +120,12 @@ async function _handleCDNScript(request, env, url) {
     // enforce the domain restriction in the browser.
   }
 
+  // Auto-verify: domain validation just passed, so this is a genuine install.
+  if (!resolvedSite.verified) {
+    db.prepare(`UPDATE Site SET verified = 1, verified_at = datetime('now') WHERE id = ?1`)
+      .bind(resolvedSite.id).run().catch(() => {});
+  }
+
   // Check subscription status — block banner if subscription is canceled/expired
   // Also capture planId so we can gate IAB features below.
   // Prefer site-specific subscription over org-level to avoid migration-created 'basic'
@@ -787,6 +793,51 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
   const loaderWebflow = `
 (function(){
   window.__CB_WEBFLOW_MODE__ = true;
+
+  // Block non-essential data-category scripts before consent is given.
+  // Runs synchronously as the page parses so scripts added to the DOM after this
+  // point are intercepted by the MutationObserver before the browser downloads them.
+  // Consent is considered "given" when _cb_cg_ (consent.js) OR any consentbit_* key
+  // (standard loader) exists in localStorage — in either case scripts are allowed.
+  (function() {
+    try {
+      var _cbCG = localStorage.getItem('_cb_cg_');
+      if (!_cbCG) {
+        for (var _i = 0; _i < localStorage.length; _i++) {
+          var _k = localStorage.key(_i);
+          if (_k && _k.indexOf('consentbit_') === 0) {
+            try { var _v = JSON.parse(localStorage.getItem(_k)); if (_v && _v.accepted) { _cbCG = 'true'; break; } } catch(e) {}
+          }
+        }
+      }
+      if (_cbCG) return; // consent already given — allow all scripts
+      function _cbIsEssentialCat(cat) {
+        return cat.split(',').some(function(c) {
+          var t = c.trim().toLowerCase();
+          return t === 'necessary' || t === 'essential';
+        });
+      }
+      function _cbBlockDataCatNode(node) {
+        if (!node || node.nodeName !== 'SCRIPT') return;
+        var cat = node.getAttribute && node.getAttribute('data-category');
+        if (!cat || _cbIsEssentialCat(cat)) return;
+        var src = node.getAttribute('src') || '';
+        if (src.indexOf('consentbit') !== -1 || src.indexOf('consent.js') !== -1) return;
+        if (node.type === 'text/plain') return;
+        node.type = 'text/plain';
+      }
+      // Watch for scripts added as the page HTML is parsed
+      var _cbDCObs = new MutationObserver(function(muts) {
+        muts.forEach(function(m) { m.addedNodes.forEach(_cbBlockDataCatNode); });
+      });
+      _cbDCObs.observe(document.documentElement, { childList: true, subtree: true });
+      // Sweep once DOM is ready to catch any missed (e.g. loaded before observer started)
+      document.addEventListener('DOMContentLoaded', function() {
+        _cbDCObs.disconnect();
+        document.querySelectorAll('script[data-category]').forEach(_cbBlockDataCatNode);
+      }, { once: true });
+    } catch(e) {}
+  })();
 
   // Load consent.js (UP_Script) from the CDN — handles data-category script blocking,
   // unblocking, and gtag consent mode for Webflow/Framer sites.

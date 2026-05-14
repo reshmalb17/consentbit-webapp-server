@@ -4332,6 +4332,18 @@ function clearConsentState() {
       } else if (event.detail && event.detail.analytics === false) {
         disableWebflowAnalytics();
       }
+
+      // Release data-category scripts that were blocked by the loaderWebflow inline blocker.
+      // Build allowed-category list from the event detail and call enableScriptsByCategories.
+      if (event.detail) {
+        var _cbAllowed = [];
+        if (event.detail.analytics === true) _cbAllowed.push('analytics', 'statistics', 'performance');
+        if (event.detail.marketing === true) _cbAllowed.push('marketing', 'advertising', 'advertisement');
+        if (event.detail.preferences === true) _cbAllowed.push('preferences', 'functional', 'personalization');
+        if (_cbAllowed.length > 0 && typeof enableScriptsByCategories === 'function') {
+          try { enableScriptsByCategories(_cbAllowed); } catch(e) {}
+        }
+      }
     });
   
     // Also listen for the legacy consent event format

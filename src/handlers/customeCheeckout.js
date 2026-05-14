@@ -187,7 +187,10 @@ async function provisionAccount(db, env, request, {
     await markTrialUsed(db, site.id);
   }
 
-  const licenseKey = await generateUniqueLicenseKey(db);
+  // Reuse existing license key on upgrade so the site key stays stable across plan changes.
+  const existingSubForSite = await getSubscriptionByOrganization(db, organizationId).catch(() => null);
+  const existingLicenseKey = existingSubForSite?.licenseKey ?? existingSubForSite?.licensekey ?? null;
+  const licenseKey = existingLicenseKey || await generateUniqueLicenseKey(db);
   await saveSubscription(db, {
     organizationId,
     siteId: site.id,

@@ -104,6 +104,11 @@ export async function handlePageview(request, env) {
 
   const usage = await incrementPageviewUsage(db, siteId);
 
+  if (!site.verified) {
+    db.prepare(`UPDATE Site SET verified = 1, verified_at = datetime('now') WHERE id = ?1`)
+      .bind(siteId).run().catch(() => {});
+  }
+
   let overLimit = false;
   if (organizationId) {
     const orgUsage = await getPageviewUsageForOrganization(db, organizationId);

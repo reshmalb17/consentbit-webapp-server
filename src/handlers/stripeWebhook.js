@@ -10,6 +10,7 @@ import {
   ensureSchema,
   saveSubscription,
   getSubscriptionByStripeId,
+  getSubscriptionBySiteId,
   savePaymentEvent,
   enqueueBulkLicenseJobs,
   markPaymentIntentProcessed,
@@ -502,7 +503,13 @@ export async function handleStripeWebhook(request, env, ctx) {
           rawPayload: { subscriptionId: subId, siteId },
         });
 
-        const licenseKey = siteId ? await generateUniqueLicenseKey(db) : null;
+        // Reuse existing license key on upgrade so the site key stays stable across plan changes.
+        let licenseKey = null;
+        if (siteId) {
+          const existingSubForSite = await getSubscriptionBySiteId(db, siteId).catch(() => null);
+          licenseKey = existingSubForSite?.licenseKey ?? existingSubForSite?.licensekey ?? null;
+          if (!licenseKey) licenseKey = await generateUniqueLicenseKey(db);
+        }
         let resolvedPlanId = subMeta.planId || null;
         if (!resolvedPlanId && stripePriceFromSub) {
           resolvedPlanId = inferTierPlanIdFromStripePriceId(env, stripePriceFromSub);
