@@ -62,21 +62,22 @@ async function upsertSite(db, { organizationId, domain, name, stagingUrl, custom
   return { siteId: id, cdnScriptId };
 }
 
-async function upsertSubscription(db, { organizationId, siteId, subscriptionId, customerId, status, cancelAtPeriodEnd, interval, currentPeriodEnd, now }) {
+async function upsertSubscription(db, { organizationId, siteId, subscriptionId, customerId, status, cancelAtPeriodEnd, interval, currentPeriodEnd, planId, now }) {
+  const resolvedPlanId = ['basic', 'essential', 'growth'].includes(planId) ? planId : 'basic';
   if (subscriptionId) {
     const existing = await db.prepare('SELECT id FROM Subscription WHERE stripeSubscriptionId = ?1').bind(subscriptionId).first();
     if (existing) {
       await db.prepare(
-        `UPDATE Subscription SET status=?1, cancelAtPeriodEnd=?2, planId='basic', updatedAt=?3 WHERE id=?4`
-      ).bind(status || 'active', cancelAtPeriodEnd ? 1 : 0, now, existing.id).run();
+        `UPDATE Subscription SET status=?1, cancelAtPeriodEnd=?2, planId=?3, updatedAt=?4 WHERE id=?5`
+      ).bind(status || 'active', cancelAtPeriodEnd ? 1 : 0, resolvedPlanId, now, existing.id).run();
       return;
     }
   } else {
     const existing = await db.prepare('SELECT id FROM Subscription WHERE siteId = ?1 LIMIT 1').bind(siteId).first();
     if (existing) {
       await db.prepare(
-        `UPDATE Subscription SET status=?1, cancelAtPeriodEnd=?2, planId='basic', updatedAt=?3 WHERE id=?4`
-      ).bind(status || 'active', cancelAtPeriodEnd ? 1 : 0, now, existing.id).run();
+        `UPDATE Subscription SET status=?1, cancelAtPeriodEnd=?2, planId=?3, updatedAt=?4 WHERE id=?5`
+      ).bind(status || 'active', cancelAtPeriodEnd ? 1 : 0, resolvedPlanId, now, existing.id).run();
       return;
     }
   }
@@ -84,9 +85,9 @@ async function upsertSubscription(db, { organizationId, siteId, subscriptionId, 
   await db.prepare(
     `INSERT INTO Subscription (id, organizationId, siteId, stripeSubscriptionId, stripeCustomerId,
       planType, planId, interval, status, cancelAtPeriodEnd, currentPeriodEnd, createdAt, updatedAt)
-     VALUES (?1,?2,?3,?4,?5,'single','basic',?6,?7,?8,?9,?10,?10)`
+     VALUES (?1,?2,?3,?4,?5,'single',?6,?7,?8,?9,?10,?11,?11)`
   ).bind(id, organizationId, siteId, subscriptionId || null, customerId || null,
-    interval || 'monthly', status || 'active', cancelAtPeriodEnd ? 1 : 0,
+    resolvedPlanId, interval || 'monthly', status || 'active', cancelAtPeriodEnd ? 1 : 0,
     currentPeriodEnd || null, now).run();
 }
 
@@ -628,7 +629,7 @@ export async function handleAdminMigrateSingleSite(request, env) {
   const siteRow = await db.prepare('SELECT cdnScriptId, apiKey FROM Site WHERE id = ?1').bind(siteId).first();
   const licenseKey = siteRow?.apiKey || null;
 
-  log(`Upserting Subscription subscriptionId="${activeEntry.subscriptionId || 'none'}"...`);
+  log(`Upserting Subscription subscriptionId="${activeEntry.subscriptionId || 'none'}" plan="${activeEntry.plan || 'basic'}"...`);
   await upsertSubscription(db, {
     organizationId: orgId,
     siteId,
@@ -638,6 +639,7 @@ export async function handleAdminMigrateSingleSite(request, env) {
     cancelAtPeriodEnd: activeEntry.cancelAtPeriodEnd || false,
     interval: activeEntry.interval || 'monthly',
     currentPeriodEnd: activeEntry.currentPeriodEnd || activeEntry.serviceExpiresAt || null,
+    planId: activeEntry.plan || 'basic',
     now,
   });
   log('Subscription upserted');

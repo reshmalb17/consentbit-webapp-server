@@ -31,8 +31,11 @@ import {
   generateUniqueLicenseKey,
   canonicalEmbedOrigin,
   buildEmbedScriptUrl,
+  getSubscriptionByOrganization,
+  normalizeDomain,
 } from '../services/db.js';
 import { injectScriptIntoWebflowHead } from './webflowFreeRegister.js';
+import { sendPaidPlanEmail } from '../services/email.js';
 
 const VALID_PLAN_IDS = ['basic', 'essential', 'growth'];
 
@@ -56,6 +59,31 @@ function toTimestamp(ts) {
 function getPriceId(env, planId, interval) {
   const key = `STRIPE_PRICE_${planId.toUpperCase()}_${interval === 'yearly' ? 'YEARLY' : 'MONTHLY'}`;
   return trimEnv(env[key]);
+}
+
+async function fetchStripeInvoice(secret, subId, interval) {
+  if (!secret || !subId) return null;
+  try {
+    const res = await fetch(
+      `https://api.stripe.com/v1/invoices?subscription=${subId}&limit=1`,
+      { headers: { Authorization: `Bearer ${secret}` } }
+    );
+    const json = await res.json();
+    const inv = json?.data?.[0];
+    if (!inv || inv.error) return null;
+    return {
+      invoiceNumber: inv.number || null,
+      invoiceUrl:    inv.hosted_invoice_url || null,
+      invoicePdf:    inv.invoice_pdf || null,
+      amountPaid:    inv.amount_paid != null ? (inv.amount_paid / 100).toFixed(2) : null,
+      currency:      (inv.currency || 'usd').toUpperCase(),
+      date:          inv.created ? new Date(inv.created * 1000).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) : null,
+      interval:      interval || 'monthly',
+    };
+  } catch (e) {
+    console.warn('[CustomCheckout] could not fetch Stripe invoice', e?.message);
+    return null;
+  }
 }
 
 /** Find existing Stripe customer by email or create a new one, attaching the payment method. */
@@ -189,6 +217,13 @@ async function provisionAccount(db, env, request, {
     await db.prepare(`UPDATE Site SET ${sets.join(', ')} WHERE id = ?${binds.length}`).bind(...binds).run().catch(() => {});
   }
 
+  // Store billingEmail on User so all future email lookups find it
+  if (billingEmailToStore && organizationId) {
+    db.prepare(
+      'UPDATE User SET billingEmail = ?1, updatedAt = ?2 WHERE id = (SELECT userId FROM OrganizationMember WHERE organizationId = ?3 LIMIT 1)'
+    ).bind(billingEmailToStore, new Date().toISOString(), organizationId).run().catch(() => {});
+  }
+
   const session = await createSession(db, { userId: user.id });
   return { user, isNewUser, session, org, site };
 }
@@ -282,19 +317,27 @@ async function persistPaidStatusToKv(env, { platform, platformSiteId, site, user
 // }
 
 async function postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }) {
-  if (!wfSiteId || !env.WEBFLOW_AUTHENTICATION) return;
+  console.log('[CustomCheckout] postCheckoutWebflowInject start', { wfSiteId, siteId: site?.id, cdnScriptId: site?.cdnScriptId });
+  if (!wfSiteId || !env.WEBFLOW_AUTHENTICATION) {
+    console.warn('[CustomCheckout] postCheckoutWebflowInject skipped: missing wfSiteId or WEBFLOW_AUTHENTICATION binding');
+    return;
+  }
   try {
     const kvRaw = await env.WEBFLOW_AUTHENTICATION.get(wfSiteId);
     if (!kvRaw) { console.warn('[CustomCheckout] no KV entry for wfSiteId=%s — skipping script inject', wfSiteId); return; }
     const kvEntry = JSON.parse(kvRaw);
     const accessToken = kvEntry.accessToken;
+    console.log('[CustomCheckout] postCheckoutWebflowInject KV found', { accessToken: !!accessToken, existingWebappSiteId: kvEntry.webappSiteId });
     if (!accessToken) { console.warn('[CustomCheckout] no accessToken in KV for wfSiteId=%s', wfSiteId); return; }
 
     const embedOrigin = canonicalEmbedOrigin(request, env);
     const scriptUrl = buildEmbedScriptUrl(embedOrigin, site.cdnScriptId)
       || `${new URL(request.url).origin}/consentbit/${site.cdnScriptId}/script.js`;
+    console.log('[CustomCheckout] postCheckoutWebflowInject scriptUrl:', scriptUrl);
 
     const result = await injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, '[CustomCheckout]', kvEntry.webflowScriptId ?? null);
+    console.log('[CustomCheckout] postCheckoutWebflowInject injection result:', { success: result.success, webflowScriptId: result.webflowScriptId });
+
     // Update KV with webapp linkage flags
     const updatedKv = {
       ...kvEntry,
@@ -308,12 +351,46 @@ async function postCheckoutWebflowInject(env, { wfSiteId, site, request, user, b
       ...(billingEmail ? { billingEmail } : {}),
     };
     await env.WEBFLOW_AUTHENTICATION.put(wfSiteId, JSON.stringify(updatedKv));
+    console.log('[CustomCheckout] postCheckoutWebflowInject KV updated with webappSiteId:', site.id);
+
+    // Publish the Webflow site so the injected script goes live immediately
+    if (result.success) {
+      try {
+        const WEBFLOW_API = 'https://api.webflow.com/v2';
+        const pubHeaders = {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'accept-version': '1.0.0',
+        };
+        let customDomains = [];
+        try {
+          const siteInfoRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}`, { headers: pubHeaders });
+          if (siteInfoRes.ok) {
+            const siteInfo = await siteInfoRes.json();
+            customDomains = (siteInfo.customDomains || []).map(d => d.url || d.name).filter(Boolean);
+          }
+        } catch (_) {}
+        const publishRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/publish`, {
+          method: 'POST',
+          headers: pubHeaders,
+          body: JSON.stringify({ publishToWebflowSubdomain: true, customDomains }),
+        });
+        if (!publishRes.ok) {
+          const err = await publishRes.text();
+          console.warn('[CustomCheckout] postCheckoutWebflowInject Webflow publish failed status=%s body=%s', publishRes.status, err);
+        } else {
+          console.log('[CustomCheckout] postCheckoutWebflowInject Webflow site published wfSiteId=%s', wfSiteId);
+        }
+      } catch (publishErr) {
+        console.warn('[CustomCheckout] postCheckoutWebflowInject Webflow publish error (non-fatal):', publishErr?.message);
+      }
+    }
   } catch (e) {
-    console.error('[CustomCheckout] postCheckoutWebflowInject failed', e?.message);
+    console.error('[CustomCheckout] postCheckoutWebflowInject failed', e?.message, e?.stack);
   }
 }
 
-export async function handleCustomCheckout(request, env) {
+export async function handleCustomCheckout(request, env, ctx) {
   if (request.method !== 'POST') {
     console.warn('[CustomCheckout] rejected: method not POST');
     return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
@@ -349,6 +426,7 @@ export async function handleCustomCheckout(request, env) {
   const wfSiteId = (body.wfSiteId || body.platformId || '').trim() || null;
   const billingEmail = (body.billingEmail || '').trim().toLowerCase() || null;
   const platform = ((body.platform || '').trim().toLowerCase()) || (wfSiteId ? 'webflow' : null);
+  const confirmUpgrade = body.confirmUpgrade === true;
 
   if (!isValidEmail(email)) {
     console.warn('[CustomCheckout] validation failed: invalid email', email);
@@ -377,6 +455,52 @@ export async function handleCustomCheckout(request, env) {
     }, { status: 503 });
   }
 
+  // ── Pre-payment domain check ───────────────────────────────────────────────
+  // Run this before touching Stripe so we never charge for a domain conflict.
+  if (!subscriptionId) { // skip on phase-2 (3DS confirm) — domain was already checked in phase-1
+    const canonDomain = normalizeDomain(rawDomain);
+    const existingSite = canonDomain
+      ? await db.prepare('SELECT id, organizationId FROM Site WHERE domain = ?1').bind(canonDomain).first().catch(() => null)
+      : null;
+    if (existingSite) {
+      let existingSub = null;
+      try { existingSub = await getSubscriptionByOrganization(db, existingSite.organizationId); } catch { /* ignore */ }
+      const existingStatus = String(existingSub?.status || '').toLowerCase();
+      const isActive = existingStatus === 'active' || existingStatus === 'trialing';
+      if (isActive) {
+        // Check if the existing site belongs to the same user (by email)
+        const ownerUser = await db.prepare(
+          'SELECT u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
+        ).bind(existingSite.organizationId).first().catch(() => null);
+        const isSameAccount = ownerUser?.email?.toLowerCase() === email.toLowerCase();
+
+        if (!isSameAccount) {
+          // Different account — block completely, no upgrade allowed
+          console.log('[CustomCheckout] domain pre-check: active under different account', { domain: canonDomain, existingPlan: existingSub?.planId });
+          return Response.json({
+            success: false,
+            code: 'DOMAIN_TAKEN',
+            canUpgrade: false,
+            message: `This domain is already registered and active under a different account. Please contact support if you believe this is an error.`,
+          }, { status: 409 });
+        }
+
+        // Same account — offer upgrade
+        if (!confirmUpgrade) {
+          console.log('[CustomCheckout] domain pre-check: active under same account', { domain: canonDomain, existingPlan: existingSub?.planId, siteId: existingSite.id });
+          return Response.json({
+            success: false,
+            code: 'DOMAIN_EXISTS',
+            canUpgrade: true,
+            existingPlan: existingSub?.planId || 'unknown',
+            existingSiteId: existingSite.id,
+            message: `This domain already has an active ${existingSub?.planId || ''} plan on your account. Set confirmUpgrade: true to upgrade it.`,
+          }, { status: 409 });
+        }
+      }
+    }
+  }
+
   const hasBrevoConfig = Boolean(env.BREVO_API_KEY);
   const cookieFlags = hasBrevoConfig
     ? 'Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000'
@@ -398,7 +522,7 @@ export async function handleCustomCheckout(request, env) {
       }, { status: 402 });
     }
     try {
-      const { user, isNewUser, session, site } = await provisionAccount(db, env, request, {
+      const { user, isNewUser, session, site, org } = await provisionAccount(db, env, request, {
         email,
         domain: rawDomain,
         siteName,
@@ -414,8 +538,22 @@ export async function handleCustomCheckout(request, env) {
         billingEmail,
         wfSiteId,
       });
-      if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(() => {});
+      if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(e => console.error('[CustomCheckout] postCheckoutWebflowInject outer error', e?.message));
       if (platform && wfSiteId) persistPaidStatusToKv(env, { platform, platformSiteId: wfSiteId, site, user }).catch(() => {});
+      const _orgId = org?.id ?? org?.organizationId;
+      let _emailTo = billingEmail || email;
+      let _emailSource = billingEmail ? 'checkout-billingEmail' : 'account-email';
+      if (_orgId) {
+        try {
+          const _userRow = await db.prepare(
+            'SELECT u.billingEmail FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
+          ).bind(_orgId).first();
+          if (_userRow?.billingEmail) { _emailTo = _userRow.billingEmail; _emailSource = 'user.billingEmail'; }
+        } catch (e) { /* fall back to billingEmail || email */ }
+      }
+      const _invoiceData = await fetchStripeInvoice(secret, subscriptionId || sub?.id, interval);
+      console.log('[CustomCheckout] sending paid-plan email', { to: _emailTo, source: _emailSource, domain: rawDomain, planId, hasInvoice: !!_invoiceData });
+      sendPaidPlanEmail(env, ctx, { to: _emailTo, name: '', domain: rawDomain, planName: planId, invoice: _invoiceData });
       return Response.json(
         { success: true, provisioned: true, isNewUser, user: { id: user.id, email: user.email, name: user.name }, siteId: site.id, subscriptionId },
         { status: 200, headers: { 'Content-Type': 'application/json', 'Set-Cookie': `sid=${session.id}; ${cookieFlags}` } },
@@ -481,7 +619,7 @@ export async function handleCustomCheckout(request, env) {
   // Payment succeeded immediately (trial start or card charged without 3DS)
   if (subStatus === 'active' || subStatus === 'trialing') {
     try {
-      const { user, isNewUser, session, site } = await provisionAccount(db, env, request, {
+      const { user, isNewUser, session, site, org } = await provisionAccount(db, env, request, {
         email,
         domain: rawDomain,
         siteName,
@@ -497,8 +635,22 @@ export async function handleCustomCheckout(request, env) {
         billingEmail,
         wfSiteId,
       });
-      if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(() => {});
+      if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(e => console.error('[CustomCheckout] postCheckoutWebflowInject outer error', e?.message));
       if (platform && wfSiteId) persistPaidStatusToKv(env, { platform, platformSiteId: wfSiteId, site, user }).catch(() => {});
+      const _orgId = org?.id ?? org?.organizationId;
+      let _emailTo = billingEmail || email;
+      let _emailSource = billingEmail ? 'checkout-billingEmail' : 'account-email';
+      if (_orgId) {
+        try {
+          const _userRow = await db.prepare(
+            'SELECT u.billingEmail FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
+          ).bind(_orgId).first();
+          if (_userRow?.billingEmail) { _emailTo = _userRow.billingEmail; _emailSource = 'user.billingEmail'; }
+        } catch (e) { /* fall back to billingEmail || email */ }
+      }
+      const _invoiceData = await fetchStripeInvoice(secret, subscriptionId || sub?.id, interval);
+      console.log('[CustomCheckout] sending paid-plan email', { to: _emailTo, source: _emailSource, domain: rawDomain, planId, hasInvoice: !!_invoiceData });
+      sendPaidPlanEmail(env, ctx, { to: _emailTo, name: '', domain: rawDomain, planName: planId, invoice: _invoiceData });
       return Response.json(
         { success: true, provisioned: true, isNewUser, user: { id: user.id, email: user.email, name: user.name }, siteId: site.id, subscriptionId: sub.id },
         { status: 201, headers: { 'Content-Type': 'application/json', 'Set-Cookie': `sid=${session.id}; ${cookieFlags}` } },

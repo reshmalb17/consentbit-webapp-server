@@ -71,14 +71,15 @@ async function upsertSite(db, { organizationId, domain, name, stagingUrl, custom
   return { siteId: id, cdnScriptId };
 }
 
-async function upsertSubscription(db, { organizationId, siteId, subscriptionId, customerId, status, cancelAtPeriodEnd, interval, currentPeriodEnd, now }) {
+async function upsertSubscription(db, { organizationId, siteId, subscriptionId, customerId, status, cancelAtPeriodEnd, interval, currentPeriodEnd, planId, now }) {
+  const resolvedPlanId = ['basic', 'essential', 'growth'].includes(planId) ? planId : 'basic';
   // If subscriptionId exists, check for existing record first
   if (subscriptionId) {
     const existing = await db.prepare('SELECT id FROM Subscription WHERE stripeSubscriptionId = ?1').bind(subscriptionId).first();
     if (existing) {
       await db.prepare(
-        `UPDATE Subscription SET status=?1, cancelAtPeriodEnd=?2, planId='basic', updatedAt=?3 WHERE id=?4`
-      ).bind(status || 'active', cancelAtPeriodEnd ? 1 : 0, now, existing.id).run();
+        `UPDATE Subscription SET status=?1, cancelAtPeriodEnd=?2, planId=?3, updatedAt=?4 WHERE id=?5`
+      ).bind(status || 'active', cancelAtPeriodEnd ? 1 : 0, resolvedPlanId, now, existing.id).run();
       return;
     }
   } else {
@@ -86,8 +87,8 @@ async function upsertSubscription(db, { organizationId, siteId, subscriptionId, 
     const existing = await db.prepare('SELECT id FROM Subscription WHERE siteId = ?1 LIMIT 1').bind(siteId).first();
     if (existing) {
       await db.prepare(
-        `UPDATE Subscription SET status=?1, cancelAtPeriodEnd=?2, planId='basic', updatedAt=?3 WHERE id=?4`
-      ).bind(status || 'active', cancelAtPeriodEnd ? 1 : 0, now, existing.id).run();
+        `UPDATE Subscription SET status=?1, cancelAtPeriodEnd=?2, planId=?3, updatedAt=?4 WHERE id=?5`
+      ).bind(status || 'active', cancelAtPeriodEnd ? 1 : 0, resolvedPlanId, now, existing.id).run();
       return;
     }
   }
@@ -95,9 +96,9 @@ async function upsertSubscription(db, { organizationId, siteId, subscriptionId, 
   await db.prepare(
     `INSERT INTO Subscription (id, organizationId, siteId, stripeSubscriptionId, stripeCustomerId,
       planType, planId, interval, status, cancelAtPeriodEnd, currentPeriodEnd, createdAt, updatedAt)
-     VALUES (?1,?2,?3,?4,?5,'single','basic',?6,?7,?8,?9,?10,?10)`
+     VALUES (?1,?2,?3,?4,?5,'single',?6,?7,?8,?9,?10,?11,?11)`
   ).bind(id, organizationId, siteId, subscriptionId || null, customerId || null,
-    interval || 'monthly', status || 'active', cancelAtPeriodEnd ? 1 : 0,
+    resolvedPlanId, interval || 'monthly', status || 'active', cancelAtPeriodEnd ? 1 : 0,
     currentPeriodEnd || null, now).run();
 }
 
@@ -163,11 +164,13 @@ async function migrateWebflow(env, db, dryRun, results, domainFilter = null) {
           cancelAtPeriodEnd: entry.cancelAtPeriodEnd,
           interval: entry.interval || 'monthly',
           currentPeriodEnd: entry.currentPeriodEnd || entry.serviceExpiresAt || null,
+          planId: entry.plan || 'basic',
           now: nowIso(),
         });
 
-        // Write back to ACTIVE_SITES_CONSENTBIT
-        const updatedActive = { ...entry, plan: 'basic', cdnScriptId, webappSiteId: siteId, orgId, userEmail: email };
+        // Write back to ACTIVE_SITES_CONSENTBIT — preserve existing plan, default to 'basic' only if unset
+        const preservedPlan = ['basic', 'essential', 'growth'].includes(entry.plan) ? entry.plan : 'basic';
+        const updatedActive = { ...entry, plan: preservedPlan, cdnScriptId, webappSiteId: siteId, orgId, userEmail: email };
         await kv.put(key, JSON.stringify(updatedActive));
 
         // Write back to WEBFLOW_AUTHENTICATION
@@ -255,6 +258,7 @@ async function migrateFramer(env, db, dryRun, results, emailFilter = null) {
           cancelAtPeriodEnd: entry.cancelAtPeriodEnd,
           interval: 'monthly',
           currentPeriodEnd: null,
+          planId: entry.plan || 'basic',
           now: nowIso(),
         });
       }

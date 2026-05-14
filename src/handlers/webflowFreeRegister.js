@@ -79,6 +79,46 @@ export async function handleWebflowFreeRegister(request, env) {
     }
   }
 
+  // ── Early site-limit check (read-only, no side-effects) ─────────────────
+  // Run BEFORE creating any user/org record or injecting any scripts.
+  // If the email already has a registered site on a different domain, reject now.
+  {
+    const earlyUser = await db.prepare('SELECT id FROM User WHERE email = ?1').bind(email).first();
+    if (earlyUser) {
+      const earlyOrg = await db.prepare(
+        `SELECT o.id FROM Organization o
+         LEFT JOIN OrganizationMember ou ON ou.organizationId = o.id
+         WHERE ou.userId = ?1
+         ORDER BY o.createdAt ASC LIMIT 1`
+      ).bind(earlyUser.id).first();
+      if (earlyOrg) {
+        const earlySites = await db
+          .prepare('SELECT id, domain, platformSiteId FROM Site WHERE organizationId = ?1 LIMIT 5')
+          .bind(earlyOrg.id)
+          .all();
+        const earlySiteList = earlySites?.results || [];
+        const earlyNormalizedDomain = normalizeDomain(domain);
+        // Skip if this exact wfSiteId is already registered (idempotent re-publish)
+        const isIdempotentRepublish = wfSiteId && earlySiteList.some(s => s.platformSiteId === wfSiteId);
+        if (!isIdempotentRepublish) {
+          const conflictSite = earlySiteList.find(s => s.domain && s.domain !== earlyNormalizedDomain);
+          if (conflictSite) {
+            console.warn(`${TAG} Early check: SITE_LIMIT_REACHED — email=${email} already has free site on domain=${conflictSite.domain}`);
+            return Response.json(
+              {
+                success: false,
+                code: 'SITE_LIMIT_REACHED',
+                error: 'Your account already has a free site registered on a different domain.',
+                existingDomain: conflictSite.domain,
+              },
+              { status: 403 }
+            );
+          }
+        }
+      }
+    }
+  }
+
   const now = new Date().toISOString();
 
   // ── Step 1: Find or create user by email ─────────────────────────────────

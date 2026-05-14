@@ -597,16 +597,18 @@ export async function handleStripeWebhook(request, env, ctx) {
         if (customerEmail) {
           // Resolve billing email: use user's billingEmail if set, else fall back to checkout email
           let emailTo = customerEmail;
+          let emailSource = 'customer-email';
           if (orgId) {
             try {
               const userForEmail = await db.prepare(
                 'SELECT u.billingEmail FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
               ).bind(orgId).first();
-              if (userForEmail?.billingEmail) emailTo = userForEmail.billingEmail;
+              if (userForEmail?.billingEmail) { emailTo = userForEmail.billingEmail; emailSource = 'user.billingEmail'; }
             } catch (e) {
               // billingEmail lookup failed, use customerEmail
             }
           }
+          console.log('[StripeWebhook] sending paid-plan email', { to: emailTo, source: emailSource, domain: siteDomainMeta, planName });
 
           // Fetch the latest invoice for this subscription to include in the email
           let invoiceData = null;

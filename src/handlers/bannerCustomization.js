@@ -105,8 +105,12 @@ export async function handleBannerCustomization(request, env) {
       const isWebappMigrated = true; // site exists in D1
       const isWebflowFree = siteFlags.platform === 'webflow' && siteFlags.isLegacy === 0;
       const iabActivated = siteFlags.bannerType === 'iab';
-      // Legacy users had the banner added via the old OAuth flow; new users only have it added once the script is published (webflowScriptId set)
-      const isBannerAdded = siteFlags.isLegacy === 1 || !!siteFlags.webflowScriptId;
+      // Legacy users: banner added via old OAuth flow (isLegacy = 1).
+      // New free users: banner is only considered "added" once the user has published at least once
+      // from the Designer App (which creates the BannerCustomization record). webflowScriptId alone
+      // is not enough because registerWebflowFree sets it during installation before the user has
+      // gone through the Scan Project onboarding flow.
+      const isBannerAdded = siteFlags.isLegacy === 1 || (!!siteFlags.webflowScriptId && customization !== null);
 
       // Derive compliance from DB region_mode (set whenever POST includes compliance).
       // KV Banner-Settings takes precedence if present (stores last value sent from Webflow Designer App).
@@ -222,7 +226,18 @@ export async function handleBannerCustomization(request, env) {
       } catch (_) {}
     }
 
-    // If still no siteId, check WEBFLOW_AUTHENTICATION KV for webappSiteId (set after registerWebflowFree)
+    // If still no siteId, try direct platformSiteId match first (covers paid checkout flow)
+    if (!siteId && wfSiteId) {
+      try {
+        const byPlatform = await db.prepare('SELECT id FROM Site WHERE platformSiteId = ?1 LIMIT 1').bind(wfSiteId).first();
+        if (byPlatform) {
+          siteId = byPlatform.id;
+          console.log('[BannerCustomization][POST] resolved siteId via platformSiteId lookup:', siteId);
+        }
+      } catch (_) {}
+    }
+
+    // Fallback: check WEBFLOW_AUTHENTICATION KV for webappSiteId (set after registerWebflowFree or checkout injection)
     if (!siteId && wfSiteId) {
       try {
         const kvRaw = await env.WEBFLOW_AUTHENTICATION?.get(wfSiteId);
@@ -230,7 +245,10 @@ export async function handleBannerCustomization(request, env) {
           const kvEntry = JSON.parse(kvRaw);
           if (kvEntry.webappSiteId) {
             const siteExists = await db.prepare('SELECT id FROM Site WHERE id = ?1 LIMIT 1').bind(kvEntry.webappSiteId).first();
-            if (siteExists) siteId = kvEntry.webappSiteId;
+            if (siteExists) {
+              siteId = kvEntry.webappSiteId;
+              console.log('[BannerCustomization][POST] resolved siteId via KV webappSiteId:', siteId);
+            }
           }
         }
       } catch (_) {}
@@ -270,10 +288,13 @@ export async function handleBannerCustomization(request, env) {
           parsedTrans = typeof rawTrans === 'string' ? JSON.parse(rawTrans) : rawTrans;
         } catch (_) {}
         const iabEnabledField = parsedTrans?.en?.iab_enabled;
+        const iabExplicitlyEnabled = iabEnabledField === true;
         const iabExplicitlyDisabled = iabEnabledField === false;
         const currentSiteRow = await db.prepare('SELECT banner_type FROM Site WHERE id = ?1').bind(siteId).first();
         const currentBannerType = currentSiteRow?.banner_type ?? 'gdpr';
-        const newBannerType = (currentBannerType === 'iab' && !iabExplicitlyDisabled)
+        const newBannerType = iabExplicitlyEnabled
+          ? 'iab'
+          : (currentBannerType === 'iab' && !iabExplicitlyDisabled)
           ? 'iab'
           : (hasUs && !hasGdpr ? 'ccpa' : 'gdpr');
         const newRegionMode = hasUs && hasGdpr ? 'both' : hasUs ? 'ccpa' : 'gdpr';
@@ -354,6 +375,7 @@ export async function handleBannerCustomization(request, env) {
             : prevAppData.selected,
           cookieExpiration: customization.cookieExpirationDays ?? prevAppData.cookieExpiration,
           animation: customization.centerAnimationDirection ?? prevAppData.animation,
+          selectedtext: configTrans.bannerTextAlign ?? prevAppData.selectedtext ?? 'left',
           language: customization.language ?? prevAppData.language,
           privacyUrl: customization.privacyPolicyUrl ?? prevAppData.privacyUrl,
           hideLogo: customization.showBannerLogo != null ? !customization.showBannerLogo : prevAppData.hideLogo,
@@ -378,27 +400,26 @@ export async function handleBannerCustomization(request, env) {
         const dataToStore = { appData, siteId: webflowSiteId, updatedAt: new Date().toISOString() };
         await env.WEBFLOW_AUTHENTICATION.put(kvKey, JSON.stringify(dataToStore));
 
-        // ── Script swap: replace legacy Webflow head script with CDN script ──
-        // Skipped when request originates from the webapp (skipScriptSwap flag).
+        // ── Ensure CDN script is injected into Webflow head on every publish/save ──
+        // Runs regardless of skipScriptSwap — always verify the script is in the head.
+        // skipScriptSwap only suppresses the post-injection Webflow site publish.
         console.log('[BannerCustomization][POST] skipScriptSwap:', skipScriptSwap, '| cdnScriptId:', siteRow?.cdnScriptId);
-        if (!skipScriptSwap) {
-          try {
-            const mainKvRaw = await env.WEBFLOW_AUTHENTICATION.get(webflowSiteId);
-            console.log('[BannerCustomization][POST] mainKv found:', !!mainKvRaw, '| webflowSiteId used for lookup:', webflowSiteId);
-            if (mainKvRaw) {
-              const mainKvEntry = JSON.parse(mainKvRaw);
-              console.log('[BannerCustomization][POST] accessToken present:', !!mainKvEntry.accessToken);
-              if (mainKvEntry.accessToken) {
-                await swapLegacyWebflowScript(env, db, siteId, webflowSiteId, mainKvEntry, siteRow);
-              } else {
-                console.warn('[BannerCustomization][POST] No accessToken in KV — script injection skipped');
-              }
+        try {
+          const mainKvRaw = await env.WEBFLOW_AUTHENTICATION.get(webflowSiteId);
+          console.log('[BannerCustomization][POST] mainKv found:', !!mainKvRaw, '| webflowSiteId used for lookup:', webflowSiteId);
+          if (mainKvRaw) {
+            const mainKvEntry = JSON.parse(mainKvRaw);
+            console.log('[BannerCustomization][POST] accessToken present:', !!mainKvEntry.accessToken);
+            if (mainKvEntry.accessToken) {
+              await ensureScriptInjected(env, db, siteId, webflowSiteId, mainKvEntry, siteRow, { skipPublish: skipScriptSwap });
             } else {
-              console.warn('[BannerCustomization][POST] No KV entry found for webflowSiteId:', webflowSiteId);
+              console.warn('[BannerCustomization][POST] No accessToken in KV — script injection skipped');
             }
-          } catch (swapErr) {
-            console.error('[BannerCustomization] Script swap error (non-fatal):', swapErr?.message || swapErr);
+          } else {
+            console.warn('[BannerCustomization][POST] No KV entry found for webflowSiteId:', webflowSiteId);
           }
+        } catch (swapErr) {
+          console.error('[BannerCustomization] Script inject error (non-fatal):', swapErr?.message || swapErr);
         }
 
         // ── iabActivated flag: reflect site banner_type in main auth KV ──
@@ -433,20 +454,24 @@ export async function handleBannerCustomization(request, env) {
   return Response.json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
 }
 
-async function swapLegacyWebflowScript(env, db, siteId, wfSiteId, kvEntry, siteRow) {
-  const TAG = '[BannerCustomization][ScriptSwap]';
+async function ensureScriptInjected(env, db, siteId, wfSiteId, kvEntry, siteRow, { skipPublish = false } = {}) {
+  const TAG = '[BannerCustomization][ScriptInject]';
   const accessToken = kvEntry.accessToken;
   const cdnScriptId = siteRow?.cdnScriptId ?? null;
   const storedWebflowScriptId = siteRow?.webflowScriptId ?? null;
 
   if (!cdnScriptId) {
+    console.warn(`${TAG} cdnScriptId missing for siteId=${siteId} — skipping`);
     return;
   }
 
   const scriptUrl = siteRow?.embedScriptUrl ||
     `https://manager.consentbit.com/consentbit/${cdnScriptId}/script.js`;
 
+  console.log(`${TAG} checking/injecting script`, { wfSiteId, siteId, cdnScriptId, scriptUrl, skipPublish });
+
   const result = await injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG, storedWebflowScriptId);
+  console.log(`${TAG} inject result`, { success: result.success, webflowScriptId: result.webflowScriptId });
 
   if (result.success) {
     let userId = null;
@@ -483,35 +508,37 @@ async function swapLegacyWebflowScript(env, db, siteId, wfSiteId, kvEntry, siteR
     }
 
     // Publish the Webflow site so the injected script goes live immediately.
-    // Fetch the site's custom domains first so we publish to all of them.
-    try {
-      const WEBFLOW_API = 'https://api.webflow.com/v2';
-      const headers = {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        'accept-version': '1.0.0',
-      };
-      let customDomains = [];
+    // Skipped when called from webapp save (skipPublish=true) to avoid unintended publishes.
+    if (!skipPublish) {
       try {
-        const siteInfoRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}`, { headers });
-        if (siteInfoRes.ok) {
-          const siteInfo = await siteInfoRes.json();
-          customDomains = (siteInfo.customDomains || []).map(d => d.url || d.name).filter(Boolean);
+        const WEBFLOW_API = 'https://api.webflow.com/v2';
+        const headers = {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'accept-version': '1.0.0',
+        };
+        let customDomains = [];
+        try {
+          const siteInfoRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}`, { headers });
+          if (siteInfoRes.ok) {
+            const siteInfo = await siteInfoRes.json();
+            customDomains = (siteInfo.customDomains || []).map(d => d.url || d.name).filter(Boolean);
+          }
+        } catch (_) {}
+        const publishRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/publish`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ publishToWebflowSubdomain: true, customDomains }),
+        });
+        if (!publishRes.ok) {
+          const err = await publishRes.text();
+          console.warn(`${TAG} Webflow publish failed status=${publishRes.status} body=${err}`);
+        } else {
+          console.log(`${TAG} Webflow site published successfully wfSiteId=${wfSiteId}`);
         }
-      } catch (_) {}
-      const publishRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/publish`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ publishToWebflowSubdomain: true, customDomains }),
-      });
-      if (!publishRes.ok) {
-        const err = await publishRes.text();
-        console.warn(`${TAG} Webflow publish failed status=${publishRes.status} body=${err}`);
-      } else {
-        console.log(`${TAG} Webflow site published successfully wfSiteId=${wfSiteId}`);
+      } catch (publishErr) {
+        console.warn(`${TAG} Webflow publish error (non-fatal):`, publishErr?.message || publishErr);
       }
-    } catch (publishErr) {
-      console.warn(`${TAG} Webflow publish error (non-fatal):`, publishErr?.message || publishErr);
     }
   }
 }

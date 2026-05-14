@@ -276,7 +276,7 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     // — Custom checkout (Stripe.js direct flow)
     case '/api/custom-checkout':
-      response = await handleCustomCheckout(request, env); break;
+      response = await handleCustomCheckout(request, env, ctx); break;
 
     // — Plugin sync (publish from platform plugin)
     case '/api/sync-plugin':
