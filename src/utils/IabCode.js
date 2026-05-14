@@ -5,8 +5,9 @@
  * can inject it directly. Inner ${...} template literals in the body are
  * pre-escaped so they survive verbatim and run in the browser at runtime.
  */
-export function getLoaderIabScript(customization) {
+export function getLoaderIabScript(customization, opts = {}) {
   const c = customization || {};
+  const o = opts || {};
 
   const colorsJson = JSON.stringify({
     bannerBg: c.backgroundColor || '#FFFFFF',
@@ -20,9 +21,10 @@ export function getLoaderIabScript(customization) {
   });
   const alignmentJson = JSON.stringify(c.textAlign || 'left');
   const layoutJson = JSON.stringify({
-    borderRadius: c.bannerBorderRadius || 12,
-    position: c.bannerLayoutVisual || 'box',
-    alignment: c.position || 'bottom-left',
+    borderRadius: c.bannerBorderRadius || '0rem',
+    buttonBorderRadius: c.buttonBorderRadius || '0.375rem',
+    position: o.bannerLayoutVisual || c.bannerLayoutVisual || 'box',
+    alignment: o.rawPos || c.position || 'bottom-left',
   });
 
   return `
@@ -76,6 +78,7 @@ const styleConfig = {
   textAlign: alignment || 'left',
   fontWeight: colors.fontWeight || '400',
   borderRadius: initialLayout?.borderRadius || '12',
+  buttonBorderRadius: initialLayout?.buttonBorderRadius || '0.375rem',
   bannerType: initialLayout?.position || 'box',
   boxAlignment: initialLayout?.alignment || 'bottom-left'
 };
@@ -83,15 +86,28 @@ const styleConfig = {
 function injectStyles() {
   if (document.getElementById('consentbit-inline-styles')) return;
   const s = styleConfig;
-  const br = s.borderRadius + 'px';
-  const brSm = Math.min(Number(s.borderRadius), 8) + 'px';
-  const brPill = Math.min(Number(s.borderRadius), 999) + 'px';
+  // borderRadius arrives as a string with its own unit (e.g. "1.5rem" or "12px").
+  // Use it as-is for br; derive sm/pill caps by parsing the number and re-attaching
+  // whichever unit the input already had. Numeric input (no unit) is treated as px.
+  const brRaw = String(s.borderRadius ?? '0').trim();
+  const brNum = parseFloat(brRaw) || 0;
+  const brUnit = brRaw.endsWith('rem') ? 'rem' : (brRaw.endsWith('px') ? 'px' : 'px');
+  const br = /rem|px|%|em/.test(brRaw) ? brRaw : (brNum + 'px');
+  const _smCap = brUnit === 'rem' ? 0.5 : 8;
+  const _pillCap = brUnit === 'rem' ? 62 : 999;
+  const brSm = Math.min(brNum, _smCap) + brUnit;
+  const brPill = Math.min(brNum, _pillCap) + brUnit;
+  // Button border-radius — pass through as-is (already a unit-suffixed string).
+  const brBtnRaw = String(s.buttonBorderRadius ?? '').trim();
+  const brBtn = brBtnRaw
+    ? (/rem|px|%|em/.test(brBtnRaw) ? brBtnRaw : (parseFloat(brBtnRaw) || 0) + 'px')
+    : brSm;
   const css = \`
 .consentBit-vendors-search-wrapper{max-height:500px;overflow-y:auto;padding:20px}
 .consentBit-search-container{position:relative;margin-bottom:20px}
 .consentBit-search-input{width:100%;padding:12px 16px 12px 44px;border:2px solid #e0e0e0;border-radius:\${brSm};font-size:14px;transition:border-color .2s ease;background:#fff;box-sizing:border-box}
 .consentBit-search-input:focus{outline:none;border-color:\${s.SecButtonColor};box-shadow:0 0 0 3px \${s.SecButtonColor}22}
-.consentBit-search-icon{position:absolute;left:16px;top:50%;transform:translateY(-50%);font-size:16px;color:#666;pointer-events:none}
+.consentBit-search-icon{position:absolute;left:16px;top:50%;transform:translateY(-50%);font-size:16px;color:\${s.textColor};pointer-events:none}
 .consentBit-vendors-list{display:flex;flex-direction:column;gap:18px;padding-bottom:8px}
 .consentBit-vendor-item{margin-bottom:6px}
 .consentBit-vendor-item{padding:16px;border:1px solid #f0f0f0;border-radius:\${brSm};background:#fafafa;transition:all .2s ease;animation:consentBit-fadeIn .3s ease}
@@ -100,7 +116,7 @@ function injectStyles() {
 .consentBit-vendor-header{display:flex;justify-content:space-between;align-items:center;gap:16px}
 .consentBit-vendor-info{flex:1}
 .consentBit-vendor-name{font-weight:600;font-size:15px;color:\${s.headingColor};margin-bottom:4px}
-.consentBit-vendor-id{font-size:12px;color:#666;font-family:monospace}
+.consentBit-vendor-id{font-size:12px;color:\${s.textColor};font-family:monospace}
 .consentBit-switch-wrapper{flex-shrink:0}
 .consentBit-consent-switch-wrapper{display:flex;align-items:center;gap:8px}
 .consentBit-switch-label{font-size:13px;font-weight:500;color:\${s.textColor}}
@@ -111,9 +127,9 @@ function injectStyles() {
 .consentBit-switch-sm input:checked+.consentBit-slider:before{transform:translateX(16px)}
 .consentBit-slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#ccc;transition:.2s;border-radius:20px}
 .consentBit-slider:before{position:absolute;content:"";height:16px;width:16px;left:2px;top:2px;background-color:#fff;transition:.2s;border-radius:50%}
-.consentBit-no-results{text-align:center;padding:40px 20px;color:#666}
+.consentBit-no-results{text-align:center;padding:40px 20px;color:\${s.textColor}}
 .consentBit-no-results p{margin:0 0 4px 0;font-size:16px}
-.consentBit-empty-vendors-text{text-align:center;color:#666;padding:40px;font-style:italic}
+.consentBit-empty-vendors-text{text-align:center;color:\${s.textColor};padding:40px;font-style:italic}
 .consentBit-loading{text-align:center;padding:40px;color:\${s.textColor}}
 @keyframes consentBit-fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
 .consentBit-consent-container{position:fixed;z-index:999999;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;border-radius:\${br};box-shadow:0 20px 60px rgba(0,0,0,.15);backdrop-filter:blur(10px);animation:consentBit-slideUp .4s cubic-bezier(.25,.46,.45,.94)}
@@ -135,9 +151,9 @@ function injectStyles() {
 .consentBit-notice-des p{margin:0 0 12px 0}
 .consentBit-notice-des p:last-child{margin-bottom:0}
 .consentBit-notice-btn-wrapper{display:flex;gap:8px;padding-top:16px;border-top:1px solid #f0f0f0;justify-content:\${s.textAlign === 'center' ? 'center' : s.textAlign === 'right' ? 'flex-end' : 'flex-start'}}
-.consentBit-btn{padding:11px 20px;border-radius:\${brSm};font-size:14px;font-weight:\${s.fontWeight};cursor:pointer;transition:opacity .2s ease;border:2px solid transparent;text-align:center;min-height:44px;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap}
+.consentBit-btn{padding:11px 20px;border-radius:\${brBtn};font-size:14px;font-weight:\${s.fontWeight};cursor:pointer;transition:opacity .2s ease;border:2px solid transparent;text-align:center;min-height:44px;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap}
 .consentBit-btn:hover,.cb-btn:hover{opacity:.85}
-.consentBit-btn-customize{color:\${s.buttonTextColor};background:\${s.buttonColor};border-color:\${s.buttonTextColor}}
+.consentBit-btn-customize{color:\${s.SecButtonTextColor};background:\${s.SecButtonColor};border-color:\${s.SecButtonColor}}
 .consentBit-vendors-link{color:#007AFF;text-decoration:underline;cursor:pointer;font-weight:600}
 .consentBit-vendors-link:hover{opacity:.8}
 .consentBit-scope-note{font-size:12px;opacity:.85;margin-top:8px}
@@ -173,16 +189,16 @@ function injectStyles() {
 .consentBit-vendor-object-note strong{color:\${s.headingColor}}
 .consentBit-vendor-links{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px}
 .consentBit-vendor-inline-links{display:flex;flex-wrap:wrap;gap:14px;font-size:12.5px}
-.consentBit-vendor-inline-links a{color:\${s.SecButtonColor};text-decoration:none;font-weight:500}
+.consentBit-vendor-inline-links a{color:#007AFF;text-decoration:none;font-weight:500}
 .consentBit-vendor-inline-links a:hover{text-decoration:underline}
 .consentBit-vendor-section-first{margin-top:0;padding-bottom:8px;border-bottom:1px solid #f0f0f0;margin-bottom:6px}
-.consentBit-vendor-expand{background:#f4f6fa;border:1px solid #e0e0e0;color:\${s.SecButtonColor};cursor:pointer;font-size:12px;font-weight:600;padding:7px 12px;border-radius:\${brSm};margin-top:10px;text-align:left;transition:background .15s ease}
-.consentBit-vendor-expand:hover{background:#eef1f7}
+.consentBit-vendor-expand{background:\${s.SecButtonColor};border:2px solid \${s.SecButtonColor};color:\${s.SecButtonTextColor};cursor:pointer;font-size:12px;font-weight:600;padding:7px 12px;border-radius:\${brBtn};margin-top:10px;text-align:left;transition:opacity .2s ease}
+.consentBit-vendor-expand:hover{opacity:.85}
 .consentBit-vendor-details{display:none;margin-top:12px;border-top:1px solid #ebebeb;padding-top:14px;display:none;flex-direction:column;gap:0}
 .consentBit-vendor-details.is-open{display:flex}
 .consentBit-li-switch-wrapper{display:flex;align-items:center;gap:6px}
 .consentBit-li-switch-wrapper .consentBit-switch-label{font-size:11px}
-.consentBit-btn-reject,.consentBit-btn-accept,.cb-btn-accept{color:\${s.SecButtonTextColor};background:\${s.SecButtonColor};border-color:\${s.SecButtonColor}}
+.consentBit-btn-reject,.consentBit-btn-accept,.cb-btn-accept{color:\${s.buttonTextColor};background:\${s.buttonColor};border-color:\${s.buttonColor}}
 .cb-modal{position:fixed;top:0;left:0;width:100%;height:100%;background-color:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000000;padding:20px;box-sizing:border-box}
 .cb-modal.cb-modal-hidden{display:none!important}
 .cb-preference-center{background-color:\${s.bannerBg};border:1px solid #f4f4f4;border-radius:\${br};max-width:720px;width:100%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 4px 20px rgba(0,0,0,.15)}
@@ -196,8 +212,8 @@ function injectStyles() {
 .cb-iab-navbar-wrapper{margin-bottom:24px;border-bottom:2px solid #f4f4f4}
 .cb-iab-navbar{display:flex;list-style:none;gap:0;padding:0;margin:0}
 .cb-iab-nav-item{flex:1}
-.cb-iab-nav-btn{width:100%;padding:12px 16px;background:none;border:none;border-bottom:3px solid transparent;cursor:pointer;font-size:13px;font-weight:\${s.fontWeight};color:\${s.textColor};opacity:.6;transition:all .2s}
-.cb-iab-nav-item-active .cb-iab-nav-btn{color:\${s.SecButtonColor};border-bottom-color:\${s.SecButtonColor};opacity:1;font-weight:600}
+.cb-iab-nav-btn{width:100%;padding:12px 16px;background:none;border:none;border-bottom:3px solid transparent;cursor:pointer;font-size:13px;font-weight:\${s.fontWeight};color:\${s.textColor};transition:all .2s}
+.cb-iab-nav-item-active .cb-iab-nav-btn{color:\${s.textColor};border-bottom-color:\${s.buttonColor};opacity:1;font-weight:700}
 .cb-iab-nav-btn:hover{background-color:#f9f9f9}
 .cb-preference-body-wrapper{display:none}
 .cb-preference-body-wrapper.active{display:block}
@@ -226,7 +242,7 @@ function injectStyles() {
 .cb-switch input[type="checkbox"]:checked::before{transform:translateX(20px)}
 .cb-accordion-body,.cb-child-accordion-body{max-height:0;overflow:hidden;transition:max-height .3s ease}
 .cb-accordion.active .cb-accordion-body,.cb-child-accordion.active .cb-child-accordion-body{max-height:2000px}
-.cb-audit-table{background-color:#f4f4f4;border:1px solid #ebebeb;border-radius:\${brSm};padding:14px;margin:0 14px 14px 28px}
+.cb-audit-table{background-color:#f4f4f4;border:1px solid #ebebeb;border-radius:\${brSm};padding:14px}
 .cb-child-accordion{border-top:1px solid #ebebeb}
 .cb-child-accordion:first-child{border-top:none}
 .cb-child-accordion-item{display:flex;gap:12px;padding:12px 16px;cursor:pointer;transition:background-color .2s}
@@ -251,8 +267,9 @@ function injectStyles() {
 .cb-footer-wrapper{border-top:1px solid #f4f4f4;background-color:\${s.bannerBg};flex-shrink:0}
 .cb-footer-shadow{display:block;height:20px;margin-top:-20px;background:linear-gradient(180deg,rgba(255,255,255,0) 0%,\${s.bannerBg} 100%)}
 .cb-prefrence-btn-wrapper{padding:14px 22px;display:flex;gap:10px;justify-content:\${s.textAlign === 'center' ? 'center' : s.textAlign === 'right' ? 'flex-start' : 'flex-end'};flex-wrap:wrap}
-.cb-btn{padding:9px 20px;border-radius:\${brSm};font-size:13px;font-weight:\${s.fontWeight};cursor:pointer;transition:opacity .2s;border:2px solid;white-space:nowrap}
-.cb-btn-reject,.cb-btn-preferences{background-color:\${s.buttonColor};color:\${s.buttonTextColor};border-color:\${s.buttonTextColor}}
+.cb-btn{padding:9px 20px;border-radius:\${brBtn};font-size:13px;font-weight:\${s.fontWeight};cursor:pointer;transition:opacity .2s;border:2px solid;white-space:nowrap}
+.cb-btn-reject{background-color:\${s.buttonColor};color:\${s.buttonTextColor};border-color:\${s.buttonColor}}
+.cb-btn-preferences{background-color:\${s.SecButtonColor};color:\${s.SecButtonTextColor};border-color:\${s.SecButtonColor}}
 @media(max-width:768px){.consentBit-type-box-bottom-left,.consentBit-type-box-bottom-right{left:10px;right:10px;max-width:calc(100% - 20px)}.consentBit-type-box-bottom-left,.consentBit-type-box-bottom-right{bottom:10px}.consentBit-consent-bar{padding:18px}.consentBit-title{font-size:16px}.consentBit-notice-btn-wrapper,.cb-prefrence-btn-wrapper{flex-direction:column}.consentBit-btn,.cb-btn{width:100%}.consentBit-type-banner .consentBit-notice,.consentBit-type-banner .consentBit-notice-group{flex-direction:column}.cb-iab-navbar{flex-direction:column}.cb-switch-wrapper{flex-direction:column;align-items:flex-start;gap:6px}.cb-switch-separator{border-right:none;padding-right:0;padding-bottom:6px;border-bottom:1px solid #ddd}}
 \`;
   const style = document.createElement('style');

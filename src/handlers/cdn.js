@@ -775,7 +775,7 @@ function remToPx(rem, baseFontSize = 16) {
 const banerBr=remToPx(parseFloat(customization?.bannerBorderRadius) || 12);
 const loaderIab=`
 ${inlineConfig}
-${getLoaderIabScript(customization)}
+${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom-left', bannerLayoutVisual: enTrans?.bannerLayoutVisual })}
 `
 
   // loaderWebflow: standard banner behaviour with script blocking delegated to consent.js.
