@@ -19,7 +19,7 @@ export function getLoaderIabScript(customization, opts = {}) {
     SecButtonTextColor: c.customiseButtonText || '#FFFFFF',
     fontWeight: c.fontWeight || '400',
   });
-  const alignmentJson = JSON.stringify(c.textAlign || 'left');
+  const alignmentJson = JSON.stringify(o.textAlign || c.textAlign || 'left');
   const layoutJson = JSON.stringify({
     borderRadius: c.bannerBorderRadius || '0rem',
     buttonBorderRadius: c.buttonBorderRadius || '0.375rem',
@@ -136,12 +136,12 @@ function injectStyles() {
 .consentBit-type-banner{bottom:0;left:0;right:0;border-radius:0;max-width:100%}
 .consentBit-type-box-bottom-left{bottom:20px;left:20px;right:auto;max-width:600px}
 .consentBit-type-box-bottom-right{bottom:20px;right:20px;left:auto;max-width:600px}
-.consentBit-type-popup{bottom:20px;left:50%;transform:translateX(-50%);right:auto;max-width:480px;width:calc(100% - 40px);animation:consentBit-slideUp .4s cubic-bezier(.25,.46,.45,.94)}
+.consentBit-type-popup{bottom:20px;left:50%;transform:translateX(-50%);right:auto;max-width:600px;width:calc(100% - 40px);animation:consentBit-slideUp .4s cubic-bezier(.25,.46,.45,.94)}
 .consentBit-popup-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999998}
 @keyframes consentBit-slideUp{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}
 .consentBit-consent-bar{border:1px solid #f4f4f4;background:\${s.bannerBg};border-radius:\${br};padding:24px}
 .consentBit-type-banner .consentBit-consent-bar{border-radius:0;padding:16px 24px}
-.consentBit-type-banner .consentBit-notice{flex-direction:row;align-items:center;gap:24px}
+.consentBit-type-banner .consentBit-notice{gap:4px}
 .consentBit-type-banner .consentBit-notice-group{display:flex;flex-direction:row;align-items:center;gap:20px;flex:1}
 .consentBit-type-banner .consentBit-notice-btn-wrapper{flex-direction:row;padding-top:0;border-top:none;flex-shrink:0}
 .consentBit-notice{display:flex;flex-direction:column;gap:16px}
@@ -361,9 +361,10 @@ function injectHTML() {
       <span class="cb-footer-shadow"></span>
       <div class="cb-prefrence-btn-wrapper">
         <button aria-label="Reject All" class="cb-btn cb-btn-reject" id="cbRejectBtn">Reject All</button>
-        <button aria-label="Save My Preferences" class="cb-btn cb-btn-preferences" id="cbSaveBtn">Save My Preferences</button>
         <button aria-label="Accept All" class="cb-btn cb-btn-accept" id="cbAcceptBtn">Accept All</button>
-      </div>
+          <button aria-label="Save My Preferences" class="cb-btn cb-btn-preferences" id="cbSaveBtn">Save My Preferences</button>
+
+        </div>
     </div>
   </div>
 </div>\`;
