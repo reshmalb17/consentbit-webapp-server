@@ -35,7 +35,14 @@ import {
   getSiteByDomain,
   inferTierPlanIdFromStripePriceId,
   canonicalEmbedOrigin,
+  markSiteVerified,
 } from '../services/db.js';
+
+const VERIFY_SCRIPT_BASE_URL = 'https://consent-webapp-manager.web-8fb.workers.dev/consentbit';
+
+function buildVerifyScriptUrl(cdnScriptId) {
+  return `${VERIFY_SCRIPT_BASE_URL}/${cdnScriptId}/script.js`;
+}
 
 function isValidEmail(email) {
   const e = (email || '').trim().toLowerCase();
@@ -212,6 +219,14 @@ export async function handleSyncPlugin(request, env) {
         return Response.json({ success: false, error: 'Failed to persist platform mapping' }, { status: 500 });
       }
 
+      if (cdnScriptId) {
+        try {
+          await markSiteVerified(db, existingSite.id, buildVerifyScriptUrl(cdnScriptId));
+        } catch (e) {
+          console.warn('[SyncPlugin] markSiteVerified failed for existing site (non-fatal)', e?.message);
+        }
+      }
+
       return Response.json({
         success: true,
         existingSite: true,
@@ -329,12 +344,21 @@ export async function handleSyncPlugin(request, env) {
   }
 
   // ── 7. Done ──────────────────────────────────────────────────────────────
+  const newCdnScriptId = site.cdnScriptId ?? site.cdnscriptid ?? null;
+  if (newCdnScriptId) {
+    try {
+      await markSiteVerified(db, site.id, buildVerifyScriptUrl(newCdnScriptId));
+    } catch (e) {
+      console.warn('[SyncPlugin] markSiteVerified failed for new site (non-fatal)', e?.message);
+    }
+  }
+
   return Response.json({
     success: true,
     isNewUser,
     userId: user.id,
     siteId: site.id,
-    cdnScriptId: site.cdnScriptId ?? site.cdnscriptid ?? null,
+    cdnScriptId: newCdnScriptId,
     organizationId,
     plan: 'free',
     platformSiteId,
