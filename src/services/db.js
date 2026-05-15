@@ -3180,29 +3180,7 @@ export async function getBannerCustomization(db, siteId) {
       .prepare('SELECT * FROM BannerCustomization WHERE siteId = ?1')
       .bind(siteId)
       .first();
-    if (result) {
-      let parsedTrans = null;
-      try { parsedTrans = typeof result.translations === 'string' ? JSON.parse(result.translations) : result.translations; } catch (_) {}
-      console.log('[db][getBannerCustomization] siteId:', siteId);
-      console.log('[db][getBannerCustomization] language (DB):', result.language);
-      console.log('[db][getBannerCustomization] contentEditedFromWebapp:', result.contentEditedFromWebapp);
-      console.log('[db][getBannerCustomization] translations.en keys:', parsedTrans?.en ? Object.keys(parsedTrans.en) : 'null');
-      console.log('[db][getBannerCustomization] translations.en (text fields):', parsedTrans?.en ? {
-        title: parsedTrans.en.title,
-        acceptAll: parsedTrans.en.acceptAll,
-        rejectAll: parsedTrans.en.rejectAll,
-        customise: parsedTrans.en.customise,
-        saveMyPreferences: parsedTrans.en.saveMyPreferences,
-        cookiePreferences: parsedTrans.en.cookiePreferences,
-        essential: parsedTrans.en.essential,
-        analytics: parsedTrans.en.analytics,
-        marketing: parsedTrans.en.marketing,
-        preferences: parsedTrans.en.preferences,
-        languageSelected: parsedTrans.en.languageSelected,
-      } : 'null');
-    } else {
-      console.log('[db][getBannerCustomization] siteId:', siteId, '→ no row found');
-    }
+    // result is returned below
     return result || null;
   } catch (error) {
     console.error('[db] Error getting banner customization:', error);
@@ -3343,25 +3321,6 @@ export async function saveBannerCustomization(db, siteId, customization) {
     const now = new Date().toISOString();
     const id = `banner-custom-${siteId}`;
 
-    let _parsedTrans = null;
-    try { _parsedTrans = customization.translations != null ? (typeof customization.translations === 'string' ? JSON.parse(customization.translations) : customization.translations) : null; } catch (_) {}
-    console.log('[db][saveBannerCustomization] siteId:', siteId);
-    console.log('[db][saveBannerCustomization] language:', customization.language);
-    console.log('[db][saveBannerCustomization] contentEditedFromWebapp:', customization.contentEditedFromWebapp);
-    console.log('[db][saveBannerCustomization] translations.en (text fields):', _parsedTrans?.en ? {
-      title: _parsedTrans.en.title,
-      acceptAll: _parsedTrans.en.acceptAll,
-      rejectAll: _parsedTrans.en.rejectAll,
-      customise: _parsedTrans.en.customise,
-      saveMyPreferences: _parsedTrans.en.saveMyPreferences,
-      cookiePreferences: _parsedTrans.en.cookiePreferences,
-      essential: _parsedTrans.en.essential,
-      analytics: _parsedTrans.en.analytics,
-      marketing: _parsedTrans.en.marketing,
-      preferences: _parsedTrans.en.preferences,
-      languageSelected: _parsedTrans.en.languageSelected,
-    } : 'null/missing');
-    console.log('[db][saveBannerCustomization] translations.config:', _parsedTrans?.config || 'null/missing');
 
     const translationsJson = customization.translations != null
       ? (typeof customization.translations === 'string' ? customization.translations : JSON.stringify(customization.translations))

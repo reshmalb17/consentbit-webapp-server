@@ -77,23 +77,7 @@ export async function handleBannerCustomization(request, env) {
       }
       const customization = row ? { ...row, translations } : null;
 
-      if (customization) {
-        console.log('[BannerCustomization][GET] siteId:', siteId);
-        console.log('[BannerCustomization][GET] language (DB):', customization.language);
-        console.log('[BannerCustomization][GET] contentEditedFromWebapp:', customization.contentEditedFromWebapp);
-        console.log('[BannerCustomization][GET] translations.en (text fields):', translations?.en ? {
-          title: translations.en.title,
-          acceptAll: translations.en.acceptAll,
-          rejectAll: translations.en.rejectAll,
-          customise: translations.en.customise,
-          saveMyPreferences: translations.en.saveMyPreferences,
-          essential: translations.en.essential,
-          analytics: translations.en.analytics,
-          marketing: translations.en.marketing,
-          preferences: translations.en.preferences,
-          languageSelected: translations.en.languageSelected,
-        } : 'null/missing');
-      }
+      // customization returned below
 
       // Fetch Site flags so callers can distinguish new-free Webflow users from legacy migrated users
       let siteFlags = { platform: null, isLegacy: 0, bannerType: 'gdpr', regionMode: 'gdpr', webflowScriptId: null, platformSiteId: null };
@@ -192,23 +176,6 @@ export async function handleBannerCustomization(request, env) {
     // compliance: ['gdpr'], ['us'], ['gdpr','us'] — from Webflow Designer App publish
     const compliance = Array.isArray(body?.compliance) && body.compliance.length ? body.compliance : null;
 
-    let _postTrans = null;
-    try { _postTrans = customization?.translations ? (typeof customization.translations === 'string' ? JSON.parse(customization.translations) : customization.translations) : null; } catch (_) {}
-    console.log('[BannerCustomization][POST] received siteId:', siteId, '| wfSiteId:', wfSiteId, '| skipScriptSwap:', skipScriptSwap);
-    console.log('[BannerCustomization][POST] customization.language:', customization?.language);
-    console.log('[BannerCustomization][POST] customization.contentEditedFromWebapp:', customization?.contentEditedFromWebapp);
-    console.log('[BannerCustomization][POST] translations.en (text fields):', _postTrans?.en ? {
-      title: _postTrans.en.title,
-      acceptAll: _postTrans.en.acceptAll,
-      rejectAll: _postTrans.en.rejectAll,
-      customise: _postTrans.en.customise,
-      saveMyPreferences: _postTrans.en.saveMyPreferences,
-      essential: _postTrans.en.essential,
-      analytics: _postTrans.en.analytics,
-      marketing: _postTrans.en.marketing,
-      preferences: _postTrans.en.preferences,
-      languageSelected: _postTrans.en.languageSelected,
-    } : 'null/missing');
 
     // If siteId provided but doesn't exist in D1, resolve via wfSiteId or platformSiteId
     if (siteId) {
@@ -232,7 +199,6 @@ export async function handleBannerCustomization(request, env) {
         const byPlatform = await db.prepare('SELECT id FROM Site WHERE platformSiteId = ?1 LIMIT 1').bind(wfSiteId).first();
         if (byPlatform) {
           siteId = byPlatform.id;
-          console.log('[BannerCustomization][POST] resolved siteId via platformSiteId lookup:', siteId);
         }
       } catch (_) {}
     }
@@ -247,7 +213,6 @@ export async function handleBannerCustomization(request, env) {
             const siteExists = await db.prepare('SELECT id FROM Site WHERE id = ?1 LIMIT 1').bind(kvEntry.webappSiteId).first();
             if (siteExists) {
               siteId = kvEntry.webappSiteId;
-              console.log('[BannerCustomization][POST] resolved siteId via KV webappSiteId:', siteId);
             }
           }
         }
@@ -298,7 +263,6 @@ export async function handleBannerCustomization(request, env) {
           ? 'iab'
           : (hasUs && !hasGdpr ? 'ccpa' : 'gdpr');
         const newRegionMode = hasUs && hasGdpr ? 'both' : hasUs ? 'ccpa' : 'gdpr';
-        console.log('[BannerCustomization][POST] compliance:', compliance, 'iab_enabled (from translations.en):', iabEnabledField, 'currentBannerType:', currentBannerType, '→ banner_type:', newBannerType, 'region_mode:', newRegionMode);
         try {
           await db.prepare('UPDATE Site SET banner_type = ?1, region_mode = ?2, updatedAt = ?3 WHERE id = ?4')
             .bind(newBannerType, newRegionMode, new Date().toISOString(), siteId).run();
@@ -313,7 +277,6 @@ export async function handleBannerCustomization(request, env) {
         const siteRow = await db.prepare('SELECT platformSiteId, cdnScriptId, webflowScriptId, embedScriptUrl, banner_type FROM Site WHERE id = ?1').bind(siteId).first();
         // Fall back to wfSiteId from request body if platformSiteId is not yet stamped in DB.
         const webflowSiteId = siteRow?.platformSiteId ?? wfSiteId ?? null;
-        console.log('[BannerCustomization][POST] webflowSiteId resolved:', webflowSiteId, '| platformSiteId in DB:', siteRow?.platformSiteId, '| wfSiteId from request:', wfSiteId);
 
         if (!webflowSiteId) {
           console.warn('[BannerCustomization][POST] No webflowSiteId — skipping KV sync and script injection');
@@ -403,13 +366,10 @@ export async function handleBannerCustomization(request, env) {
         // ── Ensure CDN script is injected into Webflow head on every publish/save ──
         // Runs regardless of skipScriptSwap — always verify the script is in the head.
         // skipScriptSwap only suppresses the post-injection Webflow site publish.
-        console.log('[BannerCustomization][POST] skipScriptSwap:', skipScriptSwap, '| cdnScriptId:', siteRow?.cdnScriptId);
         try {
           const mainKvRaw = await env.WEBFLOW_AUTHENTICATION.get(webflowSiteId);
-          console.log('[BannerCustomization][POST] mainKv found:', !!mainKvRaw, '| webflowSiteId used for lookup:', webflowSiteId);
           if (mainKvRaw) {
             const mainKvEntry = JSON.parse(mainKvRaw);
-            console.log('[BannerCustomization][POST] accessToken present:', !!mainKvEntry.accessToken);
             if (mainKvEntry.accessToken) {
               await ensureScriptInjected(env, db, siteId, webflowSiteId, mainKvEntry, siteRow, { skipPublish: skipScriptSwap });
             } else {
@@ -468,10 +428,7 @@ async function ensureScriptInjected(env, db, siteId, wfSiteId, kvEntry, siteRow,
   const scriptUrl = siteRow?.embedScriptUrl ||
     `https://manager.consentbit.com/consentbit/${cdnScriptId}/script.js`;
 
-  console.log(`${TAG} checking/injecting script`, { wfSiteId, siteId, cdnScriptId, scriptUrl, skipPublish });
-
   const result = await injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG, storedWebflowScriptId);
-  console.log(`${TAG} inject result`, { success: result.success, webflowScriptId: result.webflowScriptId });
 
   if (result.success) {
     let userId = null;
@@ -533,8 +490,6 @@ async function ensureScriptInjected(env, db, siteId, wfSiteId, kvEntry, siteRow,
         if (!publishRes.ok) {
           const err = await publishRes.text();
           console.warn(`${TAG} Webflow publish failed status=${publishRes.status} body=${err}`);
-        } else {
-          console.log(`${TAG} Webflow site published successfully wfSiteId=${wfSiteId}`);
         }
       } catch (publishErr) {
         console.warn(`${TAG} Webflow publish error (non-fatal):`, publishErr?.message || publishErr);

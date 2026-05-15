@@ -100,6 +100,9 @@ export function handleOptions(request, env) {
     '/api/banner-customization',
     '/api/licenses/activate-license',
     '/api/licenses/check-domain-script',
+    // Legacy aliases without /api/ prefix (backwards-compat for older bundles)
+    '/licenses/activate-license',
+    '/licenses/check-domain-script',
   ]);
 
   const isPublic = PUBLIC_PATHS.has(url.pathname);
