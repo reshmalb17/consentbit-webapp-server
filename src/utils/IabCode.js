@@ -264,7 +264,7 @@ function injectStyles() {
 .cb-switch-sm input[type="checkbox"]:checked::before{transform:translateX(16px)}
 .cb-switch-sm input[type="checkbox"]:disabled{cursor:not-allowed}
 .cb-switch-sm input[type="checkbox"]:disabled:checked{opacity:.7}
-.cb-footer-wrapper{border-top:1px solid #f4f4f4;background-color:\${s.bannerBg};flex-shrink:0}
+.cb-footer-wrapper{border-top:1px solid #f4f4f4;flex-shrink:0}
 .cb-footer-shadow{display:block;height:20px;margin-top:-20px;background:linear-gradient(180deg,rgba(255,255,255,0) 0%,\${s.bannerBg} 100%)}
 .cb-prefrence-btn-wrapper{padding:14px 22px;display:flex;gap:10px;justify-content:\${s.textAlign === 'center' ? 'center' : s.textAlign === 'right' ? 'flex-start' : 'flex-end'};flex-wrap:wrap}
 .cb-btn{padding:9px 20px;border-radius:\${brBtn};font-size:13px;font-weight:\${s.fontWeight};cursor:pointer;transition:opacity .2s;border:2px solid;white-space:nowrap}
