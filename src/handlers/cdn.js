@@ -355,6 +355,8 @@ async function _handleCDNScript(request, env, url) {
       textAlign = 'left';
     }
     var footerJustify = textAlign === 'center' ? 'center' : textAlign === 'right' ? 'flex-end' : 'flex-start';
+    var closeButtonEnabled = ((configTrans.closeButtonEnabled != null ? configTrans.closeButtonEnabled : enTrans.closeButtonEnabled) === '1');
+    var boxPadding = closeButtonEnabled ? '28px 20px 20px 20px' : '20px';
     var fontFamilyCss =
       fontName && String(fontName).length
         ? "'" + String(fontName).replace(/'/g, '') + "',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif"
@@ -410,7 +412,7 @@ async function _handleCDNScript(request, env, url) {
         "color:" + textColor + ";" +
         "position:fixed!important;" +
         positionStyles +
-        "padding:" + (layoutVisual === 'banner' ? "16px 36px" : "16px") + "!important;" +
+        "padding:" + (layoutVisual === 'banner' ? "16px 36px" : boxPadding) + "!important;" +
         "border:1px solid #e2e8f0;" +
         initialRadius +
         "box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);" +
@@ -429,10 +431,24 @@ async function _handleCDNScript(request, env, url) {
         "min-height:0;" +
         "overflow-y:auto;" +
       "}" +
+      "#cb-initial-banner.cb-banner #cb-close-initial-btn," +
+      "#cb-initial-banner.cb-banner [consentbit='close']{" +
+        "position:absolute!important;" +
+        "top:8px!important;" +
+        "right:20px!important;" +
+        "width:10px!important;" +
+        "height:10px!important;" +
+        "cursor:pointer!important;" +
+        "background:transparent!important;" +
+        "border:none!important;" +
+        "padding:0!important;" +
+        "z-index:10!important;" +
+        "display:" + (closeButtonEnabled ? "block" : "none") + "!important;" +
+      "}" +
       "#cb-preferences-banner.cb-banner{" +
-        "width:540px;" +
-        "max-width:92vw;" +
-        "max-height:min(85vh,580px);" +
+        "width:600px;" +
+        "max-width:94vw;" +
+        "max-height:min(88vh,640px);" +
         "min-height:0;" +
         "overflow:hidden;" +
         "background-color:" + bgColor + ";" +
@@ -441,7 +457,7 @@ async function _handleCDNScript(request, env, url) {
         "top:50%;" +
         "left:50%;" +
         "transform:translate(-50%,-50%);" +
-        "padding:20px;" +
+        "padding:28px;" +
         "border:1px solid #e2e8f0;" +
         "border-radius:" + bannerRadius + ";" +
         "box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);" +
@@ -462,7 +478,7 @@ async function _handleCDNScript(request, env, url) {
         "margin:0 0 8px;" +
         "font-size:16px!important;" +
         "line-height:1.4!important;" +
-        "font-weight:" + fontWeightStr + ";" +
+        "font-weight:600;" +
         "color:" + headingColor + ";" +
         "text-align:" + textAlign + "!important;" +
         "width:100%;" +
@@ -470,7 +486,7 @@ async function _handleCDNScript(request, env, url) {
       /* Explicit overrides for both banners — higher specificity to beat static base rules. */
       "#cb-initial-banner.cb-banner h3," +
       "#cb-preferences-banner.cb-banner h3{" +
-        "font-weight:" + fontWeightStr + "!important;" +
+        "font-weight:600!important;" +
         "color:" + headingColor + ";" +
         "text-align:" + textAlign + "!important;" +
         "width:100%;" +
