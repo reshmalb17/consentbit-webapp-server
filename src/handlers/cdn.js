@@ -279,13 +279,13 @@ async function _handleCDNScript(request, env, url) {
     const bgColor = customization.backgroundColor || '#ffffff';
     const textColor = customization.textColor || '#334155';
     const headingColor = customization.headingColor || '#0f172a';
-    var _rawRadius = customization.bannerBorderRadius || '0.375rem';
+    var _rawRadius = customization.bannerBorderRadius || '1.25rem';
     // Cap border radius at 25px to prevent over-rounding.
-    var _radiusPx = _rawRadius.endsWith('rem') ? Math.round(parseFloat(_rawRadius) * 16) : Math.round(parseFloat(_rawRadius) || 6);
+    var _radiusPx = _rawRadius.endsWith('rem') ? Math.round(parseFloat(_rawRadius) * 16) : Math.round(parseFloat(_rawRadius) || 20);
     if (_radiusPx > 25) { _rawRadius = '1.5625rem'; }
     const bannerRadius = _rawRadius;
-    var _rawBtnRadius = customization.buttonBorderRadius || '0.375rem';
-    var _btnRadiusPx = _rawBtnRadius.endsWith('rem') ? Math.round(parseFloat(_rawBtnRadius) * 16) : Math.round(parseFloat(_rawBtnRadius) || 6);
+    var _rawBtnRadius = customization.buttonBorderRadius || '0.3125rem';
+    var _btnRadiusPx = _rawBtnRadius.endsWith('rem') ? Math.round(parseFloat(_rawBtnRadius) * 16) : Math.round(parseFloat(_rawBtnRadius) || 5);
     if (_btnRadiusPx > 25) { _rawBtnRadius = '1.5625rem'; }
     const buttonRadius = _rawBtnRadius;
     var acceptBg = customization.acceptButtonBg || '#007aff';
@@ -293,9 +293,9 @@ async function _handleCDNScript(request, env, url) {
     var rejectBg = acceptBg;
     var rejectTx = acceptTx;
     var custBg = customization.customiseButtonBg || '#ffffff';
-    var custTx = customization.customiseButtonText || '#334155';
+    var custTx = customization.customiseButtonText || '#0284c7';
     var saveBg = customization.saveButtonBg || custBg;
-    var saveTx = customization.saveButtonText || custTx;
+    var saveTx = customization.saveButtonText || '#0284c7';
 
     /** Typography — read from translations.config (Option 2) with translations.en as backward-compat fallback. */
     var configTrans = {};
@@ -354,6 +354,7 @@ async function _handleCDNScript(request, env, url) {
     if (textAlign !== 'center' && textAlign !== 'right') {
       textAlign = 'left';
     }
+    var footerJustify = textAlign === 'center' ? 'center' : textAlign === 'right' ? 'flex-end' : 'flex-start';
     var fontFamilyCss =
       fontName && String(fontName).length
         ? "'" + String(fontName).replace(/'/g, '') + "',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif"
@@ -381,40 +382,40 @@ async function _handleCDNScript(request, env, url) {
     var baseWidth = baseWidthPx + 'px';
     var maxWidth = baseWidthPx + 'px';
     var initialSize =
-      'width:' + baseWidth + ';min-width:280px;max-width:min(' + maxWidth + ',96vw);max-height:min(80vh,420px);min-height:0;overflow:hidden;';
-    var initialRadius = 'border-radius:' + bannerRadius + ';';
+      'width:' + baseWidth + '!important;min-width:280px;max-width:min(' + maxWidth + ',96vw)!important;max-height:min(80vh,420px);min-height:0;overflow:hidden;';
+    var initialRadius = 'border-radius:' + bannerRadius + '!important;';
     if (layoutVisual === 'banner') {
-      initialSize = 'width:100%;max-width:none;';
-      positionStyles = 'bottom:0;left:0;right:0;transform:none;';
-      initialRadius = 'border-radius:' + bannerRadius + ';';
+      initialSize = 'width:auto!important;max-width:none!important;';
+      positionStyles = 'bottom:16px!important;left:48px!important;right:48px!important;transform:none!important;';
+      initialRadius = 'border-radius:' + bannerRadius + '!important;';
     } else if (layoutVisual === 'bottom-center') {
       initialSize =
-        'width:' + baseWidth + ';min-width:280px;max-width:min(' + maxWidth + ',96vw);max-height:min(80vh,420px);min-height:0;overflow:hidden;';
-      positionStyles = 'bottom:32px;left:50%;transform:translateX(-50%);';
-      initialRadius = 'border-radius:' + bannerRadius + ';';
+        'width:' + baseWidth + '!important;min-width:280px;max-width:min(' + maxWidth + ',96vw)!important;max-height:min(80vh,420px);min-height:0;overflow:hidden;';
+      positionStyles = 'bottom:32px!important;left:50%!important;transform:translateX(-50%)!important;';
+      initialRadius = 'border-radius:' + bannerRadius + '!important;';
     } else {
       if (position === 'bottom-right') {
-        positionStyles = 'bottom:32px;right:32px;left:auto;transform:none;';
+        positionStyles = 'bottom:32px!important;right:32px!important;left:auto!important;transform:none!important;';
       } else if (position === 'bottom-center' || position === 'bottom') {
-        positionStyles = 'bottom:32px;left:50%;transform:translateX(-50%);';
+        positionStyles = 'bottom:32px!important;left:50%!important;transform:translateX(-50%)!important;';
       } else {
-        positionStyles = 'bottom:32px;left:32px;right:auto;transform:none;';
+        positionStyles = 'bottom:32px!important;left:32px!important;right:auto!important;transform:none!important;';
       }
     }
 
     customStyles = 
       "#cb-initial-banner.cb-banner{" +
         initialSize +
-        "background-color:" + bgColor + ";" +
+        "background-color:" + bgColor + "!important;" +
         "color:" + textColor + ";" +
-        "position:fixed;" +
+        "position:fixed!important;" +
         positionStyles +
-        "padding:16px;" +
+        "padding:" + (layoutVisual === 'banner' ? "16px 36px" : "16px") + "!important;" +
         "border:1px solid #e2e8f0;" +
         initialRadius +
         "box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);" +
         "z-index:2147483647;" +
-        "display:inline-flex;" +
+        "display:flex!important;" +
         "flex-direction:column;" +
         "align-items:stretch;" +
         "font-family:" + fontFamilyCss + ";" +
@@ -463,14 +464,16 @@ async function _handleCDNScript(request, env, url) {
         "line-height:1.4!important;" +
         "font-weight:" + fontWeightStr + ";" +
         "color:" + headingColor + ";" +
-        "text-align:" + textAlign + ";" +
+        "text-align:" + textAlign + "!important;" +
+        "width:100%;" +
       "}" +
       /* Explicit overrides for both banners — higher specificity to beat static base rules. */
       "#cb-initial-banner.cb-banner h3," +
       "#cb-preferences-banner.cb-banner h3{" +
         "font-weight:" + fontWeightStr + "!important;" +
         "color:" + headingColor + ";" +
-        "text-align:" + textAlign + ";" +
+        "text-align:" + textAlign + "!important;" +
+        "width:100%;" +
       "}" +
       ".cb-gdpr-cat-label{" +
         "color:" + headingColor + ";" +
@@ -480,15 +483,17 @@ async function _handleCDNScript(request, env, url) {
         "font-size:14px!important;" +
         "line-height:1.5!important;" +
         "color:" + textColor + ";" +
-        "text-align:" + textAlign + ";" +
+        "text-align:" + textAlign + "!important;" +
+        "width:100%;" +
       "}" +
       /* Static base uses `#cb-initial-banner… .cb-banner-body > p` — must match dashboard text color + alignment. */
       "#cb-initial-banner.cb-banner .cb-banner-body > p," +
       "#cb-preferences-banner.cb-banner .cb-banner-body > p," +
       "#cb-preferences-banner.cb-banner .cb-gdpr-cat-desc{" +
         "color:" + textColor + ";" +
-        "text-align:" + textAlign + ";" +
+        "text-align:" + textAlign + "!important;" +
         "opacity:0.92;" +
+        "width:100%;" +
       "}" +
       ".cb-banner button{" +
         "padding:6px 12px;" +
@@ -540,7 +545,7 @@ async function _handleCDNScript(request, env, url) {
         "display:flex;" +
         "flex-wrap:nowrap;" +
         "gap:8px;" +
-        "justify-content:flex-end;" +
+        "justify-content:" + footerJustify + "!important;" +
         "flex-shrink:0;" +
       "}" +
       "#cb-initial-banner.cb-banner .cb-banner-footer button{" +
@@ -551,8 +556,23 @@ async function _handleCDNScript(request, env, url) {
         "text-overflow:clip;" +
       "}" +
       (layoutVisual === 'banner'
-        ? "#cb-initial-banner.cb-banner .cb-banner-footer{flex-wrap:nowrap;justify-content:flex-end;}" +
-          "#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto;width:auto;min-width:" + perBtnPx + "px;max-width:none;white-space:nowrap;overflow:visible;text-overflow:clip;}"
+        ? /* Column layout: heading, text, buttons all share same container — alignment works via text-align + justify-content */
+          "#cb-initial-banner.cb-banner{" +
+            "flex-direction:column!important;align-items:stretch!important;" +
+          "}" +
+          "#cb-initial-banner.cb-banner .cb-banner-body{" +
+            "flex:1 1 auto!important;min-width:0!important;overflow-y:visible!important;padding:0!important;margin:0!important;" +
+          "}" +
+          "#cb-initial-banner.cb-banner .cb-banner-footer{" +
+            "position:relative!important;flex:0 0 auto!important;flex-wrap:nowrap!important;justify-content:" + footerJustify + "!important;padding:0!important;margin:0!important;" +
+          "}" +
+          "#cb-initial-banner.cb-banner .cb-banner-footer button{" +
+            "flex:0 0 auto!important;width:auto!important;min-width:" + perBtnPx + "px!important;max-width:none!important;white-space:nowrap!important;overflow:visible!important;text-overflow:clip!important;" +
+          "}" +
+          /* Mobile: stretch edge-to-edge */
+          "@media(max-width:660px){" +
+            "#cb-initial-banner.cb-banner{left:0!important;right:0!important;}" +
+          "}"
         : "") +
       "#cb-initial-banner.cb-banner #cb-preferences-btn{" +
         "background:" + custBg + "!important;" +
@@ -688,26 +708,22 @@ async function _handleCDNScript(request, env, url) {
           headingColor: customization.headingColor || '#0f172a',
           acceptButtonBg: customization.acceptButtonBg || '#007aff',
           acceptButtonText: customization.acceptButtonText || '#ffffff',
+          rejectButtonBg: customization.rejectButtonBg || customization.acceptButtonBg || '#007aff',
+          rejectButtonText: customization.rejectButtonText || customization.acceptButtonText || '#ffffff',
           customiseButtonBg: customization.customiseButtonBg || '#ffffff',
-          customiseButtonText: customization.customiseButtonText || '#334155',
+          customiseButtonText: customization.customiseButtonText || '#0284c7',
+          saveButtonBg: customization.saveButtonBg || '#ffffff',
+          saveButtonText: customization.saveButtonText || '#0284c7',
           bannerEntranceAnimation: (() => { const v = String((configTrans.bannerEntranceAnimation != null ? configTrans.bannerEntranceAnimation : (enTrans && enTrans.bannerEntranceAnimation)) || 'fade-in'); return v === 'zoom' ? 'zoom-in' : v; })(),
           bannerFontWeight: String((configTrans.bannerFontWeight != null ? configTrans.bannerFontWeight : (enTrans && enTrans.bannerFontWeight)) || '600'),
-          bannerBorderRadius: customization.bannerBorderRadius || '0.375rem',
+          bannerBorderRadius: customization.bannerBorderRadius || '1.25rem',
+          buttonBorderRadius: customization.buttonBorderRadius || '0.3125rem',
           textAlign: (configTrans.bannerTextAlign != null ? configTrans.bannerTextAlign : enTrans.bannerTextAlign) || 'left',
           showBannerLogo: customization.showBannerLogo != null ? customization.showBannerLogo !== 0 && customization.showBannerLogo !== false : true,
           bannerLogoPosition: customization.bannerLogoPosition || 'left',
-          acceptButtonBg: customization.acceptButtonBg || '#007aff',
-          acceptButtonText: customization.acceptButtonText || '#ffffff',
-          rejectButtonBg: customization.acceptButtonBg || '#007aff',
-          rejectButtonText: customization.acceptButtonText || '#ffffff',
-          customiseButtonBg: customization.customiseButtonBg || '#ffffff',
-          customiseButtonText: customization.customiseButtonText || '#334155',
-          saveButtonBg: customization.saveButtonBg || '#ffffff',
-          saveButtonText: customization.saveButtonText || '#334155',
-          buttonBorderRadius: customization.buttonBorderRadius || '0.375rem',
-          font: String((configTrans.bannerFontFamily != null ? configTrans.bannerFontFamily : (enTrans && enTrans.bannerFontFamily)) || customization.font || 'Manrope'),
+          font: String((configTrans.bannerFontFamily != null ? configTrans.bannerFontFamily : (enTrans && enTrans.bannerFontFamily)) || customization.font || 'Inter'),
           fontWeight: String((configTrans.bannerFontWeight != null ? configTrans.bannerFontWeight : (enTrans && enTrans.bannerFontWeight)) || customization.fontWeight || 'Regular'),
-          fontSize: Number((configTrans.bannerFontSize != null ? configTrans.bannerFontSize : (enTrans && enTrans.bannerFontSize)) || customization.fontSize || 16),
+          fontSize: Number((configTrans.bannerFontSize != null ? configTrans.bannerFontSize : (enTrans && enTrans.bannerFontSize)) || customization.fontSize || 14),
           textAlignment: String((configTrans.bannerTextAlign != null ? configTrans.bannerTextAlign : (enTrans && enTrans.bannerTextAlign)) || customization.textAlignment || 'left'),
           bannerBg2: String((configTrans.bannerBg2 != null ? configTrans.bannerBg2 : (enTrans && enTrans.bannerBg2)) || customization.bannerBg2 || '#798EFF'),
           stopScroll: customization.stopScroll === 1 || customization.stopScroll === true,

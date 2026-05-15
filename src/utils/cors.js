@@ -98,6 +98,7 @@ export function handleOptions(request, env) {
     '/api/v2/webflow-free-register',
     '/api/payment/subscription',
     '/api/banner-customization',
+    '/api/licenses/activate-license',
   ]);
 
   const isPublic = PUBLIC_PATHS.has(url.pathname);
