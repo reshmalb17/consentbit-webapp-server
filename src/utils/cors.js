@@ -99,6 +99,7 @@ export function handleOptions(request, env) {
     '/api/payment/subscription',
     '/api/banner-customization',
     '/api/licenses/activate-license',
+    '/api/licenses/check-domain-script',
   ]);
 
   const isPublic = PUBLIC_PATHS.has(url.pathname);
