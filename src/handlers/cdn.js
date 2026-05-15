@@ -494,6 +494,9 @@ async function _handleCDNScript(request, env, url) {
       ".cb-gdpr-cat-label{" +
         "color:" + headingColor + ";" +
       "}" +
+      "#cb-preferences-banner.cb-banner .cb-gdpr-cat-label ~ div > span{" +
+        "color:" + textColor + "!important;" +
+      "}" +
       ".cb-banner p{" +
         "margin:0 0 12px;" +
         "font-size:14px!important;" +

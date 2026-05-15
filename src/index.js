@@ -24,6 +24,7 @@ import { reportStripeMeteredUsage } from './handlers/reportStripeUsage.js';
 import { handleLicenses } from './handlers/licenses.js';
 import { handleActivateLicense } from './handlers/activateLicense.js';
 import { handleActivateLicenseWebflow } from './handlers/activateLicenseWebflow.js';
+import { handleCheckDomainScript } from './handlers/checkDomainScript.js';
 import { handleCancelSubscription } from './handlers/cancelSubscription.js';
 import { handleUpgradeSubscription } from './handlers/updateSubscription.js';
 import { handleDebugSchema } from './handlers/debugSchema.js';
@@ -118,6 +119,7 @@ const PUBLIC_PATHS = new Set([
   '/api/payment/subscription',
   '/api/banner-customization',
   '/api/licenses/activate-license',
+  '/api/licenses/check-domain-script',
 ]);
 
 /**
@@ -271,6 +273,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleActivateLicense(request, env); break;
     case '/api/licenses/activate-license':
       response = await handleActivateLicenseWebflow(request, env); break;
+    case '/api/licenses/check-domain-script':
+      response = await handleCheckDomainScript(request, env); break;
     case '/api/subscriptions/cancel':
       response = await handleCancelSubscription(request, env); break;
     case '/api/subscriptions/upgrade':
