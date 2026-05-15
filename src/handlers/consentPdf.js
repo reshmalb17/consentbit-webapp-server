@@ -172,31 +172,15 @@ export async function handleConsentPdf(request, env) {
   const token = url.searchParams.get('token');
   if (!siteId || !consentId) return new Response('siteId and consentId required', { status: 400 });
 
-  let userId = null;
-  if (token) {
-    const valid = await verifyDownloadToken(env.JWT_SECRET, token, siteId, consentId);
-    if (!valid) return new Response('Link expired or invalid', { status: 401 });
-  } else {
-    const sid = getSessionIdFromCookie(request);
-    if (!sid) return new Response('Unauthorized', { status: 401 });
-    const session = await getSessionById(db, sid).catch(() => null);
-    if (!session) return new Response('Unauthorized', { status: 401 });
-    userId = session.userId ?? session.user_id;
-  }
-
-  const site = await (userId
-    ? db.prepare(
-        `SELECT s.id, s.domain
-         FROM Site s
-         INNER JOIN Organization o ON o.id = s.organizationId
-         INNER JOIN User u ON u.id = o.ownerUserId
-         WHERE s.id = ?1 AND u.id = ?2 AND (s.isLegacy = 0 OR s.isLegacy IS NULL)`,
-      ).bind(siteId, userId).first()
-    : db.prepare(
-        `SELECT s.id, s.domain FROM Site s
-         WHERE s.id = ?1 AND (s.isLegacy = 0 OR s.isLegacy IS NULL)`,
-      ).bind(siteId).first()
-  ).catch(() => null);
+  // No session or token check — open endpoint, scoped only by siteId + consentId.
+  const site = await db
+    .prepare(
+      `SELECT s.id, s.domain FROM Site s
+       WHERE s.id = ?1 AND (s.isLegacy = 0 OR s.isLegacy IS NULL)`,
+    )
+    .bind(siteId)
+    .first()
+    .catch(() => null);
 
   if (!site) return new Response('Site not found', { status: 404 });
 

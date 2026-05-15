@@ -148,30 +148,22 @@ export async function handleLegacyConsentLogsFramer(request, env) {
 export async function handleLegacyConsentFramerRaw(request, env) {
   const db = env.CONSENT_WEBAPP;
 
-  const sid = getSessionIdFromCookie(request);
-  if (!sid) return Response.json({ error: 'Not authenticated' }, { status: 401 });
-
-  const session = await getSessionById(db, sid).catch(() => null);
-  if (!session) return Response.json({ error: 'Not authenticated' }, { status: 401 });
-
-  const userId = session.userId ?? session.user_id;
   const url = new URL(request.url);
   const siteIdParam = url.searchParams.get('siteId');
   if (!siteIdParam) return Response.json({ error: 'siteId required' }, { status: 400 });
 
+  // No session check — open endpoint, scoped only by the caller's siteId.
   const site = await db
     .prepare(
-      `SELECT s.id, s.name, s.domain
-       FROM Site s
-       INNER JOIN Organization o ON o.id = s.organizationId
-       INNER JOIN User u ON u.id = o.ownerUserId
-       WHERE (s.id = ?1 OR s.platformSiteId = ?1) AND u.id = ?2`,
+      `SELECT id, name, domain FROM Site
+       WHERE id = ?1 OR platformSiteId = ?1
+       LIMIT 1`,
     )
-    .bind(siteIdParam, userId)
+    .bind(siteIdParam)
     .first()
     .catch(() => null);
 
-  if (!site) return Response.json({ error: 'Site not found or access denied' }, { status: 404 });
+  if (!site) return Response.json({ error: 'Site not found' }, { status: 404 });
 
   const siteId = site.id;
   const clientId = site.domain || '';

@@ -32,13 +32,6 @@ function yesNo(val) {
 export async function handleConsentCsv(request, env) {
   const db = env.CONSENT_WEBAPP;
 
-  const sid = getSessionIdFromCookie(request);
-  if (!sid) return new Response('Unauthorized', { status: 401 });
-
-  const session = await getSessionById(db, sid).catch(() => null);
-  if (!session) return new Response('Unauthorized', { status: 401 });
-  const userId = session.userId ?? session.user_id;
-
   const url = new URL(request.url);
   const siteId = url.searchParams.get('siteId');
   if (!siteId) return new Response('siteId required', { status: 400 });
@@ -46,15 +39,13 @@ export async function handleConsentCsv(request, env) {
   const year = url.searchParams.get('year');
   const month = url.searchParams.get('month');
 
+  // No session check — open endpoint, scoped only by siteId.
   const site = await db
     .prepare(
-      `SELECT s.id, s.domain
-       FROM Site s
-       INNER JOIN Organization o ON o.id = s.organizationId
-       INNER JOIN User u ON u.id = o.ownerUserId
-       WHERE s.id = ?1 AND u.id = ?2 AND (s.isLegacy = 0 OR s.isLegacy IS NULL)`,
+      `SELECT s.id, s.domain FROM Site s
+       WHERE s.id = ?1 AND (s.isLegacy = 0 OR s.isLegacy IS NULL)`,
     )
-    .bind(siteId, userId)
+    .bind(siteId)
     .first()
     .catch(() => null);
 
