@@ -183,7 +183,7 @@ export async function handleAuthDashboardInit(request, env) {
     return {
       ...site,
       scriptUrl,
-      licenseKey: pickSiteLicenseKey(site),
+      licenseKey: sub?.licenseKey ?? sub?.licensekey ?? null,
       planId: sitePlanId,
       plan_id: sitePlanId,
       subscriptionId: sub?.id ?? null,
@@ -197,12 +197,54 @@ export async function handleAuthDashboardInit(request, env) {
     };
   });
 
+  // Fetch subscriptions with a licenseKey but no site assigned yet (unactivated keys)
+  let unassignedRows = [];
+  try {
+    const placeholders = allOrgIds.map((_, i) => `?${i + 1}`).join(',');
+    const { results: unassignedSubs } = await db
+      .prepare(
+        `SELECT * FROM Subscription
+         WHERE organizationId IN (${placeholders})
+           AND licenseKey IS NOT NULL
+           AND (siteId IS NULL OR siteId = '')
+         ORDER BY createdAt DESC`
+      )
+      .bind(...allOrgIds)
+      .all();
+
+    unassignedRows = (unassignedSubs || []).map(sub => {
+      const planId = (sub.planId ?? sub.planid ?? sub.planType ?? sub.plantype ?? null)?.toLowerCase() ?? null;
+      const interval = sub.interval ?? sub.billing_interval ?? null;
+      return {
+        id: `unassigned_${sub.id}`,
+        _isUnassigned: true,
+        domain: null,
+        name: null,
+        organizationId: sub.organizationId ?? sub.organizationid,
+        verified: 0,
+        createdAt: sub.createdAt ?? sub.createdat,
+        licenseKey: sub.licenseKey ?? sub.licensekey,
+        planId,
+        plan_id: planId,
+        subscriptionId: sub.id,
+        stripeSubscriptionId: sub.stripeSubscriptionId ?? sub.stripesubscriptionid ?? null,
+        subscriptionCurrentPeriodEnd: sub.currentPeriodEnd ?? sub.currentperiodend ?? null,
+        subscriptionCancelAtPeriodEnd: Number(sub.cancelAtPeriodEnd ?? sub.cancelatperiodend ?? 0) === 1 ? 1 : 0,
+        interval,
+        status: sub.status ?? 'active',
+        cookieCount: 0,
+        cookieCategories: 0,
+        pagesScanned: 0,
+      };
+    });
+  } catch (_) { /* non-critical — table may not have these columns yet */ }
+
   return Response.json({
     authenticated: true,
     success: true,
     user: { id: user.id, email: user.email, name: user.name, billingEmail: user.billingEmail ?? null },
     organizations: orgs,
-    sites: sitesWithPlan,
+    sites: [...sitesWithPlan, ...unassignedRows],
     effectivePlanId: effectivePlanId ?? null,
   }, { status: 200 });
 }
