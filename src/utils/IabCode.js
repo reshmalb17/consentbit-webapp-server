@@ -2024,6 +2024,61 @@ function closeModal() {
 function openModal() {
     document.getElementById('cbPreferenceModal').classList.remove('cb-modal-hidden');
 }
+async function postConsentToManager(decision) {
+  try {
+    const siteConfig = window.__CONSENT_SITE__ || {};
+    const siteId = siteConfig.id;
+    if (!siteId) return;
+    const bannerType = String(siteConfig.bannerType || 'gdpr').toLowerCase();
+    const regulation = bannerType === 'ccpa' ? 'ccpa' : 'gdpr';
+    const nowIso = new Date().toISOString();
+    const expDays = (siteConfig.customization && siteConfig.customization.cookieExpirationDays) || 30;
+    const expiresAtIso = new Date(Date.now() + expDays * 24 * 60 * 60 * 1000).toISOString();
+
+    let categories;
+    if (decision && decision.type === 'accept') {
+      categories = { essential: true, analytics: true, preferences: true, marketing: true };
+    } else if (decision && decision.type === 'reject') {
+      categories = { essential: true, analytics: false, preferences: false, marketing: false };
+    } else {
+      const prefs = (decision && decision.preferences && decision.preferences.cookieCategories) || {};
+      const isOn = (k) => !!(prefs[k] && prefs[k].enabled);
+      categories = {
+        essential: true,
+        analytics: isOn('analytics'),
+        preferences: isOn('preferences') || isOn('functional'),
+        marketing: isOn('marketing') || isOn('advertisement'),
+      };
+    }
+
+    const accepted = !!(categories.analytics || categories.preferences || categories.marketing);
+
+    const body = {
+      siteId: siteId,
+      regulation: regulation,
+      bannerType: bannerType,
+      consentMethod: 'banner',
+      status: 'given',
+      expiresAt: expiresAtIso,
+      consent: {
+        accepted: accepted,
+        timestamp: nowIso,
+        categories: categories,
+        expiresAt: expiresAtIso,
+      },
+    };
+
+    await fetch('https://manager.consentbit.com/api/consent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      keepalive: true,
+    });
+  } catch (e) {
+    // non-fatal — never let consent telemetry break the UX
+  }
+}
+
 async function rejectAll() {
   // console.log('[ConsentBit][RejectAll] 🚫 User rejected all — blocking all non-essential scripts');
   if (!window.tcfManager) { return; }
@@ -2031,6 +2086,7 @@ async function rejectAll() {
   window.__cbConsentState = { allDenied: true };
   // console.log('[ConsentBit][RejectAll] __cbConsentState set:', window.__cbConsentState);
   blockNonEssentialScripts();
+  postConsentToManager({ type: 'reject' });
 
     const wrapper = document.querySelector('.main-iab-wrapper');
   if (wrapper) {
@@ -2038,7 +2094,7 @@ async function rejectAll() {
       .forEach(cb => cb.checked = false);
   }
   hideBanner();
-  
+
   closeModal();
 }
 
@@ -2107,6 +2163,7 @@ async function savePreferences() {
  
     // Save through TCF Manager
     await window.tcfManager.saveConsent(preferences);
+    postConsentToManager({ type: 'save', preferences: preferences });
 
     // Set in-memory state so isCategoryAllowed reads it immediately
     window.__cbConsentState = {
@@ -2134,6 +2191,7 @@ async function acceptAll() {
   window.__cbConsentState = { allGranted: true };
   // console.log('[ConsentBit][AcceptAll] __cbConsentState set:', window.__cbConsentState);
   releaseBlockedScripts();
+  postConsentToManager({ type: 'accept' });
  const wrapper = document.querySelector('.main-iab-wrapper');
   if (wrapper) {
     wrapper.querySelectorAll('input[type="checkbox"]:not([disabled])')
