@@ -23,6 +23,7 @@ import { handleStripeWebhook } from './handlers/stripeWebhook.js';
 import { reportStripeMeteredUsage } from './handlers/reportStripeUsage.js';
 import { handleLicenses } from './handlers/licenses.js';
 import { handleActivateLicense } from './handlers/activateLicense.js';
+import { handleActivateLicenseWebflow } from './handlers/activateLicenseWebflow.js';
 import { handleCancelSubscription } from './handlers/cancelSubscription.js';
 import { handleUpgradeSubscription } from './handlers/updateSubscription.js';
 import { handleDebugSchema } from './handlers/debugSchema.js';
@@ -39,6 +40,7 @@ import { handleAdminMigrateSingleSite } from './handlers/adminMigrateSingleSite.
 import { handleAdminMigrateCustomization } from './handlers/adminMigrateCustomization.js';
 import { handleAdminBackfillDescriptions } from './handlers/adminBackfillDescriptions.js';
 import { handleAdminInjectScript } from './handlers/adminInjectScript.js';
+import { handleAdminMigrateFromDashboard } from './handlers/adminMigrateFromDashboard.js';
 import { handleCheckLegacyScript } from './handlers/checkLegacyScript.js';
 import { handleLegacyConsentLogs } from './handlers/legacyConsentLogs.js';
 import { handleLegacyConsentCsv } from './handlers/legacyConsentCsv.js';
@@ -115,6 +117,7 @@ const PUBLIC_PATHS = new Set([
   '/api/v2/webflow-free-register',
   '/api/payment/subscription',
   '/api/banner-customization',
+  '/api/licenses/activate-license',
 ]);
 
 /**
@@ -161,6 +164,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/admin/migrate-customization',
   '/api/admin/backfill-descriptions',
   '/api/admin/inject-script',
+  '/api/admin/migrate-from-dashboard',
   '/api/payment/subscription',
 ]);
 
@@ -265,6 +269,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleLicenses(request, env); break;
     case '/api/licenses/activate':
       response = await handleActivateLicense(request, env); break;
+    case '/api/licenses/activate-license':
+      response = await handleActivateLicenseWebflow(request, env); break;
     case '/api/subscriptions/cancel':
       response = await handleCancelSubscription(request, env); break;
     case '/api/subscriptions/upgrade':
@@ -335,6 +341,9 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     case '/api/admin/inject-script':
       response = await handleAdminInjectScript(request, env); break;
+
+    case '/api/admin/migrate-from-dashboard':
+      response = await handleAdminMigrateFromDashboard(request, env); break;
 
     case '/api/check-legacy-script':
       response = await handleCheckLegacyScript(request, env); break;

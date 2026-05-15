@@ -454,6 +454,15 @@ export async function ensureSchema(db) {
   try {
     await db.prepare(`ALTER TABLE Subscription ADD COLUMN planId TEXT`).run();
   } catch (e) {}
+  try {
+    await db.prepare(`ALTER TABLE Subscription ADD COLUMN migratedSubId TEXT`).run();
+  } catch (e) {}
+  try {
+    await db.prepare(`ALTER TABLE Subscription ADD COLUMN stripeItemId TEXT`).run();
+  } catch (e) {}
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_sub_migratedSubId ON Subscription(migratedSubId)`).run();
+  } catch (e) {}
 
   // Plan: pricing tiers for Upgrade tab (Free, Basic, Essential, Growth)
   await db.prepare(`
