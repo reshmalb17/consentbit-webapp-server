@@ -43,7 +43,6 @@ async function _handleCDNScript(request, env, url) {
   // - Some older installs used Site.id in the script URL instead of cdnScriptId.
   // - Also guards against historical data issues where cdnScriptId was not stable.
   let resolvedSite = site;
-  console.log("[CDN] Resolved site:", resolvedSite);
   if (!resolvedSite) {
     resolvedSite = await db
       .prepare(
@@ -254,15 +253,15 @@ async function _handleCDNScript(request, env, url) {
   // Section labels per language — used to fill in missing labels for existing published data
   // that was saved before buildCustomizationPayload started writing them to translations.en
   const SECTION_LABELS = {
-    en: { essential: 'Essential',    analytics: 'Analytics',   marketing: 'Marketing',      preferences: 'Preferences',  strictlyNecessary: 'Necessary'    },
-    es: { essential: 'Esenciales',   analytics: 'Analíticas',  marketing: 'Marketing',      preferences: 'Preferencias', strictlyNecessary: 'Necesario'    },
-    fr: { essential: 'Essentiels',   analytics: 'Analytiques', marketing: 'Marketing',      preferences: 'Préférences',  strictlyNecessary: 'Nécessaire'   },
-    de: { essential: 'Notwendig',    analytics: 'Analytik',    marketing: 'Marketing',      preferences: 'Einstellungen',strictlyNecessary: 'Notwendig'    },
-    it: { essential: 'Essenziali',   analytics: 'Analitica',   marketing: 'Marketing',      preferences: 'Preferenze',   strictlyNecessary: 'Necessario'   },
-    pt: { essential: 'Essenciais',   analytics: 'Analíticos',  marketing: 'Marketing',      preferences: 'Preferências', strictlyNecessary: 'Necessário'   },
-    sv: { essential: 'Nödvändiga',   analytics: 'Analytik',    marketing: 'Marknadsföring', preferences: 'Inställningar',strictlyNecessary: 'Nödvändigt'   },
-    nl: { essential: 'Essentieel',   analytics: 'Analytics',   marketing: 'Marketing',      preferences: 'Voorkeuren',   strictlyNecessary: 'Noodzakelijk' },
-    pl: { essential: 'Niezbędne',    analytics: 'Analityczne', marketing: 'Marketingowe',   preferences: 'Preferencje',  strictlyNecessary: 'Niezbędne'    },
+    en: { essential: 'Strictly Necessary', analytics: 'Analytics',   marketing: 'Marketing',      preferences: 'Preferences'  },
+    es: { essential: 'Estrictamente Necesarias', analytics: 'Analíticas',  marketing: 'Marketing',      preferences: 'Preferencias' },
+    fr: { essential: 'Strictement Nécessaires',  analytics: 'Analytiques', marketing: 'Marketing',      preferences: 'Préférences'  },
+    de: { essential: 'Unbedingt Notwendig',      analytics: 'Analytik',    marketing: 'Marketing',      preferences: 'Einstellungen'},
+    it: { essential: 'Strettamente Necessari',   analytics: 'Analitica',   marketing: 'Marketing',      preferences: 'Preferenze'   },
+    pt: { essential: 'Estritamente Necessários', analytics: 'Analíticos',  marketing: 'Marketing',      preferences: 'Preferências' },
+    sv: { essential: 'Strikt Nödvändiga',        analytics: 'Analytik',    marketing: 'Marknadsföring', preferences: 'Inställningar'},
+    nl: { essential: 'Strikt Noodzakelijk',      analytics: 'Analytics',   marketing: 'Marketing',      preferences: 'Voorkeuren'   },
+    pl: { essential: 'Ściśle Niezbędne',         analytics: 'Analityczne', marketing: 'Marketingowe',   preferences: 'Preferencje'  },
   };
 
   // Declared here so siteConfigPayload can reference it even when customization is null
@@ -317,27 +316,15 @@ async function _handleCDNScript(request, env, url) {
     // Fill in missing section labels using languageSelected from enTrans (or DB language as fallback)
     const _langCode = enTrans.languageSelected || normalizeLangCode(customization.language);
     const _labels = SECTION_LABELS[_langCode] || SECTION_LABELS['en'];
-    if (!enTrans.essential)         enTrans.essential         = _labels.essential;
-    if (!enTrans.strictlyNecessary) enTrans.strictlyNecessary = _labels.strictlyNecessary;
-    if (!enTrans.analytics)         enTrans.analytics         = _labels.analytics;
-    if (!enTrans.marketing)         enTrans.marketing         = _labels.marketing;
-    if (!enTrans.preferences)       enTrans.preferences       = _labels.preferences;
+    enTrans.essential = _labels.essential;
+    enTrans.strictlyNecessary = '';
+    if (!enTrans.analytics)           enTrans.analytics           = _labels.analytics;
+    if (!enTrans.marketing)           enTrans.marketing           = _labels.marketing;
+    if (!enTrans.preferences)         enTrans.preferences         = _labels.preferences;
+    if (!enTrans.cookiePreferences)   enTrans.cookiePreferences   = 'Cookie Preferences';
 
-    console.log('[CDN] siteId:', resolvedSite.id, '| DB language:', customization.language, '| normalized:', normalizeLangCode(customization.language));
-    console.log('[CDN] enTrans (stored translations.en):', {
-      title: enTrans.title,
-      acceptAll: enTrans.acceptAll,
-      rejectAll: enTrans.rejectAll,
-      customise: enTrans.customise,
-      saveMyPreferences: enTrans.saveMyPreferences,
-      cookiePreferences: enTrans.cookiePreferences,
-      essential: enTrans.essential,
-      analytics: enTrans.analytics,
-      marketing: enTrans.marketing,
-      preferences: enTrans.preferences,
-      languageSelected: enTrans.languageSelected,
-    });
-    console.log('[CDN] configTrans:', configTrans);
+    console.log('[CDN] serving siteId:', resolvedSite.id, '| essential:', enTrans.essential, '| analytics:', enTrans.analytics, '| marketing:', enTrans.marketing, '| preferences:', enTrans.preferences, '| lang:', _langCode);
+
     /** box = corner card; banner = full-width bottom bar; bottom-center = centered full-width bottom bar; popup (legacy) = treated as bottom-center. */
     var layoutVisual = 'box';
     try {
@@ -357,10 +344,8 @@ async function _handleCDNScript(request, env, url) {
     var footerJustify = textAlign === 'center' ? 'center' : textAlign === 'right' ? 'flex-end' : 'flex-start';
     var closeButtonEnabled = ((configTrans.closeButtonEnabled != null ? configTrans.closeButtonEnabled : enTrans.closeButtonEnabled) === '1');
     var boxPadding = closeButtonEnabled ? '28px 20px 20px 20px' : '20px';
-    var fontFamilyCss =
-      fontName && String(fontName).length
-        ? "'" + String(fontName).replace(/'/g, '') + "',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif"
-        : "inherit";
+    var _fontName = (fontName && String(fontName).length) ? String(fontName).replace(/'/g, '') : 'Inter';
+    var fontFamilyCss = "'" + _fontName + "',ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
 
     var positionStyles = '';
     // Three-tier banner width:
@@ -379,12 +364,12 @@ async function _handleCDNScript(request, env, url) {
     var perBtnPx = Math.max(maxBtnLen * 8 + 56, 90);
     var btnRowWidth = perBtnPx * 3 + 32 + 32;
     var isLongDesc = descLen > 200;
-    var baseWidthPx = Math.max(440, btnRowWidth);
-    if (isLongDesc && baseWidthPx < 500) baseWidthPx = Math.max(baseWidthPx, isBoldHeavy ? 640 : 500);
+    var baseWidthPx = Math.max(520, btnRowWidth);
+    if (isLongDesc && baseWidthPx < 560) baseWidthPx = Math.max(baseWidthPx, isBoldHeavy ? 680 : 560);
     var baseWidth = baseWidthPx + 'px';
     var maxWidth = baseWidthPx + 'px';
     var initialSize =
-      'width:' + baseWidth + '!important;min-width:280px;max-width:min(' + maxWidth + ',96vw)!important;max-height:min(80vh,420px);min-height:0;overflow:hidden;';
+      'width:' + baseWidth + '!important;min-width:360px;max-width:min(' + maxWidth + ',96vw)!important;max-height:min(80vh,520px);min-height:160px;overflow:hidden;';
     var initialRadius = 'border-radius:' + bannerRadius + '!important;';
     if (layoutVisual === 'banner') {
       initialSize = 'width:auto!important;max-width:none!important;';
@@ -392,7 +377,7 @@ async function _handleCDNScript(request, env, url) {
       initialRadius = 'border-radius:' + bannerRadius + '!important;';
     } else if (layoutVisual === 'bottom-center') {
       initialSize =
-        'width:' + baseWidth + '!important;min-width:280px;max-width:min(' + maxWidth + ',96vw)!important;max-height:min(80vh,420px);min-height:0;overflow:hidden;';
+        'width:' + baseWidth + '!important;min-width:360px;max-width:min(' + maxWidth + ',96vw)!important;max-height:min(80vh,520px);min-height:160px;overflow:hidden;';
       positionStyles = 'bottom:32px!important;left:50%!important;transform:translateX(-50%)!important;';
       initialRadius = 'border-radius:' + bannerRadius + '!important;';
     } else {
@@ -479,6 +464,7 @@ async function _handleCDNScript(request, env, url) {
         "font-size:16px!important;" +
         "line-height:1.4!important;" +
         "font-weight:600;" +
+        "font-family:inherit;" +
         "color:" + headingColor + ";" +
         "text-align:" + textAlign + "!important;" +
         "width:100%;" +
@@ -487,9 +473,14 @@ async function _handleCDNScript(request, env, url) {
       "#cb-initial-banner.cb-banner h3," +
       "#cb-preferences-banner.cb-banner h3{" +
         "font-weight:600!important;" +
+        "font-family:inherit!important;" +
         "color:" + headingColor + ";" +
         "text-align:" + textAlign + "!important;" +
         "width:100%;" +
+      "}" +
+      "#cb-initial-banner.cb-banner .cb-banner-body h3," +
+      "#cb-preferences-banner.cb-banner .cb-banner-body h3{" +
+        "padding-right:0!important;" +
       "}" +
       ".cb-gdpr-cat-label{" +
         "color:" + headingColor + ";" +
@@ -544,6 +535,18 @@ async function _handleCDNScript(request, env, url) {
         "color:" + rejectTx + ";" +
         "border-color:" + rejectBg + ";" +
       "}" +
+      "#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer{" +
+        "display:flex!important;" +
+        "flex-direction:row!important;" +
+        "gap:10px!important;" +
+        "width:100%!important;" +
+      "}" +
+      "#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button{" +
+        "flex:1 1 0!important;" +
+        "width:0!important;" +
+        "min-width:0!important;" +
+        "white-space:nowrap!important;" +
+      "}" +
       "#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{" +
         "background-color:" + acceptBg + ";" +
         "color:" + acceptTx + ";" +
@@ -558,6 +561,9 @@ async function _handleCDNScript(request, env, url) {
         "background-color:" + saveBg + ";" +
         "color:" + saveTx + ";" +
         "border-color:#e2e8f0;" +
+      "}" +
+      "#cb-preferences-banner.cb-banner .cb-banner-footer button{" +
+        "padding:10px 36px!important;" +
       "}" +
       /* Initial banner actions — nowrap keeps all buttons in one row regardless of text length */
       "#cb-initial-banner.cb-banner .cb-banner-footer{" +
@@ -660,6 +666,18 @@ async function _handleCDNScript(request, env, url) {
   }
   const translationsForScript = mergeTranslations(storedTranslations);
 
+  // Apply essential/strictlyNecessary overrides to TRANSLATIONS so the browser receives correct labels.
+  if (translationsForScript) {
+    const _langs = Object.keys(translationsForScript);
+    for (const _lc of _langs) {
+      const _t = translationsForScript[_lc];
+      if (!_t || typeof _t !== 'object') continue;
+      const _lb = SECTION_LABELS[_lc] || SECTION_LABELS['en'];
+      _t.essential = (_lb && _lb.essential) ? _lb.essential : 'Strictly Necessary';
+      _t.strictlyNecessary = '';
+    }
+  }
+
   /** Worker-hosted SVG (same origin as the embed script). */
   function resolveWorkerFloatingLogoUrl() {
     try {
@@ -734,7 +752,7 @@ async function _handleCDNScript(request, env, url) {
           saveButtonBg: customization.saveButtonBg || '#ffffff',
           saveButtonText: customization.saveButtonText || '#0284c7',
           bannerEntranceAnimation: (() => { const v = String((configTrans.bannerEntranceAnimation != null ? configTrans.bannerEntranceAnimation : (enTrans && enTrans.bannerEntranceAnimation)) || 'fade-in'); return v === 'zoom' ? 'zoom-in' : v; })(),
-          bannerFontWeight: String((configTrans.bannerFontWeight != null ? configTrans.bannerFontWeight : (enTrans && enTrans.bannerFontWeight)) || '600'),
+          bannerFontWeight: '',
           bannerBorderRadius: customization.bannerBorderRadius || '1.25rem',
           buttonBorderRadius: customization.buttonBorderRadius || '0.3125rem',
           textAlign: (configTrans.bannerTextAlign != null ? configTrans.bannerTextAlign : enTrans.bannerTextAlign) || 'left',
@@ -765,20 +783,6 @@ async function _handleCDNScript(request, env, url) {
   const inlineConfig = `
     window.__CONSENT_SITE__ = ${jsonForInlineScript(siteConfigPayload)};
   `;
-
-  console.log('[CDN] TRANSLATIONS.en that will be embedded:', translationsForScript?.en ? {
-    title: translationsForScript.en.title,
-    acceptAll: translationsForScript.en.acceptAll,
-    rejectAll: translationsForScript.en.rejectAll,
-    customise: translationsForScript.en.customise,
-    saveMyPreferences: translationsForScript.en.saveMyPreferences,
-    cookiePreferences: translationsForScript.en.cookiePreferences,
-    essential: translationsForScript.en.essential,
-    analytics: translationsForScript.en.analytics,
-    marketing: translationsForScript.en.marketing,
-    preferences: translationsForScript.en.preferences,
-    languageSelected: translationsForScript.en.languageSelected,
-  } : 'null');
 
   const translationsVar =
     'var TRANSLATIONS = ' + jsonForInlineScript(translationsForScript) + ';';
@@ -944,14 +948,6 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
     : (wantsIab && iabAllowed) ? 'iab'
     : isWebflow ? 'webflow'
     : 'standard';
-  console.log('[CDN] banner selection — siteId:', resolvedSite.id,
-    '| bannerType:', resolvedSite.banner_type,
-    '| platform:', resolvedSite.platform,
-    '| plan:', effectivePlanId,
-    '| wantsIab:', wantsIab,
-    '| iabAllowed:', iabAllowed,
-    '| isWebflow:', isWebflow,
-    '| → serveKind:', serveKind);
   const why = {
     wantsIab,
     iabAllowed,

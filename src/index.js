@@ -120,6 +120,9 @@ const PUBLIC_PATHS = new Set([
   '/api/banner-customization',
   '/api/licenses/activate-license',
   '/api/licenses/check-domain-script',
+  // Legacy aliases without /api/ prefix (backwards-compat for older bundles)
+  '/licenses/activate-license',
+  '/licenses/check-domain-script',
 ]);
 
 /**
@@ -272,8 +275,10 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     case '/api/licenses/activate':
       response = await handleActivateLicense(request, env); break;
     case '/api/licenses/activate-license':
+    case '/licenses/activate-license':
       response = await handleActivateLicenseWebflow(request, env); break;
     case '/api/licenses/check-domain-script':
+    case '/licenses/check-domain-script':
       response = await handleCheckDomainScript(request, env); break;
     case '/api/subscriptions/cancel':
       response = await handleCancelSubscription(request, env); break;
@@ -552,7 +557,7 @@ export default {
     const pathname = url.pathname;
 
     // ── CORS preflight ────────────────────────────────────────────────────
-    if (request.method === 'OPTIONS' && pathname.startsWith('/api/')) {
+    if (request.method === 'OPTIONS' && (pathname.startsWith('/api/') || PUBLIC_PATHS.has(pathname))) {
       return handleOptions(request, env);
     }
 
@@ -571,8 +576,8 @@ export default {
       return handleConsentV2Script(request, env, url);
     }
 
-    // ── Only continue for /api/ routes ────────────────────────────────────
-    if (!pathname.startsWith('/api/')) {
+    // ── Only continue for /api/ routes (or known public aliases) ─────────
+    if (!pathname.startsWith('/api/') && !PUBLIC_PATHS.has(pathname)) {
       return Response.json({ success: false, error: 'Not Found' }, { status: 404 });
     }
 
