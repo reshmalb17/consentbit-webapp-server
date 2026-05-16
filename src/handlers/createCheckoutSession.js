@@ -64,6 +64,7 @@ async function validatePriceIsRecurring(secret, priceId, label) {
 }
 
 export async function handleCreateCheckoutSession(request, env) {
+  console.log('[CreateCheckout] POST /api/create-checkout-session called');
   if (request.method !== 'POST') {
     return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
   }
@@ -72,7 +73,10 @@ export async function handleCreateCheckoutSession(request, env) {
   const priceMonthly = env.STRIPE_PRICE_MONTHLY;
   const priceYearly = env.STRIPE_PRICE_YEARLY;
 
+  console.log('[CreateCheckout] Stripe key mode:', secret ? (secret.startsWith('sk_live') ? 'LIVE' : 'TEST') : 'NOT SET');
+
   if (!secret) {
+    console.error('[CreateCheckout] STRIPE_SECRET_KEY not set');
     return Response.json({
       success: false,
       error: 'Stripe not configured. Set STRIPE_SECRET_KEY.',
@@ -80,6 +84,7 @@ export async function handleCreateCheckoutSession(request, env) {
   }
 
   if (!db) {
+    console.error('[CreateCheckout] CONSENT_WEBAPP DB binding not set');
     return Response.json({ success: false, error: 'Database not available' }, { status: 503 });
   }
 
@@ -87,6 +92,7 @@ export async function handleCreateCheckoutSession(request, env) {
   try {
     body = await request.json();
   } catch (e) {
+    console.error('[CreateCheckout] invalid JSON body');
     return Response.json({ success: false, error: 'Invalid JSON' }, { status: 400 });
   }
 
@@ -116,6 +122,7 @@ export async function handleCreateCheckoutSession(request, env) {
 
   const organizationId = (body.organizationId || '').trim();
   const planId = (body.planId && ['basic', 'essential', 'growth'].includes(body.planId)) ? body.planId : null;
+  console.log('[CreateCheckout] body — orgId:', organizationId, '| planId:', planId, '| interval:', body.interval, '| siteId:', body.siteId);
   const rawPlanType = body.planType === 'quantity' ? 'quantity' : body.planType === 'bulk' ? 'bulk' : 'single';
   if (rawPlanType === 'bulk' || rawPlanType === 'quantity') {
     return Response.json(
@@ -287,6 +294,7 @@ export async function handleCreateCheckoutSession(request, env) {
     params.set('discounts[0][coupon]', stripeCouponId);
   }
 
+  console.log('[CreateCheckout] creating Stripe checkout session — plan:', planId || 'legacy', '| interval:', body.interval === 'yearly' ? 'yearly' : 'monthly');
   const res = await fetch('https://api.stripe.com/v1/checkout/sessions', {
     method: 'POST',
     headers: {
@@ -299,6 +307,7 @@ export async function handleCreateCheckoutSession(request, env) {
   const data = await res.json();
   if (data.error) {
     let msg = data.error.message || 'Stripe error';
+    console.error('[CreateCheckout] Stripe error:', msg);
     if (typeof msg === 'string' && msg.toLowerCase().includes('recurring')) {
       msg +=
         ' The price id in Worker env for this plan must be a **Subscription (recurring)** price in Stripe (Products → tier → Pricing), not one-time. For Basic, set STRIPE_PRICE_BASIC_MONTHLY / STRIPE_PRICE_BASIC_YEARLY to those recurring price_ ids.';
@@ -306,9 +315,11 @@ export async function handleCreateCheckoutSession(request, env) {
     return Response.json({ success: false, error: msg }, { status: 400 });
   }
   if (!data.id || !data.url) {
+    console.error('[CreateCheckout] no session id/url in Stripe response');
     return Response.json({ success: false, error: 'No session URL returned' }, { status: 502 });
   }
 
+  console.log('[CreateCheckout] session created:', data.id);
   return Response.json({
     success: true,
     sessionId: data.id,

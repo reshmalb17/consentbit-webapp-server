@@ -53,6 +53,7 @@ function planDisplayName(planType, planId) {
 
 // GET /api/billing/summary?organizationId=xxx
 export async function handleBillingSummary(request, env) {
+  console.log('[Billing] GET /api/billing/summary called');
   if (request.method !== 'GET') {
     return Response.json({ error: 'Method not allowed' }, { status: 405 });
   }
@@ -202,6 +203,7 @@ export async function handleBillingSummary(request, env) {
 
 // POST /api/billing/portal - body: { organizationId, returnUrl }
 export async function handleBillingPortal(request, env) {
+  console.log('[Billing] POST /api/billing/portal called');
   if (request.method !== 'POST') {
     return Response.json({ error: 'Method not allowed' }, { status: 405 });
   }
@@ -243,16 +245,20 @@ export async function handleBillingPortal(request, env) {
   });
   const data = await res.json();
   if (data.error) {
+    console.error('[Billing] portal Stripe error:', data.error.message);
     return Response.json({ error: data.error.message || 'Stripe error' }, { status: 400 });
   }
   if (!data.url) {
+    console.error('[Billing] portal — no URL returned from Stripe');
     return Response.json({ error: 'No portal URL returned' }, { status: 502 });
   }
+  console.log('[Billing] portal session created for customer:', stripeCustomerId);
   return Response.json({ url: data.url });
 }
 
 // GET /api/billing/invoices?organizationId=xxx&limit=20
 export async function handleBillingInvoices(request, env) {
+  console.log('[Billing] GET /api/billing/invoices called');
   if (request.method !== 'GET') {
     return Response.json({ error: 'Method not allowed' }, { status: 405 });
   }

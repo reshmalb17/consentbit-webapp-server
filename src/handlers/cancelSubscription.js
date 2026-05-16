@@ -28,6 +28,7 @@ function getLicenseKeysFromRow(row) {
 }
 
 export async function handleCancelSubscription(request, env) {
+  console.log('[CancelSubscription] POST /api/subscriptions/cancel called');
   if (request.method !== 'POST') {
     return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
   }
@@ -61,8 +62,10 @@ export async function handleCancelSubscription(request, env) {
   const stripeSubscriptionId = (body.stripeSubscriptionId || body.stripe_subscription_id || '').trim() || null;
   const subscriptionId = (body.subscriptionId || body.subscription_id || '').trim() || null;
   const licenseKey = (body.licenseKey || '').trim() || null;
+  console.log('[CancelSubscription] stripeSubId:', stripeSubscriptionId, '| subscriptionId:', subscriptionId, '| licenseKey:', licenseKey);
 
   if (!env.STRIPE_SECRET_KEY) {
+    console.error('[CancelSubscription] STRIPE_SECRET_KEY not set');
     return Response.json({ success: false, error: 'Stripe not configured' }, { status: 503 });
   }
 
@@ -75,8 +78,10 @@ export async function handleCancelSubscription(request, env) {
     sub = await getSubscriptionById(db, subscriptionId);
   }
   if (!sub) {
+    console.warn('[CancelSubscription] no subscription found for stripeSubId:', stripeSubscriptionId, '| subscriptionId:', subscriptionId);
     return Response.json({ success: false, error: 'No active subscription found for this account.' }, { status: 400 });
   }
+  console.log('[CancelSubscription] sub found — planType:', sub.planType ?? sub.plantype, '| status:', sub.status, '| stripeSubId:', sub.stripeSubscriptionId ?? sub.stripesubscriptionid);
 
   const subStripeId = sub.stripeSubscriptionId ?? sub.stripesubscriptionid ?? null;
   if (!subStripeId) {
@@ -265,6 +270,7 @@ export async function handleCancelSubscription(request, env) {
     console.warn('[CancelSubscription] Legacy sync failed (non-critical):', syncErr?.message);
   }
 
+  console.log('[CancelSubscription] cancel_at_period_end set — stripeSubId:', subStripeId);
   return Response.json({
     success: true,
     message: 'Subscription will be cancelled at the end of the current billing period. Your plan continues until then.',
