@@ -402,6 +402,8 @@ export async function handleCustomCheckout(request, env, ctx) {
   const secret = trimEnv(env.STRIPE_SECRET_KEY);
   const db = env.CONSENT_WEBAPP;
 
+  console.log('[CustomCheckout] Stripe key mode:', secret ? (secret.startsWith('sk_live') ? 'LIVE' : 'TEST') : 'NOT SET');
+
   if (!secret) {
     console.error('[CustomCheckout] STRIPE_SECRET_KEY not set');
     return Response.json({ success: false, error: 'Stripe not configured. Set STRIPE_SECRET_KEY.' }, { status: 503 });

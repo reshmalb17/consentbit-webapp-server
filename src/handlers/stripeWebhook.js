@@ -298,6 +298,7 @@ export async function handleStripeWebhook(request, env, ctx) {
   await ensureSchema(db);
   const eventId = event.id;
   const type = event.type;
+  console.log('[StripeWebhook] event received — type:', type, '| eventId:', eventId);
 
   try {
     // payment_intent.succeeded: bulk one-time payment — create license keys and add to queue (cron creates subscriptions, 4 at a time)
@@ -817,6 +818,7 @@ export async function handleStripeWebhook(request, env, ctx) {
 
     if (type === 'invoice.payment_failed') {
       const invoice = event.data.object;
+      console.log('[StripeWebhook] invoice.payment_failed — invoiceId:', invoice.id, '| subId:', invoice.subscription, '| attempt:', invoice.attempt_count, '| amountDue:', invoice.amount_due);
       const subId = invoice.subscription;
       const existing = subId ? await getSubscriptionByStripeId(db, subId) : null;
       await savePaymentEvent(db, {

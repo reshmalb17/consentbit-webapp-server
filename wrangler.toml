@@ -85,11 +85,6 @@ STRIPE_PRODUCT_MONTHLY = "prod_SHWZdF20XLXtn9"
 STRIPE_PRICE_YEARLY = "price_1Sz1ehJwcuG9163Mt7yNlrD6"
 STRIPE_PRODUCT_YEARLY = "prod_TwvVRX1MaDL7wV"
 
-# Metered usage (Workflow A cron): set these to your Stripe metered price IDs so we report pageview/scan usage.
-# STRIPE_PRICE_ESSENTIAL_PAGEVIEWS_METERED = "price_xxx"
-# STRIPE_PRICE_ESSENTIAL_SCANS_METERED = "price_xxx"
-# STRIPE_PRICE_GROWTH_PAGEVIEWS_METERED = "price_xxx"
-# STRIPE_PRICE_GROWTH_SCANS_METERED = "price_xxx"
 
 # Bulk purchase (not used — create-checkout-session rejects bulk/quantity; per-site tier / legacy single only).
 # STRIPE_ONE_TIME_PRICE_MONTHLY = "price_1SpSusJwcuG9163MHGK38FfW"
@@ -124,14 +119,15 @@ WEBAPP_PUBLIC_URL = ""
 STRIPE_PRICE_BASIC_MONTHLY    = "price_1TWgLfJwcuG9163MoWMXTzwk"
 STRIPE_PRICE_BASIC_YEARLY     = "price_1TWgLNJwcuG9163MYXxqcRZx"
 STRIPE_PRICE_ESSENTIAL_MONTHLY = "price_1TWgKzJwcuG9163M5Wwulw84"
-STRIPE_PRICE_ESSENTIAL_YEARLY  = "price_1TWgLfJwcuG9163MoWMXTzwk"
+STRIPE_PRICE_ESSENTIAL_YEARLY  = "price_1TWgKhJwcuG9163Mwh43smou"
 STRIPE_PRICE_GROWTH_MONTHLY   = "price_1TWgKKJwcuG9163Mwgb0LWj3"
 STRIPE_PRICE_GROWTH_YEARLY    = "price_1TWgK0JwcuG9163MvIF4V4TG"
 
-STRIPE_PRICE_MONTHLY  = "price_LIVE_MONTHLY"
-STRIPE_PRODUCT_MONTHLY = "prod_LIVE_MONTHLY"
-STRIPE_PRICE_YEARLY   = "price_LIVE_YEARLY"
-STRIPE_PRODUCT_YEARLY = "prod_LIVE_YEARLY"
+# Inherited from top-level [vars] — values overridden by secrets set via wrangler secret put
+STRIPE_PRICE_MONTHLY   = ""
+STRIPE_PRODUCT_MONTHLY = ""
+STRIPE_PRICE_YEARLY    = ""
+STRIPE_PRODUCT_YEARLY  = ""
 
 [[env.production.d1_databases]]
 binding = "CONSENT_WEBAPP"

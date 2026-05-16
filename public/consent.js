@@ -224,7 +224,7 @@ window.gtag('consent', 'default', {
         };
       }
       
-      const gtmScripts = document.querySelectorAll('script[src*="googletagmanager"]');
+      const gtmScripts = document.head.querySelectorAll('script[src*="googletagmanager"]');
       if (gtmScripts.length > 0) {
         if (typeof window.gtag === 'function') {
           try {
@@ -244,13 +244,13 @@ window.gtag('consent', 'default', {
         }
       }
       
-      const analyticsScripts = document.querySelectorAll('script[src*="analytics"], script[src*="gtag"], script[src*="googletagmanager"]');
+      const analyticsScripts = document.head.querySelectorAll('script[src*="analytics"], script[src*="gtag"], script[src*="googletagmanager"]');
       if (analyticsScripts.length > 0) {
       }
     }
   
     function forceReloadAnalyticsScripts() {
-      const analyticsScripts = document.querySelectorAll('script[src*="analytics"], script[src*="gtag"], script[src*="googletagmanager"], script[src*="google-analytics"]');
+      const analyticsScripts = document.head.querySelectorAll('script[src*="analytics"], script[src*="gtag"], script[src*="googletagmanager"], script[src*="google-analytics"]');
       
       analyticsScripts.forEach(function(script) {
         if (script.type === 'text/javascript' && script.src) {
@@ -679,6 +679,7 @@ window.gtag('consent', 'default', {
     }
     function showBanner(banner) {
       if (banner) {
+        console.log('[CB-SHOW] showBanner() called for:', banner.id || banner.className, '| current display:', banner.style.display, '| computed:', window.getComputedStyle(banner).display);
         __cbTiming('showBanner:start', { id: banner.id || null, className: banner.className || null });
         banner.style.setProperty("display", "block", "important");
         banner.style.setProperty("visibility", "visible", "important");
@@ -1015,6 +1016,7 @@ window.gtag('consent', 'default', {
 
     // Show GDPR banner
     function showGDPRBanner() {
+      console.log('[CB-GDPR] showGDPRBanner() called. cb-initial-banner:', document.getElementById("cb-initial-banner"));
       hideBanner(document.getElementById("cb-preferences-banner"));
       showBanner(document.getElementById("cb-initial-banner"));
     }
@@ -1333,18 +1335,17 @@ window.gtag('consent', 'default', {
       localStorage.setItem('_cb_cg_', 'true');
       var prefsD = { analytics: false, marketing: false, personalization: false, doNotShare: true, action: 'rejection', bannerType: window.locationData ? window.locationData.bannerType : undefined };
       if (typeof updateGtagConsent === 'function') updateGtagConsent(prefsD);
-      setTimeout(function () {
-        if (typeof blockScriptsByCategory === 'function') blockScriptsByCategory();
-        (async function () {
-          try {
-            var cookieDays4 = typeof fetchCookieExpirationDays === 'function' ? await fetchCookieExpirationDays() : 7;
-            await Promise.all([
-              setConsentState(prefsD, cookieDays4),
-              saveConsentStateToServer(prefsD, cookieDays4, false)
-            ]);
-          } catch (e5) {}
-        })();
-      }, 0);
+      // Block immediately (synchronous) so scripts are disabled before anything else runs
+      if (typeof blockScriptsByCategory === 'function') blockScriptsByCategory();
+      (async function () {
+        try {
+          var cookieDays4 = typeof fetchCookieExpirationDays === 'function' ? await fetchCookieExpirationDays() : 7;
+          await Promise.all([
+            setConsentState(prefsD, cookieDays4),
+            saveConsentStateToServer(prefsD, cookieDays4, false)
+          ]);
+        } catch (e5) {}
+      })();
       return;
     }
     if (isGDPRSavePreferences) {
@@ -1379,34 +1380,39 @@ window.gtag('consent', 'default', {
     }
   }, true);
 
-async function showAppropriateBanner() { 
+async function showAppropriateBanner() {
+  console.log('[CB-SAB] showAppropriateBanner() called');
   __cbTiming('showAppropriateBanner:start');
   await hideAllBanners();
   __cbTiming('showAppropriateBanner:afterHideAll');
-
 
   const allBannersElement = document.querySelector('[data-all-banners]');
   const hasAllBannersAttribute = !!allBannersElement;
   const allBannersValue = hasAllBannersAttribute
     ? allBannersElement.getAttribute('data-all-banners')
     : null;
+  console.log('[CB-SAB] data-all-banners element:', allBannersElement, 'value:', allBannersValue);
 
-  const initialCCPABanner = document.getElementById('cb-initial-banner'); // CCPA initial
-  const consentBanner = document.getElementById('cb-initial-banner');           // GDPR
+  const initialCCPABanner = document.getElementById('cb-initial-banner');
+  const consentBanner = document.getElementById('cb-initial-banner');
   const usBanner = document.getElementById('cb-initial-banner');
+  console.log('[CB-SAB] cb-initial-banner element:', initialCCPABanner);
 
-  const isEmergentSungreen = isEmergentOrSungreen(); // your existing helper
+  const isEmergentSungreen = isEmergentOrSungreen();
   const hostname = window.location.hostname.replace('www.', '');
   const isEmergentOnly =
     hostname.includes('emergent-website.webflow.io') ||
     hostname.includes('emergent.tech');
-  // 1) data-all-banners="false" → ALWAYS GDPR, never CCPA
+  console.log('[CB-SAB] hostname:', hostname, 'isEmergentOnly:', isEmergentOnly, 'isEmergentSungreen:', isEmergentSungreen);
+
   if (isEmergentOnly || isEmergentSungreen) {
-  __cbTiming('showAppropriateBanner:skip', { reason: 'emergentOnlyOrSungreen' });
-  await hideAllBanners();
-  return;  // do not run any other banner logic
-}
+    console.log('[CB-SAB] EXIT: emergentOnly or emergentSungreen — hiding all, returning.');
+    __cbTiming('showAppropriateBanner:skip', { reason: 'emergentOnlyOrSungreen' });
+    await hideAllBanners();
+    return;
+  }
   if (hasAllBannersAttribute && allBannersValue === 'false') {
+    console.log('[CB-SAB] data-all-banners=false → forcing GDPR banner');
     __cbTiming('showAppropriateBanner:forcedGDPR');
     showGDPRBanner();
 
@@ -1431,21 +1437,24 @@ async function showAppropriateBanner() {
       }
     }, 0);
 
-    return; // Never show CCPA when data-all-banners="false"
+    return;
   }
 
   // 2) Emergent ONLY → pure opt‑out: no banner on load
   if (isEmergentOnly) {
-  await  hideAllBanners();
+    console.log('[CB-SAB] EXIT: emergentOnly fallback — hiding all, returning.');
+    await hideAllBanners();
     return;
   }
 
   // 3) Attribute missing or "true" → use location for non‑Emergent
   __cbTiming('showAppropriateBanner:location:start');
+  console.log('[CB-SAB] Fetching location data...');
   const locationData = await window.getLocationData();
   __cbTiming('showAppropriateBanner:location:end', locationData || null);
+  console.log('[CB-SAB] locationData result:', locationData);
   if (!locationData || !locationData.bannerType) {
-    // Detection failed → show nothing
+    console.log('[CB-SAB] EXIT: no locationData or no bannerType — banner NOT shown.');
     __cbTiming('showAppropriateBanner:noLocationOrBannerType');
     return;
   }
@@ -1833,6 +1842,18 @@ function clearConsentState() {
   
     async function checkPublishingStatus() {
       try {
+        // Cache publishing status for 10 minutes to avoid API round-trip on every page load
+        const _cbPsKey = '_cb_ps_';
+        try {
+          const _cbPsRaw = localStorage.getItem(_cbPsKey);
+          if (_cbPsRaw) {
+            const _cbPs = JSON.parse(_cbPsRaw);
+            if (_cbPs && typeof _cbPs.canPublish === 'boolean' && Date.now() < (_cbPs.exp || 0)) {
+              return _cbPs.canPublish;
+            }
+          }
+        } catch (_) {}
+
         const sessionToken = localStorage.getItem('_cb_vst_');
         if (!sessionToken) {
           return false;
@@ -1873,7 +1894,10 @@ function clearConsentState() {
           return false;
         }
         const data = await response.json();
-        return data.canPublishToCustomDomain === true;
+        const canPublish = data.canPublishToCustomDomain === true;
+        // Cache result for 10 minutes
+        try { localStorage.setItem(_cbPsKey, JSON.stringify({ canPublish, exp: Date.now() + 600000 })); } catch (_) {}
+        return canPublish;
       } catch (error) {
         return false;
       }
@@ -2035,7 +2059,7 @@ function clearConsentState() {
         // Check all banners with data-cookie-banner="true"
         const cookieBanners = document.querySelectorAll('[data-cookie-banner="true"]');
         let anyVisible = false;
-        
+
         cookieBanners.forEach(function(banner) {
           const style = window.getComputedStyle(banner);
           if (style.display !== "none" && 
@@ -2063,7 +2087,7 @@ function clearConsentState() {
       checkAndUpdateScroll();
     }
   
-    document.addEventListener('DOMContentLoaded', async function () {
+    async function __cbInit() {
       // Emergent: hide all banners immediately on load (no banner on load for EU or US)
       if (isEmergent()) {
         await hideAllBanners();
@@ -2073,52 +2097,73 @@ function clearConsentState() {
 
 
       // STEP 1: Check if consent is already given - if yes, don't do banner/location logic
-      const consentGiven = localStorage.getItem("_cb_cg_");
+      // Check both _cb_cg_ (consent.js key) AND consentbit_* (standard loader key)
+      let consentGiven = localStorage.getItem("_cb_cg_");
+      if (!consentGiven) {
+        for (var _cbCI = 0; _cbCI < localStorage.length; _cbCI++) {
+          var _cbCK = localStorage.key(_cbCI);
+          if (_cbCK && _cbCK.indexOf('consentbit_') === 0) {
+            try { var _cbCV = JSON.parse(localStorage.getItem(_cbCK)); if (_cbCV && _cbCV.accepted) { consentGiven = 'true'; break; } } catch(_e) {}
+          }
+        }
+      }
         if (isConsentExpired()) {
          clearConsentState();
+         consentGiven = null;
         }
+
+      // Block non-essential scripts immediately if consent not yet given.
+      // Scripts placed with type="text/plain" + data-category in HTML stay inert until unblocked.
+      // Scripts already executed (type="text/javascript") cannot be undone here — site owners
+      // must use type="text/plain" in their HTML for pre-consent blocking to work.
+      if (!consentGiven) {
+        blockScriptsByCategory();
+      }
+
       // STEP 2: Check staging status synchronously (needed for toggle button visibility)
       const isStaging = isStagingHostname();
-      
+
       // Variables to store background data
       let canPublish = false;
-      
-      // STEP 3: Show toggle button immediately if staging (don't wait for canPublish check)
+
+      // STEP 3: Show toggle button immediately if staging or consent already given
       const toggleConsentBtn = document.getElementById('cb-floating-trigger');
       if (toggleConsentBtn) {
-        // Show toggle button immediately if staging
-        if (isStaging) {
+        // Show toggle button immediately if staging or consent already given
+        if (isStaging || consentGiven) {
           toggleConsentBtn.style.display = 'block';
         }
         
         // Set up click handler immediately - consolidated banner display logic
         toggleConsentBtn.onclick = async function (e) {
           e.preventDefault();
-   const locationData = await window.getLocationData();
-  if (isEmergent()) {
-    await hideAllBanners();
-    return;
-  }
-          // Ensure token exists before showing banner (needed for location detection)
+          console.log('[CB-LOGO] Logo clicked. consentGiven=', consentGiven, 'isEmergent=', isEmergent());
+          if (isEmergent()) {
+            console.log('[CB-LOGO] Emergent site — hiding all banners, returning.');
+            await hideAllBanners();
+            return;
+          }
+          // Ensure token exists BEFORE location detection (token is required for getLocationData)
           let token = localStorage.getItem('_cb_vst_');
-          if (!token && !consentGiven) {
-            // Generate token if not available
+          console.log('[CB-LOGO] Token from localStorage:', token ? 'exists' : 'missing');
+          if (!token) {
+            // Generate token if not available (needed for location detection regardless of consent state)
             try {
               token = await getVisitorSessionToken();
+              console.log('[CB-LOGO] Token fetched from API:', token ? 'success' : 'null/failed');
               if (token && !localStorage.getItem('_cb_vst_')) {
                 localStorage.setItem('_cb_vst_', token);
               }
             } catch (error) {
-              // Silent error handling
+              console.log('[CB-LOGO] Token fetch threw:', error);
             }
           }
-  
+
           // Use consolidated function to show appropriate banner
-          // This handles both consent-given and consent-not-given cases
-          // Checks data-all-banners attribute and location
+          console.log('[CB-LOGO] Calling showAppropriateBanner()...');
           if (!isEmergent()) {
             await showAppropriateBanner();
-
+            console.log('[CB-LOGO] showAppropriateBanner() completed.');
           }
           
           // SPECIAL LOGIC: For emergent/sungreen clients, ensure correct banner is shown after toggle
@@ -2191,9 +2236,9 @@ function clearConsentState() {
           await hideAllBanners();
           return;
         }
-        // Hide all banners first (before showing appropriate one)
-       await hideAllBanners();
-        
+        // Hide immediately to prevent unpaid/wrong-region banners from flashing
+        await hideAllBanners();
+
         // Check data-all-banners attribute first
         const allBannersElement = document.querySelector('[data-all-banners]');
         const hasAllBannersAttribute = allBannersElement && allBannersElement.hasAttribute('data-all-banners');
@@ -2202,27 +2247,38 @@ function clearConsentState() {
         // ALWAYS generate token and detect location (for both false and true cases)
         setTimeout(async () => {
           try {
+            console.log('[CB-INIT] setTimeout fired. isStaging:', isStaging, '| __CB_WEBFLOW_MODE__:', !!window.__CB_WEBFLOW_MODE__);
             // Generate token
             const token = await getVisitorSessionToken();
-            
+            console.log('[CB-INIT] getVisitorSessionToken result:', token ? 'ok' : 'null/failed');
+
             if (!token) {
-              // No token - don't retry or reload, just continue
+              // Token generation failed — show GDPR banner as fallback so user isn't stuck
+              console.log('[CB-INIT] no token — calling showAppropriateBanner() as fallback');
+              await showAppropriateBanner();
               return;
             } else {
               if (!localStorage.getItem('_cb_vst_')) {
                 localStorage.setItem('_cb_vst_', token);
               }
             }
-            
+
             // If staging, skip publishing status check and show banner immediately
             // If not staging, check publishing status first before showing banner
             if (isStaging) {
-           
-             
+              console.log('[CB-INIT] staging site — skipping canPublish check');
+            } else if (window.__CB_WEBFLOW_MODE__) {
+              // Webflow/Framer mode: the CDN already verified the subscription when serving
+              // the loader script, so canPublishToCustomDomain check is redundant AND wrong
+              // (Webflow subdomains like .webflow.io are never "custom domains").
+              canPublish = true;
+              console.log('[CB-INIT] __CB_WEBFLOW_MODE__ — skipping canPublish check, canPublish=true');
+              if (toggleConsentBtn) toggleConsentBtn.style.display = 'block';
             } else {
               // For non-staging sites, check publishing status first before showing banner
               canPublish = await checkPublishingStatus();
-              
+              console.log('[CB-INIT] checkPublishingStatus result:', canPublish);
+
               // Update toggle button visibility after canPublish check
               if (toggleConsentBtn) {
                 if (canPublish) {
@@ -2231,8 +2287,9 @@ function clearConsentState() {
                   toggleConsentBtn.style.display = 'none';
                 }
               }
-              
+
               if (!canPublish) {
+                console.log('[CB-INIT] canPublish=false — removing consent elements');
                 removeConsentElements();
                 return;
               }
@@ -2283,12 +2340,14 @@ function clearConsentState() {
                 return;
               }
               else {
+                console.log('[CB-INIT] calling showAppropriateBanner() — canPublish:', canPublish, '| __CB_WEBFLOW_MODE__:', !!window.__CB_WEBFLOW_MODE__);
                 await showAppropriateBanner();
+                console.log('[CB-INIT] showAppropriateBanner() returned');
               }
             }
-            
+
           } catch (error) {
-       
+            console.error('[CB-INIT] setTimeout catch:', error);
             if (!hasAllBannersAttribute || allBannersValue !== 'false') {
               clearVisitorSession();
               setTimeout(() => location.reload(), 5000);
@@ -3763,11 +3822,17 @@ function clearConsentState() {
   
       
      
-      initializeWebflowAnalytics();      
+      initializeWebflowAnalytics();
       monitorConsentChanges();
-    });
-  
-    
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', __cbInit);
+    } else {
+      __cbInit();
+    }
+
+
     function unblockScriptsWithDataCategory() {
       unblockGoogleScripts();
       
