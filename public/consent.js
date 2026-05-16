@@ -679,8 +679,7 @@ window.gtag('consent', 'default', {
     }
     function showBanner(banner) {
       if (banner) {
-        console.log('[CB-SHOW] showBanner() called for:', banner.id || banner.className, '| current display:', banner.style.display, '| computed:', window.getComputedStyle(banner).display);
-        __cbTiming('showBanner:start', { id: banner.id || null, className: banner.className || null });
+__cbTiming('showBanner:start', { id: banner.id || null, className: banner.className || null });
         banner.style.setProperty("display", "block", "important");
         banner.style.setProperty("visibility", "visible", "important");
         banner.style.setProperty("opacity", "1", "important");
@@ -1016,8 +1015,7 @@ window.gtag('consent', 'default', {
 
     // Show GDPR banner
     function showGDPRBanner() {
-      console.log('[CB-GDPR] showGDPRBanner() called. cb-initial-banner:', document.getElementById("cb-initial-banner"));
-      hideBanner(document.getElementById("cb-preferences-banner"));
+hideBanner(document.getElementById("cb-preferences-banner"));
       showBanner(document.getElementById("cb-initial-banner"));
     }
     
@@ -1381,7 +1379,6 @@ window.gtag('consent', 'default', {
   }, true);
 
 async function showAppropriateBanner() {
-  console.log('[CB-SAB] showAppropriateBanner() called');
   __cbTiming('showAppropriateBanner:start');
   await hideAllBanners();
   __cbTiming('showAppropriateBanner:afterHideAll');
@@ -1391,28 +1388,23 @@ async function showAppropriateBanner() {
   const allBannersValue = hasAllBannersAttribute
     ? allBannersElement.getAttribute('data-all-banners')
     : null;
-  console.log('[CB-SAB] data-all-banners element:', allBannersElement, 'value:', allBannersValue);
 
   const initialCCPABanner = document.getElementById('cb-initial-banner');
   const consentBanner = document.getElementById('cb-initial-banner');
   const usBanner = document.getElementById('cb-initial-banner');
-  console.log('[CB-SAB] cb-initial-banner element:', initialCCPABanner);
 
   const isEmergentSungreen = isEmergentOrSungreen();
   const hostname = window.location.hostname.replace('www.', '');
   const isEmergentOnly =
     hostname.includes('emergent-website.webflow.io') ||
     hostname.includes('emergent.tech');
-  console.log('[CB-SAB] hostname:', hostname, 'isEmergentOnly:', isEmergentOnly, 'isEmergentSungreen:', isEmergentSungreen);
 
   if (isEmergentOnly || isEmergentSungreen) {
-    console.log('[CB-SAB] EXIT: emergentOnly or emergentSungreen — hiding all, returning.');
     __cbTiming('showAppropriateBanner:skip', { reason: 'emergentOnlyOrSungreen' });
     await hideAllBanners();
     return;
   }
   if (hasAllBannersAttribute && allBannersValue === 'false') {
-    console.log('[CB-SAB] data-all-banners=false → forcing GDPR banner');
     __cbTiming('showAppropriateBanner:forcedGDPR');
     showGDPRBanner();
 
@@ -1442,19 +1434,15 @@ async function showAppropriateBanner() {
 
   // 2) Emergent ONLY → pure opt‑out: no banner on load
   if (isEmergentOnly) {
-    console.log('[CB-SAB] EXIT: emergentOnly fallback — hiding all, returning.');
     await hideAllBanners();
     return;
   }
 
   // 3) Attribute missing or "true" → use location for non‑Emergent
   __cbTiming('showAppropriateBanner:location:start');
-  console.log('[CB-SAB] Fetching location data...');
   const locationData = await window.getLocationData();
   __cbTiming('showAppropriateBanner:location:end', locationData || null);
-  console.log('[CB-SAB] locationData result:', locationData);
   if (!locationData || !locationData.bannerType) {
-    console.log('[CB-SAB] EXIT: no locationData or no bannerType — banner NOT shown.');
     __cbTiming('showAppropriateBanner:noLocationOrBannerType');
     return;
   }
@@ -2137,33 +2125,26 @@ function clearConsentState() {
         // Set up click handler immediately - consolidated banner display logic
         toggleConsentBtn.onclick = async function (e) {
           e.preventDefault();
-          console.log('[CB-LOGO] Logo clicked. consentGiven=', consentGiven, 'isEmergent=', isEmergent());
           if (isEmergent()) {
-            console.log('[CB-LOGO] Emergent site — hiding all banners, returning.');
             await hideAllBanners();
             return;
           }
           // Ensure token exists BEFORE location detection (token is required for getLocationData)
           let token = localStorage.getItem('_cb_vst_');
-          console.log('[CB-LOGO] Token from localStorage:', token ? 'exists' : 'missing');
           if (!token) {
             // Generate token if not available (needed for location detection regardless of consent state)
             try {
               token = await getVisitorSessionToken();
-              console.log('[CB-LOGO] Token fetched from API:', token ? 'success' : 'null/failed');
               if (token && !localStorage.getItem('_cb_vst_')) {
                 localStorage.setItem('_cb_vst_', token);
               }
             } catch (error) {
-              console.log('[CB-LOGO] Token fetch threw:', error);
             }
           }
 
           // Use consolidated function to show appropriate banner
-          console.log('[CB-LOGO] Calling showAppropriateBanner()...');
           if (!isEmergent()) {
             await showAppropriateBanner();
-            console.log('[CB-LOGO] showAppropriateBanner() completed.');
           }
           
           // SPECIAL LOGIC: For emergent/sungreen clients, ensure correct banner is shown after toggle
@@ -2247,14 +2228,11 @@ function clearConsentState() {
         // ALWAYS generate token and detect location (for both false and true cases)
         setTimeout(async () => {
           try {
-            console.log('[CB-INIT] setTimeout fired. isStaging:', isStaging, '| __CB_WEBFLOW_MODE__:', !!window.__CB_WEBFLOW_MODE__);
             // Generate token
             const token = await getVisitorSessionToken();
-            console.log('[CB-INIT] getVisitorSessionToken result:', token ? 'ok' : 'null/failed');
 
             if (!token) {
               // Token generation failed — show GDPR banner as fallback so user isn't stuck
-              console.log('[CB-INIT] no token — calling showAppropriateBanner() as fallback');
               await showAppropriateBanner();
               return;
             } else {
@@ -2266,18 +2244,16 @@ function clearConsentState() {
             // If staging, skip publishing status check and show banner immediately
             // If not staging, check publishing status first before showing banner
             if (isStaging) {
-              console.log('[CB-INIT] staging site — skipping canPublish check');
+              // skip canPublish check for staging
             } else if (window.__CB_WEBFLOW_MODE__) {
               // Webflow/Framer mode: the CDN already verified the subscription when serving
               // the loader script, so canPublishToCustomDomain check is redundant AND wrong
               // (Webflow subdomains like .webflow.io are never "custom domains").
               canPublish = true;
-              console.log('[CB-INIT] __CB_WEBFLOW_MODE__ — skipping canPublish check, canPublish=true');
               if (toggleConsentBtn) toggleConsentBtn.style.display = 'block';
             } else {
               // For non-staging sites, check publishing status first before showing banner
               canPublish = await checkPublishingStatus();
-              console.log('[CB-INIT] checkPublishingStatus result:', canPublish);
 
               // Update toggle button visibility after canPublish check
               if (toggleConsentBtn) {
@@ -2289,7 +2265,6 @@ function clearConsentState() {
               }
 
               if (!canPublish) {
-                console.log('[CB-INIT] canPublish=false — removing consent elements');
                 removeConsentElements();
                 return;
               }
@@ -2340,9 +2315,7 @@ function clearConsentState() {
                 return;
               }
               else {
-                console.log('[CB-INIT] calling showAppropriateBanner() — canPublish:', canPublish, '| __CB_WEBFLOW_MODE__:', !!window.__CB_WEBFLOW_MODE__);
                 await showAppropriateBanner();
-                console.log('[CB-INIT] showAppropriateBanner() returned');
               }
             }
 
