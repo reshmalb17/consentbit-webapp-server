@@ -133,10 +133,10 @@ function buildHtml(entry, siteDomain) {
   </div>
 
   <div class="section">
-    <h2>Cookie Details</h2>
+    <h2>Cookies Set</h2>
     <table>
       <thead>
-        <tr><th>Name</th><th>Category</th><th>Duration</th><th>Description</th></tr>
+        <tr><th>Name</th><th>Category</th><th>Duration / Expires</th><th>Description</th></tr>
       </thead>
       <tbody>${cookieRows}</tbody>
     </table>

@@ -77,8 +77,18 @@ export async function handleScheduledScan(request, env) {
     }
 
     try {
+      // Deactivate any existing active scheduled scans for this site so only one
+      // is ever active at a time. Without this, multiple records fire on every cron
+      // tick and produce duplicate ScanHistory rows.
+      await db
+        .prepare(
+          `UPDATE ScheduledScan SET isActive = 0, updatedAt = ?1 WHERE siteId = ?2 AND isActive = 1`
+        )
+        .bind(new Date().toISOString(), siteId)
+        .run();
+
       const result = await createScheduledScan(db, { siteId, scheduledAt, frequency });
-      
+
       if (!result.success) {
         return Response.json(
           { success: false, error: result.error || 'Failed to create scheduled scan' },
