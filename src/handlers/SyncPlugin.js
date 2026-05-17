@@ -88,6 +88,30 @@ function deriveBannerTypeAndRegionMode(customization) {
   return null;
 }
 
+// Legacy/migrated customization stores `language` as an ISO code ("en"),
+// but the live plugin's translations record is keyed by full names ("English").
+// Map on read so old data renders correctly without rewriting the DB.
+const LANG_CODE_TO_NAME = {
+  en: 'English',
+  es: 'Spanish',
+  fr: 'French',
+  de: 'German',
+  sv: 'Swedish',
+  nl: 'Dutch',
+  it: 'Italian',
+  pt: 'Portuguese',
+  pl: 'Polish',
+};
+
+function normalizeCustomizationLanguage(customization) {
+  if (!customization || typeof customization !== 'object') return customization;
+  const code = customization.language;
+  if (typeof code !== 'string') return customization;
+  const mapped = LANG_CODE_TO_NAME[code.toLowerCase()];
+  if (!mapped || mapped === code) return customization;
+  return { ...customization, language: mapped };
+}
+
 /** UPDATE Site SET banner_type, region_mode for an existing row. Silent on failure. */
 async function updateSiteBannerType(db, siteId, derived) {
   if (!siteId || !derived) return;
@@ -485,7 +509,7 @@ export async function handleGetPluginData(request, env) {
   return Response.json({
     success: true,
     webAppSiteId,
-    customization,
+    customization: normalizeCustomizationLanguage(customization),
   }, { status: 200 });
 }
 
