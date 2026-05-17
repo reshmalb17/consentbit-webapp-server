@@ -384,15 +384,10 @@ export async function handleSyncPluginCustomization(request, env) {
   }
 
   const db = env.CONSENT_WEBAPP;
-  const kv = env.AUTH_STORE_FRAMER;
 
   if (!db) {
     console.error('[SyncPluginCustomization] CONSENT_WEBAPP DB binding missing');
     return Response.json({ success: false, error: 'Database not available' }, { status: 503 });
-  }
-  if (!kv) {
-    console.error('[SyncPluginCustomization] AUTH_STORE_FRAMER KV binding missing');
-    return Response.json({ success: false, error: 'KV (AUTH_STORE_FRAMER) not configured' }, { status: 503 });
   }
 
   let body;
@@ -403,36 +398,15 @@ export async function handleSyncPluginCustomization(request, env) {
     return Response.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
   }
 
-  const platformSiteId = (body?.platformSiteId || '').trim();
+  const webAppSiteId = (body?.webAppSiteId || '').trim();
   const customization = body?.customization && typeof body.customization === 'object' ? body.customization : null;
 
-  if (!platformSiteId) {
-    return Response.json({ success: false, error: 'platformSiteId is required' }, { status: 400 });
+  if (!webAppSiteId) {
+    return Response.json({ success: false, error: 'webAppSiteId is required' }, { status: 400 });
   }
   if (!customization) {
     return Response.json({ success: false, error: 'customization object is required' }, { status: 400 });
   }
-
-  // Look up the KV entry for this platformSiteId
-  let kvEntry;
-  try {
-    kvEntry = await kv.get(platformSiteId, { type: 'json' });
-  } catch (e) {
-    console.error('[SyncPluginCustomization] KV get failed', e);
-    return Response.json({ success: false, error: 'Failed to read platform mapping' }, { status: 500 });
-  }
-
-  if (!kvEntry || !kvEntry.webAppSiteId) {
-    console.warn('[SyncPluginCustomization] no KV mapping for platformSiteId', platformSiteId);
-    return Response.json({
-      success: false,
-      code: 'NOT_PROVISIONED',
-      error: 'Site not yet provisioned. Call /api/sync-plugin first.',
-    }, { status: 404 });
-  }
-
-  const webAppSiteId = kvEntry.webAppSiteId;
-  const cdnScriptId = kvEntry.cdnScriptId ?? null;
 
   try {
     await saveBannerCustomization(db, webAppSiteId, customization);
@@ -448,18 +422,9 @@ export async function handleSyncPluginCustomization(request, env) {
     await updateSiteBannerType(db, webAppSiteId, derivedFromCustomization);
   }
 
-  // Bump KV updatedAt timestamp
-  try {
-    await kv.put(platformSiteId, JSON.stringify({ ...kvEntry, updatedAt: new Date().toISOString() }));
-  } catch (e) {
-    console.warn('[SyncPluginCustomization] KV updatedAt bump failed (non-fatal)', e);
-  }
-
   return Response.json({
     success: true,
     siteId: webAppSiteId,
-    cdnScriptId,
-    platformSiteId,
   }, { status: 200 });
 }
 

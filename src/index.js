@@ -36,7 +36,7 @@ import { handleAdminBackfillWfSiteId } from './handlers/adminBackfillWfSiteId.js
 import { handleAdminBackfillFramerSiteId } from './handlers/adminBackfillFramerSiteId.js';
 import { handleAdminClearWebappData } from './handlers/adminClearWebappData.js';
 import { handleAdminResetLegacyWebflow } from './handlers/adminResetLegacyWebflow.js';
-import { handleAdminMigrateFromKv } from './handlers/adminMigrateFromKv.js';
+import { handleAdminMigrateFromKv, handleAdminMigrateFramerFromKv } from './handlers/adminMigrateFromKv.js';
 import { handleAdminMigrateSingleSite } from './handlers/adminMigrateSingleSite.js';
 import { handleAdminMigrateCustomization } from './handlers/adminMigrateCustomization.js';
 import { handleAdminBackfillDescriptions } from './handlers/adminBackfillDescriptions.js';
@@ -165,6 +165,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/admin/clear-webapp-data',
   '/api/admin/reset-legacy-webflow',
   '/api/admin/migrate-from-kv',
+  '/api/admin/migrate-framer-from-kv',
   '/api/admin/migrate-single-site',
   '/api/admin/migrate-customization',
   '/api/admin/backfill-descriptions',
@@ -338,6 +339,9 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     case '/api/admin/migrate-from-kv':
       response = await handleAdminMigrateFromKv(request, env); break;
+
+    case '/api/admin/migrate-framer-from-kv':
+      response = await handleAdminMigrateFramerFromKv(request, env); break;
 
     case '/api/admin/migrate-single-site':
       response = await handleAdminMigrateSingleSite(request, env); break;

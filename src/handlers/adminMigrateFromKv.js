@@ -203,42 +203,59 @@ async function migrateFramer(env, db, dryRun, results, emailFilter = null) {
   const kv = env.ACTIVE_SITES_CONSENTBIT_FRAMER;
   const authKv = env.AUTH_STORE_FRAMER;
   if (!kv) { results.push({ platform: 'framer', status: 'skipped', reason: 'KV not configured' }); return; }
+  if (!authKv) { results.push({ platform: 'framer', status: 'skipped', reason: 'AUTH_STORE_FRAMER not configured' }); return; }
 
-  const keys = await listAllKvKeys(kv);
-  for (const key of keys) {
+  // Phase 0: load paid entries (the 66-ish set we actually want to migrate).
+  const paidKeys = await listAllKvKeys(kv);
+  const paidEntries = [];
+  for (const key of paidKeys) {
+    const entry = await kv.get(key, { type: 'json' });
+    if (!entry || !entry.active) continue;
+    const domain = normalizeDomain(entry.site_domain || key);
+    if (!domain) { results.push({ key, platform: 'framer', status: 'skipped', reason: 'no site_domain' }); continue; }
+    paidEntries.push({ key, entry, domain });
+  }
+
+  // Phase 1: scan auth store, keep only entries whose productionUrl matches a paid domain.
+  const paidDomainSet = new Set(paidEntries.map(p => p.domain));
+  const authIndex = new Map(); // domain → { framerSiteId, authData }
+  const authKeys = await listAllKvKeys(authKv);
+  for (const authKey of authKeys) {
     try {
-      const entry = await kv.get(key, { type: 'json' });
-      if (!entry || !entry.active) continue;
+      const raw = await authKv.get(authKey);
+      if (!raw) continue;
+      const authData = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      const productionUrl = authData?.userData?.productionUrl;
+      if (!productionUrl) continue;
+      const domain = normalizeDomain(productionUrl);
+      if (paidDomainSet.has(domain)) {
+        authIndex.set(domain, { framerSiteId: authKey, authData });
+      }
+    } catch (_) {}
+  }
 
-      const domain = normalizeDomain(entry.site_domain || key);
-      if (!domain) continue;
-
-      const framerSiteId = entry.framerSiteId || null;
-
-      // Look up Framer auth details
-      let email = entry.email || null;
-      let siteName = domain;
-      let stagingUrl = null;
-
-      if (authKv && framerSiteId) {
-        try {
-          const raw = await authKv.get(framerSiteId);
-          if (raw) {
-            const authData = typeof raw === 'string' ? JSON.parse(raw) : raw;
-            email = email || authData?.userData?.email || null;
-            stagingUrl = authData?.userData?.productionUrl || authData?.userData?.stagingUrl || null;
-            siteName = authData?.userData?.name ? `${authData.userData.name}'s site` : domain;
-          }
-        } catch (_) {}
+  // Phase 2: join paid entries with auth index and upsert.
+  for (const { key, entry, domain } of paidEntries) {
+    try {
+      const match = authIndex.get(domain);
+      if (!match) {
+        results.push({ key, platform: 'framer', status: 'skipped', reason: 'no auth entry for domain', domain });
+        continue;
       }
 
-      if (!email) { results.push({ key, platform: 'framer', status: 'skipped', reason: 'no email' }); continue; }
+      const { framerSiteId, authData } = match;
+      const userData = authData?.userData || {};
+      const email = entry.email || userData.email || null;
+      if (!email) { results.push({ key, platform: 'framer', status: 'skipped', reason: 'no email', domain }); continue; }
       if (emailFilter && email.toLowerCase() !== emailFilter.toLowerCase()) continue;
+
+      const siteName = userData.name ? `${userData.name}'s site` : domain;
+      const stagingUrl = userData.productionUrl || userData.stagingUrl || null;
 
       if (!dryRun) {
         const userId = await upsertUser(db, email, nowIso());
         const orgId = await upsertOrganization(db, userId, siteName, nowIso());
-        const siteId = await upsertSite(db, {
+        const { siteId, cdnScriptId } = await upsertSite(db, {
           organizationId: orgId,
           domain,
           name: siteName,
@@ -251,7 +268,7 @@ async function migrateFramer(env, db, dryRun, results, emailFilter = null) {
         });
         await upsertSubscription(db, {
           organizationId: orgId,
-          siteId: siteId.siteId,
+          siteId,
           subscriptionId: entry.subscription_id || entry.subscriptionId,
           customerId: entry.customer_id || entry.customerId,
           status: entry.active ? 'active' : 'canceled',
@@ -261,6 +278,30 @@ async function migrateFramer(env, db, dryRun, results, emailFilter = null) {
           planId: entry.plan || 'basic',
           now: nowIso(),
         });
+
+        // Write back to ACTIVE_SITES_CONSENTBIT_FRAMER — preserve plan, add resolved IDs.
+        const preservedPlan = ['basic', 'essential', 'growth'].includes(entry.plan) ? entry.plan : 'basic';
+        await kv.put(key, JSON.stringify({
+          ...entry,
+          plan: preservedPlan,
+          framerSiteId,
+          webappSiteId: siteId,
+          organizationId: orgId,
+          cdnScriptId,
+          userEmail: email,
+        }));
+
+        // Write back to AUTH_STORE_FRAMER — merge into existing object, preserve structure.
+        try {
+          await authKv.put(framerSiteId, JSON.stringify({
+            ...authData,
+            webappSiteId: siteId,
+            organizationId: orgId,
+            userId,
+            cdnScriptId,
+            isLegacyUser: true,
+          }));
+        } catch (_) {}
       }
 
       results.push({ key, platform: 'framer', status: dryRun ? 'dry-run' : 'migrated', email, domain, framerSiteId });
@@ -296,6 +337,32 @@ export async function handleAdminMigrateFromKv(request, env) {
   if (!platformFilter || platformFilter === 'framer') {
     await migrateFramer(env, db, dryRun, results, emailFilter);
   }
+
+  const migrated = results.filter(r => r.status === 'migrated' || r.status === 'dry-run').length;
+  const skipped = results.filter(r => r.status === 'skipped').length;
+  const errors = results.filter(r => r.status === 'error').length;
+
+  return Response.json({ success: true, dryRun, migrated, skipped, errors, results });
+}
+
+export async function handleAdminMigrateFramerFromKv(request, env) {
+  if (request.method !== 'POST') {
+    return Response.json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
+  }
+  const authError = checkAdminAuth(request, env);
+  if (authError) return authError;
+
+  const db = env.CONSENT_WEBAPP;
+  if (!db) {
+    return Response.json({ success: false, error: 'CONSENT_WEBAPP not configured' }, { status: 503 });
+  }
+
+  const url = new URL(request.url);
+  const dryRun = url.searchParams.get('dryRun') === 'true';
+  const emailFilter = url.searchParams.get('email') || null;
+
+  const results = [];
+  await migrateFramer(env, db, dryRun, results, emailFilter);
 
   const migrated = results.filter(r => r.status === 'migrated' || r.status === 'dry-run').length;
   const skipped = results.filter(r => r.status === 'skipped').length;
