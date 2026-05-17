@@ -82,11 +82,41 @@ export async function handleLegacyConsentLogs(request, env) {
   const total = consents.length;
   const page = consents.slice(offset, offset + limit);
 
+  // Fetch scanned cookie inventory from D1 for this site
+  const resolvedSiteId = site.id;
+  const { results: cookieRows } = await db
+    .prepare(
+      `SELECT id, name, domain, path, category, provider, description, expires, source, lastSeenAt FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
+        FROM Cookie
+        WHERE siteId = ?1 AND (isExpected = 0 OR isExpected IS NULL)
+      ) WHERE rn = 1
+      ORDER BY category, provider, name`,
+    )
+    .bind(resolvedSiteId)
+    .all()
+    .catch(() => ({ results: [] }));
+
+  const cookies = (cookieRows || []).map(({ rn, RN, ...rest }) => rest);
+
+  let customCookieRules = [];
+  try {
+    const { results: ccrRows } = await db
+      .prepare(
+        `SELECT id, name, domain, scriptUrlPattern, category, duration, description
+         FROM CustomCookieRule WHERE siteId = ?1 AND published = 1
+         ORDER BY category, name`,
+      )
+      .bind(resolvedSiteId)
+      .all();
+    customCookieRules = ccrRows || [];
+  } catch { /* non-fatal */ }
+
   return Response.json({
     success: true,
     consents: page,
-    cookies: [],
-    customCookieRules: [],
+    cookies,
+    customCookieRules,
     total,
     limit,
     offset,

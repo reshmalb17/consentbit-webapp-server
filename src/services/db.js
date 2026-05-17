@@ -3210,21 +3210,9 @@ export async function createScheduledScan(db, { siteId, scheduledAt, frequency =
     const id = `scheduled-${siteId}-${Date.now()}`;
     const now = new Date().toISOString();
     
-    // Calculate nextRunAt based on frequency
-    let nextRunAt = scheduledAt;
-    if (frequency === 'daily') {
-      const next = new Date(scheduledAt);
-      next.setDate(next.getDate() + 1);
-      nextRunAt = next.toISOString();
-    } else if (frequency === 'weekly') {
-      const next = new Date(scheduledAt);
-      next.setDate(next.getDate() + 7);
-      nextRunAt = next.toISOString();
-    } else if (frequency === 'monthly') {
-      const next = new Date(scheduledAt);
-      next.setMonth(next.getMonth() + 1);
-      nextRunAt = next.toISOString();
-    }
+    // First run always fires at the user-selected scheduledAt. Subsequent runs are
+    // advanced by one period in calculateNextRunAt after the cron executes.
+    const nextRunAt = scheduledAt;
 
     await db
       .prepare(

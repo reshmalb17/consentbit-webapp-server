@@ -19,9 +19,11 @@ function normalizeCategories(cats) {
   return cats.categories && typeof cats.categories === 'object' ? cats.categories : cats;
 }
 
-function buildHtml(consent, cookies, customCookieRules, siteDomain) {
+export function buildHtml(consent, cookies, customCookieRules, siteDomain) {
   const cats = normalizeCategories(consent.categories) || {};
-  const isCcpa = consent.regulation === 'ccpa' || (cats.ccpa !== undefined);
+  // Use regulation as primary signal; fall back to ccpa-only categories only when regulation is absent
+  const isCcpa = consent.regulation === 'ccpa' ||
+    (!consent.regulation && cats.ccpa !== undefined && cats.essential === undefined && cats.analytics === undefined);
   const isAccepted = consent.status === 'given';
   const ts = consent.createdAt ? new Date(consent.createdAt).toUTCString() : '—';
 

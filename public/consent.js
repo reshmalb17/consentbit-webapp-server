@@ -1750,38 +1750,12 @@ function clearConsentState() {
       const marketingCheckbox = document.getElementById('cb-pref-marketing');
       const personalizationCheckbox = document.getElementById('cb-pref-preferences');
       const analyticsCheckbox = document.getElementById('cb-pref-analytics');
-      const checkboxUs = document.getElementById('cb-ccpa-optout');
-  
-  
-  
+
       if (necessaryCheckbox) {
         necessaryCheckbox.checked = true;
         necessaryCheckbox.disabled = true;
       }
-      
-      // US preference banner checkbox - always checked and disabled
-      if (checkboxUs && !checkboxUs.hasAttribute('data-us-checkbox-initialized')) {
-        checkboxUs.checked = true;
-        checkboxUs.disabled = true;
-        checkboxUs.setAttribute('data-us-checkbox-initialized', 'true');
-        
-        // Prevent unchecking even if user tries to interact
-        checkboxUs.addEventListener('click', function(e) {
-          e.preventDefault();
-          checkboxUs.checked = true;
-          return false;
-        }, true);
-        checkboxUs.addEventListener('change', function(e) {
-          if (!checkboxUs.checked) {
-            checkboxUs.checked = true;
-          }
-        }, true);
-      } else if (checkboxUs) {
-        // Ensure it's still checked even if already initialized
-        checkboxUs.checked = true;
-        checkboxUs.disabled = true;
-      }
-      
+
       if (marketingCheckbox) {
         marketingCheckbox.checked = Boolean(preferences.marketing);
       }

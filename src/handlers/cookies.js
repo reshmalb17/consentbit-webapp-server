@@ -126,9 +126,22 @@ export async function handleCookies(request, env) {
       .first();
 
     // Get cookies from the latest completed scan only so the list matches the scan history count.
-    // Fall back to all-time cookies if no scan record exists yet.
-    const { results } = latestScan
-      ? await db
+    // Fall back to all-time cookies if no scan record exists yet, or if the latest scan has no
+    // associated cookies (e.g. race condition where scan just completed but upsertCookies hasn't
+    // committed yet, or the browser scan found 0 cookies).
+    const allTimeFallback = db
+      .prepare(
+        `SELECT * FROM (
+          SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
+          FROM Cookie
+          WHERE siteId = ?1 AND (isExpected = 0 OR isExpected IS NULL)
+        ) WHERE rn = 1
+        ORDER BY lastSeenAt DESC, category ASC`
+      )
+      .bind(siteId);
+
+    let scanFilteredQuery = latestScan
+      ? db
           .prepare(
             `SELECT * FROM (
               SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
@@ -138,18 +151,20 @@ export async function handleCookies(request, env) {
             ORDER BY lastSeenAt DESC, category ASC`
           )
           .bind(siteId, latestScan.id)
-          .all()
-      : await db
-          .prepare(
-            `SELECT * FROM (
-              SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
-              FROM Cookie
-              WHERE siteId = ?1 AND (isExpected = 0 OR isExpected IS NULL)
-            ) WHERE rn = 1
-            ORDER BY lastSeenAt DESC, category ASC`
-          )
-          .bind(siteId)
-          .all();
+      : null;
+
+    let { results } = scanFilteredQuery
+      ? await scanFilteredQuery.all()
+      : await allTimeFallback.all();
+
+    // If the scan-filtered query returned nothing, the scan may have just completed and cookies
+    // haven't been associated yet (race condition), or the browser found no cookies. Fall back
+    // to the all-time query so previously detected cookies remain visible.
+    let usingScanFilter = !!latestScan;
+    if (latestScan && (!results || results.length === 0)) {
+      ({ results } = await allTimeFallback.all());
+      usingScanFilter = false;
+    }
 
     // Drop the rn column from each row for the response (D1 may return lowercase or uppercase)
     let cookies = (results || []).map((row) => {
@@ -161,7 +176,7 @@ export async function handleCookies(request, env) {
     // in the latest scan. Cookies that exist in the Cookie table as expected but were
     // not detected during scanning should not appear in the cookie list.
     try {
-      const expectedQuery = latestScan
+      const expectedQuery = usingScanFilter
         ? `SELECT * FROM (
             SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
             FROM Cookie
@@ -173,7 +188,7 @@ export async function handleCookies(request, env) {
             WHERE siteId = ?1 AND isExpected = 1
           ) WHERE rn = 1`;
 
-      const expectedStmt = latestScan
+      const expectedStmt = usingScanFilter
         ? db.prepare(expectedQuery).bind(siteId, latestScan.id)
         : db.prepare(expectedQuery).bind(siteId);
 

@@ -2,6 +2,25 @@
 import { getBannerCustomization, saveBannerCustomization } from '../services/db.js';
 import { injectScriptIntoWebflowHead } from './webflowFreeRegister.js';
 
+function encodeEnvelope(payload) {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return { d: btoa(binary) };
+}
+
+function decodeEnvelopeBody(body) {
+  if (body && typeof body.d === 'string') {
+    try {
+      const binary = atob(body.d);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return JSON.parse(new TextDecoder().decode(bytes));
+    } catch (_) {}
+  }
+  return body;
+}
+
 export async function handleBannerCustomization(request, env) {
   const db = env.CONSENT_WEBAPP;
 
@@ -150,7 +169,7 @@ export async function handleBannerCustomization(request, env) {
         }
       }
 
-      return Response.json({ success: true, customization, platform: siteFlags.platform, isLegacy: siteFlags.isLegacy, isWebappMigrated, isWebflowFree, iabActivated, isBannerAdded, compliance, plan: kvPlan, webappSiteId: kvWebappSiteId });
+      return Response.json(encodeEnvelope({ success: true, customization, platform: siteFlags.platform, isLegacy: siteFlags.isLegacy, isWebappMigrated, isWebflowFree, iabActivated, isBannerAdded, compliance, plan: kvPlan, webappSiteId: kvWebappSiteId }));
     } catch (error) {
       console.error('[BannerCustomization] Error fetching:', error);
       return Response.json(
@@ -163,7 +182,7 @@ export async function handleBannerCustomization(request, env) {
   if (request.method === 'POST') {
     let body;
     try {
-      body = await request.json();
+      body = decodeEnvelopeBody(await request.json());
     } catch (e) {
       return Response.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
     }

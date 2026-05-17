@@ -180,16 +180,30 @@ export function transformEntry(entry, siteId) {
   const hasAnalytics = prefs.analytics || prefs.Analytics;
   const hasPersonalization = prefs.personalization || prefs.Personalization;
   const isAccepted = entry.action === 'acceptance' || !!(hasAnalytics || hasMarketing || hasPersonalization);
+  // bannerType/lawType explicit check (when stored in the raw entry)
+  const isCcpaBanner = entry.bannerType === 'CCPA' || entry.lawType === 'CCPA' ||
+    prefs.bannerType === 'CCPA';
+  const hasCcpaSignal = prefs.doNotShare !== undefined || prefs.doNotSell !== undefined ||
+    prefs.donotshare !== undefined || prefs.donotselldata !== undefined;
+  // hasGdprTrueSignal: at least one GDPR category was actually accepted (true).
+  // A CCPA "reject-all" stores analytics/marketing/personalization as false — this should NOT
+  // count as a GDPR signal. Only a genuine GDPR acceptance (value = true) distinguishes GDPR.
+  const hasGdprTrueSignal = !!(hasMarketing || hasAnalytics || hasPersonalization);
   let categories;
-  if (prefs.doNotShare !== undefined || prefs.doNotSell !== undefined || prefs.donotshare !== undefined || prefs.donotselldata !== undefined) {
-    categories = { ccpa: { doNotSell: Boolean(prefs.doNotSell || prefs.donotselldata) } };
+  if (isCcpaBanner || (hasCcpaSignal && !hasGdprTrueSignal)) {
+    // CCPA entry: only store doNotSell — never mix in false GDPR fields
+    categories = { ccpa: { doNotSell: Boolean(prefs.doNotSell || prefs.donotselldata || prefs.donotshare || prefs.doNotShare) } };
   } else {
+    // GDPR entry (or BOTH mode when hasCcpaSignal && hasGdprTrueSignal)
     categories = {
       essential: Boolean(prefs.necessary ?? true),
       analytics: Boolean(hasAnalytics),
       marketing: Boolean(hasMarketing),
       preferences: Boolean(hasPersonalization),
     };
+    if (hasCcpaSignal) {
+      categories.ccpa = { doNotSell: Boolean(prefs.doNotSell || prefs.donotselldata) };
+    }
   }
   return {
     id: entry._visitorId || entry.visitorId || String(Math.random()),
@@ -202,7 +216,7 @@ export function transformEntry(entry, siteId) {
     is_eu: 0,
     createdAt: ts,
     updatedAt: ts,
-    regulation: entry.bannerType === 'CCPA' || entry.lawType === 'CCPA' ? 'ccpa' : 'gdpr',
+    regulation: (isCcpaBanner || (hasCcpaSignal && !hasGdprTrueSignal)) ? 'ccpa' : 'gdpr',
     bannerType: entry.bannerType || prefs.bannerType || entry.lawType || null,
     consentMethod: entry.bannerType || prefs.bannerType || entry.lawType || 'legacy',
     status: isAccepted ? 'given' : 'rejected',
