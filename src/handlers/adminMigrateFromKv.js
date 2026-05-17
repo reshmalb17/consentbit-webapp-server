@@ -205,25 +205,25 @@ async function migrateFramer(env, db, dryRun, results, emailFilter = null) {
   if (!kv) { results.push({ platform: 'framer', status: 'skipped', reason: 'KV not configured' }); return; }
   if (!authKv) { results.push({ platform: 'framer', status: 'skipped', reason: 'AUTH_STORE_FRAMER not configured' }); return; }
 
-  // Phase 0: load paid entries (the 66-ish set we actually want to migrate).
+  // Phase 0: load paid entries in parallel.
   const paidKeys = await listAllKvKeys(kv);
+  const paidRaw = await Promise.all(paidKeys.map(k => kv.get(k, { type: 'json' }).then(entry => ({ key: k, entry }))));
   const paidEntries = [];
-  for (const key of paidKeys) {
-    const entry = await kv.get(key, { type: 'json' });
+  for (const { key, entry } of paidRaw) {
     if (!entry || !entry.active) continue;
     const domain = normalizeDomain(entry.site_domain || key);
     if (!domain) { results.push({ key, platform: 'framer', status: 'skipped', reason: 'no site_domain' }); continue; }
     paidEntries.push({ key, entry, domain });
   }
 
-  // Phase 1: scan auth store, keep only entries whose productionUrl matches a paid domain.
+  // Phase 1: scan auth store in parallel, keep only entries whose productionUrl matches a paid domain.
   const paidDomainSet = new Set(paidEntries.map(p => p.domain));
   const authIndex = new Map(); // domain → { framerSiteId, authData }
   const authKeys = await listAllKvKeys(authKv);
-  for (const authKey of authKeys) {
+  const authRaw = await Promise.all(authKeys.map(k => authKv.get(k).then(v => ({ key: k, raw: v })).catch(() => ({ key: k, raw: null }))));
+  for (const { key: authKey, raw } of authRaw) {
+    if (!raw) continue;
     try {
-      const raw = await authKv.get(authKey);
-      if (!raw) continue;
       const authData = typeof raw === 'string' ? JSON.parse(raw) : raw;
       const productionUrl = authData?.userData?.productionUrl;
       if (!productionUrl) continue;
@@ -234,20 +234,22 @@ async function migrateFramer(env, db, dryRun, results, emailFilter = null) {
     } catch (_) {}
   }
 
-  // Phase 2: join paid entries with auth index and upsert.
-  for (const { key, entry, domain } of paidEntries) {
+  // Phase 2: join paid entries with auth index and upsert. Chunked parallelism (8 at a time)
+  // to limit D1 contention while still finishing well under the 30s response cap.
+  const CHUNK_SIZE = 8;
+  const migrateOne = async ({ key, entry, domain }) => {
     try {
       const match = authIndex.get(domain);
       if (!match) {
         results.push({ key, platform: 'framer', status: 'skipped', reason: 'no auth entry for domain', domain });
-        continue;
+        return;
       }
 
       const { framerSiteId, authData } = match;
       const userData = authData?.userData || {};
       const email = entry.email || userData.email || null;
-      if (!email) { results.push({ key, platform: 'framer', status: 'skipped', reason: 'no email', domain }); continue; }
-      if (emailFilter && email.toLowerCase() !== emailFilter.toLowerCase()) continue;
+      if (!email) { results.push({ key, platform: 'framer', status: 'skipped', reason: 'no email', domain }); return; }
+      if (emailFilter && email.toLowerCase() !== emailFilter.toLowerCase()) return;
 
       const siteName = userData.name ? `${userData.name}'s site` : domain;
       const stagingUrl = userData.productionUrl || userData.stagingUrl || null;
@@ -285,7 +287,7 @@ async function migrateFramer(env, db, dryRun, results, emailFilter = null) {
           ...entry,
           plan: preservedPlan,
           framerSiteId,
-          webappSiteId: siteId,
+          webAppSiteId: siteId,
           organizationId: orgId,
           cdnScriptId,
           userEmail: email,
@@ -295,11 +297,11 @@ async function migrateFramer(env, db, dryRun, results, emailFilter = null) {
         try {
           await authKv.put(framerSiteId, JSON.stringify({
             ...authData,
-            webappSiteId: siteId,
+            webAppSiteId: siteId,
             organizationId: orgId,
             userId,
             cdnScriptId,
-            isLegacyUser: true,
+            isLegacy: true,
           }));
         } catch (_) {}
       }
@@ -308,6 +310,11 @@ async function migrateFramer(env, db, dryRun, results, emailFilter = null) {
     } catch (err) {
       results.push({ key, platform: 'framer', status: 'error', reason: err?.message });
     }
+  };
+
+  for (let i = 0; i < paidEntries.length; i += CHUNK_SIZE) {
+    const chunk = paidEntries.slice(i, i + CHUNK_SIZE);
+    await Promise.all(chunk.map(migrateOne));
   }
 }
 
