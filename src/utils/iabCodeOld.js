@@ -2250,7 +2250,8 @@ async function initAll() {
     // Hide banner immediately if consent was already stored — avoids visible flash
     // while waiting for tcfManager to initialize (~100 ms poll in waitForTCFManager).
     try {
-      if (localStorage.getItem('cookieConsentPrefs')) {
+      if (localStorage.getItem('TCF_TC_STRING') || localStorage.getItem('cookieConsentPrefs') ||
+          document.cookie.split(';').some(function(c){ return c.trim().indexOf('euconsent-v2=') === 0; })) {
         hideBanner();
       }
     } catch(e) {}
