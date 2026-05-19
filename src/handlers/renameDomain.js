@@ -136,13 +136,30 @@ export async function handleRenameDomain(request, env) {
   // Ownership: the target site must belong to one of the caller's orgs.
   const targetSite = await getSiteById(db, excludeSiteId);
   if (!targetSite) {
+    console.warn('[RenameDomain] site not found', { excludeSiteId, userId: user.id });
     return Response.json({ success: false, error: 'Site not found' }, { status: 404 });
   }
   const userOrgs = await getOrganizationsForUser(db, user.id);
-  const allowedOrgIds = new Set(userOrgs.map((o) => String(o.id)));
-  const targetOrgId = String(targetSite.organizationId ?? targetSite.organizationid ?? '');
+  const allowedOrgIds = new Set(userOrgs.map((o) => String(o.id ?? o.ID ?? '')).filter(Boolean));
+  const targetOrgId = String(targetSite.organizationId ?? targetSite.organizationid ?? targetSite.ORGANIZATIONID ?? '');
   if (!targetOrgId || !allowedOrgIds.has(targetOrgId)) {
-    return Response.json({ success: false, error: 'Forbidden' }, { status: 403 });
+    console.warn('[RenameDomain] forbidden — ownership check failed', {
+      excludeSiteId,
+      userId: user.id,
+      targetOrgId: targetOrgId || '(empty)',
+      allowedOrgIds: [...allowedOrgIds],
+      userOrgsCount: userOrgs.length,
+      targetSiteKeys: Object.keys(targetSite || {}),
+    });
+    return Response.json({
+      success: false,
+      error: 'Forbidden',
+      message: 'You do not have permission to rename this site.',
+      debug: {
+        targetOrgId: targetOrgId || null,
+        userOrgCount: userOrgs.length,
+      },
+    }, { status: 403 });
   }
 
   // Conflict check — same logic as checkDomainAvailability, scoped to "another site owns this domain".
