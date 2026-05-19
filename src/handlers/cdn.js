@@ -840,6 +840,7 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
 `
 
   const consentJsSrc = (env.CDN_BASE_URL || apiBase) + '/consent.js';
+
   const loaderWebflow = `(function(){window.__CB_WEBFLOW_MODE__=true;(function(){try{var a=localStorage.getItem('\x5f\x63\x62\x5f\x63\x67\x5f');if(!a){for(var b=0;b<localStorage.length;b++){var c=localStorage.key(b);if(c&&c.indexOf('\x63\x6f\x6e\x73\x65\x6e\x74\x62\x69\x74\x5f')===0){try{var d=JSON.parse(localStorage.getItem(c));if(d&&d.accepted){a='\x74\x72\x75\x65';break;}}catch(e){}}}}if(a)return;function f(g){return g.split(',').some(function(h){var i=h.trim().toLowerCase();return i==='\x6e\x65\x63\x65\x73\x73\x61\x72\x79'||i==='\x65\x73\x73\x65\x6e\x74\x69\x61\x6c';})}function j(k){if(!k||k.nodeName!=='\x53\x43\x52\x49\x50\x54')return;var l=k.getAttribute&&k.getAttribute('\x64\x61\x74\x61\x2d\x63\x61\x74\x65\x67\x6f\x72\x79');if(!l||f(l))return;var m=k.getAttribute('\x73\x72\x63')||'';if(m.indexOf('\x63\x6f\x6e\x73\x65\x6e\x74\x62\x69\x74')!==-1||m.indexOf('\x63\x6f\x6e\x73\x65\x6e\x74\x2e\x6a\x73')!==-1)return;if(k.type==='\x74\x65\x78\x74\x2f\x70\x6c\x61\x69\x6e')return;k.type='\x74\x65\x78\x74\x2f\x70\x6c\x61\x69\x6e';}var n=new MutationObserver(function(o){o.forEach(function(p){p.addedNodes.forEach(j);});});n.observe(document.documentElement,{childList:true,subtree:true});document.addEventListener('\x44\x4f\x4d\x43\x6f\x6e\x74\x65\x6e\x74\x4c\x6f\x61\x64\x65\x64',function(){n.disconnect();document.querySelectorAll('\x73\x63\x72\x69\x70\x74\x5b\x64\x61\x74\x61\x2d\x63\x61\x74\x65\x67\x6f\x72\x79\x5d').forEach(j);},{once:true});}catch(e){}})();var CONSENT_JS_SRC=${JSON.stringify(consentJsSrc)};if(!document.querySelector('\x73\x63\x72\x69\x70\x74\x5b\x73\x72\x63\x3d\x22'+CONSENT_JS_SRC+'\x22\x5d')){var _s=document.createElement('\x73\x63\x72\x69\x70\x74');_s.src=CONSENT_JS_SRC;_s.async=true;_s.setAttribute('\x64\x61\x74\x61\x2d\x64\x69\x73\x70\x6c\x61\x79\x2d\x6e\x61\x6d\x65','\x43\x6f\x6e\x73\x65\x6e\x74\x42\x69\x74\x53\x63\x72\x69\x70\x74\x32\x30\x32\x35');document.head.appendChild(_s);}})();
 ` + loader;
 
@@ -851,7 +852,7 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
   // so the IAB UI is never served.
   const iabAllowed = effectivePlanId === 'growth' || effectivePlanId === 'essential';
   const wantsIab = String(resolvedSite.banner_type || '').toLowerCase() === 'iab';
-  const isWebflow = String(resolvedSite.platform || '').toLowerCase() === 'webflow';
+  const isWebflow = ['webflow', 'framer'].includes(String(resolvedSite.platform || '').toLowerCase());
   const serveKind = (wantsIab && iabAllowed && isWebflow) ? 'iabwebflow'
     : (wantsIab && iabAllowed) ? 'iab'
     : isWebflow ? 'webflow'
