@@ -18,6 +18,15 @@ const KNOWN_PROD_ORIGINS = [
 ];
 
 /**
+ * Origin patterns where the host segment is dynamic per-plugin/per-build.
+ * Framer plugins serve from a fresh subdomain on plugins.framercdn.com each time
+ * the plugin is rebuilt, so we can't put exact origins in the allowlist.
+ */
+const ALLOWED_ORIGIN_PATTERNS = [
+  /^https:\/\/[a-z0-9-]+\.plugins\.framercdn\.com$/i,
+];
+
+/**
  * Build the authoritative allowed-origin list for a given request context.
  * Production origin is read from env.WEBAPP_PUBLIC_URL so it never needs to
  * be hard-coded here.
@@ -34,6 +43,13 @@ function getAllowedOrigins(env) {
   return origins;
 }
 
+/** True if the origin matches an exact allowlist entry or one of the dynamic patterns. */
+function isOriginAllowed(origin, env) {
+  if (!origin) return false;
+  if (getAllowedOrigins(env).includes(origin)) return true;
+  return ALLOWED_ORIGIN_PATTERNS.some((re) => re.test(origin));
+}
+
 // Headers that the webapp is allowed to send with credentialed requests.
 // X-Requested-With is required for CSRF protection.
 const ALLOW_HEADERS  = 'Content-Type, X-Requested-With, X-CB-Client, Authorization';
@@ -46,10 +62,9 @@ const MAX_AGE        = '86400'; // 24 h preflight cache
  */
 export function withCors(response, request, env) {
   const origin  = request.headers.get('Origin');
-  const allowed = getAllowedOrigins(env);
   const headers = new Headers(response.headers);
 
-  if (origin && allowed.includes(origin)) {
+  if (origin && isOriginAllowed(origin, env)) {
     headers.set('Access-Control-Allow-Origin',      origin);
     headers.set('Access-Control-Allow-Credentials', 'true');
     headers.set('Vary', 'Origin');
@@ -106,9 +121,8 @@ export function handleOptions(request, env) {
   ]);
 
   const isPublic = PUBLIC_PATHS.has(url.pathname);
-  const allowed  = getAllowedOrigins(env);
 
-  if (origin && (isPublic || allowed.includes(origin))) {
+  if (origin && (isPublic || isOriginAllowed(origin, env))) {
     headers.set('Access-Control-Allow-Origin',  origin);
     headers.set('Access-Control-Allow-Methods', ALLOW_METHODS);
     headers.set('Access-Control-Allow-Headers', ALLOW_HEADERS);

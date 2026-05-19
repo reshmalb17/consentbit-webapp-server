@@ -57,6 +57,8 @@ id = "75ceeaf610d54418aa82480cad36e125"
 JWT_SECRET="x7K9pL2mQ5vR8tY1nB4jH7uF0zA3eD6cK9pL2mQ5vR8tY1nB4jH7uF0zA3eD6cK9p"
 # Shared secret for calling cb-server internal APIs. Must match cb-server's LEGACY_API_SECRET.
 LEGACY_API_SECRET = "cb-internal-legacy-2025"
+# Admin key for /api/admin/* routes — send as `X-Admin-Key` header.
+ADMIN_SECRET = "cb-admin-7Kp2vQ8mNx9LtR5yJ4hB6fW1aZ3sE0d"
 # Base URL of the cb-server (app.consentbit.com) for internal calls.
 CB_SERVER_BASE_URL = "https://app.consentbit.com"
 
@@ -111,6 +113,7 @@ name = "consent-webapp-manager-production"
 [env.production.vars]
 JWT_SECRET="x7K9pL2mQ5vR8tY1nB4jH7uF0zA3eD6cK9pL2mQ5vR8tY1nB4jH7uF0zA3eD6cK9p"
 LEGACY_API_SECRET = "cb-internal-legacy-2025"
+ADMIN_SECRET = "cb-admin-7Kp2vQ8mNx9LtR5yJ4hB6fW1aZ3sE0d"
 CB_SERVER_BASE_URL = "https://app.consentbit.com"
 CDN_BASE_URL = ""
 WEBAPP_PUBLIC_URL = ""

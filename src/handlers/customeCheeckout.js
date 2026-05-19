@@ -163,6 +163,7 @@ async function provisionAccount(db, env, request, {
   amountCents,
   billingEmail,
   wfSiteId,
+  platform,
 }) {
   const [existingUser] = await Promise.all([getUserByEmail(db, email)]);
   const isNewUser = !existingUser;
@@ -214,7 +215,11 @@ async function provisionAccount(db, env, request, {
     const sets = [];
     const binds = [];
     if (billingEmailToStore) { sets.push(`billingEmail = ?${binds.length + 1}`); binds.push(billingEmailToStore); }
-    if (platformSiteIdToStore) { sets.push(`platformSiteId = COALESCE(platformSiteId, ?${binds.length + 1}), platform = COALESCE(platform, ?${binds.length + 2})`); binds.push(platformSiteIdToStore, 'webflow'); }
+    if (platformSiteIdToStore) {
+      const platformToStore = (String(platform || '').trim().toLowerCase()) || 'webflow';
+      sets.push(`platformSiteId = COALESCE(platformSiteId, ?${binds.length + 1}), platform = COALESCE(platform, ?${binds.length + 2})`);
+      binds.push(platformSiteIdToStore, platformToStore);
+    }
     sets.push(`updatedAt = ?${binds.length + 1}`); binds.push(new Date().toISOString());
     binds.push(site.id);
     await db.prepare(`UPDATE Site SET ${sets.join(', ')} WHERE id = ?${binds.length}`).bind(...binds).run().catch(() => {});
@@ -542,8 +547,9 @@ export async function handleCustomCheckout(request, env, ctx) {
         amountCents: sub.items?.data?.[0]?.price?.unit_amount ?? null,
         billingEmail,
         wfSiteId,
+        platform,
       });
-      if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(e => console.error('[CustomCheckout] postCheckoutWebflowInject outer error', e?.message));
+      if (wfSiteId && platform === 'webflow') postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(e => console.error('[CustomCheckout] postCheckoutWebflowInject outer error', e?.message));
       if (platform && wfSiteId) persistPaidStatusToKv(env, { platform, platformSiteId: wfSiteId, site, user }).catch(() => {});
       const _orgId = org?.id ?? org?.organizationId;
       let _emailTo = billingEmail || email;
@@ -639,8 +645,9 @@ export async function handleCustomCheckout(request, env, ctx) {
         amountCents: sub.items?.data?.[0]?.price?.unit_amount ?? null,
         billingEmail,
         wfSiteId,
+        platform,
       });
-      if (wfSiteId) postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(e => console.error('[CustomCheckout] postCheckoutWebflowInject outer error', e?.message));
+      if (wfSiteId && platform === 'webflow') postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(e => console.error('[CustomCheckout] postCheckoutWebflowInject outer error', e?.message));
       if (platform && wfSiteId) persistPaidStatusToKv(env, { platform, platformSiteId: wfSiteId, site, user }).catch(() => {});
       const _orgId = org?.id ?? org?.organizationId;
       let _emailTo = billingEmail || email;
