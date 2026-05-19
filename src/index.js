@@ -66,6 +66,7 @@ import { handleAuthVerifyCode } from './handlers/authVerifyCode.js';
 import { handleAuthLogout } from './handlers/authLogout.js';
 import { handleOnboardingFirstSetup } from './handlers/onboardingFirstSetup.js';
 import { handleCheckDomainAvailability } from './handlers/checkDomainAvailability.js';
+import { handleRenameDomain } from './handlers/renameDomain.js';
 import { handleWebflowFreeRegister } from './handlers/webflowFreeRegister.js';
 import { handleFeedback } from './handlers/feedback.js';
 import { handleCustomCheckout } from './handlers/customeCheeckout.js';
@@ -227,6 +228,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleWebflowFreeRegister(request, env); break;
     case '/api/sites/check-domain':
       response = await handleCheckDomainAvailability(request, env); break;
+    case '/api/sites/rename-domain':
+      response = await handleRenameDomain(request, env); break;
 
     // — Banner / scan
     case '/api/banner-customization':
