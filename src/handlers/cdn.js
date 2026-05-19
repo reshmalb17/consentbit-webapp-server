@@ -852,7 +852,7 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
   // so the IAB UI is never served.
   const iabAllowed = effectivePlanId === 'growth' || effectivePlanId === 'essential';
   const wantsIab = String(resolvedSite.banner_type || '').toLowerCase() === 'iab';
-  const isWebflow = ['webflow', 'framer'].includes(String(resolvedSite.platform || '').toLowerCase());
+  const isWebflow = String(resolvedSite.platform || '').toLowerCase() === 'webflow';
   const serveKind = (wantsIab && iabAllowed && isWebflow) ? 'iabwebflow'
     : (wantsIab && iabAllowed) ? 'iab'
     : isWebflow ? 'webflow'
