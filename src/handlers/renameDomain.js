@@ -60,6 +60,22 @@ async function fetchSiteHtml(domain) {
   return '';
 }
 
+function detectOldScript(html) {
+  if (!html) return false;
+  const scriptTagRe = /<script\b[^>]*>/gi;
+  let m;
+  while ((m = scriptTagRe.exec(html)) !== null) {
+    const tag = m[0];
+    const srcMatch = tag.match(/\bsrc\s*=\s*["']([^"']+)["']/i);
+    if (!srcMatch) continue;
+    const src = srcMatch[1].trim();
+    if (/(^|\/\/)api\.consentbit\.com\/consent\.js(\?|$|["'])/i.test(src)) return true;
+    if (/(^|\/\/)api\.consentbit\.com\/consentbit\.js(\?|$|["'])/i.test(src)) return true;
+    if (/(^|\/\/)consentbit-public\.pages\.dev\/consentbit\.js(\?|$|["'])/i.test(src)) return true;
+  }
+  return false;
+}
+
 function detectPlatform(html) {
   if (!html) return { platform: '', platformSiteId: '' };
 
@@ -212,6 +228,7 @@ export async function handleRenameDomain(request, env) {
   // Conflict-free. Detect platform from the live HTML.
   const html = await fetchSiteHtml(domain);
   const detection = html ? detectPlatform(html) : null;
+  const isOldScript = html ? detectOldScript(html) : false;
 
   // Always update domain + updatedAt. Update platform fields only when we actually fetched HTML
   // — a transient fetch failure shouldn't wipe valid existing platform data.
@@ -240,6 +257,7 @@ export async function handleRenameDomain(request, env) {
       code: detection
         ? (detection.platform ? 'PLATFORM_DETECTED' : 'PLATFORM_UNKNOWN')
         : 'PLATFORM_FETCH_FAILED',
+      isOldScript,
     },
     { status: 200 },
   );
