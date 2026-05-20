@@ -18,6 +18,7 @@ import { handleConsentLogs } from './handlers/consentLogs.js';
 import { handleValidatePromo } from './handlers/validatePromo.js';
 import { handleCreateCheckoutSession } from './handlers/createCheckoutSession.js';
 import { handleCheckoutSessionDetails } from './handlers/checkoutSessionDetails.js';
+import { handleCheckoutToken } from './handlers/checkoutToken.js';
 import { handleCheckoutSuccessRedirect } from './handlers/checkoutSuccessRedirect.js';
 import { handleStripeWebhook } from './handlers/stripeWebhook.js';
 import { reportStripeMeteredUsage } from './handlers/reportStripeUsage.js';
@@ -121,6 +122,7 @@ const PUBLIC_PATHS = new Set([
   '/api/banner-customization',
   '/api/licenses/activate-license',
   '/api/licenses/check-domain-script',
+  '/api/checkout-token',
   // Legacy aliases without /api/ prefix (backwards-compat for older bundles)
   '/licenses/activate-license',
   '/licenses/check-domain-script',
@@ -262,6 +264,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleCreateCheckoutSession(request, env); break;
     case '/api/checkout-session':
       response = await handleCheckoutSessionDetails(request, env); break;
+    case '/api/checkout-token':
+      response = await handleCheckoutToken(request, env); break;
     case '/api/checkout-success-redirect':
       response = await handleCheckoutSuccessRedirect(request, env); break;
     case '/api/billing/summary':
