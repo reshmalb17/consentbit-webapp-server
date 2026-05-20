@@ -224,7 +224,7 @@ export async function handleRenameDomain(request, env) {
       { status: 200 },
     );
   }
-
+//commit
   // Conflict-free. Detect platform from the live HTML.
   const html = await fetchSiteHtml(domain);
   const detection = html ? detectPlatform(html) : null;
