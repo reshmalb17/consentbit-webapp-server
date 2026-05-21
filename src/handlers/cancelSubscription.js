@@ -6,6 +6,7 @@
 
 import { getSessionById, getUserById, getSubscriptionByStripeId, getSubscriptionById, saveSubscription, getSiteById, getSiteByDomain } from '../services/db.js';
 import { syncSubscriptionUpdateToLegacy } from '../services/syncLegacy.js';
+import { sendCancellationEmail } from '../services/email.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -27,7 +28,7 @@ function getLicenseKeysFromRow(row) {
   }
 }
 
-export async function handleCancelSubscription(request, env) {
+export async function handleCancelSubscription(request, env, ctx) {
   console.log('[CancelSubscription] POST /api/subscriptions/cancel called');
   if (request.method !== 'POST') {
     return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
@@ -271,6 +272,7 @@ export async function handleCancelSubscription(request, env) {
   }
 
   console.log('[CancelSubscription] cancel_at_period_end set — stripeSubId:', subStripeId);
+  sendCancellationEmail(env, ctx, { to: user.email, name: user.name || '' });
   return Response.json({
     success: true,
     message: 'Subscription will be cancelled at the end of the current billing period. Your plan continues until then.',

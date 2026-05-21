@@ -7,6 +7,7 @@
 import puppeteer from '@cloudflare/puppeteer';
 import { getSessionById } from '../services/db.js';
 import { verifyDownloadToken } from '../utils/signedToken.js';
+import { fetchImageAsDataUrl } from './consentPdf.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -36,7 +37,7 @@ async function getFramerConsentRows(kv, platformSiteId) {
   }
 }
 
-function buildHtml(entry, siteDomain) {
+function buildHtml(entry, siteDomain, logoUrl = null) {
   const p = entry.preferences || {};
   const meta = entry.metadata || {};
   const isCcpa = entry.bannerType === 'CCPA' || entry.lawType === 'CCPA' || p.bannerType === 'CCPA';
@@ -88,9 +89,12 @@ function buildHtml(entry, siteDomain) {
 </head>
 <body>
   <div class="header">
-    <div>
-      <h1>Consent Record</h1>
-      <p style="font-size:13px;color:#374151;margin-top:4px">${siteDomain}</p>
+    <div style="display:flex;align-items:center;gap:10px;">
+      ${logoUrl ? `<img src="${logoUrl}" style="width:28px;height:28px;object-fit:contain;" alt="ConsentBit" />` : ''}
+      <div>
+        <h1>Consent Record</h1>
+        <p style="font-size:13px;color:#374151;margin-top:4px">${siteDomain}</p>
+      </div>
     </div>
     <div class="meta">
       <div>Generated: ${new Date().toUTCString()}</div>
@@ -199,7 +203,8 @@ export async function handleLegacyConsentPdfFramer(request, env) {
   const entry = entries.find((e) => (e._visitorId || e.visitorId) === visitorId);
   if (!entry) return new Response('Visitor not found', { status: 404 });
 
-  const html = buildHtml(entry, site.domain || siteId);
+  const logoUrl = await fetchImageAsDataUrl();
+  const html = buildHtml(entry, site.domain || siteId, logoUrl);
 
   let browser;
   try {

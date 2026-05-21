@@ -21,6 +21,18 @@ import {
   matchPublishedCustomRule,
   hostHintsFromSiteDomain,
 } from '../utils/customCookieRules.js';
+import { SCRIPT_BLOCK_PROVIDERS } from '../data/scriptBlockProviders.js';
+
+function categorizeScriptByProviders(url) {
+  try {
+    for (const { pattern, categories } of SCRIPT_BLOCK_PROVIDERS) {
+      if (new RegExp(pattern, 'i').test(url)) {
+        return categories[0];
+      }
+    }
+  } catch (_) {}
+  return null;
+}
 
 
 function parseCookieString(cookieString) {
@@ -221,15 +233,20 @@ async function performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId,
 
     const scanDuration = Date.now() - scanStartTime;
 
+    // Only count and store scripts matching known tracking tool patterns
+    const trackingScripts = scripts
+      .map(url => ({ url, category: categorizeScriptByProviders(url) }))
+      .filter(s => s.category !== null);
+
     await upsertCookies(db, { siteId, scanHistoryId, cookies });
-    await upsertScripts(db, { siteId, scripts: scripts.map(url => ({ url, category: 'uncategorized' })) });
+    await upsertScripts(db, { siteId, scripts: trackingScripts });
 
     const categoriesJson = JSON.stringify(
       [...new Set(cookies.map((c) => String(c.category || 'uncategorized').toLowerCase()).filter(Boolean))].sort()
     );
     await db.prepare(
       `UPDATE ScanHistory SET cookiesFound = ?1, scriptsFound = ?2, scanDuration = ?3, scanStatus = 'completed', categories = ?5 WHERE id = ?4`
-    ).bind(cookies.length, scripts.length, scanDuration, scanHistoryId, categoriesJson).run();
+    ).bind(cookies.length, trackingScripts.length, scanDuration, scanHistoryId, categoriesJson).run();
 
   } catch (err) {
     console.error('[ScanSite] performBrowserScan failed:', err);
@@ -504,46 +521,17 @@ export async function handleScanSite(request, env, ctx) {
       }
     }
 
-    // Categorize scripts
-    function categorizeScript(src) {
-      try {
-        const u = new URL(src);
-        const host = u.hostname;
-
-        if (
-          host.includes('google-analytics.com') ||
-          src.includes('gtag/js') ||
-          host.includes('googletagmanager.com')
-        ) {
-          return 'analytics';
-        }
-        if (
-          host.includes('facebook.com') ||
-          host.includes('fbcdn.net') ||
-          host.includes('doubleclick.net') ||
-          host.includes('ads.')
-        ) {
-          return 'marketing';
-        }
-        if (
-          host.includes('hotjar.com') ||
-          host.includes('intercom.io') ||
-          host.includes('fullstory.com')
-        ) {
-          return 'behavioral';
-        }
-        return 'uncategorized';
-      } catch (e) {
-        return 'uncategorized';
-      }
-    }
+    // Only count and store scripts matching known tracking tool patterns
+    const trackingScripts = scripts
+      .map(url => ({ url, category: categorizeScriptByProviders(url) }))
+      .filter(s => s.category !== null);
 
     // Create scan history using db.js function
     const scanDuration = Date.now() - scanStartTime;
     const { scanHistoryId } = await createScanHistory(db, {
       siteId,
       scanUrl,
-      scriptsFound: scripts.length,
+      scriptsFound: trackingScripts.length,
       cookiesFound: cookies.length,
       scanDuration,
     });
@@ -552,17 +540,14 @@ export async function handleScanSite(request, env, ctx) {
     // Store only real detected cookies — no inference or script-pattern phantoms
     await upsertCookies(db, { siteId, scanHistoryId, cookies });
 
-    await upsertScripts(db, {
-      siteId,
-      scripts: scripts.map(url => ({ url, category: categorizeScript(url) })),
-    });
+    await upsertScripts(db, { siteId, scripts: trackingScripts });
 
     // Persist accurate counts and categories snapshot
     const categoriesSnapshot = JSON.stringify(
       [...new Set(cookies.map((c) => String(c.category || 'uncategorized').toLowerCase()).filter(Boolean))].sort()
     );
     await db.prepare(`UPDATE ScanHistory SET cookiesFound = ?1, scriptsFound = ?2, categories = ?3 WHERE id = ?4`)
-      .bind(cookies.length, scripts.length, categoriesSnapshot, scanHistoryId).run();
+      .bind(cookies.length, trackingScripts.length, categoriesSnapshot, scanHistoryId).run();
 
     // Calculate cookies by consent state
     const cookiesByConsent = getCookiesByConsentState(cookies, {
@@ -575,7 +560,7 @@ export async function handleScanSite(request, env, ctx) {
     return Response.json({
       success: true,
       scanHistoryId,
-      scriptsFound: scripts.length,
+      scriptsFound: trackingScripts.length,
       cookiesFound: cookies.length,
       cookiesByConsent: {
         necessary: cookiesByConsent.necessary.length,

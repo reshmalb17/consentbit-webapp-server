@@ -3,7 +3,7 @@ import puppeteer from '@cloudflare/puppeteer';
 import { getSessionById } from '../services/db.js';
 import { buildSearchKeys, getConsentRowsFromR2, getConsentRowsFromKV, transformEntry } from './legacyConsentHelpers.js';
 import { verifyDownloadToken } from '../utils/signedToken.js';
-import { buildHtml } from './consentPdf.js';
+import { buildHtml, fetchImageAsDataUrl } from './consentPdf.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -101,7 +101,8 @@ export async function handleLegacyConsentPdf(request, env) {
 
   const customCookieRules = customRuleRows || [];
 
-  const html = buildHtml(consent, cookies, customCookieRules, site.domain || siteId);
+  const logoUrl = await fetchImageAsDataUrl();
+  const html = buildHtml(consent, cookies, customCookieRules, site.domain || siteId, logoUrl);
 
   let browser;
   try {

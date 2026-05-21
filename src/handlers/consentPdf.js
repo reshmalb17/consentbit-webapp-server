@@ -3,6 +3,13 @@ import puppeteer from '@cloudflare/puppeteer';
 import { getSessionById } from '../services/db.js';
 import { verifyDownloadToken } from '../utils/signedToken.js';
 
+// favicon1.png embedded as base64 — Workers cannot fetch their own origin (522 loop).
+const LOGO_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAACXBIWXMAAAsTAAALEwEAmpwYAAAFIGlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNS42LWMxNDUgNzkuMTYzNDk5LCAyMDE4LzA4LzEzLTE2OjQwOjIyICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6cGhvdG9zaG9wPSJodHRwOi8vbnMuYWRvYmUuY29tL3Bob3Rvc2hvcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIgeG1wOkNyZWF0b3JUb29sPSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoTWFjaW50b3NoKSIgeG1wOkNyZWF0ZURhdGU9IjIwMjUtMDItMTlUMTk6NDM6MTQrMDU6MzAiIHhtcDpNb2RpZnlEYXRlPSIyMDI1LTAyLTE5VDE5OjQzOjU4KzA1OjMwIiB4bXA6TWV0YWRhdGFEYXRlPSIyMDI1LTAyLTE5VDE5OjQzOjU4KzA1OjMwIiBkYzpmb3JtYXQ9ImltYWdlL3BuZyIgcGhvdG9zaG9wOkNvbG9yTW9kZT0iMyIgcGhvdG9zaG9wOklDQ1Byb2ZpbGU9InNSR0IgSUVDNjE5NjYtMi4xIiB4bXBNTTpJbnN0YW5jZUlEPSJ4bXAuaWlkOjMyMTFhNTBjLWYz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';
+
+export async function fetchImageAsDataUrl(_url) {
+  return LOGO_DATA_URL;
+}
+
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
@@ -38,7 +45,7 @@ function cookieDuration(expires) {
   }
 }
 
-export function buildHtml(consent, cookies, customCookieRules, siteDomain) {
+export function buildHtml(consent, cookies, customCookieRules, siteDomain, logoUrl = null) {
   const cats = normalizeCategories(consent.categories) || {};
   const isCcpa = consent.regulation === 'ccpa' ||
     (!consent.regulation && cats.ccpa !== undefined && cats.essential === undefined && cats.analytics === undefined);
@@ -160,11 +167,11 @@ export function buildHtml(consent, cookies, customCookieRules, siteDomain) {
   <div class="proof-header">
     <h1 class="proof-title">Proof of consent</h1>
     <div class="proof-brand">
-      <svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <circle cx="9" cy="9" r="9" fill="#007aff"/>
-        <path d="M4.5 9.5L7.5 12.5L13.5 6" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
-      <span class="proof-brand-name">Consentbit</span>
+      ${logoUrl
+        ? `<img src="${logoUrl}" style="width:28px;height:28px;object-fit:contain;" alt="ConsentBit" />`
+        : `<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:18px;height:18px;"><circle cx="9" cy="9" r="9" fill="#007aff"/><path d="M4.5 9.5L7.5 12.5L13.5 6" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+      }
+      <span class="proof-brand-name">ConsentBit</span>
     </div>
   </div>
 
@@ -278,7 +285,8 @@ export async function handleConsentPdf(request, env) {
 
   const customCookieRules = customRuleRows || [];
 
-  const html = buildHtml(consent, cookies, customCookieRules, site.domain || siteId);
+  const logoUrl = await fetchImageAsDataUrl();
+  const html = buildHtml(consent, cookies, customCookieRules, site.domain || siteId, logoUrl);
 
   let browser;
   try {

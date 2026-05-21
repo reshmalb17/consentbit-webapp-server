@@ -429,6 +429,152 @@ ConsentBit Team
 // 4. Scan limit reached — sent once per month when scheduled scans are blocked
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 5. Cancellation confirmation — sent immediately when user cancels
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {object} env
+ * @param {ExecutionContext|null} ctx
+ * @param {{ to: string, name: string }} opts
+ */
+export function sendCancellationEmail(env, ctx, { to, name }) {
+  const displayName = name || 'there';
+
+  const subject = `Your ConsentBit Subscription Has Been Cancelled`;
+
+  const html = layout(
+    `Your ConsentBit subscription has been cancelled successfully.`,
+    `
+    <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi ${displayName},</p>
+    <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
+      Your ConsentBit subscription has been cancelled successfully.
+    </p>
+    <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
+      You will retain access to your current plan until the end of your billing period.
+    </p>
+
+    ${HR}
+
+    <p style="margin:0 0 18px;color:#6b7280;font-size:14px;line-height:1.6;">
+      If you have any feedback or need assistance in the future, feel free to reach out — we're always happy to help.
+    </p>
+    <p style="margin:0 0 18px;color:#6b7280;font-size:14px;line-height:1.6;">
+      Thank you for trying ConsentBit.
+    </p>
+    <p style="margin:18px 0 0;color:#6b7280;font-size:14px;line-height:1.6;">Best regards,<br/>Team ConsentBit</p>
+    `
+  );
+
+  const text = `Hi ${displayName},
+
+Your ConsentBit subscription has been cancelled successfully.
+
+You will retain access to your current plan until the end of your billing period.
+
+If you have any feedback or need assistance in the future, feel free to reach out — we're always happy to help.
+
+Thank you for trying ConsentBit.
+
+Best regards,
+Team ConsentBit
+`;
+
+  const send = sendBrevoEmail(env, { to, name, subject, html, text })
+    .catch(e => console.error('[Email] sendCancellationEmail failed:', e?.message));
+
+  if (ctx?.waitUntil) ctx.waitUntil(send);
+}
+
+// ---------------------------------------------------------------------------
+// 6. Payment failure reminders (1 = gentle, 2 = follow-up, 3 = final)
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {object} env
+ * @param {ExecutionContext|null} ctx
+ * @param {{ to: string, name: string, updatePaymentUrl?: string, reminderNumber: 1|2|3 }} opts
+ */
+export function sendPaymentFailureEmail(env, ctx, { to, name, updatePaymentUrl, reminderNumber = 1 }) {
+  const displayName   = name || 'there';
+  const billingUrl    = updatePaymentUrl || ((env.WEBAPP_PUBLIC_URL || 'https://app.consentbit.com').replace(/\/$/, '') + '/billing');
+
+  const configs = {
+    1: {
+      subject: `Action required: Payment failed for your ConsentBit subscription`,
+      preheader: `We were unable to process your recent payment. Please update your payment details.`,
+      intro: `We were unable to process your recent payment for your ConsentBit subscription.`,
+      detail: `This may be due to an expired card or insufficient funds.`,
+      body: `Please update your payment details to avoid any interruption in your service.`,
+      note: `If you've already updated your payment, you can ignore this message.`,
+    },
+    2: {
+      subject: `Reminder: Your ConsentBit payment is still outstanding`,
+      preheader: `Just a quick reminder — your recent payment attempt was unsuccessful.`,
+      intro: `Just a quick reminder that your recent payment attempt for your ConsentBit subscription was unsuccessful.`,
+      detail: null,
+      body: `To ensure uninterrupted access to your services, please update your payment details as soon as possible.`,
+      note: `If you need any help, feel free to reach out — we're happy to assist.`,
+    },
+    3: {
+      subject: `Final notice: Update your payment to keep your ConsentBit subscription active`,
+      preheader: `Final reminder — please update your payment details to avoid suspension.`,
+      intro: `This is a final reminder regarding your failed payment.`,
+      detail: `If we're unable to process your payment soon, your ConsentBit subscription may be suspended.`,
+      body: `To continue using the service without interruption, please update your payment details immediately.`,
+      note: `If you've already resolved this, please ignore this message.`,
+    },
+  };
+
+  const cfg = configs[reminderNumber] || configs[1];
+
+  const html = layout(
+    cfg.preheader,
+    `
+    <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi ${displayName},</p>
+    <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
+      ${cfg.intro}
+    </p>
+    ${cfg.detail ? `<p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">${cfg.detail}</p>` : ''}
+    <p style="margin:0 0 22px;color:#6b7280;font-size:15px;line-height:1.6;">
+      ${cfg.body}
+    </p>
+
+    <a href="${billingUrl}" style="${BTN}">Update Payment Method →</a>
+
+    ${HR}
+
+    <p style="margin:0;color:#9ca3af;font-size:13px;line-height:1.6;">
+      ${cfg.note}
+    </p>
+    <p style="margin:18px 0 0;color:#6b7280;font-size:14px;line-height:1.6;">Best regards,<br/>Support Team</p>
+    `
+  );
+
+  const text = `Hi ${displayName},
+
+${cfg.intro}
+${cfg.detail ? `\n${cfg.detail}\n` : ''}
+${cfg.body}
+
+Update your payment method: ${billingUrl}
+
+${cfg.note}
+
+Best regards,
+Support Team
+`;
+
+  const send = sendBrevoEmail(env, { to, name, subject: cfg.subject, html, text })
+    .catch(e => console.error(`[Email] sendPaymentFailureEmail (reminder ${reminderNumber}) failed:`, e?.message));
+
+  if (ctx?.waitUntil) ctx.waitUntil(send);
+}
+
+// ---------------------------------------------------------------------------
+// 4. Scan limit reached — sent once per month when scheduled scans are blocked
+// ---------------------------------------------------------------------------
+
 /**
  * @param {object} env
  * @param {ExecutionContext|null} ctx

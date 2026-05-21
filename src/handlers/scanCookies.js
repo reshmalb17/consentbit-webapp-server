@@ -202,28 +202,40 @@ export async function handleScanCookies(request, env) {
         console.warn('[ScanCookies] Failed to clear pendingScan flag', e);
       }
     } else {
-      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-      const existingScan = await db
-        .prepare('SELECT id FROM ScanHistory WHERE siteId = ?1 AND scanUrl LIKE ?2 AND createdAt > ?3 ORDER BY createdAt DESC LIMIT 1')
-        .bind(siteId, '%client-detection%', oneHourAgo)
+      // If a browser scan is currently in progress for this site, attach to it
+      // instead of creating a duplicate row. This happens because Puppeteer visits
+      // the live site, which triggers the ConsentBit embed to fire passively.
+      const pendingScan = await db
+        .prepare(`SELECT id FROM ScanHistory WHERE siteId = ?1 AND scanStatus = 'pending' ORDER BY createdAt DESC LIMIT 1`)
+        .bind(siteId)
         .first();
 
-      if (!existingScan) {
-        await createScanHistory(db, {
-          id: newScanHistoryId,
-          siteId,
-          scanUrl: pageUrl || 'client-detection',
-          scriptsFound: scripts.length,
-          cookiesFound: cookies.length,
-          scanDuration: null,
-          scanStatus: 'completed',
-        });
-        currentScanHistoryId = newScanHistoryId;
+      if (pendingScan) {
+        currentScanHistoryId = pendingScan.id;
       } else {
-        currentScanHistoryId = existingScan.id;
-        await db.prepare('UPDATE ScanHistory SET cookiesFound = ?1, scriptsFound = ?2 WHERE id = ?3')
-          .bind(cookies.length, scripts.length, currentScanHistoryId)
-          .run();
+        const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+        const existingScan = await db
+          .prepare('SELECT id FROM ScanHistory WHERE siteId = ?1 AND scanUrl LIKE ?2 AND createdAt > ?3 ORDER BY createdAt DESC LIMIT 1')
+          .bind(siteId, '%client-detection%', oneHourAgo)
+          .first();
+
+        if (!existingScan) {
+          await createScanHistory(db, {
+            id: newScanHistoryId,
+            siteId,
+            scanUrl: pageUrl || 'client-detection',
+            scriptsFound: scripts.length,
+            cookiesFound: cookies.length,
+            scanDuration: null,
+            scanStatus: 'completed',
+          });
+          currentScanHistoryId = newScanHistoryId;
+        } else {
+          currentScanHistoryId = existingScan.id;
+          await db.prepare('UPDATE ScanHistory SET cookiesFound = ?1, scriptsFound = ?2 WHERE id = ?3')
+            .bind(cookies.length, scripts.length, currentScanHistoryId)
+            .run();
+        }
       }
     }
 

@@ -20,7 +20,7 @@ import {
   inferTierPlanIdFromStripePriceId,
   markTrialUsed,
 } from '../services/db.js';
-import { sendPaidPlanEmail } from '../services/email.js';
+import { sendPaidPlanEmail, sendPaymentFailureEmail } from '../services/email.js';
 import {
   syncPurchaseToLegacy,
   syncSubscriptionUpdateToLegacy,
@@ -833,6 +833,30 @@ export async function handleStripeWebhook(request, env, ctx) {
         failureReason: invoice.last_finalization_error?.message || null,
         rawPayload: { attempt_count: invoice.attempt_count },
       });
+
+      // Send payment failure reminder email based on attempt count
+      const orgId = existing?.organizationId ?? existing?.organizationid;
+      if (orgId) {
+        try {
+          const userRow = await db.prepare(
+            'SELECT u.email, u.name FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
+          ).bind(orgId).first();
+          if (userRow?.email) {
+            const attempt = invoice.attempt_count || 1;
+            const reminderNumber = attempt >= 3 ? 3 : attempt;
+            const billingUrl = (env.WEBAPP_PUBLIC_URL || 'https://app.consentbit.com').replace(/\/$/, '') + '/billing';
+            sendPaymentFailureEmail(env, ctx, {
+              to: userRow.email,
+              name: userRow.name || '',
+              updatePaymentUrl: billingUrl,
+              reminderNumber,
+            });
+          }
+        } catch (e) {
+          console.warn('[StripeWebhook] payment failure email lookup failed:', e?.message);
+        }
+      }
+
       return Response.json({ received: true });
     }
 

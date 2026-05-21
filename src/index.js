@@ -289,7 +289,7 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     case '/licenses/check-domain-script':
       response = await handleCheckDomainScript(request, env); break;
     case '/api/subscriptions/cancel':
-      response = await handleCancelSubscription(request, env); break;
+      response = await handleCancelSubscription(request, env, ctx); break;
     case '/api/subscriptions/upgrade':
       response = await handleUpgradeSubscription(request, env); break;
 
