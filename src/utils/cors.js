@@ -115,6 +115,7 @@ export function handleOptions(request, env) {
     '/api/banner-customization',
     '/api/licenses/activate-license',
     '/api/licenses/check-domain-script',
+    '/api/checkout-token',
     // Legacy aliases without /api/ prefix (backwards-compat for older bundles)
     '/licenses/activate-license',
     '/licenses/check-domain-script',
