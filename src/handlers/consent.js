@@ -171,7 +171,8 @@ export async function handleConsent(request, env) {
         tcf_vendors_li,
         tcf_publisher_restrictions,
         tcf_core_string,
-        tcf_publisher_string
+        tcf_publisher_string,
+        domain
       )
       VALUES (
         ?1, ?2, ?3, ?4, ?5,
@@ -180,7 +181,7 @@ export async function handleConsent(request, env) {
         ?17, ?18, ?19, ?20, ?21,
         ?22, ?23, ?24, ?25, ?26,
         ?27, ?28, ?29, ?30, ?31,
-        ?32, ?33, ?34, ?35
+        ?32, ?33, ?34, ?35, ?36
       )
     `
     )
@@ -219,7 +220,8 @@ export async function handleConsent(request, env) {
       tcf_vendors_li,
       tcf_publisher_restr,
       tcf_core_string,
-      tcf_publisher_string
+      tcf_publisher_string,
+      site.domain || null
     )
     .run();
 

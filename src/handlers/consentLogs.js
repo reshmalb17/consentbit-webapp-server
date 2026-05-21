@@ -29,7 +29,7 @@ export async function handleConsentLogs(request, env) {
       ? await db
           .prepare(
             `SELECT id, siteId, deviceId, ipAddress, userAgent, country, region, is_eu,
-                    createdAt, updatedAt, regulation, bannerType, consentMethod, status, expiresAt, consent_categories
+                    createdAt, updatedAt, regulation, bannerType, consentMethod, status, expiresAt, consent_categories, domain
              FROM Consent WHERE siteId = ?1
                AND strftime('%Y', createdAt) = ?4
                AND strftime('%m', createdAt) = ?5
@@ -40,7 +40,7 @@ export async function handleConsentLogs(request, env) {
       : await db
           .prepare(
             `SELECT id, siteId, deviceId, ipAddress, userAgent, country, region, is_eu,
-                    createdAt, updatedAt, regulation, bannerType, consentMethod, status, expiresAt, consent_categories
+                    createdAt, updatedAt, regulation, bannerType, consentMethod, status, expiresAt, consent_categories, domain
              FROM Consent WHERE siteId = ?1 ORDER BY createdAt DESC LIMIT ?2 OFFSET ?3`
           )
           .bind(siteId, limit, offset)
@@ -88,6 +88,7 @@ export async function handleConsentLogs(request, env) {
         consentMethod: row.consentMethod,
         status: row.status,
         expiresAt: row.expiresAt,
+        domain: row.domain,
         categories,
       };
     });

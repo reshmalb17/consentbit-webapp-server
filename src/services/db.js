@@ -380,11 +380,17 @@ export async function ensureSchema(db) {
       tcf_publisher_restrictions TEXT,
       tcf_core_string TEXT,
       tcf_publisher_string TEXT,
+      domain TEXT,
       FOREIGN KEY (siteId) REFERENCES Site(id) ON DELETE CASCADE
     )
   `).run();
   try {
     await db.prepare(`ALTER TABLE Consent ADD COLUMN consent_categories TEXT`).run();
+  } catch (e) {
+    // Column already exists, ignore
+  }
+  try {
+    await db.prepare(`ALTER TABLE Consent ADD COLUMN domain TEXT`).run();
   } catch (e) {
     // Column already exists, ignore
   }
