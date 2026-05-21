@@ -27,7 +27,7 @@ export async function handleCheckoutToken(request, env) {
 
     const token = crypto.randomUUID();
     await kv.put(`checkout-token:${token}`, JSON.stringify(payload), { expirationTtl: 600 });
-    console.log('[checkout-token] POST: stored token', token, 'payload:', JSON.stringify(payload));
+    console.log('[checkout-token] POST: stored token', token, 'keys:', Object.keys(payload));
 
     return Response.json({ token }, { headers: CORS_HEADERS });
   }

@@ -9,42 +9,95 @@ function getSessionIdFromCookie(request) {
   return match ? match[1].trim() : null;
 }
 
-function yesNo(val) {
-  if (val === undefined || val === null) return '—';
-  return val ? 'Yes' : 'No';
-}
-
 function normalizeCategories(cats) {
   if (!cats || typeof cats !== 'object') return cats;
   return cats.categories && typeof cats.categories === 'object' ? cats.categories : cats;
 }
 
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function cookieDuration(expires) {
+  if (!expires || expires.toLowerCase() === 'session') return 'session';
+  try {
+    const d = new Date(expires);
+    if (isNaN(d.getTime())) return expires;
+    const now = new Date();
+    if (d.getTime() < now.getTime()) return 'expired';
+    const days = Math.round((d.getTime() - now.getTime()) / (24 * 60 * 60 * 1000));
+    if (days <= 1) return '1 day';
+    if (days < 365) return `${days} days`;
+    return `${(days / 365).toFixed(1)} years`;
+  } catch {
+    return expires || 'session';
+  }
+}
+
 export function buildHtml(consent, cookies, customCookieRules, siteDomain) {
   const cats = normalizeCategories(consent.categories) || {};
-  // Use regulation as primary signal; fall back to ccpa-only categories only when regulation is absent
   const isCcpa = consent.regulation === 'ccpa' ||
     (!consent.regulation && cats.ccpa !== undefined && cats.essential === undefined && cats.analytics === undefined);
-  const isAccepted = consent.status === 'given';
-  const ts = consent.createdAt ? new Date(consent.createdAt).toUTCString() : '—';
+  const isGiven = (consent.status || '').toLowerCase() === 'given';
 
-  // Filter cookies by accepted categories
-  const acceptedSet = new Set();
+  // Format consent date
+  const ts = consent.createdAt
+    ? (() => {
+        const d = new Date(consent.createdAt);
+        const month = d.toLocaleString('en-US', { month: 'long' });
+        const day = d.getDate();
+        const year = d.getFullYear();
+        const time = d.toLocaleTimeString('en-US', { hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'UTC' });
+        return `${month} ${day}, ${year} at ${time} UTC`;
+      })()
+    : '—';
+
+  // Anonymize IP (zero out last octet for IPv4)
+  const rawIp = consent.ipAddress || '';
+  const anonIp = (() => {
+    const s = rawIp.trim();
+    if (!s) return '—';
+    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(s)) {
+      const parts = s.split('.');
+      parts[3] = '0';
+      return parts.join('.');
+    }
+    if (s.includes(':')) return s.split(':').slice(0, 4).join(':') + '::';
+    return s;
+  })();
+
+  // Build accepted categories list
+  const acceptedCats = [];
   if (!isCcpa) {
-    if (cats.essential) acceptedSet.add('essential');
-    if (cats.analytics) acceptedSet.add('analytics');
-    if (cats.marketing) acceptedSet.add('marketing');
-    if (cats.preferences) acceptedSet.add('preferences');
+    if (cats.essential !== false) acceptedCats.push('Essential');
+    if (cats.analytics === true) acceptedCats.push('Analytics');
+    if (cats.marketing === true) acceptedCats.push('Marketing');
+    if (cats.preferences === true) acceptedCats.push('Preferences');
   }
+  const acceptedLabels = isCcpa
+    ? (cats.ccpa?.doNotSell === false ? 'All (CCPA accepted)' : 'None (Do Not Sell)')
+    : (acceptedCats.length ? acceptedCats.join(', ') : 'Essential');
+
+  // Filter cookies to accepted categories
+  const acceptedSet = new Set(acceptedCats.map(c => c.toLowerCase()));
+  acceptedSet.add('necessary');
 
   const relevantCookies = isCcpa
     ? (cats.ccpa?.doNotSell === false ? cookies : [])
-    : cookies.filter(c => acceptedSet.has((c.category || '').toLowerCase()) || (c.category || '').toLowerCase() === 'necessary');
+    : cookies.filter(c => {
+        const cat = (c.category || '').toLowerCase();
+        return acceptedSet.has(cat) || cat === 'essential';
+      });
 
   const relevantCustomRules = isCcpa
     ? (cats.ccpa?.doNotSell === false ? customCookieRules : [])
     : customCookieRules.filter(r => {
         const cat = (r.category || '').toLowerCase();
-        if (cat === 'necessary') return true;
+        if (cat === 'necessary' || cat === 'essential') return true;
         if (cat === 'analytics') return !!cats.analytics;
         if (cat === 'marketing' || cat === 'advertisement') return !!cats.marketing;
         if (cat === 'functional' || cat === 'performance' || cat === 'preferences') return !!cats.preferences;
@@ -54,109 +107,94 @@ export function buildHtml(consent, cookies, customCookieRules, siteDomain) {
   const cookieRows = (() => {
     const scanned = relevantCookies.map(c => `
       <tr>
-        <td>${c.name || '—'}</td>
-        <td>${c.category || '—'}</td>
-        <td>${c.expires || '—'}</td>
-        <td>${c.description || '—'}</td>
+        <td class="proof-td">${escapeHtml(c.name || '—')}</td>
+        <td class="proof-td">${escapeHtml(cookieDuration(c.expires))}</td>
+        <td class="proof-td">${escapeHtml(c.description || '—')}</td>
       </tr>`);
     const custom = relevantCustomRules.map(r => `
       <tr>
-        <td>${r.name || '—'} <span style="font-size:10px;color:#6b7280">(custom)</span></td>
-        <td>${r.category || '—'}</td>
-        <td>${r.duration || '—'}</td>
-        <td>${r.description || '—'}</td>
+        <td class="proof-td">${escapeHtml(r.name || '—')} <span style="font-size:10px;color:#6b7280">(custom)</span></td>
+        <td class="proof-td">${escapeHtml(r.duration || '—')}</td>
+        <td class="proof-td">${escapeHtml(r.description || '—')}</td>
       </tr>`);
     const all = [...scanned, ...custom];
     return all.length > 0
       ? all.join('')
-      : `<tr><td colspan="4" style="color:#6b7280;text-align:center">No cookies recorded for accepted categories</td></tr>`;
+      : `<tr><td class="proof-td" colspan="3" style="color:#6b7280;text-align:center">No cookies recorded for accepted categories.</td></tr>`;
   })();
 
-  const consentPrefs = isCcpa
-    ? `
-      <div class="field"><div class="label">Do Not Sell</div><div class="value">${yesNo(cats.ccpa?.doNotSell)}</div></div>
-    `
-    : `
-      <div class="field"><div class="label">Necessary</div><div class="value">${yesNo(cats.essential ?? true)}</div></div>
-      <div class="field"><div class="label">Analytics</div><div class="value">${yesNo(cats.analytics)}</div></div>
-      <div class="field"><div class="label">Marketing</div><div class="value">${yesNo(cats.marketing)}</div></div>
-      <div class="field"><div class="label">Preferences</div><div class="value">${yesNo(cats.preferences)}</div></div>
-    `;
+  const consentStatusLabel = isGiven ? 'Given' : 'Rejected';
 
   return `<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <style>
+  @page { margin: 16mm 14mm; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #111827; padding: 40px; background: #fff; }
-  .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #007AFF; padding-bottom: 16px; margin-bottom: 24px; }
-  .header h1 { font-size: 22px; color: #007AFF; }
-  .header .meta { font-size: 12px; color: #6b7280; text-align: right; }
-  .badge { display: inline-block; padding: 3px 10px; border-radius: 99px; font-size: 12px; font-weight: 600; }
-  .badge-given { background: #dcfce7; color: #15803d; }
-  .badge-rejected { background: #fee2e2; color: #b91c1c; }
-  .badge-gdpr { background: #dbeafe; color: #1d4ed8; }
-  .badge-ccpa { background: #fef9c3; color: #a16207; }
-  .section { margin-bottom: 24px; }
-  .section h2 { font-size: 13px; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; }
-  .field { padding: 8px 0; border-bottom: 1px solid #f3f4f6; }
-  .field .label { font-size: 11px; color: #9ca3af; margin-bottom: 2px; }
-  .field .value { font-size: 13px; color: #111827; word-break: break-all; }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th { background: #f9fafb; text-align: left; padding: 8px 10px; font-weight: 600; color: #374151; border-bottom: 1px solid #e5e7eb; }
-  td { padding: 8px 10px; border-bottom: 1px solid #f3f4f6; color: #374151; }
-  .footer { margin-top: 32px; padding-top: 12px; border-top: 1px solid #e5e7eb; font-size: 11px; color: #9ca3af; text-align: center; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #111827; padding: 24px 28px 32px; background: #fff; font-size: 12px; line-height: 1.45; }
+
+  .proof-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid #dbe5f3; }
+  .proof-title { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; color: #007aff; }
+  .proof-brand { flex-shrink: 0; display: flex; align-items: center; gap: 5px; padding-top: 4px; }
+  .proof-brand svg { width: 18px; height: 18px; }
+  .proof-brand-name { font-size: 18px; font-weight: 700; color: #111827; }
+
+  .proof-meta { width: 100%; border-collapse: collapse; margin-bottom: 18px; }
+  .proof-label { padding: 6px 12px 6px 0; vertical-align: top; font-weight: 600; color: #374151; width: 200px; }
+  .proof-value { padding: 6px 0; color: #111827; word-break: break-word; }
+
+  .proof-section-box { border: 1px solid #93c5fd; border-radius: 8px; overflow: hidden; margin-bottom: 14px; }
+  .proof-categories-header { background: linear-gradient(180deg, #f0f7ff 0%, #ffffff 100%); padding: 12px 14px 14px; border-bottom: 1px solid #93c5fd; }
+  .proof-categories-title { font-size: 14px; font-weight: 700; color: #007aff; margin-bottom: 4px; }
+  .proof-categories-line { color: #374151; font-size: 12px; }
+
+  .proof-cookie-table { border-collapse: collapse; width: 100%; }
+  .proof-th { border: 1px solid #bfdbfe; padding: 10px 12px; text-align: left; vertical-align: top; background: #e6f1fd; color: #1e3a5f; font-weight: 600; font-size: 12px; }
+  .proof-td { border: 1px solid #bfdbfe; padding: 10px 12px; text-align: left; vertical-align: top; color: #111827; font-size: 11.5px; }
+
+  .proof-footer { margin-top: 20px; font-size: 11px; color: #6b7280; }
 </style>
 </head>
 <body>
-  <div class="header">
-    <div>
-      <h1>Consent Record</h1>
-      <p style="font-size:13px;color:#374151;margin-top:4px">${siteDomain}</p>
-    </div>
-    <div class="meta">
-      <div>Generated: ${new Date().toUTCString()}</div>
-      <div style="margin-top:4px">
-        <span class="badge ${isAccepted ? 'badge-given' : 'badge-rejected'}">${isAccepted ? 'Consent Given' : 'Consent Rejected'}</span>
-        &nbsp;
-        <span class="badge ${isCcpa ? 'badge-ccpa' : 'badge-gdpr'}">${isCcpa ? 'CCPA' : 'GDPR'}</span>
-      </div>
+  <div class="proof-header">
+    <h1 class="proof-title">Proof of consent</h1>
+    <div class="proof-brand">
+      <svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="9" cy="9" r="9" fill="#007aff"/>
+        <path d="M4.5 9.5L7.5 12.5L13.5 6" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="proof-brand-name">Consentbit</span>
     </div>
   </div>
 
-  <div class="section">
-    <h2>Visitor Information</h2>
-    <div class="grid">
-      <div class="field"><div class="label">Consent ID</div><div class="value">${consent.id || '—'}</div></div>
-      <div class="field"><div class="label">Timestamp (UTC)</div><div class="value">${ts}</div></div>
-      <div class="field"><div class="label">IP Address</div><div class="value">${consent.ipAddress || '—'}</div></div>
-      <div class="field"><div class="label">Country</div><div class="value">${consent.country || '—'}</div></div>
-      <div class="field"><div class="label">Region</div><div class="value">${consent.region || '—'}</div></div>
-      <div class="field"><div class="label">Regulation</div><div class="value">${(consent.regulation || 'gdpr').toUpperCase()}</div></div>
-      <div class="field" style="grid-column:1/-1"><div class="label">User Agent</div><div class="value">${consent.userAgent || '—'}</div></div>
-    </div>
-  </div>
+  <table class="proof-meta" role="presentation">
+    <tr><td class="proof-label">Consented domain</td><td class="proof-value">${escapeHtml(siteDomain)}</td></tr>
+    <tr><td class="proof-label">Consent date</td><td class="proof-value">${escapeHtml(ts)}</td></tr>
+    <tr><td class="proof-label">Consent ID</td><td class="proof-value">${escapeHtml(consent.id || '—')}</td></tr>
+    <tr><td class="proof-label">Country</td><td class="proof-value">${escapeHtml(consent.country || '—')}</td></tr>
+    <tr><td class="proof-label">Anonymized IP address</td><td class="proof-value">${escapeHtml(anonIp)}</td></tr>
+    <tr><td class="proof-label">Consent status</td><td class="proof-value">${escapeHtml(consentStatusLabel)}</td></tr>
+  </table>
 
-  <div class="section">
-    <h2>Consent Preferences</h2>
-    <div class="grid">
-      ${consentPrefs}
+  <div class="proof-section-box">
+    <div class="proof-categories-header">
+      <p class="proof-categories-title">Accepted Categories</p>
+      <p class="proof-categories-line">${escapeHtml(acceptedLabels)}</p>
     </div>
-  </div>
-
-  <div class="section">
-    <h2>Cookies Set</h2>
-    <table>
+    <table class="proof-cookie-table">
       <thead>
-        <tr><th>Name</th><th>Category</th><th>Duration / Expires</th><th>Description</th></tr>
+        <tr>
+          <th class="proof-th">Cookie Name</th>
+          <th class="proof-th">Duration</th>
+          <th class="proof-th">Description</th>
+        </tr>
       </thead>
       <tbody>${cookieRows}</tbody>
     </table>
   </div>
 
-  <div class="footer">ConsentBit &mdash; Consent Record for ${siteDomain} &mdash; ID ${consent.id}</div>
+  <p class="proof-footer">Page 1 of 1</p>
 </body>
 </html>`;
 }
