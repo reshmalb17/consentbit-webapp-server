@@ -73,9 +73,10 @@ export async function handleAuthRequestCode(request, env, ctx) {
     return Response.json({ success: false, error: 'name is required for signup' }, { status: 400 });
   }
 
+  let loginUser = null;
   if (purpose === 'login') {
-    const existingUser = await getUserByEmail(db, email);
-    if (!existingUser) {
+    loginUser = await getUserByEmail(db, email);
+    if (!loginUser) {
       return Response.json({ success: false, error: 'No account found with this email. Please sign up first.' }, { status: 404 });
     }
   }
@@ -87,6 +88,8 @@ export async function handleAuthRequestCode(request, env, ctx) {
     }
   }
 
+  const displayName = name || loginUser?.name || '';
+
   const code = generateCode();
   const salt = env.OTP_SECRET || 'dev-otp-secret';
   const codeHash = await sha256Hex(`${purpose}|${email}|${code}|${salt}`);
@@ -94,8 +97,8 @@ export async function handleAuthRequestCode(request, env, ctx) {
   const ttlMinutes = Number(env.OTP_TTL_MINUTES || 10) || 10;
   const row = await createEmailVerificationCode(db, { email, purpose, codeHash, name, ttlMinutes });
 
-  const subject = 'Your ConsentBit verification code';
-  const text = `Hello,\n\nYour verification code is: ${code}\n\nIt will expire in ${ttlMinutes} minutes, so please use it soon.\n\nIf you didn’t request this, you can safely ignore this email.\n\nBest regards,\nConsentBit Team\n`;
+  const subject = ‘Your ConsentBit verification code’;
+  const text = `Hello${displayName ? ` ${displayName}` : ‘’},\n\nYour verification code is: ${code}\n\nThis code will expire in ${ttlMinutes} minutes, so please use it as soon as possible.\n\nIf you did not request this verification code, you can safely ignore this email.\n\nBest regards,\nConsentBit Team\n`;
 
   const hasBrevoConfig = Boolean(env.BREVO_API_KEY && env.BREVO_FROM_EMAIL);
   const allowReturn = String(env.RETURN_OTP_IN_RESPONSE || '').toLowerCase() === 'true';

@@ -28,6 +28,8 @@ import { handleActivateLicenseWebflow } from './handlers/activateLicenseWebflow.
 import { handleCheckDomainScript } from './handlers/checkDomainScript.js';
 import { handleCancelSubscription } from './handlers/cancelSubscription.js';
 import { handleUpgradeSubscription } from './handlers/updateSubscription.js';
+import { handleCreateSetupIntent, handleUpdatePaymentMethod } from './handlers/updatePaymentMethod.js';
+import { handleSwitchBillingInterval } from './handlers/switchBillingInterval.js';
 import { handleDebugSchema } from './handlers/debugSchema.js';
 import { handleAdminSeedLegacy } from './handlers/adminSeedLegacy.js';
 import { handleAdminSeedBannerConfigs } from './handlers/adminSeedBannerConfigs.js';
@@ -292,6 +294,12 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleCancelSubscription(request, env, ctx); break;
     case '/api/subscriptions/upgrade':
       response = await handleUpgradeSubscription(request, env); break;
+    case '/api/subscriptions/switch-interval':
+      response = await handleSwitchBillingInterval(request, env); break;
+    case '/api/billing/setup-intent':
+      response = await handleCreateSetupIntent(request, env); break;
+    case '/api/billing/update-payment-method':
+      response = await handleUpdatePaymentMethod(request, env); break;
 
     // — Webhooks (own auth mechanism — Stripe signature)
     case '/api/webhooks/stripe':

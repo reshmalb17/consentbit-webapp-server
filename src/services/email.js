@@ -144,56 +144,54 @@ export function sendWelcomeEmail(env, ctx, { to, name }) {
     `
     <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi ${displayName},</p>
     <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
-      Welcome to ConsentBit. We are glad to have you with us.
+      Welcome to ConsentBit; we're excited to have you onboard.
     </p>
     <p style="margin:0 0 20px;color:#6b7280;font-size:15px;line-height:1.6;">
-      Your account is ready, and you're just a few quick steps away from getting your site compliant and running smoothly.
+      Your account has been successfully created, and you're just a few quick steps away from making your website compliant and ready to go.
     </p>
 
     ${HR}
 
-    <p style="margin:0 0 12px;color:#111827;font-size:15px;font-weight:600;">Here's how to get started:</p>
+    <p style="margin:0 0 12px;color:#111827;font-size:15px;font-weight:600;">Getting started is simple:</p>
 
     <ul style="margin:0 0 22px;padding-left:18px;color:#374151;font-size:14px;line-height:1.7;">
-      <li>Add your website (domain)</li>
-      <li>Choose a plan (you can start free)</li>
-      <li>Paste one simple script on your site</li>
+      <li>Add your website domain</li>
+      <li>Choose a plan; you can start with our Free Plan</li>
+      <li>Copy and paste a single script into your website</li>
     </ul>
 
     <p style="margin:0 0 22px;color:#6b7280;font-size:14px;line-height:1.6;">
-      That's it, your cookie consent banner will be live in minutes.
+      That's it — your cookie consent banner can be live within minutes.
     </p>
 
-    <a href="${dashboardUrl}" style="${BTN}">Go to your Dashboard →</a>
+    <a href="${dashboardUrl}" style="${BTN}">Go to Your Dashboard →</a>
 
     ${HR}
 
     <p style="margin:0;color:#9ca3af;font-size:13px;line-height:1.6;">
-      If you need help at any point, just reply to this email or visit:
-      <a href="https://consentbit.com/docs" style="color:#007AFF;text-decoration:none;">https://consentbit.com/docs</a>
+      If you have any questions or need assistance along the way, feel free to reply to this email. We're here to help.
     </p>
     `
   );
 
   const text = `Hi ${displayName},
 
-Welcome to ConsentBit. We are glad to have you with us.
+Welcome to ConsentBit; we're excited to have you onboard.
 
-Your account is ready, and you're just a few quick steps away from getting your site compliant and running smoothly.
+Your account has been successfully created, and you're just a few quick steps away from making your website compliant and ready to go.
 
-Here's how to get started:
-- Add your website (domain)
-- Choose a plan (you can start free)
-- Paste one simple script on your site
+Getting started is simple:
+- Add your website domain
+- Choose a plan; you can start with our Free Plan
+- Copy and paste a single script into your website
 
-That's it, your cookie consent banner will be live in minutes.
+That's it — your cookie consent banner can be live within minutes.
 
-Go to your dashboard: ${dashboardUrl}
+Go to Your Dashboard: ${dashboardUrl}
 
-If you need help at any point, just reply to this email or visit:
-https://consentbit.com/docs
+If you have any questions or need assistance along the way, feel free to reply to this email. We're here to help.
 
-Best,
+Best regards,
 ConsentBit Team
 `;
 
@@ -223,15 +221,15 @@ export function sendFreePlanEmail(env, ctx, { to, name, domain, scriptUrl }) {
   const subject = `Your site is ready: ${displayDomain}`;
 
   const html = layout(
-    `Your site is ready on the free plan.`,
+    `Your site is ready on the ConsentBit Free Plan.`,
     `
     <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi ${displayName},</p>
     <p style="margin:0 0 20px;color:#6b7280;font-size:15px;line-height:1.6;">
-      Good news, your site <strong style="color:#111827;">${displayDomain}</strong> is all set up on the free plan.
+      Good news; your website, <strong style="color:#111827;">${displayDomain}</strong>, has been successfully set up on the ConsentBit Free Plan.
     </p>
     <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
-      To get your consent banner live, just copy and paste the script below into your website's
-      <code style="font-size:13px;background:#f3f4f6;padding:2px 6px;border-radius:4px;">&lt;head&gt;</code> section:
+      To activate your cookie consent banner, simply copy and paste the script below into the
+      <code style="font-size:13px;background:#f3f4f6;padding:2px 6px;border-radius:4px;">&lt;head&gt;</code> section of your website:
     </p>
 
     ${HR}
@@ -244,57 +242,53 @@ export function sendFreePlanEmail(env, ctx, { to, name, domain, scriptUrl }) {
       </code>
     </div>
 
-    <p style="margin:0 0 18px;color:#6b7280;font-size:14px;line-height:1.6;">
-      Once added, your banner will be up and running in minutes.
-    </p>
-
-    <a href="${dashboardUrl}" style="${BTN}">Customize your banner →</a>
-
-
     ${HR}
 
     <p style="margin:0 0 10px;color:#111827;font-size:14px;font-weight:700;">Your Free Plan includes:</p>
     <ul style="margin:0 0 18px;padding-left:18px;color:#374151;font-size:14px;line-height:1.7;">
       <li>1 domain</li>
-      <li>7,500 page views/month</li>
+      <li>7,500 page views per month</li>
       <li>100 cookie scans</li>
-      <li>GDPR &amp; CCPA compliance</li>
+      <li>GDPR &amp; CCPA compliance support</li>
     </ul>
 
-    <p style="margin:0 0 18px;color:#6b7280;font-size:14px;line-height:1.6;">
-      Need more as you grow? You can upgrade anytime.
+    <p style="margin:0 0 22px;color:#6b7280;font-size:14px;line-height:1.6;">
+      As your website grows, you can upgrade your plan anytime to unlock additional features and higher limits.
     </p>
-    <p style="margin:0;color:#6b7280;font-size:14px;line-height:1.6;">
-      Thanks for getting started with ConsentBit, we're here if you need anything.
+
+    <a href="${dashboardUrl}" style="${BTN}">Go to Dashboard →</a>
+
+    ${HR}
+
+    <p style="margin:0;color:#9ca3af;font-size:13px;line-height:1.6;">
+      If you need any help with setup or installation, simply reply to this email and our team will be happy to assist.
     </p>
-    <p style="margin:18px 0 0;color:#6b7280;font-size:14px;line-height:1.6;">Best,<br/>ConsentBit Team</p>
+    <p style="margin:18px 0 0;color:#6b7280;font-size:14px;line-height:1.6;">Best regards,<br/>ConsentBit Team</p>
     `
   );
 
   const text = `Hi ${displayName},
 
-Good news, your site ${displayDomain} is all set up on the free plan.
+Good news; your website, ${displayDomain}, has been successfully set up on the ConsentBit Free Plan.
 
-To get your consent banner live, just copy and paste the script below into your website's <head> section:
+To activate your cookie consent banner, simply copy and paste the script below into the <head> section of your website:
 
 <!-- ConsentBit -->
 <script id="consentbit" src="${scriptUrl || 'YOUR_SCRIPT_URL'}" async></script>
 
-Once added, your banner will be up and running in minutes.
-
-Customize your banner here: ${dashboardUrl}
-
 Your Free Plan includes:
 - 1 domain
-- 7,500 page views/month
+- 7,500 page views per month
 - 100 cookie scans
-- GDPR & CCPA compliance
+- GDPR & CCPA compliance support
 
-Need more as you grow? You can upgrade anytime.
+As your website grows, you can upgrade your plan anytime to unlock additional features and higher limits.
 
-Thanks for getting started with ConsentBit, we're here if you need anything.
+Go to Dashboard: ${dashboardUrl}
 
-Best,
+If you need any help with setup or installation, simply reply to this email and our team will be happy to assist.
+
+Best regards,
 ConsentBit Team
 `;
 
@@ -321,14 +315,6 @@ export function sendPaidPlanEmail(env, ctx, { to, name, domain, planName, invoic
   const displayDomain = domain || 'your website';
   const displayPlan   = planName || 'Basic';
 
-  // Plan-specific feature bullets
-  const planFeatures = {
-    basic:     ['1 domain', '100,000 page views / month', '750 cookie scans', 'GDPR &amp; CCPA', 'Email support'],
-    essential: ['1 domain', '500,000 page views / month', '5,000 cookie scans', 'GDPR + CCPA + IAB/TCF', 'Priority support'],
-    growth:    ['1 domain', '2M page views / month', '10,000 cookie scans', 'GDPR + CCPA + IAB/TCF', 'Dedicated support'],
-  };
-  const features = planFeatures[displayPlan.toLowerCase()] || planFeatures.basic;
-  const featureItems = features.map(f => `<li>${f}</li>`).join('\n      ');
 
   // Invoice section HTML
   const invoiceHtml = invoice ? `
@@ -339,11 +325,10 @@ export function sendPaidPlanEmail(env, ctx, { to, name, domain, planName, invoic
       <tr>
         <td style="padding:6px 0;">
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-            ${invoice.invoiceNumber ? `<tr><td style="color:#6b7280;font-size:13px;width:140px;">Invoice #</td><td style="color:#111827;font-size:13px;font-weight:600;">${invoice.invoiceNumber}</td></tr>` : ''}
-            ${invoice.date         ? `<tr><td style="color:#6b7280;font-size:13px;padding-top:6px;">Date</td><td style="color:#111827;font-size:13px;padding-top:6px;">${invoice.date}</td></tr>` : ''}
-            ${invoice.amountPaid   ? `<tr><td style="color:#6b7280;font-size:13px;padding-top:6px;">Amount paid</td><td style="color:#111827;font-size:13px;font-weight:600;padding-top:6px;">${invoice.currency} ${invoice.amountPaid}</td></tr>` : ''}
-            ${invoice.interval     ? `<tr><td style="color:#6b7280;font-size:13px;padding-top:6px;">Billing</td><td style="color:#111827;font-size:13px;padding-top:6px;text-transform:capitalize;">${invoice.interval}</td></tr>` : ''}
-            <tr><td style="color:#6b7280;font-size:13px;padding-top:6px;">Plan</td><td style="color:#111827;font-size:13px;padding-top:6px;">${displayPlan}</td></tr>
+            ${invoice.invoiceNumber ? `<tr><td style="color:#6b7280;font-size:13px;width:140px;">Invoice Number</td><td style="color:#111827;font-size:13px;font-weight:600;">${invoice.invoiceNumber}</td></tr>` : ''}
+            ${invoice.date         ? `<tr><td style="color:#6b7280;font-size:13px;padding-top:6px;">Billing Date</td><td style="color:#111827;font-size:13px;padding-top:6px;">${invoice.date}</td></tr>` : ''}
+            ${invoice.amountPaid   ? `<tr><td style="color:#6b7280;font-size:13px;padding-top:6px;">Amount Paid</td><td style="color:#111827;font-size:13px;font-weight:600;padding-top:6px;">${invoice.currency} ${invoice.amountPaid}</td></tr>` : ''}
+            ${invoice.interval     ? `<tr><td style="color:#6b7280;font-size:13px;padding-top:6px;">Billing Cycle</td><td style="color:#111827;font-size:13px;padding-top:6px;text-transform:capitalize;">${invoice.interval}</td></tr>` : ''}
           </table>
         </td>
       </tr>
@@ -360,43 +345,35 @@ export function sendPaidPlanEmail(env, ctx, { to, name, domain, planName, invoic
   // Invoice plain text
   const invoiceText = invoice ? `
 --- Invoice Details ---
-${invoice.invoiceNumber ? `Invoice #: ${invoice.invoiceNumber}` : ''}
-${invoice.date         ? `Date: ${invoice.date}` : ''}
-${invoice.amountPaid   ? `Amount paid: ${invoice.currency} ${invoice.amountPaid}` : ''}
-${invoice.interval     ? `Billing: ${invoice.interval}` : ''}
-Plan: ${displayPlan}
-${invoice.invoicePdf   ? `Download PDF: ${invoice.invoicePdf}` : ''}
-${invoice.invoiceUrl   ? `View online: ${invoice.invoiceUrl}` : ''}
+${invoice.invoiceNumber ? `Invoice Number: ${invoice.invoiceNumber}` : ''}
+${invoice.date         ? `Billing Date: ${invoice.date}` : ''}
+${invoice.amountPaid   ? `Amount Paid: ${invoice.currency} ${invoice.amountPaid}` : ''}
+${invoice.interval     ? `Billing Cycle: ${invoice.interval}` : ''}
+${invoice.invoicePdf   ? `Download Invoice PDF: ${invoice.invoicePdf}` : ''}
+${invoice.invoiceUrl   ? `View Invoice Online: ${invoice.invoiceUrl}` : ''}
 ` : '';
 
-  const subject = `You're all set on the ${displayPlan} plan.`;
+  const subject = `You're all set on the ${displayPlan} plan`;
 
   const html = layout(
     `Your ${displayPlan} plan is active.`,
     `
     <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi ${displayName},</p>
     <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
-      Thanks for your purchase, your <strong style="color:#111827;">${displayPlan}</strong> plan is now active for
-      <strong style="color:#111827;">${displayDomain}</strong>.
+      Thank you for choosing ConsentBit.
     </p>
     <p style="margin:0 0 22px;color:#6b7280;font-size:15px;line-height:1.6;">
-      You now have access to everything included in your plan to keep your site fully compliant and running at scale.
+      Your <strong style="color:#111827;">${displayPlan}</strong> plan has been successfully activated for
+      <strong style="color:#111827;">${displayDomain}</strong>, and your account is now ready to use.
     </p>
-
-    ${HR}
-
-    <p style="margin:0 0 10px;color:#111827;font-size:14px;font-weight:700;">What's included in your ${displayPlan} plan:</p>
-    <ul style="margin:0 0 22px;padding-left:18px;color:#374151;font-size:14px;line-height:1.7;">
-      ${featureItems}
-    </ul>
+    <p style="margin:0 0 22px;color:#6b7280;font-size:15px;line-height:1.6;">
+      Your plan includes features designed to help you manage cookie consent and compliance efficiently. Available features may vary depending on your selected plan (Basic, Essential, or Growth).
+    </p>
 
     ${invoiceHtml}
 
     <p style="margin:0;color:#6b7280;font-size:14px;line-height:1.6;">
-      If you have any questions or need help, just reply to this email, we're happy to help.
-    </p>
-    <p style="margin:12px 0 0;color:#6b7280;font-size:14px;line-height:1.6;">
-      Thanks again for choosing ConsentBit.
+      If you need any assistance or have questions about your subscription, simply reply to this email and our team will be glad to help.
     </p>
     <p style="margin:18px 0 0;color:#6b7280;font-size:14px;line-height:1.6;">Best regards,<br/>ConsentBit Team</p>
     `
@@ -404,16 +381,13 @@ ${invoice.invoiceUrl   ? `View online: ${invoice.invoiceUrl}` : ''}
 
   const text = `Hi ${displayName},
 
-Thanks for your purchase, your ${displayPlan} plan is now active for ${displayDomain}.
+Thank you for choosing ConsentBit.
 
-You now have access to everything included in your plan to keep your site fully compliant and running at scale.
+Your ${displayPlan} plan has been successfully activated for ${displayDomain}, and your account is now ready to use.
 
-What's included in your ${displayPlan} plan:
-${features.map(f => `- ${f.replace(/&amp;/g, '&')}`).join('\n')}
+Your plan includes features designed to help you manage cookie consent and compliance efficiently. Available features may vary depending on your selected plan (Basic, Essential, or Growth).
 ${invoiceText}
-If you have any questions or need help, just reply to this email, we're happy to help.
-
-Thanks again for choosing ConsentBit.
+If you need any assistance or have questions about your subscription, simply reply to this email and our team will be glad to help.
 
 Best regards,
 ConsentBit Team
@@ -585,54 +559,55 @@ export function sendScanLimitEmail(env, ctx, { to, name, domain, scansLimit, upg
   const displayDomain = domain || 'your website';
   const billingUrl    = upgradeUrl || ((env.WEBAPP_PUBLIC_URL || 'https://app.consentbit.com').replace(/\/$/, '') + '/billing');
 
-  const subject = `Your scheduled scan was paused — scan limit reached`;
+  const subject = `Your scheduled scan was paused; scan limit reached`;
 
   const html = layout(
     `Your scheduled cookie scan for ${displayDomain} was paused because you've reached your monthly scan limit.`,
     `
     <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi ${displayName},</p>
     <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
-      Your scheduled cookie scan for <strong style="color:#111827;">${displayDomain}</strong> was paused
-      because you've used all <strong style="color:#111827;">${scansLimit} scans</strong> included in your plan this month.
+      Your scheduled cookie scan for <strong style="color:#111827;">${displayDomain}</strong> has been paused
+      because you've reached the maximum number of scans included in your current plan for this month.
     </p>
     <p style="margin:0 0 22px;color:#6b7280;font-size:15px;line-height:1.6;">
-      Your scan schedule is still saved — it will automatically resume at the start of next month when your quota resets,
-      or immediately if you upgrade your plan.
+      Don't worry — your scan schedule is still active and will automatically resume at the beginning of next month when your quota resets.
+      You can also resume scanning immediately by upgrading your plan.
     </p>
 
     ${HR}
 
-    <p style="margin:0 0 12px;color:#111827;font-size:14px;font-weight:600;">What you can do:</p>
+    <p style="margin:0 0 12px;color:#111827;font-size:14px;font-weight:600;">What you can do next:</p>
     <ul style="margin:0 0 22px;padding-left:18px;color:#374151;font-size:14px;line-height:1.7;">
-      <li>Wait until the 1st of next month — your schedule resumes automatically</li>
-      <li>Upgrade your plan now to unlock more scans immediately</li>
+      <li>Wait until the 1st of next month; your scheduled scans will resume automatically</li>
+      <li>Upgrade your plan to unlock additional scans instantly</li>
     </ul>
 
-    <a href="${billingUrl}" style="${BTN}">Upgrade plan →</a>
+    <a href="${billingUrl}" style="${BTN}">Upgrade Plan</a>
 
     ${HR}
 
     <p style="margin:0;color:#9ca3af;font-size:13px;line-height:1.6;">
-      Questions? Just reply to this email and we'll help you out.
+      If you have any questions, feel free to reply to this email and our team will be happy to help.
     </p>
+    <p style="margin:18px 0 0;color:#6b7280;font-size:14px;line-height:1.6;">Best regards,<br/>ConsentBit Team</p>
     `
   );
 
   const text = `Hi ${displayName},
 
-Your scheduled cookie scan for ${displayDomain} was paused because you've used all ${scansLimit} scans included in your plan this month.
+Your scheduled cookie scan for ${displayDomain} has been paused because you've reached the maximum number of scans included in your current plan for this month.
 
-Your scan schedule is still saved — it will automatically resume at the start of next month when your quota resets, or immediately if you upgrade your plan.
+Don't worry — your scan schedule is still active and will automatically resume at the beginning of next month when your quota resets. You can also resume scanning immediately by upgrading your plan.
 
-What you can do:
-- Wait until the 1st of next month — your schedule resumes automatically
-- Upgrade your plan now to unlock more scans immediately
+What you can do next:
+- Wait until the 1st of next month; your scheduled scans will resume automatically
+- Upgrade your plan to unlock additional scans instantly
 
-Upgrade your plan: ${billingUrl}
+Upgrade Plan: ${billingUrl}
 
-Questions? Just reply to this email and we'll help you out.
+If you have any questions, feel free to reply to this email and our team will be happy to help.
 
-Best,
+Best regards,
 ConsentBit Team
 `;
 
