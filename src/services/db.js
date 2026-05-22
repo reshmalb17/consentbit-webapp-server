@@ -1956,19 +1956,34 @@ export async function markTrialUsed(db, siteId) {
 export async function getSubscriptionsBySiteIds(db, siteIds) {
   if (!siteIds || siteIds.length === 0) return {};
   const placeholders = siteIds.map((_, i) => `?${i + 1}`).join(', ');
-  // Rely on status active/trialing only — avoid comparing ISO currentPeriodEnd to sqlite datetime('now')
-  // (can mis-filter valid subscriptions and leave per-site planId stuck on "free" in dashboard-init).
+  // Also fetch 'canceled' rows: a canceled subscription still grants the plan until its
+  // paid period (currentPeriodEnd) ends. The currentPeriodEnd check is done in JS below —
+  // not in SQL — to avoid comparing ISO currentPeriodEnd against sqlite datetime('now').
   const { results } = await db
     .prepare(
-      `SELECT * FROM Subscription WHERE siteId IN (${placeholders}) AND status IN ('active', 'trialing') ORDER BY updatedAt DESC`
+      `SELECT * FROM Subscription WHERE siteId IN (${placeholders}) AND status IN ('active', 'trialing', 'canceled') ORDER BY updatedAt DESC`
     )
     .bind(...siteIds)
     .all();
-  // First row per siteId wins (already sorted by updatedAt DESC)
+  const rows = results || [];
+  const now = Date.now();
   const map = {};
-  for (const row of (results || [])) {
+  // Pass 1 — active/trialing wins, first row per siteId (unchanged behavior).
+  for (const row of rows) {
     const sid = String(row.siteId ?? row.siteid ?? '');
-    if (sid && !map[sid]) map[sid] = row;
+    if (!sid || map[sid]) continue;
+    const status = String(row.status ?? '').toLowerCase();
+    if (status === 'active' || status === 'trialing') map[sid] = row;
+  }
+  // Pass 2 — for sites with no active/trialing sub, accept a canceled sub that is
+  // still within its paid period (currentPeriodEnd in the future). Expired ones skipped.
+  for (const row of rows) {
+    const sid = String(row.siteId ?? row.siteid ?? '');
+    if (!sid || map[sid]) continue;
+    if (String(row.status ?? '').toLowerCase() !== 'canceled') continue;
+    const periodEndRaw = row.currentPeriodEnd ?? row.currentperiodend ?? null;
+    const periodEnd = periodEndRaw ? Date.parse(periodEndRaw) : NaN;
+    if (Number.isFinite(periodEnd) && periodEnd > now) map[sid] = row;
   }
   return map;
 }
