@@ -97,8 +97,8 @@ export async function handleAuthRequestCode(request, env, ctx) {
   const ttlMinutes = Number(env.OTP_TTL_MINUTES || 10) || 10;
   const row = await createEmailVerificationCode(db, { email, purpose, codeHash, name, ttlMinutes });
 
-  const subject = ‘Your ConsentBit verification code’;
-  const text = `Hello${displayName ? ` ${displayName}` : ‘’},\n\nYour verification code is: ${code}\n\nThis code will expire in ${ttlMinutes} minutes, so please use it as soon as possible.\n\nIf you did not request this verification code, you can safely ignore this email.\n\nBest regards,\nConsentBit Team\n`;
+  const subject = `Your ConsentBit verification code`;
+  const text = `Hello${displayName ? ` ${displayName}` : ''},\n\nYour verification code is: ${code}\n\nThis code will expire in ${ttlMinutes} minutes, so please use it as soon as possible.\n\nIf you did not request this verification code, you can safely ignore this email.\n\nBest regards,\nConsentBit Team\n`;
 
   const hasBrevoConfig = Boolean(env.BREVO_API_KEY && env.BREVO_FROM_EMAIL);
   const allowReturn = String(env.RETURN_OTP_IN_RESPONSE || '').toLowerCase() === 'true';

@@ -90,7 +90,7 @@ export async function handleConsentCsv(request, env) {
     }
 
     const isCcpa = (row.regulation || '').toLowerCase() === 'ccpa' || (cats && cats.ccpa !== undefined);
-    const isAccepted = (row.status || '').toLowerCase() === 'given';
+    const isAccepted = ['given', 'accepted'].includes((row.status || '').toLowerCase());
     const token = await createDownloadToken(env.JWT_SECRET, siteId, row.id || '');
     const pdfUrl = `${workerOrigin}/api/consent-pdf?siteId=${encodeURIComponent(siteId)}&consentId=${encodeURIComponent(row.id || '')}&token=${encodeURIComponent(token)}`;
 
