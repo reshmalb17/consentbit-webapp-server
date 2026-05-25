@@ -100,6 +100,14 @@ async function findOrCreateStripeCustomer(secret, email, paymentMethodId) {
   }
   if (searchData.data?.length > 0 && searchData.data[0].id) {
     const customerId = searchData.data[0].id;
+    await fetch(`https://api.stripe.com/v1/customers/${customerId}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({ description: '' }).toString(),
+    });
     if (paymentMethodId) {
       const attachRes = await fetch(`https://api.stripe.com/v1/payment_methods/${paymentMethodId}/attach`, {
         method: 'POST',

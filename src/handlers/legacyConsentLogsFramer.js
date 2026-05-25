@@ -249,7 +249,7 @@ export async function handleLegacyConsentFramerRaw(request, env) {
     const marketing = Boolean(cats.marketing);
     const personalization = Boolean(cats.preferences ?? cats.personalization);
     const doNotShare = Boolean(cats.ccpa?.doNotSell ?? cats.doNotShare ?? cats.doNotSell);
-    const action = (row.status === 'given' || analytics || marketing || personalization) ? 'acceptance' : 'rejection';
+    const action = (['given', 'accepted'].includes(row.status) || analytics || marketing || personalization) ? 'acceptance' : 'rejection';
     const bannerType = String(row.bannerType || row.regulation || 'gdpr').toLowerCase();
 
     const tsIso = row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString();

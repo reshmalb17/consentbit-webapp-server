@@ -60,7 +60,7 @@ export async function handleConsent(request, env) {
     regulation = 'gdpr',
     bannerType = 'gdpr',
     consentMethod = 'banner',
-    status = 'given',
+    status = 'accepted',
     expiresAt,
     consent: consentPayload = null,
     tcf = {},

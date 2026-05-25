@@ -219,7 +219,7 @@ export function transformEntry(entry, siteId) {
     regulation: (isCcpaBanner || (hasCcpaSignal && !hasGdprTrueSignal)) ? 'ccpa' : 'gdpr',
     bannerType: entry.bannerType || prefs.bannerType || entry.lawType || null,
     consentMethod: entry.bannerType || prefs.bannerType || entry.lawType || 'legacy',
-    status: isAccepted ? 'given' : 'rejected',
+    status: isAccepted ? 'accepted' : 'rejected',
     expiresAt: null,
     categories,
   };

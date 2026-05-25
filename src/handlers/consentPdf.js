@@ -49,7 +49,7 @@ export function buildHtml(consent, cookies, customCookieRules, siteDomain, logoU
   const cats = normalizeCategories(consent.categories) || {};
   const isCcpa = consent.regulation === 'ccpa' ||
     (!consent.regulation && cats.ccpa !== undefined && cats.essential === undefined && cats.analytics === undefined);
-  const isGiven = (consent.status || '').toLowerCase() === 'given';
+  const isGiven = ['given', 'accepted'].includes((consent.status || '').toLowerCase());
 
   // Format consent date
   const ts = consent.createdAt
@@ -130,7 +130,7 @@ export function buildHtml(consent, cookies, customCookieRules, siteDomain, logoU
       : `<tr><td class="proof-td" colspan="3" style="color:#6b7280;text-align:center">No cookies recorded for accepted categories.</td></tr>`;
   })();
 
-  const consentStatusLabel = isGiven ? 'Given' : 'Rejected';
+  const consentStatusLabel = isGiven ? 'Accepted' : 'Rejected';
 
   return `<!DOCTYPE html>
 <html lang="en">
