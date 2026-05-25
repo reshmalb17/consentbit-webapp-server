@@ -836,7 +836,7 @@ function remToPx(rem, baseFontSize = 16) {
 const banerBr=remToPx(parseFloat(customization?.bannerBorderRadius) || 12);
 const loaderIab=`
 ${inlineConfig}
-${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom-left', bannerLayoutVisual: enTrans?.bannerLayoutVisual, textAlign: (typeof textAlign !== 'undefined' && (textAlign === 'center' || textAlign === 'right')) ? textAlign : 'left' })}
+${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom-left', bannerLayoutVisual: enTrans?.bannerLayoutVisual, textAlign: (typeof textAlign !== 'undefined' && (textAlign === 'center' || textAlign === 'right')) ? textAlign : 'left', bannerEntranceAnimation: siteConfigPayload?.customization?.bannerEntranceAnimation })}
 `
 
   const consentJsSrc = (env.CDN_BASE_URL || apiBase) + '/consent.js';

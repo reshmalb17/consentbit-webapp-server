@@ -27,6 +27,21 @@ export function getLoaderIabScript(customization, opts = {}) {
     alignment: o.rawPos || c.position || 'bottom-left',
   });
 
+  // Banner entrance animation — pick keyframes + animation shorthand for the
+  // dashboard-selected option ('fade-in' | 'slide-up' | 'slide-down' | 'zoom-in').
+  // Baked at template-build time and injected at runtime via a <style> tag.
+  // #consentBitBanner ID selector + !important wins over the class-based
+  // animation rules in injectStyles(), so existing CSS isn't touched.
+  const __cbAnimChoice = String(o.bannerEntranceAnimation || c.bannerEntranceAnimation || 'slide-up').toLowerCase();
+  const __cbAnimPresets = {
+    'fade-in':    { kf: '@keyframes consentBitFadeInAnim{from{opacity:0}to{opacity:1}}',                                                          anim: 'consentBitFadeInAnim .4s ease' },
+    'slide-up':   { kf: '@keyframes consentBitSlideUpAnim{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}',     anim: 'consentBitSlideUpAnim .4s cubic-bezier(.25,.46,.45,.94)' },
+    'slide-down': { kf: '@keyframes consentBitSlideDownAnim{from{transform:translateY(-100%);opacity:0}to{transform:translateY(0);opacity:1}}',  anim: 'consentBitSlideDownAnim .4s cubic-bezier(.25,.46,.45,.94)' },
+    'zoom-in':    { kf: '@keyframes consentBitZoomInAnim{from{transform:scale(.85);opacity:0}to{transform:scale(1);opacity:1}}',                 anim: 'consentBitZoomInAnim .4s cubic-bezier(.25,.46,.45,.94)' },
+  };
+  const __cbAnimPreset = __cbAnimPresets[__cbAnimChoice] || __cbAnimPresets['slide-up'];
+  const animCssLiteral = JSON.stringify(__cbAnimPreset.kf + ' #consentBitBanner{animation:' + __cbAnimPreset.anim + ' !important}');
+
   return `
 /**
  * Cookie Consent UI Integration
@@ -868,6 +883,17 @@ function releaseBlockedScripts() {
 installConsentScriptBlocker();
 initConsentDependencies();
 
+// ─── Banner Entrance Animation (server-baked override) ───────────────────────
+// Injects a <style> with the chosen entrance animation (fade-in / slide-up /
+// slide-down / zoom-in). #consentBitBanner ID selector + !important overrides
+// the hardcoded .consentBit-consent-container and .consentBit-type-popup rules.
+(function __cbInjectBannerEntranceAnimation() {
+  if (document.getElementById('consentbit-anim-styles')) return;
+  var s = document.createElement('style');
+  s.id = 'consentbit-anim-styles';
+  s.textContent = ${animCssLiteral};
+  (document.head || document.documentElement).appendChild(s);
+})();
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Cookie Categories Data
