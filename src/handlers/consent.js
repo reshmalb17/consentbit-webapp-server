@@ -53,7 +53,13 @@ export async function handleConsent(request, env) {
   //     ]
   //   }
   // }
-  const body = await request.json();
+  let body;
+  try {
+    body = await request.json();
+  } catch (parseErr) {
+    console.error('[Consent] failed to parse request body:', parseErr?.message);
+    return new Response(JSON.stringify({ error: 'Invalid JSON body' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+  }
 
   const {
     siteId,
@@ -67,7 +73,23 @@ export async function handleConsent(request, env) {
   } = body || {};
   const consentCategoriesJson = consentPayload != null ? JSON.stringify(consentPayload) : null;
 
+  console.log('[Consent] incoming —', {
+    siteId,
+    regulation,
+    bannerType,
+    consentMethod,
+    status,
+    expiresAt: expiresAt || null,
+    hasConsent: consentPayload != null,
+    consentKeys: consentPayload ? Object.keys(consentPayload) : [],
+    country,
+    region,
+    isEU,
+    origin: request.headers.get('origin') || request.headers.get('referer') || '(none)',
+  });
+
   if (!siteId) {
+    console.warn('[Consent] rejected — siteId missing');
     return new Response(
       JSON.stringify({ error: 'siteId is required' }),
       {
@@ -77,14 +99,29 @@ export async function handleConsent(request, env) {
     );
   }
 
-  const site = await getSiteById(db, siteId);
+  const site = await getSiteById(db, siteId).catch(e => {
+    console.error('[Consent] DB lookup error for siteId:', siteId, e?.message);
+    return null;
+  });
   if (!site) {
+    console.warn('[Consent] site not found — siteId:', siteId);
     return new Response(
       JSON.stringify({ error: 'Site not found', code: 'SITE_NOT_FOUND' }),
       { status: 404, headers: { 'Content-Type': 'application/json' } }
     );
   }
-  if (!requestDomainMatchesSite(site, request)) {
+
+  console.log('[Consent] site found —', { id: site.id, domain: site.domain, isLegacy: site.isLegacy });
+
+  const domainOk = requestDomainMatchesSite(site, request);
+  console.log('[Consent] domain check —', {
+    siteDomain: site.domain,
+    requestOrigin: request.headers.get('origin') || '(none)',
+    requestReferer: request.headers.get('referer') || '(none)',
+    passed: domainOk,
+  });
+  if (!domainOk) {
+    console.warn('[Consent] domain mismatch — siteId:', siteId, '| site.domain:', site.domain);
     return new Response(
       JSON.stringify({ error: 'This script is not valid for this domain. It is licensed for the site it was issued to.', code: 'DOMAIN_MISMATCH' }),
       { status: 403, headers: { 'Content-Type': 'application/json' } }
@@ -133,6 +170,9 @@ export async function handleConsent(request, env) {
 
   const id = crypto.randomUUID();
 
+  console.log('[Consent] inserting row — id:', id, '| siteId:', siteId, '| status:', status, '| regulation:', regulation);
+
+  try {
   await db
     .prepare(
       `
@@ -224,6 +264,16 @@ export async function handleConsent(request, env) {
       site.domain || null
     )
     .run();
+
+  console.log('[Consent] ✅ saved — id:', id, '| siteId:', siteId);
+
+  } catch (dbErr) {
+    console.error('[Consent] ❌ DB insert failed — siteId:', siteId, '| error:', dbErr?.message, '| cause:', dbErr?.cause?.message);
+    return new Response(
+      JSON.stringify({ error: 'Failed to save consent', details: dbErr?.message }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
 
   return new Response(
     JSON.stringify({ success: true, id }),

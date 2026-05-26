@@ -33,19 +33,29 @@ export async function buildSearchKeys(kv, platformSiteId, fallbackDomain, fallba
 export async function getConsentRowsFromR2(r2, searchKeys) {
   const entries = [];
   const allKeys = [...new Set([...searchKeys, ...searchKeys.map(k => k.toLowerCase())])];
+  console.log('[legacyConsent/R2] searching keys:', allKeys);
 
   try {
     const obj = await r2.get('Cookie-Preferences.json');
     if (obj) {
       const data = JSON.parse(await obj.text());
+      const topLevelKeys = Object.keys(data);
+      console.log('[legacyConsent/R2] Cookie-Preferences.json top-level keys:', topLevelKeys.length, '— sample:', topLevelKeys.slice(0, 5));
       for (const key of allKeys) {
         const siteData = data[key];
-        if (!siteData || typeof siteData !== 'object') continue;
+        if (!siteData || typeof siteData !== 'object') {
+          console.log('[legacyConsent/R2] Cookie-Preferences.json — key not found:', key);
+          continue;
+        }
+        const visitorCount = Object.keys(siteData).length;
+        console.log('[legacyConsent/R2] Cookie-Preferences.json — key:', key, '| visitors:', visitorCount);
         for (const [visitorId, visits] of Object.entries(siteData)) {
           if (!Array.isArray(visits)) continue;
           for (const v of visits) entries.push({ ...v, _visitorId: visitorId });
         }
       }
+    } else {
+      console.warn('[legacyConsent/R2] Cookie-Preferences.json not found in R2');
     }
   } catch (err) {
     console.error('[legacyConsent] R2 Cookie-Preferences.json read failed', err?.message);
@@ -55,10 +65,12 @@ export async function getConsentRowsFromR2(r2, searchKeys) {
     for (const key of allKeys) {
       const prefix = `consent-v2/${key}/`;
       let cursor;
+      let keyTotal = 0;
       do {
         const listed = await r2.list({ prefix, limit: 1000, ...(cursor ? { cursor } : {}) });
         const objects = listed?.objects ?? [];
         cursor = listed?.truncated ? listed?.cursor : undefined;
+        keyTotal += objects.length;
         for (let i = 0; i < objects.length; i += 50) {
           const batch = objects.slice(i, i + 50);
           const values = await Promise.all(batch.map(o => r2.get(o.key)));
@@ -76,11 +88,18 @@ export async function getConsentRowsFromR2(r2, searchKeys) {
           }
         }
       } while (cursor);
+      console.log('[legacyConsent/R2] consent-v2 prefix:', prefix, '| objects found:', keyTotal);
     }
   } catch (err) {
     console.error('[legacyConsent] R2 consent-v2 read failed', err?.message);
   }
 
+  console.log('[legacyConsent/R2] total entries collected:', entries.length);
+  if (entries.length > 0) {
+    const sample = entries[0];
+    const sampleTs = sample.timestamp || sample.preferences?.lastUpdated || sample.metadata?.timestamp;
+    console.log('[legacyConsent/R2] sample entry — timestamp:', sampleTs, '| keys:', Object.keys(sample).join(', '));
+  }
   return entries;
 }
 

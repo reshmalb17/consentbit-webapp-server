@@ -432,6 +432,7 @@ async function executeScheduledScans(env, ctx) {
   try {
     const now = new Date().toISOString();
     const scheduledScans = await getDueScheduledScans(db);
+    console.log('[Cron] executeScheduledScans —', { time: now, dueScans: scheduledScans.length });
     const executed = [];
     for (const scheduledScan of scheduledScans) {
       try {
@@ -484,6 +485,7 @@ async function executeScheduledScans(env, ctx) {
         executed.push({ id: scheduledScan.id, status: 'failed', error: err.message });
       }
     }
+    console.log('[Cron] executeScheduledScans done —', executed);
   } catch (err) {
     console.error('[Cron] Error executing scheduled scans:', err);
   }
@@ -561,7 +563,8 @@ async function processSubscriptionQueue(env) {
 // ---------------------------------------------------------------------------
 
 export default {
-  async scheduled(_event, env, ctx) {
+  async scheduled(event, env, ctx) {
+    console.log('[Worker] scheduled cron fired —', { cron: event?.cron, scheduledTime: event?.scheduledTime });
     ctx.waitUntil(
       Promise.all([
         executeScheduledScans(env, ctx),

@@ -17,16 +17,33 @@ function getSessionIdFromCookie(request) {
  */
 export async function handleLegacyConsentLogs(request, env) {
   const db = env.CONSENT_WEBAPP;
-
-  const sid = getSessionIdFromCookie(request);
-  if (!sid) return Response.json({ success: false, error: 'Not authenticated' }, { status: 401 });
-
-  const session = await getSessionById(db, sid).catch(() => null);
-  if (!session) return Response.json({ success: false, error: 'Not authenticated' }, { status: 401 });
-
-  const userId = session.userId ?? session.user_id;
   const url = new URL(request.url);
   const siteId = url.searchParams.get('siteId');
+  const year  = url.searchParams.get('year');
+  const month = url.searchParams.get('month');
+  const limit  = Math.min(parseInt(url.searchParams.get('limit')  || '50', 10), 500);
+  const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+
+  console.log('[LegacyConsentLogs] request params —', { siteId, year, month, limit, offset });
+
+  const sid = getSessionIdFromCookie(request);
+  if (!sid) {
+    console.warn('[LegacyConsentLogs] no session cookie');
+    return Response.json({ success: false, error: 'Not authenticated' }, { status: 401 });
+  }
+
+  const session = await getSessionById(db, sid).catch((e) => {
+    console.error('[LegacyConsentLogs] session lookup error:', e?.message);
+    return null;
+  });
+  if (!session) {
+    console.warn('[LegacyConsentLogs] session not found for sid:', sid?.slice(0, 8) + '…');
+    return Response.json({ success: false, error: 'Not authenticated' }, { status: 401 });
+  }
+
+  const userId = session.userId ?? session.user_id;
+  console.log('[LegacyConsentLogs] userId:', userId);
+
   if (!siteId) return Response.json({ success: false, error: 'siteId required' }, { status: 400 });
 
   const site = await db
@@ -39,34 +56,55 @@ export async function handleLegacyConsentLogs(request, env) {
     )
     .bind(siteId, userId)
     .first()
-    .catch(() => null);
+    .catch((e) => {
+      console.error('[LegacyConsentLogs] site DB query error:', e?.message);
+      return null;
+    });
 
-  if (!site) return Response.json({ success: false, error: 'Legacy site not found or access denied' }, { status: 404 });
+  if (!site) {
+    console.warn('[LegacyConsentLogs] site not found — siteId:', siteId, 'userId:', userId);
+    return Response.json({ success: false, error: 'Legacy site not found or access denied' }, { status: 404 });
+  }
 
   const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
+  console.log('[LegacyConsentLogs] site found —', {
+    id: site.id,
+    name: site.name,
+    domain: site.domain,
+    platformSiteId,
+    legacySource: site.legacySource,
+  });
+
   const kv = env.WEBFLOW_AUTHENTICATION;
   const r2 = env.R2;
 
-  const year = url.searchParams.get('year');
-  const month = url.searchParams.get('month');
-  const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 500);
-  const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+  console.log('[LegacyConsentLogs] bindings — kv:', !!kv, '| r2:', !!r2);
 
   // Resolve search keys from KV site details.
-  // site.name is the Webflow shortName (e.g. "biaw-stage") stored during migration —
-  // R2 keys are indexed under that shortName, so include it as an extra fallback.
   const searchKeys = await buildSearchKeys(kv, platformSiteId, site.domain, site.name);
+  console.log('[LegacyConsentLogs] searchKeys:', searchKeys);
 
   // 1. Read R2 (Cookie-Preferences.json + consent-v2/ per-visitor keys)
-  let entries = r2 ? await getConsentRowsFromR2(r2, searchKeys) : [];
+  let entries = [];
+  if (r2) {
+    entries = await getConsentRowsFromR2(r2, searchKeys);
+    console.log('[LegacyConsentLogs] R2 entries:', entries.length);
+  } else {
+    console.warn('[LegacyConsentLogs] R2 binding missing — skipping R2 read');
+  }
 
   // 2. Fallback to KV Cookie-Preferences scan if R2 returned nothing
   if (entries.length === 0 && platformSiteId && kv) {
+    console.log('[LegacyConsentLogs] R2 empty — falling back to KV, platformSiteId:', platformSiteId);
     entries = await getConsentRowsFromKV(kv, platformSiteId);
+    console.log('[LegacyConsentLogs] KV entries:', entries.length);
+  } else if (entries.length === 0) {
+    console.warn('[LegacyConsentLogs] both R2 and KV returned 0 entries — platformSiteId:', platformSiteId, '| kv:', !!kv);
   }
 
   // Filter by year/month if requested
   if (year && month) {
+    const beforeFilter = entries.length;
     const paddedMonth = month.padStart(2, '0');
     entries = entries.filter((entry) => {
       const ts = entry.timestamp || entry.preferences?.lastUpdated || entry.metadata?.timestamp;
@@ -74,6 +112,12 @@ export async function handleLegacyConsentLogs(request, env) {
       const d = new Date(ts);
       return String(d.getFullYear()) === String(year) && String(d.getMonth() + 1).padStart(2, '0') === paddedMonth;
     });
+    console.log('[LegacyConsentLogs] year/month filter', year, paddedMonth, '—', beforeFilter, '->', entries.length, 'entries');
+    if (entries.length === 0 && beforeFilter > 0) {
+      console.warn('[LegacyConsentLogs] year/month filter removed all entries — no data for', year, '/', paddedMonth);
+    }
+  } else {
+    console.log('[LegacyConsentLogs] no year/month filter applied');
   }
 
   const consents = entries.map(e => transformEntry(e, siteId));
@@ -81,6 +125,8 @@ export async function handleLegacyConsentLogs(request, env) {
 
   const total = consents.length;
   const page = consents.slice(offset, offset + limit);
+
+  console.log('[LegacyConsentLogs] result — total:', total, '| page size:', page.length, '| offset:', offset);
 
   // Fetch scanned cookie inventory from D1 for this site
   const resolvedSiteId = site.id;
