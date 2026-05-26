@@ -1803,6 +1803,7 @@ ${inlineConfig}
           }
         }, 100)
       }
+    }
   }
 
   function ze() {
@@ -2199,7 +2200,7 @@ ${inlineConfig}
             te = ee ? "slide-up" === u ? "cb-banner-animate-initial-center-bottom" : "slide-down" === u ? "cb-banner-animate-initial-center-top" : "zoom-in" === u ? "cb-banner-animate-initial-center-zoom" : "cb-banner-animate-fade" : "slide-up" === u ? "cb-banner-animate-bottom" : "slide-down" === u ? "cb-banner-animate-top" : "zoom-in" === u ? "cb-banner-animate-zoom-in" : "cb-banner-animate-fade";
             K.classList.add(te)
           }
-        } else
+        }
       } else {
         setTimeout(Pe, 100)
       }
@@ -2718,7 +2719,7 @@ function remToPx(rem, baseFontSize = 16) {
 const banerBr=remToPx(parseFloat(customization?.bannerBorderRadius) || 12);
 const loaderIab=`
 ${inlineConfig}
-${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom-left', bannerLayoutVisual: enTrans?.bannerLayoutVisual, textAlign: (typeof textAlign !== 'undefined' && (textAlign === 'center' || textAlign === 'right')) ? textAlign : 'left' })}
+${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom-left', bannerLayoutVisual: enTrans?.bannerLayoutVisual, textAlign: (typeof textAlign !== 'undefined' && (textAlign === 'center' || textAlign === 'right')) ? textAlign : 'left', bannerEntranceAnimation: siteConfigPayload?.customization?.bannerEntranceAnimation })}
 `
 
   const loaderWebflow = `window.__CONSENT_SITE__=${jsonForInlineScript(siteConfigPayload)};

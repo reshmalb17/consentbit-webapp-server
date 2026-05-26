@@ -147,6 +147,9 @@ export async function handleCreateCheckoutSession(request, env) {
     : `${rawSuccessUrl}?session_id={CHECKOUT_SESSION_ID}`;
   const cancelUrl = body.cancelUrl || `${request.url.replace(/\/api\/.*$/, '')}/pro-plan?canceled=true`;
   const stripeCouponId = body.stripeCouponId && body.stripeCouponId.trim() ? body.stripeCouponId.trim() : null;
+  const promotionCodeId = body.promotionCodeId && body.promotionCodeId.trim() ? body.promotionCodeId.trim() : null;
+  // Customer-facing coupon string (e.g. "MEMORIAL25"). Resolved to a promo_xxx id below.
+  const couponCode = body.couponCode && body.couponCode.trim() ? body.couponCode.trim() : null;
 
   if (!organizationId) {
     return Response.json({ success: false, error: 'organizationId required' }, { status: 400 });
@@ -292,6 +295,84 @@ export async function handleCreateCheckoutSession(request, env) {
 
   if (stripeCouponId) {
     params.set('discounts[0][coupon]', stripeCouponId);
+  }
+
+  // ── Apply promotion code (optional) ──────────────────────────────────────
+  // Re-validate server-side — never trust the client's claim.
+  if (promotionCodeId) {
+    try {
+      const verifyRes = await fetch(
+        `https://api.stripe.com/v1/promotion_codes/${encodeURIComponent(promotionCodeId)}`,
+        { headers: { Authorization: `Bearer ${secret}` } },
+      );
+      const verify = await verifyRes.json();
+      if (verify.error || !verify.active) {
+        console.warn('[CreateCheckout] promotion code rejected', { id: promotionCodeId, err: verify.error?.message });
+        return Response.json({ success: false, error: 'Promotion code is no longer valid' }, { status: 400 });
+      }
+      params.set('discounts[0][promotion_code]', promotionCodeId);
+      if (verify.code) params.set('subscription_data[metadata][promotionCode]', verify.code);
+    } catch (e) {
+      console.error('[CreateCheckout] promotion code verify failed', e?.message);
+      return Response.json({ success: false, error: 'Promotion code validation failed' }, { status: 400 });
+    }
+  }
+
+  // ── Apply customer-facing coupon code (optional) ─────────────────────────
+  console.log('[CreateCheckout] coupon inputs', {
+    couponCode,
+    promotionCodeId,
+    stripeCouponId,
+    bodyKeys: Object.keys(body || {}),
+  });
+  if (couponCode && !promotionCodeId) {
+    try {
+      const listParams = new URLSearchParams({ code: couponCode, active: 'true', limit: '1' });
+      const lookupRes = await fetch(
+        `https://api.stripe.com/v1/promotion_codes?${listParams.toString()}`,
+        { headers: { Authorization: `Bearer ${secret}` } },
+      );
+      const lookupData = await lookupRes.json();
+      console.log('[CreateCheckout] coupon code lookup result', {
+        httpStatus: lookupRes.status,
+        found: lookupData?.data?.length || 0,
+        firstId: lookupData?.data?.[0]?.id,
+        firstActive: lookupData?.data?.[0]?.active,
+        error: lookupData?.error?.message,
+      });
+      if (lookupData?.error) {
+        return Response.json({ success: false, error: lookupData.error.message || 'Coupon lookup failed' }, { status: 400 });
+      }
+      const promo = lookupData?.data?.[0];
+      if (!promo || !promo.active) {
+        return Response.json({ success: false, error: 'Invalid or expired coupon code' }, { status: 400 });
+      }
+      params.set('discounts[0][promotion_code]', promo.id);
+      params.set('subscription_data[metadata][promotionCode]', promo.code || couponCode);
+      console.log('[CreateCheckout] coupon attached to session', { promoId: promo.id, code: promo.code });
+    } catch (e) {
+      console.error('[CreateCheckout] coupon code resolution failed', e?.message);
+      return Response.json({ success: false, error: 'Coupon validation failed' }, { status: 400 });
+    }
+  }
+
+  // ── Allow customers to enter a promo code directly on Stripe Checkout ──
+  // Mutually exclusive with pre-applied discounts[] — Stripe rejects sessions
+  // that set both. So only enable the input field when no discount was attached.
+  if (!params.has('discounts[0][promotion_code]') && !params.has('discounts[0][coupon]')) {
+    params.set('allow_promotion_codes', 'true');
+  }
+
+  // Final visibility into what we're sending to Stripe
+  if (params.has('discounts[0][promotion_code]') || params.has('discounts[0][coupon]')) {
+    console.log('[CreateCheckout] discount params being sent to Stripe', {
+      'discounts[0][promotion_code]': params.get('discounts[0][promotion_code]'),
+      'discounts[0][coupon]': params.get('discounts[0][coupon]'),
+      mode: params.get('mode'),
+      hasTrial: params.has('subscription_data[trial_period_days]'),
+    });
+  } else {
+    console.log('[CreateCheckout] no discount being applied to Stripe session (allow_promotion_codes=true)');
   }
 
   console.log('[CreateCheckout] creating Stripe checkout session — plan:', planId || 'legacy', '| interval:', body.interval === 'yearly' ? 'yearly' : 'monthly');

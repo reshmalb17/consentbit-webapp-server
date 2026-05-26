@@ -445,6 +445,7 @@ export async function handleCustomCheckout(request, env, ctx) {
   const billingEmail = (body.billingEmail || '').trim().toLowerCase() || null;
   const platform = ((body.platform || '').trim().toLowerCase()) || (wfSiteId ? 'webflow' : null);
   const confirmUpgrade = body.confirmUpgrade === true;
+  const promotionCodeId = (body.promotionCodeId || '').trim() || null;
 
   if (!isValidEmail(email)) {
     console.warn('[CustomCheckout] validation failed: invalid email', email);
@@ -617,6 +618,26 @@ export async function handleCustomCheckout(request, env, ctx) {
   }
   if (billingEmail) subParams.set('metadata[billingEmail]', billingEmail);
 
+  // ── Apply promotion code (optional) ────────────────────────────────────────
+  // Re-validate server-side — never trust the client's claim.
+  if (promotionCodeId) {
+    try {
+      const verifyRes = await fetch(
+        `https://api.stripe.com/v1/promotion_codes/${promotionCodeId}`,
+        { headers: { Authorization: `Bearer ${secret}` } },
+      );
+      const verify = await verifyRes.json();
+      if (verify.error || !verify.active) {
+        return Response.json({ success: false, error: 'Promotion code is no longer valid' }, { status: 400 });
+      }
+      subParams.set('discounts[0][promotion_code]', promotionCodeId);
+      subParams.set('metadata[promotionCode]', verify.code || '');
+    } catch (e) {
+      console.error('[CustomCheckout] promotion code verify failed', e?.message);
+      return Response.json({ success: false, error: 'Promotion code validation failed' }, { status: 400 });
+    }
+  }
+
   const subRes = await fetch('https://api.stripe.com/v1/subscriptions', {
     method: 'POST',
     headers: {
@@ -699,4 +720,64 @@ export async function handleCustomCheckout(request, env, ctx) {
 
   console.error('[CustomCheckout] unexpected status', { subStatus, piStatus: paymentIntent?.status, sub });
   return Response.json({ success: false, error: `Unexpected subscription status: ${subStatus}` }, { status: 400 });
+}
+
+// GET /api/validate-coupon?code=<customer-facing code>
+//
+// Looks up an active Stripe promotion code by its customer-facing string and
+// returns the underlying promo_xxx id + the coupon's discount details so the
+// frontend can show "Coupon X — −20%" and re-send the promotionCodeId on
+// checkout. Server-side re-validates the code before applying.
+export async function handleValidateCoupon(request, env) {
+  const secret = trimEnv(env.STRIPE_SECRET_KEY);
+  if (!secret) {
+    return Response.json({ valid: false, error: 'Stripe not configured' }, { status: 503 });
+  }
+
+  const url = new URL(request.url);
+  const code = (url.searchParams.get('code') || '').trim();
+  if (!code) {
+    return Response.json({ valid: false, error: 'code required' }, { status: 400 });
+  }
+
+  let promo = null;
+  try {
+    // Promotion codes don't support /search — use the list endpoint with `code` filter.
+    // `code` is case-insensitive in Stripe's list filter.
+    const params = new URLSearchParams({
+      code,
+      active: 'true',
+      limit: '1',
+    });
+    const res = await fetch(
+      `https://api.stripe.com/v1/promotion_codes?${params.toString()}`,
+      { headers: { Authorization: `Bearer ${secret}` } },
+    );
+    const data = await res.json();
+    if (data?.error) {
+      console.warn('[ValidateCoupon] Stripe list error', data.error?.message);
+      return Response.json({ valid: false, error: data.error.message || 'Coupon lookup failed' }, { status: 400 });
+    }
+    promo = data?.data?.[0];
+  } catch (e) {
+    console.error('[ValidateCoupon] fetch failed', e?.message);
+    return Response.json({ valid: false, error: 'Coupon lookup failed' }, { status: 500 });
+  }
+
+  if (!promo || !promo.active) {
+    return Response.json({ valid: false, error: 'Invalid or expired code' }, { status: 200 });
+  }
+
+  const c = promo.coupon || {};
+  return Response.json({
+    valid: true,
+    promotionCodeId: promo.id,           // promo_xxx — send back on checkout
+    code: promo.code,
+    name: c.name || promo.code,
+    percentOff: c.percent_off ?? null,
+    amountOff: c.amount_off ?? null,     // in cents
+    currency: c.currency || 'usd',
+    duration: c.duration,                // 'once' | 'repeating' | 'forever'
+    durationInMonths: c.duration_in_months ?? null,
+  });
 }

@@ -72,7 +72,7 @@ import { handleCheckDomainAvailability } from './handlers/checkDomainAvailabilit
 import { handleRenameDomain } from './handlers/renameDomain.js';
 import { handleWebflowFreeRegister } from './handlers/webflowFreeRegister.js';
 import { handleFeedback } from './handlers/feedback.js';
-import { handleCustomCheckout } from './handlers/customeCheeckout.js';
+import { handleCustomCheckout, handleValidateCoupon } from './handlers/customeCheeckout.js';
 import { handleSyncPlugin, handleSyncPluginCustomization, handleGetPluginData, handleGetPluginPlan } from './handlers/SyncPlugin.js';
 import { handlePaymentSubscription } from './handlers/paymentSubscription.js';
 
@@ -308,6 +308,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     // — Custom checkout (Stripe.js direct flow)
     case '/api/custom-checkout':
       response = await handleCustomCheckout(request, env, ctx); break;
+    case '/api/validate-coupon':
+      response = await handleValidateCoupon(request, env); break;
 
     // — Plugin sync (publish from platform plugin)
     case '/api/sync-plugin':
