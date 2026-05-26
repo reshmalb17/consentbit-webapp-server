@@ -1803,6 +1803,7 @@ ${inlineConfig}
           }
         }, 100)
       }
+    }
   }
 
   function ze() {
@@ -2199,7 +2200,7 @@ ${inlineConfig}
             te = ee ? "slide-up" === u ? "cb-banner-animate-initial-center-bottom" : "slide-down" === u ? "cb-banner-animate-initial-center-top" : "zoom-in" === u ? "cb-banner-animate-initial-center-zoom" : "cb-banner-animate-fade" : "slide-up" === u ? "cb-banner-animate-bottom" : "slide-down" === u ? "cb-banner-animate-top" : "zoom-in" === u ? "cb-banner-animate-zoom-in" : "cb-banner-animate-fade";
             K.classList.add(te)
           }
-        } else
+        }
       } else {
         setTimeout(Pe, 100)
       }

@@ -71,6 +71,9 @@ export async function handleUpgradeSubscription(request, env) {
   const organizationId = (body.organizationId && typeof body.organizationId === 'string') ? body.organizationId.trim() : null;
   const planId = (['basic', 'essential', 'growth'].includes(body.planId)) ? body.planId : null;
   const interval = body.interval === 'yearly' ? 'yearly' : 'monthly';
+  const stripeCouponId = body.stripeCouponId && body.stripeCouponId.trim() ? body.stripeCouponId.trim() : null;
+  const promotionCodeId = body.promotionCodeId && body.promotionCodeId.trim() ? body.promotionCodeId.trim() : null;
+  const couponCode = body.couponCode && body.couponCode.trim() ? body.couponCode.trim() : null;
   const rawSuccessUrl = body.successUrl || `${request.url.replace(/\/api\/.*$/, '')}/dashboard`;
   const successUrl = rawSuccessUrl.includes('?')
     ? `${rawSuccessUrl}&session_id={CHECKOUT_SESSION_ID}`
@@ -153,6 +156,82 @@ export async function handleUpgradeSubscription(request, env) {
   console.log('[UPGRADE] trialAlreadyUsed:', trialAlreadyUsed, '| will offer trial:', !oldStripeSubscriptionId && !trialAlreadyUsed);
   if (!oldStripeSubscriptionId && !trialAlreadyUsed) {
     params.set('subscription_data[trial_period_days]', '14');
+  }
+
+  // ── Apply coupon / promotion code (optional) ─────────────────────────────
+  console.log('[UPGRADE] coupon inputs', {
+    couponCode,
+    promotionCodeId,
+    stripeCouponId,
+    bodyKeys: Object.keys(body || {}),
+  });
+
+  // a) Raw coupon id (coup_xxx)
+  if (stripeCouponId) {
+    params.set('discounts[0][coupon]', stripeCouponId);
+  }
+
+  // b) Promotion code id (promo_xxx) — re-validate server-side
+  if (promotionCodeId) {
+    try {
+      const verifyRes = await fetch(
+        `https://api.stripe.com/v1/promotion_codes/${encodeURIComponent(promotionCodeId)}`,
+        { headers: { Authorization: `Bearer ${secret}` } },
+      );
+      const verify = await verifyRes.json();
+      if (verify.error || !verify.active) {
+        console.warn('[UPGRADE] promotion code rejected', { id: promotionCodeId, err: verify.error?.message });
+        return Response.json({ success: false, error: 'Promotion code is no longer valid' }, { status: 400 });
+      }
+      params.set('discounts[0][promotion_code]', promotionCodeId);
+      if (verify.code) params.set('subscription_data[metadata][promotionCode]', verify.code);
+    } catch (e) {
+      console.error('[UPGRADE] promotion code verify failed', e?.message);
+      return Response.json({ success: false, error: 'Promotion code validation failed' }, { status: 400 });
+    }
+  }
+
+  // c) Customer-facing coupon string ("MEMORIAL25") — resolve to promo_xxx via list endpoint,
+  //    then apply same way. Skipped if promotionCodeId already applied (no stacking).
+  if (couponCode && !promotionCodeId) {
+    try {
+      const listParams = new URLSearchParams({ code: couponCode, active: 'true', limit: '1' });
+      const lookupRes = await fetch(
+        `https://api.stripe.com/v1/promotion_codes?${listParams.toString()}`,
+        { headers: { Authorization: `Bearer ${secret}` } },
+      );
+      const lookupData = await lookupRes.json();
+      console.log('[UPGRADE] coupon code lookup result', {
+        httpStatus: lookupRes.status,
+        found: lookupData?.data?.length || 0,
+        firstId: lookupData?.data?.[0]?.id,
+        firstActive: lookupData?.data?.[0]?.active,
+        error: lookupData?.error?.message,
+      });
+      if (lookupData?.error) {
+        return Response.json({ success: false, error: lookupData.error.message || 'Coupon lookup failed' }, { status: 400 });
+      }
+      const promo = lookupData?.data?.[0];
+      if (!promo || !promo.active) {
+        return Response.json({ success: false, error: 'Invalid or expired coupon code' }, { status: 400 });
+      }
+      params.set('discounts[0][promotion_code]', promo.id);
+      params.set('subscription_data[metadata][promotionCode]', promo.code || couponCode);
+      console.log('[UPGRADE] coupon attached to session', { promoId: promo.id, code: promo.code });
+    } catch (e) {
+      console.error('[UPGRADE] coupon code resolution failed', e?.message);
+      return Response.json({ success: false, error: 'Coupon validation failed' }, { status: 400 });
+    }
+  }
+
+  if (params.has('discounts[0][promotion_code]') || params.has('discounts[0][coupon]')) {
+    console.log('[UPGRADE] discount params being sent to Stripe', {
+      'discounts[0][promotion_code]': params.get('discounts[0][promotion_code]'),
+      'discounts[0][coupon]': params.get('discounts[0][coupon]'),
+      hasTrial: params.has('subscription_data[trial_period_days]'),
+    });
+  } else {
+    console.log('[UPGRADE] no discount being applied to Stripe session');
   }
 
   console.log('[UPGRADE] creating Stripe checkout session...');

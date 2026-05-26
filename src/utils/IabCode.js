@@ -2203,6 +2203,11 @@ function injectFloatingTrigger() {
   document.body.appendChild(btn);
 
   btn.addEventListener('click', () => {
+    // If the consent banner is currently visible, ignore the floating trigger —
+    // user must dismiss the banner first. Only after the banner is hidden does
+    // the floating trigger open the preference modal.
+    const banner = document.getElementById('consentBitBanner');
+    if (banner && getComputedStyle(banner).display !== 'none') return;
     openModal();
     // If the banner was hidden, keep it hidden — only open the preference modal
   });
