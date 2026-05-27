@@ -79,19 +79,6 @@ function layout(preheader, bodyHtml) {
       <td align="center">
         <table role="presentation" width="100%" style="max-width:600px;" cellpadding="0" cellspacing="0">
 
-          <!-- Logo header -->
-          <tr>
-            <td align="center" style="padding-bottom:24px;">
-              <table role="presentation" cellpadding="0" cellspacing="0">
-                <tr>
-                  <td style="background:#007AFF;border-radius:10px;padding:10px 20px;">
-                    <span style="color:#ffffff;font-size:18px;font-weight:700;letter-spacing:-0.3px;">ConsentBit</span>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-
           <!-- Card -->
           <tr>
             <td style="background:#ffffff;border-radius:16px;padding:40px 40px 32px;box-shadow:0 2px 12px rgba(0,0,0,0.06);">

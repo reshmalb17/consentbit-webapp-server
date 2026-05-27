@@ -48,7 +48,7 @@ export async function handleLegacyConsentLogs(request, env) {
 
   const site = await db
     .prepare(
-      `SELECT s.id, s.name, s.domain, s.platformSiteId as platformsiteid, s.legacySource
+      `SELECT s.id, s.name, s.domain, s.platformSiteId as platformsiteid, s.legacySource, s.isLegacy
        FROM Site s
        INNER JOIN Organization o ON o.id = s.organizationId
        INNER JOIN User u ON u.id = o.ownerUserId
@@ -100,6 +100,109 @@ export async function handleLegacyConsentLogs(request, env) {
     console.log('[LegacyConsentLogs] KV entries:', entries.length);
   } else if (entries.length === 0) {
     console.warn('[LegacyConsentLogs] both R2 and KV returned 0 entries — platformSiteId:', platformSiteId, '| kv:', !!kv);
+  }
+
+  // 3. D1 fallback — Webflow app sites (isLegacy=0, platformSiteId set) save consent to D1.
+  //    If R2/KV returned nothing, read directly from the Consent table.
+  if (entries.length === 0 && !site.isLegacy) {
+    console.log('[LegacyConsentLogs] non-legacy site with no R2/KV data — reading from D1, siteId:', site.id);
+    try {
+      const paddedMonth = month ? month.padStart(2, '0') : '';
+      const hasDateFilter = year && month;
+      const { results: d1Rows } = hasDateFilter
+        ? await db
+            .prepare(
+              `SELECT id, siteId, ipAddress, userAgent, country, region, is_eu,
+                      createdAt, updatedAt, regulation, bannerType, consentMethod, status,
+                      expiresAt, consent_categories, domain
+               FROM Consent WHERE siteId = ?1
+                 AND strftime('%Y', createdAt) = ?2
+                 AND strftime('%m', createdAt) = ?3
+               ORDER BY createdAt DESC LIMIT 500`
+            )
+            .bind(site.id, String(year), paddedMonth)
+            .all()
+        : await db
+            .prepare(
+              `SELECT id, siteId, ipAddress, userAgent, country, region, is_eu,
+                      createdAt, updatedAt, regulation, bannerType, consentMethod, status,
+                      expiresAt, consent_categories, domain
+               FROM Consent WHERE siteId = ?1 ORDER BY createdAt DESC LIMIT 500`
+            )
+            .bind(site.id)
+            .all();
+
+      console.log('[LegacyConsentLogs] D1 rows found:', (d1Rows || []).length);
+
+      // Map D1 Consent rows directly to the ConsentLog shape (skip transformEntry)
+      const d1Consents = (d1Rows || []).map(row => {
+        let categories = null;
+        if (row.consent_categories) {
+          try {
+            const parsed = typeof row.consent_categories === 'string'
+              ? JSON.parse(row.consent_categories)
+              : row.consent_categories;
+            categories = parsed && typeof parsed.categories === 'object' ? parsed.categories : parsed;
+          } catch { /* ignore */ }
+        }
+        return {
+          id: row.id,
+          siteId: row.siteId,
+          deviceId: null,
+          ipAddress: row.ipAddress,
+          userAgent: row.userAgent,
+          country: row.country,
+          region: row.region,
+          is_eu: row.is_eu,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+          regulation: row.regulation,
+          bannerType: row.bannerType,
+          consentMethod: row.consentMethod,
+          status: row.status,
+          expiresAt: row.expiresAt,
+          domain: row.domain,
+          categories,
+        };
+      });
+
+      // Return D1 data directly (already in the right shape — skip the R2 transform path)
+      const resolvedSiteId2 = site.id;
+      const { results: cookieRows2 } = await db
+        .prepare(
+          `SELECT id, name, domain, path, category, provider, description, expires, source, lastSeenAt FROM (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
+            FROM Cookie WHERE siteId = ?1 AND (isExpected = 0 OR isExpected IS NULL)
+          ) WHERE rn = 1 ORDER BY category, provider, name`
+        )
+        .bind(resolvedSiteId2)
+        .all()
+        .catch(() => ({ results: [] }));
+      const cookies2 = (cookieRows2 || []).map(({ rn, RN, ...rest }) => rest);
+      let customCookieRules2 = [];
+      try {
+        const { results: ccrRows2 } = await db
+          .prepare(`SELECT id, name, domain, scriptUrlPattern, category, duration, description
+                    FROM CustomCookieRule WHERE siteId = ?1 AND published = 1 ORDER BY category, name`)
+          .bind(resolvedSiteId2)
+          .all();
+        customCookieRules2 = ccrRows2 || [];
+      } catch { /* non-fatal */ }
+
+      console.log('[LegacyConsentLogs] D1 response — total:', d1Consents.length);
+      return Response.json({
+        success: true,
+        consents: d1Consents.slice(offset, offset + limit),
+        cookies: cookies2,
+        customCookieRules: customCookieRules2,
+        total: d1Consents.length,
+        limit,
+        offset,
+      });
+    } catch (d1Err) {
+      console.error('[LegacyConsentLogs] D1 fallback error:', d1Err?.message);
+      // fall through to return empty result
+    }
   }
 
   // Filter by year/month if requested

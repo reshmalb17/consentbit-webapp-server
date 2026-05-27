@@ -40,14 +40,14 @@ export async function handleLegacyConsentPdf(request, env) {
 
   const site = await (userId
     ? db.prepare(
-        `SELECT s.id, s.name, s.domain, s.platformSiteId as platformsiteid
+        `SELECT s.id, s.name, s.domain, s.platformSiteId as platformsiteid, s.isLegacy
          FROM Site s
          INNER JOIN Organization o ON o.id = s.organizationId
          INNER JOIN User u ON u.id = o.ownerUserId
          WHERE (s.id = ?1 OR s.platformSiteId = ?1) AND u.id = ?2 AND (s.isLegacy = 1 OR s.platformSiteId IS NOT NULL)`,
       ).bind(siteId, userId).first()
     : db.prepare(
-        `SELECT s.id, s.name, s.domain, s.platformSiteId as platformsiteid
+        `SELECT s.id, s.name, s.domain, s.platformSiteId as platformsiteid, s.isLegacy
          FROM Site s WHERE (s.id = ?1 OR s.platformSiteId = ?1) AND (s.isLegacy = 1 OR s.platformSiteId IS NOT NULL)`,
       ).bind(siteId).first()
   ).catch(() => null);
@@ -66,10 +66,55 @@ export async function handleLegacyConsentPdf(request, env) {
   }
 
   const rawEntry = entries.find(e => (e._visitorId || e.visitorId) === visitorId);
-  if (!rawEntry) return new Response('Visitor not found', { status: 404 });
 
-  // Transform into the standard consent shape (same as legacyConsentLogs)
-  const consent = transformEntry(rawEntry, site.id);
+  let consent;
+  if (rawEntry) {
+    // Legacy R2/KV path
+    consent = transformEntry(rawEntry, site.id);
+  } else if (!site.isLegacy) {
+    // Webflow app site — visitorId is actually the D1 Consent.id UUID
+    const d1Row = await db
+      .prepare(`SELECT id, siteId, ipAddress, userAgent, country, region, is_eu,
+                       createdAt, updatedAt, regulation, bannerType, consentMethod, status,
+                       expiresAt, consent_categories, domain
+                FROM Consent WHERE id = ?1 AND siteId = ?2`)
+      .bind(visitorId, site.id)
+      .first()
+      .catch(() => null);
+
+    if (!d1Row) return new Response('Visitor not found', { status: 404 });
+
+    let categories = null;
+    if (d1Row.consent_categories) {
+      try {
+        const parsed = typeof d1Row.consent_categories === 'string'
+          ? JSON.parse(d1Row.consent_categories)
+          : d1Row.consent_categories;
+        categories = parsed && typeof parsed.categories === 'object' ? parsed.categories : parsed;
+      } catch { /* ignore */ }
+    }
+    consent = {
+      id: d1Row.id,
+      siteId: d1Row.siteId,
+      deviceId: null,
+      ipAddress: d1Row.ipAddress,
+      userAgent: d1Row.userAgent,
+      country: d1Row.country,
+      region: d1Row.region,
+      is_eu: d1Row.is_eu,
+      createdAt: d1Row.createdAt,
+      updatedAt: d1Row.updatedAt,
+      regulation: d1Row.regulation,
+      bannerType: d1Row.bannerType,
+      consentMethod: d1Row.consentMethod,
+      status: d1Row.status,
+      expiresAt: d1Row.expiresAt,
+      domain: d1Row.domain,
+      categories,
+    };
+  } else {
+    return new Response('Visitor not found', { status: 404 });
+  }
 
   // Fetch scanned cookie inventory from D1 for this site
   const resolvedSiteId = site.id;

@@ -20,7 +20,7 @@ import {
   inferTierPlanIdFromStripePriceId,
   markTrialUsed,
 } from '../services/db.js';
-import { sendPaidPlanEmail, sendPaymentFailureEmail } from '../services/email.js';
+import { sendWelcomeEmail, sendPaidPlanEmail, sendPaymentFailureEmail } from '../services/email.js';
 import {
   syncPurchaseToLegacy,
   syncSubscriptionUpdateToLegacy,
@@ -504,6 +504,15 @@ export async function handleStripeWebhook(request, env, ctx) {
           rawPayload: { subscriptionId: subId, siteId },
         });
 
+        // Check if this org has ever had a subscription (determines whether to send welcome email)
+        let isFirstPurchase = false;
+        if (orgId) {
+          try {
+            const priorSub = await db.prepare('SELECT id FROM Subscription WHERE organizationId = ?1 LIMIT 1').bind(orgId).first();
+            isFirstPurchase = !priorSub;
+          } catch (e) { /* ignore — default false */ }
+        }
+
         // Reuse existing license key on upgrade so the site key stays stable across plan changes.
         let licenseKey = null;
         if (siteId) {
@@ -643,6 +652,11 @@ export async function handleStripeWebhook(request, env, ctx) {
               // Could not fetch invoice for email
             }
           }
+          // Send welcome email first if this is their first-ever purchase
+          if (isFirstPurchase) {
+            sendWelcomeEmail(env, ctx, { to: emailTo, name: customerName });
+          }
+
           sendPaidPlanEmail(env, ctx, {
             to:       emailTo,
             name:     customerName,

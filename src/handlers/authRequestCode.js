@@ -102,8 +102,21 @@ export async function handleAuthRequestCode(request, env, ctx) {
 
   const hasBrevoConfig = Boolean(env.BREVO_API_KEY && env.BREVO_FROM_EMAIL);
   const allowReturn = String(env.RETURN_OTP_IN_RESPONSE || '').toLowerCase() === 'true';
+
+  console.log('[AuthRequestCode] email config check —', {
+    hasBrevoApiKey: !!env.BREVO_API_KEY,
+    hasBrevoFromEmail: !!env.BREVO_FROM_EMAIL,
+    fromEmail: env.BREVO_FROM_EMAIL || '(not set)',
+    allowReturn,
+    hasBrevoConfig,
+    toEmail: email,
+    purpose,
+    requestId: row.id,
+  });
+
   // If Brevo is not configured, fall back to returning the code in the response (dev only)
   if (!hasBrevoConfig || allowReturn) {
+    console.warn('[AuthRequestCode] ⚠️ DEV fallback — Brevo not configured, returning code in response. Email NOT sent.');
     return Response.json(
       { success: true, message: 'DEV: email not configured; returning code', requestId: row.id, expiresAt: row.expiresAt, code },
       { status: 200 },
@@ -111,10 +124,15 @@ export async function handleAuthRequestCode(request, env, ctx) {
   }
 
   // Brevo is configured — fire email in background and respond immediately
+  console.log('[AuthRequestCode] dispatching Brevo email to:', email);
   ctx.waitUntil(
-    sendEmailViaBrevo(env, { to: email, subject, text }).catch((e) => {
-      console.error('[AuthRequestCode] Brevo send failed:', e?.message || e);
-    })
+    sendEmailViaBrevo(env, { to: email, subject, text })
+      .then(() => {
+        console.log('[AuthRequestCode] ✅ Brevo email sent to:', email);
+      })
+      .catch((e) => {
+        console.error('[AuthRequestCode] ❌ Brevo send failed:', e?.message || e);
+      })
   );
 
   return Response.json(

@@ -2694,7 +2694,7 @@ ${inlineConfig}
   // ETag must change whenever banner customization/translation changes.
   // `Site.updatedAt` does not always update when only BannerCustomization changes, so include both.
   // Also include a script version so CDN logic changes propagate even when site/customization did not change.
-  const SCRIPT_VERSION = '2026-04-19-translations-hash';
+  const SCRIPT_VERSION = '2026-05-28-iab-webflow-blocking-fix';
   const customizationUpdatedAt = customization?.updatedAt || customization?.updated_at || '';
   const translationsSig = await (async () => {
     try {
@@ -2722,12 +2722,19 @@ ${inlineConfig}
 ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom-left', bannerLayoutVisual: enTrans?.bannerLayoutVisual, textAlign: (typeof textAlign !== 'undefined' && (textAlign === 'center' || textAlign === 'right')) ? textAlign : 'left', bannerEntranceAnimation: siteConfigPayload?.customization?.bannerEntranceAnimation })}
 `
 
-  const loaderWebflow = `window.__CONSENT_SITE__=${jsonForInlineScript(siteConfigPayload)};
-${getWebflowSetupScript()}
-` + loader;
+  // Strip the inlineConfig prefix from loader so __CONSENT_SITE__ is only assigned once
+  // in loaderWebflow (set here → read by getWebflowSetupScript → loader IIFE reads it).
+  const loaderCore = loader.replace(inlineConfig, '');
+  const loaderWebflow = `${inlineConfig}${getWebflowSetupScript()}
+` + loaderCore;
 
-  const loaderIabWebflow = `window.__CONSENT_SITE__=${jsonForInlineScript(siteConfigPayload)};(function(){window.__CB_WEBFLOW_MODE__=true;function _cbInstallTcfBridge(){if(!window.__tcfapi){setTimeout(_cbInstallTcfBridge,150);return;}try{window.__tcfapi('\x61\x64\x64\x45\x76\x65\x6e\x74\x4c\x69\x73\x74\x65\x6e\x65\x72',2,function(a,b){if(!b)return;if(a.eventStatus==='\x75\x73\x65\x72\x61\x63\x74\x69\x6f\x6e\x63\x6f\x6d\x70\x6c\x65\x74\x65'||a.eventStatus==='\x74\x63\x6c\x6f\x61\x64\x65\x64'){var c=!!(a.purpose&&a.purpose.consents&&a.purpose.consents[1]);var d={essential:true,analytics:c,marketing:c,preferences:c};window.userConsent=d;try{document.dispatchEvent(new CustomEvent('\x63\x6f\x6e\x73\x65\x6e\x74\x55\x70\x64\x61\x74\x65\x64',{detail:d,bubbles:true}));}catch(e){}}});}catch(e){}}_cbInstallTcfBridge();})();
-` + loaderIab;
+  // loaderIab also starts with inlineConfig — strip it to avoid a second __CONSENT_SITE__ assignment.
+  const loaderIabCore = loaderIab.replace(inlineConfig, '');
+  // Execution order: inlineConfig → getWebflowSetupScript (sets __CB_WEBFLOW_MODE__, script blocking,
+  // consentUpdated listener) → TCF bridge (fires consentUpdated on IAB consent) → IAB banner UI.
+  const loaderIabWebflow = `${inlineConfig}${getWebflowSetupScript()}
+(function(){function _cbInstallTcfBridge(){if(!window.__tcfapi){setTimeout(_cbInstallTcfBridge,150);return;}try{window.__tcfapi('addEventListener',2,function(a,b){if(!b)return;if(a.eventStatus==='useractioncomplete'||a.eventStatus==='tcloaded'){var c=!!(a.purpose&&a.purpose.consents&&a.purpose.consents[1]);var d={essential:true,analytics:c,marketing:c,preferences:c};window.userConsent=d;try{document.dispatchEvent(new CustomEvent('consentUpdated',{detail:d,bubbles:true}));}catch(e){}}});}catch(e){}}_cbInstallTcfBridge();})();
+` + loaderIabCore;
 
   // IAB/TCF banner requires a paid tier that includes IAB (Essential or Growth).
   // If the site was downgraded to a lower plan, fall back to the standard GDPR banner

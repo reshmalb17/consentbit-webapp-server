@@ -1,8 +1,11 @@
 // api/consent.js
+// Consent data is written exclusively to D1 (Consent table).
+// Legacy Webflow/Framer sites (isLegacy=true) store data in R2/KV via their
+// own CDN scripts — the dashboard reads R2 for those before June 2026, D1 after.
 import { ensureSchema, getSiteById } from '../services/db.js';
 import { requestDomainMatchesSite } from '../utils/domainValidate.js';
 
-export async function handleConsent(request, env) {
+export async function handleConsent(request, env, ctx) {
   const db = env.CONSENT_WEBAPP;
 
   await ensureSchema(db);
@@ -266,6 +269,49 @@ export async function handleConsent(request, env) {
     .run();
 
   console.log('[Consent] ✅ saved — id:', id, '| siteId:', siteId);
+
+  // ── Dual-write to R2 (consent-v2/) for consents received before June 2026 ──
+  // This keeps legacy CSV/logs exports working while the transition to D1 completes.
+  // After June 2026 all reads go to D1 only; this write can then be removed.
+  if (ctx && env.R2 && site.domain && new Date() < new Date('2026-06-01')) {
+    ctx.waitUntil((async () => {
+      try {
+        const cats = (consentPayload?.categories) || consentPayload || {};
+        const isCcpaReg = (regulation || '').toLowerCase() === 'ccpa' || (bannerType || '').toLowerCase() === 'ccpa';
+        const isAcceptedStatus = (status || '').toLowerCase() === 'accepted' || (status || '').toLowerCase() === 'given';
+        const legacyRecord = [{
+          timestamp: now,
+          action: isAcceptedStatus ? 'acceptance' : 'rejection',
+          bannerType: isCcpaReg ? 'CCPA' : 'GDPR',
+          country: country || '',
+          state: region || '',
+          preferences: {
+            necessary: Boolean(cats.essential ?? cats.necessary ?? true),
+            analytics: Boolean(cats.analytics),
+            marketing: Boolean(cats.marketing),
+            personalization: Boolean(cats.preferences || cats.personalization),
+            ...(isCcpaReg ? {
+              doNotSell: Boolean(cats.ccpa?.doNotSell),
+              doNotShare: Boolean(cats.ccpa?.doNotShare),
+            } : {}),
+          },
+          metadata: {
+            ip: ipAddress || '',
+            userAgent: userAgent || '',
+            country: country || '',
+            state: region || '',
+          },
+        }];
+        const r2Key = `consent-v2/${site.domain}/${id}.json`;
+        await env.R2.put(r2Key, JSON.stringify(legacyRecord), {
+          httpMetadata: { contentType: 'application/json' },
+        });
+        console.log('[Consent] R2 dual-write ✅ —', r2Key);
+      } catch (r2Err) {
+        console.warn('[Consent] R2 dual-write failed (non-fatal):', r2Err?.message);
+      }
+    })());
+  }
 
   } catch (dbErr) {
     console.error('[Consent] ❌ DB insert failed — siteId:', siteId, '| error:', dbErr?.message, '| cause:', dbErr?.cause?.message);

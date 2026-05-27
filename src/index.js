@@ -45,6 +45,8 @@ import { handleAdminMigrateCustomization } from './handlers/adminMigrateCustomiz
 import { handleAdminBackfillDescriptions } from './handlers/adminBackfillDescriptions.js';
 import { handleAdminInjectScript } from './handlers/adminInjectScript.js';
 import { handleAdminMigrateFromDashboard } from './handlers/adminMigrateFromDashboard.js';
+import { handleAdminBackfillConsentR2 } from './handlers/adminBackfillConsentR2.js';
+import { handleAdminBackfillStripeSubscriptions } from './handlers/adminBackfillStripeSubscriptions.js';
 import { handleCheckLegacyScript } from './handlers/checkLegacyScript.js';
 import { handleLegacyConsentLogs } from './handlers/legacyConsentLogs.js';
 import { handleLegacyConsentCsv } from './handlers/legacyConsentCsv.js';
@@ -176,6 +178,8 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/admin/backfill-descriptions',
   '/api/admin/inject-script',
   '/api/admin/migrate-from-dashboard',
+  '/api/admin/backfill-consent-r2',
+  '/api/admin/backfill-stripe-subscriptions',
   '/api/payment/subscription',
 ]);
 
@@ -194,7 +198,7 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     // — Public CDN / consent / scan endpoints
     case '/api/consent':
-      response = await handleConsent(request, env); break;
+      response = await handleConsent(request, env, ctx); break;
     case '/api/scan-scripts':
       response = await handleScanScripts(request, env); break;
     case '/api/scan-cookies':
@@ -374,6 +378,12 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     case '/api/admin/migrate-from-dashboard':
       response = await handleAdminMigrateFromDashboard(request, env); break;
+
+    case '/api/admin/backfill-consent-r2':
+      response = await handleAdminBackfillConsentR2(request, env); break;
+
+    case '/api/admin/backfill-stripe-subscriptions':
+      response = await handleAdminBackfillStripeSubscriptions(request, env); break;
 
     case '/api/check-legacy-script':
       response = await handleCheckLegacyScript(request, env); break;

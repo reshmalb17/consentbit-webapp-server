@@ -15,6 +15,8 @@ export async function handleConsentLogs(request, env) {
   const year = url.searchParams.get('year');   // e.g. "2025"
   const month = url.searchParams.get('month'); // e.g. "04"
 
+  console.log('[ConsentLogs] request —', { siteId, year, month, limit, offset });
+
   if (!siteId) {
     return Response.json({ success: false, error: 'siteId is required' }, { status: 400 });
   }
@@ -61,6 +63,7 @@ export async function handleConsentLogs(request, env) {
           .first();
 
     const total = totalStmt?.total ?? 0;
+    console.log('[ConsentLogs] result —', { siteId, year, month, total, returned: (consents || []).length });
 
     const logs = (consents || []).map((row) => {
       let categories = null;

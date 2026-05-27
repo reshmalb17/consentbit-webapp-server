@@ -21,6 +21,36 @@ function linkCell(url, text) {
   return `<Cell ss:HRef="${x(url)}"><Data ss:Type="String">${x(text)}</Data></Cell>`;
 }
 
+function buildHeaderRow() {
+  const headers = ['#', 'Visitor ID', 'Timestamp (UTC)', 'Status', 'Banner Type', 'Country', 'Region', 'IP Address', 'User Agent', 'Necessary', 'Analytics', 'Marketing', 'Personalization', 'Do Not Share', 'Do Not Sell', 'Download PDF'];
+  return `<Row>${headers.map(h => `<Cell ss:StyleID="header"><Data ss:Type="String">${x(h)}</Data></Cell>`).join('')}</Row>`;
+}
+
+function buildWorkbookXml(headerRow, dataRows) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+  xmlns:o="urn:schemas-microsoft-com:office:office"
+  xmlns:x="urn:schemas-microsoft-com:office:excel"
+  xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+  <Styles>
+    <Style ss:ID="header">
+      <Font ss:Bold="1"/>
+      <Interior ss:Color="#E6F1FD" ss:Pattern="Solid"/>
+    </Style>
+    <Style ss:ID="link">
+      <Font ss:Color="#1D4ED8" ss:Underline="Single"/>
+    </Style>
+  </Styles>
+  <Worksheet ss:Name="Consent Logs">
+    <Table>
+      ${headerRow}
+      ${dataRows.join('\n')}
+    </Table>
+  </Worksheet>
+</Workbook>`;
+}
+
 export async function handleLegacyConsentCsv(request, env) {
   const db = env.CONSENT_WEBAPP;
 
@@ -37,7 +67,7 @@ export async function handleLegacyConsentCsv(request, env) {
 
   const site = await db
     .prepare(
-      `SELECT s.id, s.name, s.domain, s.platformSiteId as platformsiteid, s.legacySource
+      `SELECT s.id, s.name, s.domain, s.platformSiteId as platformsiteid, s.legacySource, s.isLegacy
        FROM Site s
        INNER JOIN Organization o ON o.id = s.organizationId
        INNER JOIN User u ON u.id = o.ownerUserId
@@ -52,7 +82,13 @@ export async function handleLegacyConsentCsv(request, env) {
   const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
   const kv = env.WEBFLOW_AUTHENTICATION;
   const r2 = env.R2;
+  const year = url.searchParams.get('year');
+  const month = url.searchParams.get('month');
+  const workerOrigin = new URL(request.url).origin;
 
+  // ── Step 1: Try R2/KV for ALL sites (legacy AND non-legacy Webflow app) ──────
+  // Non-legacy (Webflow app) sites also write to R2 via dual-write in consent.js
+  // before June 2026, so R2 may have data for them too.
   const searchKeys = await buildSearchKeys(kv, platformSiteId, site.domain, site.name);
 
   let entries = r2 ? await getConsentRowsFromR2(r2, searchKeys) : [];
@@ -60,8 +96,74 @@ export async function handleLegacyConsentCsv(request, env) {
     entries = await getConsentRowsFromKV(kv, platformSiteId);
   }
 
-  const year = url.searchParams.get('year');
-  const month = url.searchParams.get('month');
+  // ── Step 2: D1 fallback — non-legacy (Webflow app) sites with no R2/KV data ─
+  if (entries.length === 0 && !site.isLegacy) {
+    const paddedMonth = month ? month.padStart(2, '0') : '';
+    const hasDateFilter = year && month;
+    const { results: d1Rows } = await (hasDateFilter
+      ? db.prepare(
+          `SELECT id, ipAddress, userAgent, country, region, regulation, bannerType,
+                  status, createdAt, consent_categories
+           FROM Consent WHERE siteId = ?1
+             AND strftime('%Y', createdAt) = ?2
+             AND strftime('%m', createdAt) = ?3
+           ORDER BY createdAt DESC LIMIT 5000`
+        ).bind(site.id, String(year), paddedMonth).all()
+      : db.prepare(
+          `SELECT id, ipAddress, userAgent, country, region, regulation, bannerType,
+                  status, createdAt, consent_categories
+           FROM Consent WHERE siteId = ?1 ORDER BY createdAt DESC LIMIT 5000`
+        ).bind(site.id).all()
+    ).catch(() => ({ results: [] }));
+
+    const headerRow = buildHeaderRow();
+    const dataRows = await Promise.all((d1Rows || []).map(async (row, i) => {
+      let cats = null;
+      if (row.consent_categories) {
+        try {
+          const p = typeof row.consent_categories === 'string' ? JSON.parse(row.consent_categories) : row.consent_categories;
+          cats = p && typeof p.categories === 'object' ? p.categories : p;
+        } catch { /* ignore */ }
+      }
+      const isCcpa = (row.regulation || '').toLowerCase() === 'ccpa' || (row.bannerType || '').toLowerCase() === 'ccpa';
+      const isAccepted = (row.status || '').toLowerCase() === 'accepted' || (row.status || '').toLowerCase() === 'given';
+      const analytics = cats?.analytics;
+      const marketing = cats?.marketing;
+      const preferences = cats?.preferences;
+      const doNotSell = cats?.ccpa?.doNotSell;
+      const token = await createDownloadToken(env.JWT_SECRET, siteId, row.id);
+      const pdfUrl = `${workerOrigin}/api/legacy-consent-pdf?siteId=${encodeURIComponent(siteId)}&visitorId=${encodeURIComponent(row.id)}&token=${encodeURIComponent(token)}`;
+
+      return `<Row>
+        ${cell(i + 1)}
+        ${cell(row.id)}
+        ${cell(row.createdAt || '')}
+        ${cell(isAccepted ? 'Accepted' : 'Rejected')}
+        ${cell(isCcpa ? 'CCPA' : 'GDPR')}
+        ${cell(row.country || '')}
+        ${cell(row.region || '')}
+        ${cell(row.ipAddress || '')}
+        ${cell(row.userAgent || '')}
+        ${cell(isCcpa ? '' : 'Yes')}
+        ${cell(isCcpa ? '' : (analytics ? 'Yes' : 'No'))}
+        ${cell(isCcpa ? '' : (marketing ? 'Yes' : 'No'))}
+        ${cell(isCcpa ? '' : (preferences ? 'Yes' : 'No'))}
+        ${cell(isCcpa ? (doNotSell !== undefined ? (doNotSell ? 'Yes' : 'No') : '') : '')}
+        ${cell(isCcpa ? (doNotSell !== undefined ? (doNotSell ? 'Yes' : 'No') : '') : '')}
+        ${linkCell(pdfUrl, 'Download PDF')}
+      </Row>`;
+    }));
+
+    const date = new Date().toISOString().split('T')[0];
+    const suffix = (year && month) ? `_${year}-${month.padStart(2, '0')}` : `_${date}`;
+    const filename = `consent_${siteId}${suffix}.xls`;
+    return new Response(buildWorkbookXml(headerRow, dataRows), {
+      status: 200,
+      headers: { 'Content-Type': 'application/vnd.ms-excel', 'Content-Disposition': `attachment; filename="${filename}"` },
+    });
+  }
+
+  // ── Step 3: Build XLS from R2/KV entries ────────────────────────────────────
   if (year && month) {
     const paddedMonth = month.padStart(2, '0');
     entries = entries.filter((e) => {
@@ -74,12 +176,7 @@ export async function handleLegacyConsentCsv(request, env) {
 
   entries.sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
 
-  // PDF links go directly to the worker (token handles auth — no proxy/cookie needed)
-  const workerOrigin = new URL(request.url).origin;
-
-  const headers = ['#', 'Visitor ID', 'Timestamp (UTC)', 'Status', 'Banner Type', 'Country', 'Region', 'IP Address', 'User Agent', 'Necessary', 'Analytics', 'Marketing', 'Personalization', 'Do Not Share', 'Do Not Sell', 'Download PDF'];
-
-  const headerRow = `<Row>${headers.map(h => `<Cell ss:StyleID="header"><Data ss:Type="String">${x(h)}</Data></Cell>`).join('')}</Row>`;
+  const headerRow = buildHeaderRow();
 
   const dataRows = await Promise.all(entries.map(async (entry, i) => {
     const p = entry.preferences || {};
@@ -119,30 +216,7 @@ export async function handleLegacyConsentCsv(request, env) {
   const suffix = (year && month) ? `_${year}-${month.padStart(2, '0')}` : `_${date}`;
   const filename = `legacy_consent_${siteId}${suffix}.xls`;
 
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<?mso-application progid="Excel.Sheet"?>
-<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
-  xmlns:o="urn:schemas-microsoft-com:office:office"
-  xmlns:x="urn:schemas-microsoft-com:office:excel"
-  xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
-  <Styles>
-    <Style ss:ID="header">
-      <Font ss:Bold="1"/>
-      <Interior ss:Color="#E6F1FD" ss:Pattern="Solid"/>
-    </Style>
-    <Style ss:ID="link">
-      <Font ss:Color="#1D4ED8" ss:Underline="Single"/>
-    </Style>
-  </Styles>
-  <Worksheet ss:Name="Consent Logs">
-    <Table>
-      ${headerRow}
-      ${dataRows.join('\n')}
-    </Table>
-  </Worksheet>
-</Workbook>`;
-
-  return new Response(xml, {
+  return new Response(buildWorkbookXml(headerRow, dataRows), {
     status: 200,
     headers: {
       'Content-Type': 'application/vnd.ms-excel',
