@@ -1177,10 +1177,6 @@ ${inlineConfig}
       ke()
     } catch (e) {
     }
-    try {
-      _e()
-    } catch (e) {
-    }
   }
 
   function ne(e) {
@@ -1421,6 +1417,19 @@ ${inlineConfig}
     return !1
   }
 
+  function cbDetectInlineCategory(content) {
+    if (!content || typeof content !== "string") return null;
+    if (content.indexOf("fbq(") >= 0 || content.indexOf("fbq (") >= 0 || content.indexOf("connect.facebook.net") >= 0) return "marketing";
+    if (content.indexOf("ttq(") >= 0 || content.indexOf("ttq (") >= 0 || content.indexOf("analytics.tiktok.com") >= 0) return "marketing";
+    if (content.indexOf("pintrk(") >= 0 || content.indexOf("pintrk (") >= 0 || content.indexOf("ct.pinterest.com") >= 0) return "marketing";
+    if (content.indexOf("twq(") >= 0 || content.indexOf("twq (") >= 0 || content.indexOf("ads-twitter.com") >= 0) return "marketing";
+    if (content.indexOf("_linkedin_partner_id") >= 0 || content.indexOf("lintrk(") >= 0 || content.indexOf("lintrk (") >= 0) return "marketing";
+    if (content.indexOf("bat.bing.com") >= 0) return "marketing";
+    if (content.indexOf("hotjar.com") >= 0) return "analytics";
+    if (content.indexOf("window.clarity") >= 0) return "analytics";
+    return null;
+  }
+
   function he(e) {
     if (e && "SCRIPT" === e.nodeName && (!e.getAttribute || "javascript/blocked" !== e.getAttribute("type"))) {
       var t = e.getAttribute && e.getAttribute("src") || e.src || "";
@@ -1432,6 +1441,15 @@ ${inlineConfig}
           e.setAttribute("type", "javascript/blocked");
           e.removeAttribute("src")
         } catch (e) {}
+      } else {
+        var inlineCat = (e.getAttribute && e.getAttribute("data-consentbit-category")) || cbDetectInlineCategory(e.textContent || "");
+        if (inlineCat && !ue(inlineCat)) try {
+          e.__cbInlineContent = e.textContent || "";
+          var _nTC = Object.getOwnPropertyDescriptor(Node.prototype, "textContent");
+          _nTC && _nTC.set ? _nTC.set.call(e, "") : (e.textContent = "");
+          e.setAttribute("type", "javascript/blocked");
+          e.setAttribute("data-cb-inline", "1");
+        } catch(ex) {}
       }
     }
   }
@@ -1471,6 +1489,26 @@ ${inlineConfig}
           }
         })
       } catch (e) {}
+      try {
+        var _nTC = Object.getOwnPropertyDescriptor(Node.prototype, "textContent");
+        if (_nTC && _nTC.set) {
+          var _nTCSet = _nTC.set;
+          Object.defineProperty(e, "textContent", {
+            configurable: !0,
+            get: function() { return _nTC.get ? _nTC.get.call(e) : ""; },
+            set: function(val) {
+              var cat = (e.getAttribute && e.getAttribute("data-consentbit-category")) || cbDetectInlineCategory(val);
+              if (cat && !ue(cat)) {
+                e.__cbInlineContent = val;
+                e.setAttribute("type", "javascript/blocked");
+                e.setAttribute("data-cb-inline", "1");
+              } else {
+                _nTCSet.call(e, val);
+              }
+            }
+          });
+        }
+      } catch (_xeErr) {}
     }
   }
 
@@ -1529,6 +1567,92 @@ ${inlineConfig}
             }
           }
       }
+      var _cbTagged = document.querySelectorAll('script[type="text/plain"][data-consentbit-category]');
+      for (var _ti = 0; _ti < _cbTagged.length; _ti++) {
+        var _ts = _cbTagged[_ti];
+        var _tcat = _ts.getAttribute("data-consentbit-category");
+        if (_tcat && ue(_tcat)) {
+          z = !0;
+          try {
+            var _tl = document.createElement("script");
+            _tl.async = _ts.hasAttribute("async");
+            _tl.defer = _ts.hasAttribute("defer");
+            var _tsrc = _ts.getAttribute("src") || "";
+            if (_tsrc) _tl.src = _tsrc;
+            else _tl.textContent = _ts.textContent;
+            var _tattrs = _ts.attributes;
+            for (var _tai = 0; _tai < _tattrs.length; _tai++) {
+              var _taname = _tattrs[_tai].name;
+              if (_taname !== "type" && _taname !== "src" && _taname !== "data-consentbit-category") _tl.setAttribute(_taname, _tattrs[_tai].value);
+            }
+            _ts.parentNode ? _ts.parentNode.replaceChild(_tl, _ts) : document.head.appendChild(_tl);
+          } catch(e) {
+          } finally {
+            z = !1;
+          }
+        }
+      }
+      var _cbInline = document.querySelectorAll('script[type="javascript/blocked"][data-cb-inline="1"]');
+      for (var _ii = 0; _ii < _cbInline.length; _ii++) {
+        var _is = _cbInline[_ii];
+        var _icontent = _is.__cbInlineContent || "";
+        var _icat = (_is.getAttribute && _is.getAttribute("data-consentbit-category")) || cbDetectInlineCategory(_icontent);
+        if (_icat && ue(_icat)) {
+          z = !0;
+          try {
+            var _il = document.createElement("script");
+            if (_icontent) _il.textContent = _icontent;
+            _is.parentNode ? _is.parentNode.replaceChild(_il, _is) : document.head.appendChild(_il);
+          } catch(e) {
+          } finally {
+            z = !1;
+          }
+        }
+      }
+    }
+  }
+
+  function cbDeleteCookieAllVariants(n) {
+    var h = window.location.hostname;
+    var b = h.indexOf("www.") === 0 ? h.slice(4) : h;
+    var ds = [null, h, "." + h, b, "." + b, "www." + b, ".www." + b];
+    var ps = ["/", window.location.pathname];
+    var ex = "Thu, 01 Jan 1970 00:00:00 GMT";
+    for (var di = 0; di < ds.length; di++)
+      for (var pi = 0; pi < ps.length; pi++) {
+        var cv = n + "=; expires=" + ex + "; path=" + ps[pi];
+        if (ds[di]) cv += "; domain=" + ds[di];
+        try { document.cookie = cv; } catch(e) {}
+      }
+  }
+
+  function cbGetMatchingCookieNames(pat) {
+    var si = pat.indexOf("*");
+    var pfx = si >= 0 ? pat.slice(0, si) : null;
+    var all = document.cookie.split(";").map(function(c) { return c.trim().split("=")[0]; });
+    return pfx ? all.filter(function(c) { return c.startsWith(pfx); }) : (all.indexOf(pat) >= 0 ? [pat] : []);
+  }
+
+  var CB_KNOWN_COOKIES = {
+    analytics: ["_ga", "_ga_*", "_gid", "_gat", "_gat_*", "_gac_*", "_hjid", "_hjSessionUser_*", "_hjSession_*", "_hjAbsoluteSessionInProgress", "_clck", "_clsk"],
+    marketing: ["_fbp", "_fbc", "_gcl_au", "_gcl_ls", "_gcl_aw", "_ttp", "tt_webid_v2", "_pin_unauth", "_pinterest_ct_ua", "li_sugr", "bcookie", "bscookie", "lidc", "_uetsid", "_uetvid", "IDE", "test_cookie", "fr"],
+    preferences: []
+  };
+
+  function cbDeleteByCategories(denied) {
+    for (var cat in CB_KNOWN_COOKIES) {
+      if (denied.indexOf(cat) >= 0) {
+        var pats = CB_KNOWN_COOKIES[cat];
+        for (var pi = 0; pi < pats.length; pi++) {
+          var names = cbGetMatchingCookieNames(pats[pi]);
+          for (var ni = 0; ni < names.length; ni++) cbDeleteCookieAllVariants(names[ni]);
+        }
+      }
+    }
+    for (var ri = 0; ri < P.length; ri++) {
+      var rule = P[ri];
+      if (!rule || !rule.category || denied.indexOf(rule.category) < 0) continue;
+      if (rule.name) cbDeleteCookieAllVariants(rule.name);
     }
   }
 
@@ -1576,18 +1700,6 @@ ${inlineConfig}
     }
   }
 
-  function _e() {
-    var e = document.querySelectorAll("img[data-cb-blocked-src]");
-    for (var t = 0; t < e.length; t++) {
-      var n = e[t];
-      var a = n.getAttribute("data-cb-blocked-src");
-      if (a && !Ee(a)) {
-        n.removeAttribute("data-cb-blocked-src");
-        n.src = a
-      }
-    }
-  }
-
   function Ie(e) {
     if (window.__CB_WEBFLOW_MODE__) {
       var t = e || {};
@@ -1609,19 +1721,10 @@ ${inlineConfig}
       } catch (e) {
         N = document.createElement
       }
-      try {
-        var e = window.Image;
-        window.Image = function (t, n) {
-          var a = new e(t, n);
-          Se(a);
-          return a
-        };
-        window.Image.prototype = e.prototype
-      } catch (e) {}
       document.createElement = function (e) {
         var t = N(e);
         var n = String(e || "").toLowerCase();
-        "script" === n ? xe(t) : "img" !== n && "iframe" !== n || Se(t);
+        "script" === n ? xe(t) : n === "iframe" && Se(t);
         return t
       };
       var t = new MutationObserver(function (e) {
@@ -2434,6 +2537,7 @@ ${inlineConfig}
           marketing: !1
         }
       };
+      cbDeleteByCategories(["analytics", "marketing", "preferences"]);
       te(e);
       re(e, {
         status: "rejected"
@@ -2479,6 +2583,7 @@ ${inlineConfig}
             marketing: !1
           }
         };
+        cbDeleteByCategories(["analytics", "marketing", "preferences"]);
         te(e);
         re(e, {
           status: "rejected"
@@ -2564,6 +2669,11 @@ ${inlineConfig}
             marketing: !(!i || !i.checked)
           }
         };
+        var _cbDenied = [];
+        if (!o.categories.analytics) _cbDenied.push("analytics");
+        if (!o.categories.marketing) _cbDenied.push("marketing");
+        if (!o.categories.preferences) _cbDenied.push("preferences");
+        if (_cbDenied.length) cbDeleteByCategories(_cbDenied);
         te(o);
         re(o, {
           status: "partial"

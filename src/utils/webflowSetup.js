@@ -257,12 +257,20 @@ export function getWebflowSetupScript() {
             if (!el.getAttribute('data-category')) {
               var cat = _detectCategory(src);
               if (cat) el.setAttribute('data-category', cat);
+              else {
+                var _cbcat = el.getAttribute('data-consentbit-category') || el.getAttribute('data-category-cb');
+                if (_cbcat) el.setAttribute('data-category', _cbcat.trim().toLowerCase());
+              }
             }
           }
           // Mark inline pre-blocked scripts (no src) with a sentinel so the
           // consentUpdated handler can find and release them.
           if (!src && !el.getAttribute('data-cb-inline-blocked')) {
             el.setAttribute('data-cb-inline-blocked', '1');
+            if (!el.getAttribute('data-category')) {
+              var _incat = el.getAttribute('data-consentbit-category') || el.getAttribute('data-category-cb');
+              if (_incat) el.setAttribute('data-category', _incat.trim().toLowerCase());
+            }
           }
         });
       }
@@ -341,18 +349,33 @@ export function getWebflowSetupScript() {
                 }
                 // Mark so we can re-block if consent is later revoked
                 ns2.setAttribute('data-cb-released-src', bsrc);
+                s2.parentNode ? s2.parentNode.replaceChild(ns2, s2) : document.head.appendChild(ns2);
               } else {
-                ns2.textContent = s2.textContent || s2.innerHTML || '';
-                var at3 = s2.attributes;
-                for (var aj = 0; aj < at3.length; aj++) {
-                  var an3 = at3[aj].name;
-                  if (an3 !== 'type' && an3 !== 'data-cb-inline-blocked')
-                    ns2.setAttribute(an3, at3[aj].value);
+                var _ic = s2.textContent || s2.innerHTML || '';
+                var _nl = String.fromCharCode(10);
+                var _ls = _ic.split(_nl);
+                var _si = 0;
+                while (_si < _ls.length && _si < 10) {
+                  var _lt = _ls[_si].trim();
+                  if (_lt.length === 0 || (_lt.charAt(0) === '/' && _lt.charAt(1) === '/')) {
+                    _si++;
+                  } else {
+                    break;
+                  }
                 }
-                // Mark so we can re-block if consent is later revoked
-                ns2.setAttribute('data-cb-released-inline', '1');
+                var _fc = (_si < _ls.length ? _ls.slice(_si).join(_nl) : '').trim().charAt(0);
+                if (_fc !== '{' && _fc !== '[') {
+                  ns2.textContent = _ic;
+                  var at3 = s2.attributes;
+                  for (var aj = 0; aj < at3.length; aj++) {
+                    var an3 = at3[aj].name;
+                    if (an3 !== 'type' && an3 !== 'data-cb-inline-blocked')
+                      ns2.setAttribute(an3, at3[aj].value);
+                  }
+                  ns2.setAttribute('data-cb-released-inline', '1');
+                  s2.parentNode && s2.parentNode.replaceChild(ns2, s2);
+                }
               }
-              s2.parentNode && s2.parentNode.replaceChild(ns2, s2);
             } catch (e) {}
           }
         }

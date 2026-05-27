@@ -328,6 +328,7 @@
           if (ok) {
             try {
               var ns2 = _origCE('script');
+              var _doReplace = true;
               if (bsrc) {
                 ns2.src = bsrc;
                 if (s2.hasAttribute('async')) ns2.async = true;
@@ -341,17 +342,33 @@
                 // Mark so we can re-block if consent is later revoked
                 ns2.setAttribute('data-cb-released-src', bsrc);
               } else {
-                ns2.textContent = s2.textContent || s2.innerHTML || '';
-                var at3 = s2.attributes;
-                for (var aj = 0; aj < at3.length; aj++) {
-                  var an3 = at3[aj].name;
-                  if (an3 !== 'type' && an3 !== 'data-cb-inline-blocked')
-                    ns2.setAttribute(an3, at3[aj].value);
+                var _ic = s2.textContent || s2.innerHTML || '';
+                // Strip leading // comment lines (e.g. "// line 1\n// line 2\n{...}")
+                // so that JSON content preceded by comments is still detected correctly.
+                var _stripped = _ic;
+                var _clRe = /^\s*\/\/[^\n]*(\n|$)/;
+                for (var _ci = 0; _ci < 10 && _clRe.test(_stripped); _ci++) {
+                  _stripped = _stripped.replace(_clRe, '');
                 }
-                // Mark so we can re-block if consent is later revoked
-                ns2.setAttribute('data-cb-released-inline', '1');
+                var _fc = _stripped.trim().charAt(0);
+                if (_fc === '{' || _fc === '[') {
+                  // JSON-like content (JSON-LD, structured data, config objects) —
+                  // executing as JavaScript throws SyntaxError: Unexpected token ':'.
+                  // Leave untouched; these are not consent-gated tracking scripts.
+                  _doReplace = false;
+                } else {
+                  ns2.textContent = _ic;
+                  var at3 = s2.attributes;
+                  for (var aj = 0; aj < at3.length; aj++) {
+                    var an3 = at3[aj].name;
+                    if (an3 !== 'type' && an3 !== 'data-cb-inline-blocked')
+                      ns2.setAttribute(an3, at3[aj].value);
+                  }
+                  // Mark so we can re-block if consent is later revoked
+                  ns2.setAttribute('data-cb-released-inline', '1');
+                }
               }
-              s2.parentNode && s2.parentNode.replaceChild(ns2, s2);
+              if (_doReplace) s2.parentNode && s2.parentNode.replaceChild(ns2, s2);
             } catch (e) {}
           }
         }
