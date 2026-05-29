@@ -98,7 +98,7 @@ async function _handleCDNScript(request, env, url) {
 
           if ((stagingHost && sourceHost === stagingHost) || sourceHost.endsWith('.webflow.io')) {
             // Staging domain allowed — site-specific staging URL or Webflow infrastructure domain
-            console.log(`[CDN] Domain mismatch allowed: script for "${siteHost}" from "${sourceHost}" (stagingHost=${stagingHost}, isWebflowIO=${sourceHost.endsWith('.webflow.io')})`);
+            // console.log(`[CDN] Domain mismatch allowed: script for "${siteHost}" from "${sourceHost}" (stagingHost=${stagingHost}, isWebflowIO=${sourceHost.endsWith('.webflow.io')})`);
           } else {
             console.warn(`[CDN] Domain mismatch BLOCKED: script for "${siteHost}" from "${sourceHost}" (stagingHost=${stagingHost})`);
             return new Response('// Script not authorized for this domain', {
@@ -116,7 +116,7 @@ async function _handleCDNScript(request, env, url) {
         });
       }
     } else {
-      console.log('[CDN] No Origin/Referer header — allowing (client-side guard will enforce)');
+      // console.log('[CDN] No Origin/Referer header — allowing (client-side guard will enforce)');
     }
     // Neither Origin nor Referer present: could be a direct/server-side fetch.
     // Allow through — the client-side domain guard in the embedded script will
@@ -408,6 +408,7 @@ async function _handleCDNScript(request, env, url) {
     }
 
     customStyles =
+      ".cb-banner{border:none !important;}" +
       "#cb-initial-banner.cb-banner{" +
         initialSize +
         "background-color:" + bgColor + "!important;" +
@@ -1070,7 +1071,7 @@ ${inlineConfig}
         var n = H(l && l.position);
         var a = Me();
         var r = "56px";
-        "banner" !== t ? "left" === a ? "bottom-center" !== t && "popup" !== t && "bottom" !== n && "bottom-left" !== n || (e.style.marginLeft = r) : "bottom-center" !== t && "popup" !== t && "bottom" !== n && "bottom-right" !== n || (e.style.marginRight = r) : "left" === a ? e.style.paddingLeft = r : e.style.paddingRight = r
+        "banner" !== t ? "left" === a ? "bottom-center" !== t && "popup" !== t && "bottom" !== n || (e.style.marginLeft = r) : "bottom-center" !== t && "popup" !== t && "bottom" !== n || (e.style.marginRight = r) : "left" === a ? e.style.paddingLeft = r : e.style.paddingRight = r
       }
     }
   }
@@ -2205,10 +2206,21 @@ ${inlineConfig}
             n.appendChild(i);
             var d = document.createElement("div");
             d.className = "cb-gdpr-cat-desc";
-            d.style.cssText = "display:none;padding:0 12px 12px 44px;font-size:13px;line-height:1.5;";
-            d.textContent = e.descText;
+            d.style.cssText = "display:grid;grid-template-rows:0fr;opacity:0;font-size:13px;line-height:1.5;transition:grid-template-rows .3s ease,opacity .25s ease;";
+            var dInner = document.createElement("div");
+            dInner.style.cssText = "overflow:hidden;min-height:0;padding:0 12px 12px 44px;";
+            dInner.textContent = e.descText;
+            d.appendChild(dInner);
+            var expand = function (el) {
+              el.style.gridTemplateRows = "1fr";
+              el.style.opacity = ""
+            };
+            var collapse = function (el) {
+              el.style.gridTemplateRows = "0fr";
+              el.style.opacity = "0"
+            };
             a.addEventListener("click", function () {
-              var io = "none" === d.style.display;
+              var io = "true" !== a.getAttribute("aria-expanded");
               var container = t.parentNode;
               if (container) {
                 var items = container.children;
@@ -2216,7 +2228,7 @@ ${inlineConfig}
                   var _desc = items[_i].querySelector(".cb-gdpr-cat-desc");
                   var _btn = items[_i].querySelector("button[aria-expanded]");
                   if (_desc && _desc !== d) {
-                    _desc.style.display = "none";
+                    collapse(_desc);
                     if (_btn) {
                       _btn.textContent = "+";
                       _btn.setAttribute("aria-expanded", "false")
@@ -2224,7 +2236,7 @@ ${inlineConfig}
                   }
                 }
               }
-              d.style.display = io ? "block" : "none";
+              io ? expand(d) : collapse(d);
               a.textContent = io ? "−" : "+";
               a.setAttribute("aria-expanded", io ? "true" : "false")
             });
