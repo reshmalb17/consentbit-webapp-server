@@ -260,18 +260,81 @@ async function _handleCDNScript(request, env, url) {
     return LANG_NAME_TO_CODE[s] || (s.length <= 3 ? s.toLowerCase() : 'en');
   }
 
-  // Section labels per language — used to fill in missing labels for existing published data
-  // that was saved before buildCustomizationPayload started writing them to translations.en
+  // Section labels and descriptions per language — used to fill in labels/descriptions for
+  // existing published data that was saved before per-language overrides were in place.
   const SECTION_LABELS = {
-    en: { essential: 'Strictly Necessary', analytics: 'Analytics',   marketing: 'Marketing',      preferences: 'Preferences'  },
-    es: { essential: 'Estrictamente Necesarias', analytics: 'Analíticas',  marketing: 'Marketing',      preferences: 'Preferencias' },
-    fr: { essential: 'Strictement Nécessaires',  analytics: 'Analytiques', marketing: 'Marketing',      preferences: 'Préférences'  },
-    de: { essential: 'Unbedingt Notwendig',      analytics: 'Analytik',    marketing: 'Marketing',      preferences: 'Einstellungen'},
-    it: { essential: 'Strettamente Necessari',   analytics: 'Analitica',   marketing: 'Marketing',      preferences: 'Preferenze'   },
-    pt: { essential: 'Estritamente Necessários', analytics: 'Analíticos',  marketing: 'Marketing',      preferences: 'Preferências' },
-    sv: { essential: 'Strikt Nödvändiga',        analytics: 'Analytik',    marketing: 'Marknadsföring', preferences: 'Inställningar'},
-    nl: { essential: 'Strikt Noodzakelijk',      analytics: 'Analytics',   marketing: 'Marketing',      preferences: 'Voorkeuren'   },
-    pl: { essential: 'Ściśle Niezbędne',         analytics: 'Analityczne', marketing: 'Marketingowe',   preferences: 'Preferencje'  },
+    en: {
+      essential: 'Strictly Necessary', analytics: 'Analytics', marketing: 'Marketing', preferences: 'Preferences',
+      alwaysActive: 'Always Active', cookiePreferences: 'Cookie Preferences',
+      essentialDescription: "Essential cookies enable core site functions like security and accessibility. They don't store personal data and can't be disabled.",
+      analyticsDescription: 'These cookies collect anonymous data to help us improve website functionality and enhance user experience.',
+      marketingDescription: 'These cookies track users across websites to deliver relevant ads and may process personal data, requiring explicit consent.',
+      preferencesDescription: 'These cookies remember settings like language or region and store display preferences to offer a more personalized, seamless experience.',
+    },
+    es: {
+      essential: 'Estrictamente Necesarias', analytics: 'Analíticas', marketing: 'Marketing', preferences: 'Preferencias',
+      alwaysActive: 'Siempre Activo', cookiePreferences: 'Preferencias de Cookies',
+      essentialDescription: 'Las cookies esenciales permiten funciones básicas del sitio como seguridad y accesibilidad. No almacenan datos personales y no se pueden desactivar.',
+      analyticsDescription: 'Estas cookies recopilan datos anónimos para ayudarnos a mejorar la funcionalidad del sitio y la experiencia del usuario.',
+      marketingDescription: 'Estas cookies rastrean a los usuarios en diferentes sitios para ofrecer anuncios relevantes y pueden procesar datos personales, requiriendo consentimiento explícito.',
+      preferencesDescription: 'Estas cookies recuerdan configuraciones como idioma o región y almacenan preferencias de visualización para ofrecer una experiencia más personalizada.',
+    },
+    fr: {
+      essential: 'Strictement Nécessaires', analytics: 'Analytiques', marketing: 'Marketing', preferences: 'Préférences',
+      alwaysActive: 'Toujours Actif', cookiePreferences: 'Préférences de Cookies',
+      essentialDescription: "Les cookies essentiels permettent les fonctions de base du site comme la sécurité et l'accessibilité. Ils ne stockent pas de données personnelles et ne peuvent pas être désactivés.",
+      analyticsDescription: "Ces cookies collectent des données anonymes pour nous aider à améliorer la fonctionnalité du site et l'expérience utilisateur.",
+      marketingDescription: 'Ces cookies suivent les utilisateurs sur les sites web pour diffuser des publicités pertinentes et peuvent traiter des données personnelles, nécessitant un consentement explicite.',
+      preferencesDescription: "Ces cookies mémorisent des paramètres comme la langue ou la région et stockent des préférences d'affichage pour offrir une expérience plus personnalisée.",
+    },
+    de: {
+      essential: 'Unbedingt Notwendig', analytics: 'Analytik', marketing: 'Marketing', preferences: 'Einstellungen',
+      alwaysActive: 'Immer Aktiv', cookiePreferences: 'Cookie-Einstellungen',
+      essentialDescription: 'Wesentliche Cookies ermöglichen grundlegende Website-Funktionen wie Sicherheit und Barrierefreiheit. Sie speichern keine persönlichen Daten und können nicht deaktiviert werden.',
+      analyticsDescription: 'Diese Cookies sammeln anonyme Daten, um uns bei der Verbesserung der Website-Funktionalität und der Benutzererfahrung zu helfen.',
+      marketingDescription: 'Diese Cookies verfolgen Benutzer auf Websites, um relevante Anzeigen zu liefern, und können persönliche Daten verarbeiten, was eine ausdrückliche Einwilligung erfordert.',
+      preferencesDescription: 'Diese Cookies merken sich Einstellungen wie Sprache oder Region und speichern Anzeigeeinstellungen für eine personalisierte Erfahrung.',
+    },
+    it: {
+      essential: 'Strettamente Necessari', analytics: 'Analitica', marketing: 'Marketing', preferences: 'Preferenze',
+      alwaysActive: 'Sempre Attivo', cookiePreferences: 'Preferenze dei Cookie',
+      essentialDescription: "I cookie essenziali abilitano le funzioni di base del sito come la sicurezza e l'accessibilità. Non memorizzano dati personali e non possono essere disabilitati.",
+      analyticsDescription: "Questi cookie raccolgono dati anonimi per aiutarci a migliorare la funzionalità del sito e l'esperienza dell'utente.",
+      marketingDescription: 'Questi cookie tracciano gli utenti su diversi siti web per fornire annunci pertinenti e possono elaborare dati personali, richiedendo il consenso esplicito.',
+      preferencesDescription: "Questi cookie ricordano impostazioni come lingua o regione e memorizzano preferenze di visualizzazione per un'esperienza più personalizzata.",
+    },
+    pt: {
+      essential: 'Estritamente Necessários', analytics: 'Analíticos', marketing: 'Marketing', preferences: 'Preferências',
+      alwaysActive: 'Sempre Ativo', cookiePreferences: 'Preferências de Cookies',
+      essentialDescription: 'Cookies essenciais permitem funções básicas do site como segurança e acessibilidade. Eles não armazenam dados pessoais e não podem ser desativados.',
+      analyticsDescription: 'Estes cookies coletam dados anônimos para nos ajudar a melhorar a funcionalidade do site e a experiência do usuário.',
+      marketingDescription: 'Estes cookies rastreiam usuários em sites para entregar anúncios relevantes e podem processar dados pessoais, exigindo consentimento explícito.',
+      preferencesDescription: 'Estes cookies lembram configurações como idioma ou região e armazenam preferências de exibição para uma experiência mais personalizada.',
+    },
+    sv: {
+      essential: 'Strikt Nödvändiga', analytics: 'Analytik', marketing: 'Marknadsföring', preferences: 'Inställningar',
+      alwaysActive: 'Alltid Aktiv', cookiePreferences: 'Cookie-inställningar',
+      essentialDescription: 'Viktiga cookies möjliggör grundläggande webbplatsfunktioner som säkerhet och tillgänglighet. De lagrar inga personuppgifter och kan inte inaktiveras.',
+      analyticsDescription: 'Dessa cookies samlar in anonyma data för att hjälpa oss förbättra webbplatsens funktionalitet och användarupplevelsen.',
+      marketingDescription: 'Dessa cookies spårar användare på webbplatser för att leverera relevanta annonser och kan behandla personuppgifter, vilket kräver uttryckligt samtycke.',
+      preferencesDescription: 'Dessa cookies kommer ihåg inställningar som språk eller region och lagrar visningsinställningar för en mer personlig upplevelse.',
+    },
+    nl: {
+      essential: 'Strikt Noodzakelijk', analytics: 'Analytics', marketing: 'Marketing', preferences: 'Voorkeuren',
+      alwaysActive: 'Altijd Actief', cookiePreferences: 'Cookie-instellingen',
+      essentialDescription: 'Essentiële cookies maken basisfuncties van de site mogelijk zoals beveiliging en toegankelijkheid. Ze slaan geen persoonlijke gegevens op en kunnen niet worden uitgeschakeld.',
+      analyticsDescription: 'Deze cookies verzamelen anonieme gegevens om ons te helpen de websitefunctionaliteit en gebruikerservaring te verbeteren.',
+      marketingDescription: 'Deze cookies volgen gebruikers op websites om relevante advertenties te tonen en kunnen persoonlijke gegevens verwerken, waarvoor expliciete toestemming vereist is.',
+      preferencesDescription: 'Deze cookies onthouden instellingen zoals taal of regio en slaan weergavevoorkeuren op voor een meer gepersonaliseerde ervaring.',
+    },
+    pl: {
+      essential: 'Ściśle Niezbędne', analytics: 'Analityczne', marketing: 'Marketingowe', preferences: 'Preferencje',
+      alwaysActive: 'Zawsze Aktywne', cookiePreferences: 'Preferencje dotyczące plików cookie',
+      essentialDescription: 'Niezbędne pliki cookie umożliwiają podstawowe funkcje witryny, takie jak bezpieczeństwo i dostępność. Nie przechowują danych osobowych i nie można ich wyłączyć.',
+      analyticsDescription: 'Te pliki cookie zbierają anonimowe dane, aby pomóc nam ulepszyć funkcjonalność witryny i doświadczenie użytkownika.',
+      marketingDescription: 'Te pliki cookie śledzą użytkowników na stronach internetowych, aby wyświetlać odpowiednie reklamy i mogą przetwarzać dane osobowe, wymagając wyraźnej zgody.',
+      preferencesDescription: 'Te pliki cookie zapamiętują ustawienia, takie jak język lub region, i przechowują preferencje wyświetlania dla bardziej spersonalizowanego doświadczenia.',
+    },
   };
 
   // Declared here so siteConfigPayload can reference it even when customization is null
@@ -326,12 +389,17 @@ async function _handleCDNScript(request, env, url) {
     // Fill in missing section labels using languageSelected from enTrans (or DB language as fallback)
     const _langCode = enTrans.languageSelected || normalizeLangCode(customization.language);
     const _labels = SECTION_LABELS[_langCode] || SECTION_LABELS['en'];
-    enTrans.essential = _labels.essential;
-    enTrans.strictlyNecessary = '';
-    if (!enTrans.analytics)           enTrans.analytics           = _labels.analytics;
-    if (!enTrans.marketing)           enTrans.marketing           = _labels.marketing;
-    if (!enTrans.preferences)         enTrans.preferences         = _labels.preferences;
-    if (!enTrans.cookiePreferences)   enTrans.cookiePreferences   = 'Cookie Preferences';
+    enTrans.essential            = _labels.essential;
+    enTrans.strictlyNecessary    = '';
+    enTrans.analytics            = _labels.analytics;
+    enTrans.marketing            = _labels.marketing;
+    enTrans.preferences          = _labels.preferences;
+    enTrans.alwaysActive         = _labels.alwaysActive         || 'Always Active';
+    enTrans.cookiePreferences    = _labels.cookiePreferences    || 'Cookie Preferences';
+    enTrans.essentialDescription = _labels.essentialDescription || enTrans.essentialDescription;
+    enTrans.analyticsDescription = _labels.analyticsDescription || enTrans.analyticsDescription;
+    enTrans.marketingDescription = _labels.marketingDescription || enTrans.marketingDescription;
+    enTrans.preferencesDescription = _labels.preferencesDescription || enTrans.preferencesDescription;
 
 
     /** box = corner card; banner = full-width bottom bar; bottom-center = centered full-width bottom bar; popup (legacy) = treated as bottom-center. */
@@ -719,8 +787,17 @@ async function _handleCDNScript(request, env, url) {
     const _enT = translationsForScript.en;
     const _lc = _enT.languageSelected || 'en';
     const _lb = SECTION_LABELS[_lc] || SECTION_LABELS['en'];
-    _enT.essential = (_lb && _lb.essential) ? _lb.essential : 'Strictly Necessary';
-    _enT.strictlyNecessary = '';
+    _enT.essential            = _lb.essential            || 'Strictly Necessary';
+    _enT.strictlyNecessary    = '';
+    _enT.analytics            = _lb.analytics            || 'Analytics';
+    _enT.marketing            = _lb.marketing            || 'Marketing';
+    _enT.preferences          = _lb.preferences          || 'Preferences';
+    _enT.alwaysActive         = _lb.alwaysActive         || 'Always Active';
+    _enT.cookiePreferences    = _lb.cookiePreferences    || 'Cookie Preferences';
+    _enT.essentialDescription = _lb.essentialDescription || _enT.essentialDescription;
+    _enT.analyticsDescription = _lb.analyticsDescription || _enT.analyticsDescription;
+    _enT.marketingDescription = _lb.marketingDescription || _enT.marketingDescription;
+    _enT.preferencesDescription = _lb.preferencesDescription || _enT.preferencesDescription;
   }
 
   /** Worker-hosted SVG (same origin as the embed script). */
@@ -2066,10 +2143,12 @@ ${inlineConfig}
   }
 
   function Pe() {
+    console.log("[CB] Pe() called, banner already exists:", !!document.getElementById("cb-initial-banner"), "bannerType:", i);
     if (!document.getElementById("cb-initial-banner"))
       if (document.body) {
         var e = "ccpa" === i;
         var t = document.createElement("div");
+        console.log("[CB] Building banner, ccpa:", e);
         if (e) {
           var n;
           (n = document.createElement("div")).className = "cb-banner";
@@ -2157,6 +2236,7 @@ ${inlineConfig}
           je(p);
           t.appendChild(p)
         } else {
+          console.log("[CB] GDPR banner path - building elements");
           var N = function (e) {
             var t = document.createElement("div");
             t.style.borderBottom = "1px solid #e5e7eb";
@@ -2340,6 +2420,7 @@ ${inlineConfig}
           t.appendChild(p)
         }
         document.body.appendChild(t);
+        console.log("[CB] Banner wrapper appended to body, searching for cb-initial-banner...");
         f && (document.body.style.overflow = "hidden");
         if (!window.__cbResizeInit) {
           window.__cbResizeInit = true;
@@ -2349,11 +2430,13 @@ ${inlineConfig}
           });
         }
         var K = document.getElementById("cb-initial-banner");
+        console.log("[CB] cb-initial-banner element found:", K, "current display:", K ? K.style.display : "N/A");
         if (K) {
           var ee = Z(K);
           K.style.display = "flex";
           K.style.visibility = "visible";
           K.style.opacity = "1";
+          console.log("[CB] Banner display set to flex, computedDisplay:", window.getComputedStyle(K).display, "computedVisibility:", window.getComputedStyle(K).visibility, "computedOpacity:", window.getComputedStyle(K).opacity);
           if (m) {
             var te = "";
             var ne = u;
