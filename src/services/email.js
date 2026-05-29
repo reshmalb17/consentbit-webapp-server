@@ -222,8 +222,8 @@ export function sendFreePlanEmail(env, ctx, { to, name, domain, scriptUrl }) {
     ${HR}
 
     <p style="margin:0 0 10px;color:#111827;font-size:14px;font-weight:600;">Installation script</p>
-    <div style="background:#1e293b;border-radius:8px;padding:16px 20px;margin-bottom:24px;overflow:hidden;">
-      <code style="color:#7dd3fc;font-size:13px;font-family:'Courier New',Courier,monospace;line-height:1.6;word-break:break-all;">
+    <div style="background:#f3f4f6;border-radius:8px;padding:16px 20px;margin-bottom:24px;overflow:hidden;border:1px solid #e5e7eb;">
+      <code style="color:#374151;font-size:13px;font-family:'Courier New',Courier,monospace;line-height:1.6;word-break:break-all;">
         &lt;!-- ConsentBit --&gt;<br/>
         ${snippet}
       </code>
