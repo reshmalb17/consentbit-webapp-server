@@ -1,6 +1,7 @@
 ﻿// handlers/bannerCustomization.js
 import { getBannerCustomization, saveBannerCustomization } from '../services/db.js';
 import { injectScriptIntoWebflowHead } from './webflowFreeRegister.js';
+import { capturePostHogEvent, identifyPostHogPerson } from '../services/posthog.js';
 
 function encodeEnvelope(payload) {
   const bytes = new TextEncoder().encode(JSON.stringify(payload));
@@ -419,6 +420,17 @@ export async function handleBannerCustomization(request, env) {
       } catch (kvErr) {
         console.error('[BannerCustomization] Failed to sync Banner-Settings KV:', kvErr);
       }
+
+      // PostHog: track banner customized + published (save from Webflow = publish)
+      try {
+        const orgRow = await db.prepare('SELECT organizationId FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
+        const orgId = orgRow?.organizationId;
+        if (orgId) {
+          capturePostHogEvent(env, orgId, 'banner_customized', { platform: 'webflow', site_id: siteId, wf_site_id: wfSiteId || null }).catch(() => {});
+          capturePostHogEvent(env, orgId, 'banner_published_staging', { platform: 'webflow', site_id: siteId, wf_site_id: wfSiteId || null }).catch(() => {});
+          identifyPostHogPerson(env, orgId, { platform: 'webflow', did_customize_banner: true, did_publish_banner: true, lifecycle_stage: 'published' }).catch(() => {});
+        }
+      } catch (_) {}
 
       return Response.json({ success: true });
     } catch (error) {

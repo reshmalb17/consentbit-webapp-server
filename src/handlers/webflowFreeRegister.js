@@ -12,6 +12,7 @@ import {
   markSiteVerified,
   saveBannerCustomization,
 } from '../services/db.js';
+import { capturePostHogEvent, identifyPostHogPerson } from '../services/posthog.js';
 
 const TAG = '[webflow-free-register][webapp]';
 
@@ -440,6 +441,31 @@ export async function handleWebflowFreeRegister(request, env) {
       console.error(`${TAG} Step 7: Script injection error:`, err?.message || err);
     }
   }
+
+  // PostHog: track Webflow app install + set person properties for funnel filtering
+  const isNewInstall = !existingSameDomain;
+  if (isNewInstall) {
+    capturePostHogEvent(env, org.id, 'app_installed', {
+      platform: 'webflow',
+      domain: site.domain,
+      site_id: site.id,
+      wf_site_id: wfSiteId || null,
+      injected_into_head: injectedIntoHead,
+    }).catch(() => {});
+  }
+  identifyPostHogPerson(env, org.id, {
+    email: user.email,
+    platform: 'webflow',
+    subscription_status: 'none',
+    plan_tier: 'free',
+    lifecycle_stage: isNewInstall ? 'installed' : 'published',
+    did_install_app: true,
+    installed_at: isNewInstall ? now : undefined,
+  }).catch(() => {});
+
+  // Alias email → orgId so designer extension events (keyed by email) merge with
+  // server-side events (keyed by orgId) into one PostHog person record.
+  capturePostHogEvent(env, user.email, '$create_alias', { alias: org.id }).catch(() => {});
 
   return Response.json({
     success: true,
