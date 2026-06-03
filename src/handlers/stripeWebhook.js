@@ -550,7 +550,7 @@ export async function handleStripeWebhook(request, env, ctx) {
         if (orgId) {
           const _phEmail = (session.customer_email || session.customer_details?.email || '').trim().toLowerCase() || null;
           const _phPlatform = platform || null;
-          capturePostHogEvent(env, orgId, 'paid_plan_activated', {
+          await capturePostHogEvent(env, orgId, 'paid_plan_activated', {
             status: subscriptionStatus,
             plan: resolvedPlanId,
             interval,
@@ -857,7 +857,7 @@ export async function handleStripeWebhook(request, env, ctx) {
         if (type === 'customer.subscription.updated') {
           const prevStatus = event.data.previous_attributes?.status;
           if (prevStatus === 'trialing' && sub.status === 'active' && orgIdFinal) {
-            capturePostHogEvent(env, orgIdFinal, 'paid_plan_activated', {
+            await capturePostHogEvent(env, orgIdFinal, 'paid_plan_activated', {
               status: 'active',
               plan: planIdFromMeta,
               interval: intervalFromSub,
@@ -871,31 +871,31 @@ export async function handleStripeWebhook(request, env, ctx) {
           if (planIdFromMeta && previousPlanId && planIdFromMeta !== previousPlanId && orgIdFinal) {
             const planOrder = { basic: 1, essential: 2, growth: 3 };
             const isUpgrade = (planOrder[planIdFromMeta] ?? 0) > (planOrder[previousPlanId] ?? 0);
-            capturePostHogEvent(env, orgIdFinal, isUpgrade ? 'plan_upgraded' : 'plan_downgraded', {
+            await capturePostHogEvent(env, orgIdFinal, isUpgrade ? 'plan_upgraded' : 'plan_downgraded', {
               from_plan: previousPlanId,
               to_plan: planIdFromMeta,
               interval: intervalFromSub,
               site_id: existing?.siteId ?? existing?.siteid ?? null,
               ...(_phPlatform ? { platform: _phPlatform } : {}),
               $set: { plan_tier: planIdFromMeta, previous_plan_tier: previousPlanId, subscription_status: sub.status, did_upgrade_plan: isUpgrade, ...(isUpgrade ? { upgraded_at: new Date().toISOString(), lifecycle_stage: 'upgraded' } : {}), ...(_phPlatform ? { platform: _phPlatform } : {}) },
-            }).catch(() => {});
+            });
           }
         }
 
         if (type === 'customer.subscription.deleted' && orgIdFinal) {
-          capturePostHogEvent(env, orgIdFinal, 'subscription_cancelled', {
+          await capturePostHogEvent(env, orgIdFinal, 'subscription_cancelled', {
             plan: planIdFromMeta,
             interval: intervalFromSub,
             site_id: existing?.siteId ?? existing?.siteid ?? null,
             ...(_phPlatform ? { platform: _phPlatform } : {}),
-          }).catch(() => {});
-          identifyPostHogPerson(env, orgIdFinal, {
+          });
+          await identifyPostHogPerson(env, orgIdFinal, {
             subscription_status: 'canceled',
             lifecycle_stage: 'canceled',
             did_cancel: true,
             canceled_at: new Date().toISOString(),
             ...(_phPlatform ? { platform: _phPlatform } : {}),
-          }).catch(() => {});
+          });
         }
       }
 

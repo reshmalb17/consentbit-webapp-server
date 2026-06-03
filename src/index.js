@@ -47,6 +47,7 @@ import { handleAdminInjectScript } from './handlers/adminInjectScript.js';
 import { handleAdminMigrateFromDashboard } from './handlers/adminMigrateFromDashboard.js';
 import { handleAdminBackfillConsentR2 } from './handlers/adminBackfillConsentR2.js';
 import { handleAdminBackfillStripeSubscriptions } from './handlers/adminBackfillStripeSubscriptions.js';
+import { handleAdminBackfillPosthog } from './handlers/adminBackfillPosthog.js';
 import { handleCheckLegacyScript } from './handlers/checkLegacyScript.js';
 import { handleLegacyConsentLogs } from './handlers/legacyConsentLogs.js';
 import { handleLegacyConsentCsv } from './handlers/legacyConsentCsv.js';
@@ -180,6 +181,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/admin/migrate-from-dashboard',
   '/api/admin/backfill-consent-r2',
   '/api/admin/backfill-stripe-subscriptions',
+  '/api/admin/backfill-posthog',
   '/api/payment/subscription',
 ]);
 
@@ -384,6 +386,9 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     case '/api/admin/backfill-stripe-subscriptions':
       response = await handleAdminBackfillStripeSubscriptions(request, env); break;
+
+    case '/api/admin/backfill-posthog':
+      response = await handleAdminBackfillPosthog(request, env); break;
 
     case '/api/check-legacy-script':
       response = await handleCheckLegacyScript(request, env); break;

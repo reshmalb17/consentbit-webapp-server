@@ -426,9 +426,9 @@ export async function handleBannerCustomization(request, env) {
         const orgRow = await db.prepare('SELECT organizationId FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
         const orgId = orgRow?.organizationId;
         if (orgId) {
-          capturePostHogEvent(env, orgId, 'banner_customized', { platform: 'webflow', site_id: siteId, wf_site_id: wfSiteId || null }).catch(() => {});
-          capturePostHogEvent(env, orgId, 'banner_published_staging', { platform: 'webflow', site_id: siteId, wf_site_id: wfSiteId || null }).catch(() => {});
-          identifyPostHogPerson(env, orgId, { platform: 'webflow', did_customize_banner: true, did_publish_banner: true, lifecycle_stage: 'published' }).catch(() => {});
+          await capturePostHogEvent(env, orgId, 'banner_customized', { platform: 'webflow', site_id: siteId, wf_site_id: wfSiteId || null });
+          await capturePostHogEvent(env, orgId, 'banner_published_staging', { platform: 'webflow', site_id: siteId, wf_site_id: wfSiteId || null });
+          await identifyPostHogPerson(env, orgId, { platform: 'webflow', did_customize_banner: true, did_publish_banner: true, lifecycle_stage: 'published' });
         }
       } catch (_) {}
 
