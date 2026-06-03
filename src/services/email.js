@@ -122,7 +122,7 @@ const HR = '<div style="border:none;border-top:1px solid #e5e7eb;margin:28px 0;"
  */
 export function sendWelcomeEmail(env, ctx, { to, name }) {
   const displayName = name || 'there';
-  const dashboardUrl = (env.WEBAPP_PUBLIC_URL || 'https://app.consentbit.com').replace(/\/$/, '') + '/dashboard';
+  const dashboardUrl = (env.WEBAPP_PUBLIC_URL || 'https://accounts.consentbit.com').replace(/\/$/, '') + '/dashboard';
 
   const subject = `Welcome to ConsentBit, ${name || 'there'}!`;
 
@@ -200,7 +200,7 @@ ConsentBit Team
 export function sendFreePlanEmail(env, ctx, { to, name, domain, scriptUrl }) {
   const displayName  = name || 'there';
   const displayDomain = domain || 'your website';
-  const dashboardUrl  = (env.WEBAPP_PUBLIC_URL || 'https://app.consentbit.com').replace(/\/$/, '') + '/dashboard';
+  const dashboardUrl  = (env.WEBAPP_PUBLIC_URL || 'https://accounts.consentbit.com').replace(/\/$/, '') + '/dashboard';
   const snippet = scriptUrl
     ? `&lt;script id="consentbit" src="${scriptUrl}" async&gt;&lt;/script&gt;`
     : '&lt;script id="consentbit" src="YOUR_SCRIPT_URL" async&gt;&lt;/script&gt;';

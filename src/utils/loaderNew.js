@@ -1131,10 +1131,12 @@ export function getLoaderScript(translationsVar) {
   }
 
   function Pe() {
+    console.log("[CB] Pe() called, banner already exists:", !!document.getElementById("cb-initial-banner"), "bannerType:", i);
     if (!document.getElementById("cb-initial-banner"))
       if (document.body) {
         var e = "ccpa" === i;
         var t = document.createElement("div");
+        console.log("[CB] Building banner, ccpa:", e);
         if (e) {
           var n;
           (n = document.createElement("div")).className = "cb-banner";
@@ -1222,6 +1224,7 @@ export function getLoaderScript(translationsVar) {
           je(p);
           t.appendChild(p)
         } else {
+          console.log("[CB] GDPR banner path - building elements");
           var N = function (e) {
             var t = document.createElement("div");
             t.style.borderBottom = "1px solid #e5e7eb";
@@ -1405,6 +1408,7 @@ export function getLoaderScript(translationsVar) {
           t.appendChild(p)
         }
         document.body.appendChild(t);
+        console.log("[CB] Banner wrapper appended to body, searching for cb-initial-banner...");
         f && (document.body.style.overflow = "hidden");
         if (!window.__cbResizeInit) {
           window.__cbResizeInit = true;
@@ -1414,11 +1418,13 @@ export function getLoaderScript(translationsVar) {
           });
         }
         var K = document.getElementById("cb-initial-banner");
+        console.log("[CB] cb-initial-banner element found:", K, "current display:", K ? K.style.display : "N/A");
         if (K) {
           var ee = Z(K);
           K.style.display = "flex";
           K.style.visibility = "visible";
           K.style.opacity = "1";
+          console.log("[CB] Banner display set to flex, visibility:", K.style.visibility, "opacity:", K.style.opacity, "computedDisplay:", window.getComputedStyle(K).display);
           if (m) {
             var te = "";
             var ne = u;

@@ -73,26 +73,24 @@ export async function handleAuthRequestCode(request, env, ctx) {
     return Response.json({ success: false, error: 'name is required for signup' }, { status: 400 });
   }
 
-  let loginUser = null;
-  if (purpose === 'login') {
-    loginUser = await getUserByEmail(db, email);
-    if (!loginUser) {
-      return Response.json({ success: false, error: 'No account found with this email. Please sign up first.' }, { status: 404 });
-    }
-  }
-
-  if (purpose === 'signup') {
-    const existingUser = await getUserByEmail(db, email);
-    if (existingUser) {
-      return Response.json({ success: false, error: 'An account with this email already exists. Please log in instead.' }, { status: 409 });
-    }
-  }
-
-  const displayName = name || loginUser?.name || '';
-
   const code = generateCode();
   const salt = env.OTP_SECRET || 'dev-otp-secret';
-  const codeHash = await sha256Hex(`${purpose}|${email}|${code}|${salt}`);
+
+  // Run user lookup and hash computation in parallel — neither depends on the other
+  const [existingUser, codeHash] = await Promise.all([
+    getUserByEmail(db, email),
+    sha256Hex(`${purpose}|${email}|${code}|${salt}`),
+  ]);
+
+  if (purpose === 'login' && !existingUser) {
+    return Response.json({ success: false, error: 'No account found with this email. Please sign up first.' }, { status: 404 });
+  }
+  if (purpose === 'signup' && existingUser) {
+    return Response.json({ success: false, error: 'An account with this email already exists. Please log in instead.' }, { status: 409 });
+  }
+
+  const loginUser = purpose === 'login' ? existingUser : null;
+  const displayName = name || loginUser?.name || '';
 
   const ttlMinutes = Number(env.OTP_TTL_MINUTES || 10) || 10;
   const row = await createEmailVerificationCode(db, { email, purpose, codeHash, name, ttlMinutes });
