@@ -4,6 +4,7 @@ import { handleCDNScript } from './handlers/cdn.js';
 import { handleConsentV2Script } from './handlers/consentv2handler.js';
 import { handleEmbedFloatingLogo } from './handlers/embedFloatingLogo.js';
 import { handleConsent } from './handlers/consent.js';
+import { handleFramerConsent } from './handlers/framerConsent.js';
 import { handleScanScripts } from './handlers/scanScripts.js';
 import { handleScanCookies } from './handlers/scanCookies.js';
 import { handleVerifyScript } from './handlers/verifyScript.js';
@@ -118,6 +119,7 @@ import { sendScanLimitEmail } from './services/email.js';
  */
 const PUBLIC_PATHS = new Set([
   '/api/consent',
+  '/api/framer-consent',
   '/api/scan-scripts',
   '/api/scan-cookies',
   '/api/pageview',
@@ -203,6 +205,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     // — Public CDN / consent / scan endpoints
     case '/api/consent':
       response = await handleConsent(request, env, ctx); break;
+    case '/api/framer-consent':
+      response = await handleFramerConsent(request, env, ctx); break;
     case '/api/scan-scripts':
       response = await handleScanScripts(request, env); break;
     case '/api/scan-cookies':

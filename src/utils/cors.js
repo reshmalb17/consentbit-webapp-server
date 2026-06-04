@@ -105,6 +105,7 @@ export function handleOptions(request, env) {
   // Endpoints accessible from any customer-site origin (embed CDN calls)
   const PUBLIC_PATHS = new Set([
     '/api/consent',
+    '/api/framer-consent',
     '/api/scan-scripts',
     '/api/scan-cookies',
     '/api/pageview',
