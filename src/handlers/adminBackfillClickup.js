@@ -45,22 +45,28 @@ async function fetchAllSubscriptionsInRange(stripeKey, createdGte, createdLte) {
   return all;
 }
 
-async function resolvePlatform(env, sub) {
+async function resolveSiteDetails(env, sub) {
   const meta = sub.metadata || {};
-  if (meta.platform) return meta.platform.trim().toLowerCase();
+  const platform = meta.platform ? meta.platform.trim().toLowerCase() : null;
+  const domainFromMeta = meta.siteDomain ? String(meta.siteDomain).trim() : null;
 
   const siteId = meta.siteId ? String(meta.siteId).trim() : null;
-  if (!siteId || !env.CONSENT_WEBAPP) return null;
-
-  try {
-    const row = await env.CONSENT_WEBAPP
-      .prepare('SELECT platform FROM Site WHERE id = ?1 LIMIT 1')
-      .bind(siteId)
-      .first();
-    return row?.platform || null;
-  } catch {
-    return null;
+  if ((!platform || !domainFromMeta) && siteId && env.CONSENT_WEBAPP) {
+    try {
+      const row = await env.CONSENT_WEBAPP
+        .prepare('SELECT platform, domain FROM Site WHERE id = ?1 LIMIT 1')
+        .bind(siteId)
+        .first();
+      return {
+        platform: platform || row?.platform || null,
+        domain: domainFromMeta || row?.domain || null,
+      };
+    } catch {
+      return { platform, domain: domainFromMeta };
+    }
   }
+
+  return { platform, domain: domainFromMeta };
 }
 
 export async function handleAdminBackfillClickup(request, env) {
@@ -112,7 +118,7 @@ export async function handleAdminBackfillClickup(request, env) {
     const name = customer?.name || null;
     const customerId = customer?.id || (typeof sub.customer === 'string' ? sub.customer : null);
 
-    const platform = await resolvePlatform(env, sub);
+    const { platform, domain: resolvedDomain } = await resolveSiteDetails(env, sub);
     const status = sub.status || null;
     const dateCreated = new Date(sub.created * 1000).toISOString().split('T')[0];
 
@@ -135,7 +141,7 @@ export async function handleAdminBackfillClickup(request, env) {
     const interval = intervalRaw === 'year' ? 'yearly' : 'monthly';
     const amountCents = sub.items?.data?.[0]?.plan?.amount ?? null;
     const currency = sub.currency || 'usd';
-    const domain = meta.siteDomain || null;
+    const domain = resolvedDomain;
 
     const entry = {
       subId: sub.id,
