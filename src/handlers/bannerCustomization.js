@@ -421,14 +421,16 @@ export async function handleBannerCustomization(request, env) {
         console.error('[BannerCustomization] Failed to sync Banner-Settings KV:', kvErr);
       }
 
-      // PostHog: track banner customized + published (save from Webflow = publish)
+      // PostHog: use email as canonical distinct_id to match client-side events
       try {
-        const orgRow = await db.prepare('SELECT organizationId FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
-        const orgId = orgRow?.organizationId;
-        if (orgId) {
-          await capturePostHogEvent(env, orgId, 'banner_customized', { platform: 'webflow', site_id: siteId, wf_site_id: wfSiteId || null });
-          await capturePostHogEvent(env, orgId, 'banner_published_staging', { platform: 'webflow', site_id: siteId, wf_site_id: wfSiteId || null });
-          await identifyPostHogPerson(env, orgId, { platform: 'webflow', did_customize_banner: true, did_publish_banner: true, lifecycle_stage: 'published' });
+        const userRow = await db.prepare(
+          'SELECT u.email FROM Site s JOIN OrganizationMember om ON om.organizationId = s.organizationId JOIN User u ON u.id = om.userId WHERE s.id = ?1 LIMIT 1'
+        ).bind(siteId).first();
+        const userEmail = userRow?.email;
+        if (userEmail) {
+          await capturePostHogEvent(env, userEmail, 'banner_customized', { platform: 'webflow', site_id: siteId, wf_site_id: wfSiteId || null });
+          await capturePostHogEvent(env, userEmail, 'banner_published_staging', { platform: 'webflow', site_id: siteId, wf_site_id: wfSiteId || null });
+          await identifyPostHogPerson(env, userEmail, { platform: 'webflow', did_customize_banner: true, did_publish_banner: true, lifecycle_stage: 'published' });
         }
       } catch (_) {}
 

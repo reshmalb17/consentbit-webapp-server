@@ -20,7 +20,7 @@ import {
   inferTierPlanIdFromStripePriceId,
   markTrialUsed,
 } from '../services/db.js';
-import { capturePostHogEvent as _phCapture, identifyPostHogPerson as _phIdentify } from '../services/posthog.js';
+import { capturePostHogEvent as _phCapture, identifyPostHogPerson as _phIdentify, identifyPostHogSite as _phSite } from '../services/posthog.js';
 import { sendWelcomeEmail, sendPaidPlanEmail, sendPaymentFailureEmail } from '../services/email.js';
 import {
   syncPurchaseToLegacy,
@@ -64,6 +64,7 @@ async function findOrCreateStripeCustomerByEmail(env, email) {
 
 const capturePostHogEvent = _phCapture;
 const identifyPostHogPerson = _phIdentify;
+const identifyPostHogSite = _phSite;
 
 function toTimestamp(ts) {
   if (ts == null) return null;
@@ -546,18 +547,33 @@ export async function handleStripeWebhook(request, env, ctx) {
           amountCents: session.amount_total ?? null,
         });
 
-        // PostHog: track plan activation at checkout
+        // PostHog: use email as canonical distinct_id to match client-side events
         if (orgId) {
           const _phEmail = (session.customer_email || session.customer_details?.email || '').trim().toLowerCase() || null;
           const _phPlatform = platform || null;
-          await capturePostHogEvent(env, orgId, 'paid_plan_activated', {
-            status: subscriptionStatus,
-            plan: resolvedPlanId,
-            interval,
-            site_id: siteId || null,
-            is_first_purchase: isFirstPurchase,
-            ...(_phEmail ? { email: _phEmail, $set: { email: _phEmail, plan: resolvedPlanId, subscription_status: subscriptionStatus, plan_tier: resolvedPlanId, ...(_phPlatform ? { platform: _phPlatform } : {}), did_start_trial: subscriptionStatus === 'trialing', ...(subscriptionStatus === 'trialing' ? { trial_started_at: new Date().toISOString() } : { did_convert_to_paid: true, converted_at: new Date().toISOString() }) } } : { $set: { plan: resolvedPlanId, subscription_status: subscriptionStatus, plan_tier: resolvedPlanId, ...(_phPlatform ? { platform: _phPlatform } : {}), did_start_trial: subscriptionStatus === 'trialing', ...(subscriptionStatus === 'trialing' ? { trial_started_at: new Date().toISOString() } : { did_convert_to_paid: true, converted_at: new Date().toISOString() }) } }),
-          });
+          if (_phEmail) {
+            await capturePostHogEvent(env, _phEmail, 'paid_plan_activated', {
+              status: subscriptionStatus,
+              plan: resolvedPlanId,
+              interval,
+              site_id: siteId || null,
+              org_id: orgId,
+              is_first_purchase: isFirstPurchase,
+              ...(siteId ? { $groups: { site: siteId } } : {}),
+              $set: { email: _phEmail, plan: resolvedPlanId, subscription_status: subscriptionStatus, plan_tier: resolvedPlanId, ...(_phPlatform ? { platform: _phPlatform } : {}), did_start_trial: subscriptionStatus === 'trialing', ...(subscriptionStatus === 'trialing' ? { trial_started_at: new Date().toISOString() } : { did_convert_to_paid: true, converted_at: new Date().toISOString() }) },
+            });
+            // Update site group with new plan — tracks per-site status independently
+            if (siteId) {
+              await identifyPostHogSite(env, _phEmail, siteId, {
+                subscription_status: subscriptionStatus,
+                plan_tier: resolvedPlanId,
+                interval,
+                owner_email: _phEmail,
+                ...(_phPlatform ? { platform: _phPlatform } : {}),
+                ...(subscriptionStatus === 'trialing' ? { trial_started_at: new Date().toISOString() } : { paid_at: new Date().toISOString() }),
+              });
+            }
+          }
         }
 
         // Store billingEmail on Site — prefer explicit billing email, fall back to account email
@@ -854,48 +870,51 @@ export async function handleStripeWebhook(request, env, ctx) {
           _phPlatform = _phSite?.platform || null;
         } catch (e) { /* ignore */ }
 
-        if (type === 'customer.subscription.updated') {
-          const prevStatus = event.data.previous_attributes?.status;
-          if (prevStatus === 'trialing' && sub.status === 'active' && orgIdFinal) {
-            await capturePostHogEvent(env, orgIdFinal, 'paid_plan_activated', {
-              status: 'active',
+        // Use email as distinct_id — only fire PostHog if we have the email
+        if (_phEmail) {
+          if (type === 'customer.subscription.updated') {
+            const prevStatus = event.data.previous_attributes?.status;
+            if (prevStatus === 'trialing' && sub.status === 'active') {
+              await capturePostHogEvent(env, _phEmail, 'paid_plan_activated', {
+                status: 'active',
+                plan: planIdFromMeta,
+                interval: intervalFromSub,
+                site_id: existing?.siteId ?? existing?.siteid ?? null,
+                org_id: orgIdFinal,
+                $set: { plan: planIdFromMeta, subscription_status: 'active', plan_tier: planIdFromMeta, did_convert_to_paid: true, converted_at: new Date().toISOString(), ...(_phPlatform ? { platform: _phPlatform } : {}) },
+              });
+            }
+
+            const previousPlanId = existing?.planId ?? existing?.planid ?? null;
+            if (planIdFromMeta && previousPlanId && planIdFromMeta !== previousPlanId) {
+              const planOrder = { basic: 1, essential: 2, growth: 3 };
+              const isUpgrade = (planOrder[planIdFromMeta] ?? 0) > (planOrder[previousPlanId] ?? 0);
+              await capturePostHogEvent(env, _phEmail, isUpgrade ? 'plan_upgraded' : 'plan_downgraded', {
+                from_plan: previousPlanId,
+                to_plan: planIdFromMeta,
+                interval: intervalFromSub,
+                org_id: orgIdFinal,
+                ...(_phPlatform ? { platform: _phPlatform } : {}),
+                $set: { plan_tier: planIdFromMeta, previous_plan_tier: previousPlanId, subscription_status: sub.status, did_upgrade_plan: isUpgrade, ...(isUpgrade ? { upgraded_at: new Date().toISOString(), lifecycle_stage: 'upgraded' } : {}), ...(_phPlatform ? { platform: _phPlatform } : {}) },
+              });
+            }
+          }
+
+          if (type === 'customer.subscription.deleted') {
+            await capturePostHogEvent(env, _phEmail, 'subscription_cancelled', {
               plan: planIdFromMeta,
               interval: intervalFromSub,
-              site_id: existing?.siteId ?? existing?.siteid ?? null,
-              $set: { plan: planIdFromMeta, subscription_status: 'active', plan_tier: planIdFromMeta, did_convert_to_paid: true, converted_at: new Date().toISOString(), ...(_phEmail ? { email: _phEmail } : {}), ...(_phPlatform ? { platform: _phPlatform } : {}) },
-            });
-          }
-
-          // Plan upgrade: detect when planId changed from what was stored in D1
-          const previousPlanId = existing?.planId ?? existing?.planid ?? null;
-          if (planIdFromMeta && previousPlanId && planIdFromMeta !== previousPlanId && orgIdFinal) {
-            const planOrder = { basic: 1, essential: 2, growth: 3 };
-            const isUpgrade = (planOrder[planIdFromMeta] ?? 0) > (planOrder[previousPlanId] ?? 0);
-            await capturePostHogEvent(env, orgIdFinal, isUpgrade ? 'plan_upgraded' : 'plan_downgraded', {
-              from_plan: previousPlanId,
-              to_plan: planIdFromMeta,
-              interval: intervalFromSub,
-              site_id: existing?.siteId ?? existing?.siteid ?? null,
+              org_id: orgIdFinal,
               ...(_phPlatform ? { platform: _phPlatform } : {}),
-              $set: { plan_tier: planIdFromMeta, previous_plan_tier: previousPlanId, subscription_status: sub.status, did_upgrade_plan: isUpgrade, ...(isUpgrade ? { upgraded_at: new Date().toISOString(), lifecycle_stage: 'upgraded' } : {}), ...(_phPlatform ? { platform: _phPlatform } : {}) },
+            });
+            await identifyPostHogPerson(env, _phEmail, {
+              subscription_status: 'canceled',
+              lifecycle_stage: 'canceled',
+              did_cancel: true,
+              canceled_at: new Date().toISOString(),
+              ...(_phPlatform ? { platform: _phPlatform } : {}),
             });
           }
-        }
-
-        if (type === 'customer.subscription.deleted' && orgIdFinal) {
-          await capturePostHogEvent(env, orgIdFinal, 'subscription_cancelled', {
-            plan: planIdFromMeta,
-            interval: intervalFromSub,
-            site_id: existing?.siteId ?? existing?.siteid ?? null,
-            ...(_phPlatform ? { platform: _phPlatform } : {}),
-          });
-          await identifyPostHogPerson(env, orgIdFinal, {
-            subscription_status: 'canceled',
-            lifecycle_stage: 'canceled',
-            did_cancel: true,
-            canceled_at: new Date().toISOString(),
-            ...(_phPlatform ? { platform: _phPlatform } : {}),
-          });
         }
       }
 

@@ -12,7 +12,7 @@ import {
   markSiteVerified,
   saveBannerCustomization,
 } from '../services/db.js';
-import { capturePostHogEvent, identifyPostHogPerson } from '../services/posthog.js';
+import { capturePostHogEvent, identifyPostHogPerson, identifyPostHogSite } from '../services/posthog.js';
 
 const TAG = '[webflow-free-register][webapp]';
 
@@ -442,20 +442,23 @@ export async function handleWebflowFreeRegister(request, env) {
     }
   }
 
-  // PostHog: track Webflow app install + set person properties for funnel filtering
+  // PostHog: use email as canonical distinct_id (matches client-side Webflow Designer app)
   const isNewInstall = !existingSameDomain;
   try {
     if (isNewInstall) {
-      await capturePostHogEvent(env, org.id, 'app_installed', {
+      await capturePostHogEvent(env, user.email, 'app_installed', {
         platform: 'webflow',
         domain: site.domain,
         site_id: site.id,
+        org_id: org.id,
         wf_site_id: wfSiteId || null,
         injected_into_head: injectedIntoHead,
+        $groups: { site: site.id },
       });
     }
-    await identifyPostHogPerson(env, org.id, {
+    await identifyPostHogPerson(env, user.email, {
       email: user.email,
+      org_id: org.id,
       platform: 'webflow',
       subscription_status: 'none',
       plan_tier: 'free',
@@ -463,9 +466,16 @@ export async function handleWebflowFreeRegister(request, env) {
       did_install_app: true,
       installed_at: isNewInstall ? now : undefined,
     });
-    // Alias email → orgId so designer extension events (keyed by email) merge with
-    // server-side events (keyed by orgId) into one PostHog person record.
-    await capturePostHogEvent(env, user.email, '$create_alias', { alias: org.id });
+    // Group: one row per site — tracks plan/status per site independently
+    await identifyPostHogSite(env, user.email, site.id, {
+      domain: site.domain,
+      platform: 'webflow',
+      wf_site_id: wfSiteId || null,
+      owner_email: user.email,
+      subscription_status: 'none',
+      plan_tier: 'free',
+      installed_at: now,
+    });
   } catch (_) {}
 
   return Response.json({

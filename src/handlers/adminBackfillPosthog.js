@@ -17,13 +17,32 @@ export async function handleAdminBackfillPosthog(request, env) {
 
   const body = await request.json().catch(() => ({}));
   const days = Math.min(parseInt(body.days || '30', 10) || 30, 180);
-  const platform = body.platform === 'framer' ? 'framer' : 'webflow';
+  const platform = ['framer', 'webapp'].includes(body.platform) ? body.platform : 'webflow';
   const db = env.CONSENT_WEBAPP;
 
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 
-  // Fetch all sites for the given platform created within the window
-  const rows = await db.prepare(`
+  // For webapp: users who signed up directly (platform IS NULL or 'webapp')
+  // For webflow/framer: filter by platform column
+  const isWebapp = platform === 'webapp';
+  const rows = await db.prepare(isWebapp ? `
+    SELECT
+      s.id        AS siteId,
+      s.domain,
+      NULL        AS wfSiteId,
+      u.createdAt,
+      o.id        AS orgId,
+      u.email
+    FROM User u
+    JOIN OrganizationMember om ON om.userId = u.id
+    JOIN Organization o ON o.id = om.organizationId
+    LEFT JOIN Site s ON s.organizationId = o.id
+    WHERE u.createdAt >= ?1
+      AND u.email NOT LIKE '%@seattlenewmedia.com'
+      AND (u.passwordHash NOT LIKE 'webflow:%' AND u.passwordHash NOT LIKE 'framer:%')
+    GROUP BY o.id
+    ORDER BY u.createdAt ASC
+  ` : `
     SELECT
       s.id        AS siteId,
       s.domain,
@@ -39,7 +58,7 @@ export async function handleAdminBackfillPosthog(request, env) {
       AND s.createdAt >= ?1
       AND u.email NOT LIKE '%@seattlenewmedia.com'
     ORDER BY s.createdAt ASC
-  `).bind(cutoff, platform).all();
+  `).bind(...(isWebapp ? [cutoff] : [cutoff, platform])).all();
 
   const sites = rows?.results || [];
   let sent = 0;
@@ -60,18 +79,21 @@ export async function handleAdminBackfillPosthog(request, env) {
       const planId = sub?.planId || sub?.planid || null;
       const interval = sub?.interval || null;
 
-      // Send app_installed
-      await capturePostHogEvent(env, row.orgId, 'app_installed', {
+      // Webapp uses email as distinct_id (matches client-side); webflow/framer use orgId
+      const distinctId = isWebapp ? row.email : row.orgId;
+      const eventName = isWebapp ? 'account_created' : 'app_installed';
+
+      await capturePostHogEvent(env, distinctId, eventName, {
         platform,
         domain: row.domain,
         site_id: row.siteId,
-        wf_site_id: row.wfSiteId || null,
+        ...(isWebapp ? {} : { wf_site_id: row.wfSiteId || null }),
         backfilled: true,
       });
 
       // Send paid_plan_activated if they have/had a subscription
       if (sub && ['active', 'trialing', 'past_due'].includes(subStatus)) {
-        await capturePostHogEvent(env, row.orgId, 'paid_plan_activated', {
+        await capturePostHogEvent(env, distinctId, 'paid_plan_activated', {
           status: subStatus,
           plan: planId,
           interval,
@@ -81,8 +103,8 @@ export async function handleAdminBackfillPosthog(request, env) {
         });
       }
 
-      // Set correct person properties including real subscription status
-      await identifyPostHogPerson(env, row.orgId, {
+      // Set person properties with real subscription status
+      await identifyPostHogPerson(env, distinctId, {
         email: row.email,
         platform,
         subscription_status: subStatus,
@@ -97,7 +119,7 @@ export async function handleAdminBackfillPosthog(request, env) {
           : 'installed',
       });
 
-      // Alias email ↔ orgId
+      // Alias email ↔ orgId so server events and client events merge into one person
       await capturePostHogEvent(env, row.email, '$create_alias', { alias: row.orgId });
 
       sent++;
