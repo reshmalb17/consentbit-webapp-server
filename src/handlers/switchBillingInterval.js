@@ -1,9 +1,9 @@
-// POST /api/subscriptions/switch-interval
 // Switches an existing subscription between monthly and yearly billing in-place.
 // Uses Stripe subscription update with proration — no checkout redirect needed.
 //
-// Body: { organizationId, targetInterval: 'monthly' | 'yearly' }
-// Returns: { success, interval, nextBillingDate }
+// POST /api/subscriptions/switch-interval          → commit the switch
+// POST /api/subscriptions/switch-interval/preview   → preview the prorated balance (no change)
+// Body for both: { organizationId, targetInterval: 'monthly' | 'yearly' }
 
 import {
   getSessionById,
@@ -25,53 +25,51 @@ function trimEnv(v) {
   return s || null;
 }
 
-export async function handleSwitchBillingInterval(request, env) {
-  console.log('[SwitchInterval] POST /api/subscriptions/switch-interval called');
-  if (request.method !== 'POST') {
-    return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
-  }
+const fail = (error, status) => Response.json({ success: false, error }, { status });
+
+// Shared prep for both preview and commit: auth, validation, load subscription,
+// resolve the new price, and read the live Stripe subscription (item id + trial state).
+// Returns either { error: Response } or { ctx: {...} }.
+async function prepareSwitch(request, env) {
+  if (request.method !== 'POST') return { error: fail('Method not allowed', 405) };
 
   const db = env.CONSENT_WEBAPP;
-  if (!db) return Response.json({ success: false, error: 'Database not available' }, { status: 503 });
-  if (!env.STRIPE_SECRET_KEY) return Response.json({ success: false, error: 'Stripe not configured' }, { status: 503 });
+  if (!db) return { error: fail('Database not available', 503) };
+  if (!env.STRIPE_SECRET_KEY) return { error: fail('Stripe not configured', 503) };
 
   // Auth
   const sid = getSessionIdFromCookie(request);
-  if (!sid) return Response.json({ success: false, error: 'Login required' }, { status: 401 });
+  if (!sid) return { error: fail('Login required', 401) };
   const session = await getSessionById(db, sid);
-  if (!session) return Response.json({ success: false, error: 'Login required' }, { status: 401 });
+  if (!session) return { error: fail('Login required', 401) };
   const userId = session.userId ?? session.user_id;
   const user = await getUserById(db, userId);
-  if (!user) return Response.json({ success: false, error: 'Login required' }, { status: 401 });
+  if (!user) return { error: fail('Login required', 401) };
 
   let body;
-  try { body = await request.json(); } catch {
-    return Response.json({ success: false, error: 'Invalid JSON' }, { status: 400 });
-  }
+  try { body = await request.json(); } catch { return { error: fail('Invalid JSON', 400) }; }
 
   const organizationId = (body.organizationId || '').trim();
   const targetInterval = body.targetInterval === 'yearly' ? 'yearly' : body.targetInterval === 'monthly' ? 'monthly' : null;
 
-  if (!organizationId) return Response.json({ success: false, error: 'organizationId required' }, { status: 400 });
-  if (!targetInterval) return Response.json({ success: false, error: 'targetInterval must be monthly or yearly' }, { status: 400 });
+  if (!organizationId) return { error: fail('organizationId required', 400) };
+  if (!targetInterval) return { error: fail('targetInterval must be monthly or yearly', 400) };
 
   const member = await getOrganizationMember(db, userId, organizationId);
-  if (!member) return Response.json({ success: false, error: 'Not allowed for this organization' }, { status: 403 });
+  if (!member) return { error: fail('Not allowed for this organization', 403) };
 
   // Load current subscription
   const sub = await getSubscriptionByOrganization(db, organizationId);
-  if (!sub) return Response.json({ success: false, error: 'No active subscription found' }, { status: 404 });
+  if (!sub) return { error: fail('No active subscription found', 404) };
 
   const stripeSubId = sub.stripeSubscriptionId ?? sub.stripesubscriptionid;
   const currentInterval = (sub.interval ?? 'monthly').toLowerCase();
   const planId = String(sub.planId ?? sub.planid ?? '').toLowerCase();
 
-  if (!stripeSubId) return Response.json({ success: false, error: 'Subscription has no Stripe ID' }, { status: 400 });
-  if (currentInterval === targetInterval) {
-    return Response.json({ success: false, error: `Already on ${targetInterval} billing` }, { status: 400 });
-  }
+  if (!stripeSubId) return { error: fail('Subscription has no Stripe ID', 400) };
+  if (currentInterval === targetInterval) return { error: fail(`Already on ${targetInterval} billing`, 400) };
   if (!['basic', 'essential', 'growth'].includes(planId)) {
-    return Response.json({ success: false, error: 'Cannot switch interval for this plan type' }, { status: 400 });
+    return { error: fail('Cannot switch interval for this plan type', 400) };
   }
 
   // Resolve the new price ID (same tier, different interval)
@@ -83,35 +81,125 @@ export async function handleSwitchBillingInterval(request, env) {
   const newPriceId = tierPriceMap[planId]?.[targetInterval];
   if (!newPriceId) {
     console.error('[SwitchInterval] Missing price env var for', planId, targetInterval);
-    return Response.json(
-      { success: false, error: `Price not configured for ${planId} ${targetInterval}` },
-      { status: 503 }
-    );
+    return { error: fail(`Price not configured for ${planId} ${targetInterval}`, 503) };
   }
 
-  // Fetch current subscription from Stripe to get the subscription item ID
+  // Fetch current subscription from Stripe to get the subscription item ID + trial state
   const subRes = await fetch(`https://api.stripe.com/v1/subscriptions/${stripeSubId}`, {
     headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
   });
   const stripeSub = await subRes.json();
   if (stripeSub.error) {
     console.error('[SwitchInterval] Stripe fetch sub failed:', stripeSub.error.message);
-    return Response.json({ success: false, error: stripeSub.error.message || 'Failed to read subscription' }, { status: 400 });
+    return { error: fail(stripeSub.error.message || 'Failed to read subscription', 400) };
   }
 
   const subItemId = stripeSub.items?.data?.[0]?.id;
-  if (!subItemId) {
-    return Response.json({ success: false, error: 'Could not read subscription item ID' }, { status: 500 });
+  if (!subItemId) return { error: fail('Could not read subscription item ID', 500) };
+
+  // While the subscription is still trialing, Stripe rejects billing_cycle_anchor=now
+  // ("Trial end cannot be after billing_cycle_anchor"). During a trial there is nothing to
+  // prorate yet — keep the remaining trial and bill the new price at trial end.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const isTrialing = stripeSub.status === 'trialing' || (stripeSub.trial_end && stripeSub.trial_end > nowSec);
+  const trialEndISO = stripeSub.trial_end ? new Date(stripeSub.trial_end * 1000).toISOString() : null;
+
+  return {
+    ctx: {
+      db, user, organizationId, targetInterval, currentInterval, planId,
+      sub, stripeSubId, stripeSub, subItemId, newPriceId, isTrialing, trialEndISO,
+    },
+  };
+}
+
+// POST /api/subscriptions/switch-interval/preview
+// Returns the prorated balance that would be charged now (or trial info) — does NOT change anything.
+export async function handleSwitchIntervalPreview(request, env) {
+  console.log('[SwitchInterval] POST /preview called');
+  const prep = await prepareSwitch(request, env);
+  if (prep.error) return prep.error;
+  const { stripeSubId, subItemId, newPriceId, targetInterval, currentInterval, isTrialing, trialEndISO } = prep.ctx;
+
+  let amountDueCents = null;
+  let currency = 'usd';
+
+  if (isTrialing) {
+    // During a trial there is no proration to charge now (the upcoming invoice would be $0).
+    // Show what the customer will actually be billed when the trial converts = the new plan's
+    // recurring price (yearly amount), read straight from the Stripe Price.
+    try {
+      const priceRes = await fetch(`https://api.stripe.com/v1/prices/${newPriceId}`, {
+        headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
+      });
+      const price = await priceRes.json();
+      if (price.error) {
+        console.warn('[SwitchInterval] preview price error:', price.error.message);
+        return fail(price.error.message || 'Could not read the plan price', 400);
+      }
+      amountDueCents = price.unit_amount ?? null;
+      currency = price.currency || 'usd';
+    } catch (e) {
+      console.warn('[SwitchInterval] preview price fetch failed:', e?.message);
+      return fail('Could not preview the charge', 502);
+    }
+  } else {
+    // Active subscription: preview the upcoming invoice (prorated balance charged immediately).
+    const params = new URLSearchParams({
+      subscription: stripeSubId,
+      'subscription_items[0][id]': subItemId,
+      'subscription_items[0][price]': newPriceId,
+      subscription_proration_behavior: 'create_prorations',
+    });
+    if (targetInterval === 'yearly') {
+      params.set('subscription_billing_cycle_anchor', 'now');
+    }
+    try {
+      const res = await fetch(`https://api.stripe.com/v1/invoices/upcoming?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
+      });
+      const inv = await res.json();
+      if (inv.error) {
+        console.warn('[SwitchInterval] preview upcoming-invoice error:', inv.error.message);
+        return fail(inv.error.message || 'Could not preview the charge', 400);
+      }
+      amountDueCents = inv.amount_due ?? inv.total ?? null;
+      currency = inv.currency || 'usd';
+    } catch (e) {
+      console.warn('[SwitchInterval] preview fetch failed:', e?.message);
+      return fail('Could not preview the charge', 502);
+    }
   }
 
-  // Update the subscription in Stripe: swap the price, prorate the difference
+  return Response.json({
+    success: true,
+    currentInterval,
+    targetInterval,
+    isTrialing: !!isTrialing,
+    // For an active sub: amount charged immediately. For a trial: amount billed at trial end.
+    amountDueCents,
+    currency,
+    trialEnd: isTrialing ? trialEndISO : null,
+  });
+}
+
+// POST /api/subscriptions/switch-interval — commit the switch.
+export async function handleSwitchBillingInterval(request, env) {
+  console.log('[SwitchInterval] POST /api/subscriptions/switch-interval called');
+  const prep = await prepareSwitch(request, env);
+  if (prep.error) return prep.error;
+  const {
+    db, user, organizationId, targetInterval, currentInterval,
+    sub, stripeSubId, subItemId, newPriceId, isTrialing,
+  } = prep.ctx;
+
+  // Update the subscription in Stripe: swap the price, prorate the difference.
   const updateParams = new URLSearchParams({
     'items[0][id]': subItemId,
     'items[0][price]': newPriceId,
     proration_behavior: 'create_prorations',
   });
-  // When switching to yearly, anchor the billing cycle now so prorations are settled immediately
-  if (targetInterval === 'yearly') {
+  // Anchor the cycle now (settle prorations immediately) only when NOT trialing — see prepareSwitch.
+  if (targetInterval === 'yearly' && !isTrialing) {
     updateParams.set('billing_cycle_anchor', 'now');
   }
 
@@ -126,7 +214,7 @@ export async function handleSwitchBillingInterval(request, env) {
   const updated = await updateRes.json();
   if (updated.error) {
     console.error('[SwitchInterval] Stripe update failed:', updated.error.message);
-    return Response.json({ success: false, error: updated.error.message || 'Failed to switch billing interval' }, { status: 400 });
+    return fail(updated.error.message || 'Failed to switch billing interval', 400);
   }
 
   // Determine the new period end

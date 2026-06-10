@@ -30,7 +30,7 @@ import { handleCheckDomainScript } from './handlers/checkDomainScript.js';
 import { handleCancelSubscription } from './handlers/cancelSubscription.js';
 import { handleUpgradeSubscription } from './handlers/updateSubscription.js';
 import { handleCreateSetupIntent, handleUpdatePaymentMethod } from './handlers/updatePaymentMethod.js';
-import { handleSwitchBillingInterval } from './handlers/switchBillingInterval.js';
+import { handleSwitchBillingInterval, handleSwitchIntervalPreview } from './handlers/switchBillingInterval.js';
 import { handleDebugSchema } from './handlers/debugSchema.js';
 import { handleAdminSeedLegacy } from './handlers/adminSeedLegacy.js';
 import { handleAdminSeedBannerConfigs } from './handlers/adminSeedBannerConfigs.js';
@@ -50,6 +50,7 @@ import { handleAdminBackfillConsentR2 } from './handlers/adminBackfillConsentR2.
 import { handleAdminBackfillStripeSubscriptions } from './handlers/adminBackfillStripeSubscriptions.js';
 import { handleAdminBackfillPosthog } from './handlers/adminBackfillPosthog.js';
 import { handleAdminBackfillClickup } from './handlers/adminBackfillClickup.js';
+import { handleAdminMicheleClickup } from './handlers/adminMicheleClickup.js';
 import { handleCheckLegacyScript } from './handlers/checkLegacyScript.js';
 import { handleLegacyConsentLogs } from './handlers/legacyConsentLogs.js';
 import { handleLegacyConsentCsv } from './handlers/legacyConsentCsv.js';
@@ -186,6 +187,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/admin/backfill-stripe-subscriptions',
   '/api/admin/backfill-posthog',
   '/api/admin/backfill-clickup',
+  '/api/admin/michele-clickup',
   '/api/payment/subscription',
 ]);
 
@@ -308,6 +310,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleUpgradeSubscription(request, env); break;
     case '/api/subscriptions/switch-interval':
       response = await handleSwitchBillingInterval(request, env); break;
+    case '/api/subscriptions/switch-interval/preview':
+      response = await handleSwitchIntervalPreview(request, env); break;
     case '/api/billing/setup-intent':
       response = await handleCreateSetupIntent(request, env); break;
     case '/api/billing/update-payment-method':
@@ -398,6 +402,9 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     case '/api/admin/backfill-clickup':
       response = await handleAdminBackfillClickup(request, env); break;
+
+    case '/api/admin/michele-clickup':
+      response = await handleAdminMicheleClickup(request, env); break;
 
     case '/api/check-legacy-script':
       response = await handleCheckLegacyScript(request, env); break;

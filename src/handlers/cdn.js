@@ -2818,7 +2818,7 @@ ${inlineConfig}
         }
         var Hd = document.getElementById("cb-floating-trigger");
         if (Hd) Hd.style.display = "flex";
-      } else {
+      } else if (o) {
         var Hf = document.getElementById("cb-initial-banner");
         if (Hf) {
           Hf.style.display = "flex";
@@ -2827,6 +2827,16 @@ ${inlineConfig}
         }
         var Hft = document.getElementById("cb-floating-trigger");
         if (Hft) Hft.style.display = "none";
+      } else {
+        // bannerEnabled === false (region-suppressed, e.g. CCPA banner for non-US):
+        // keep the initial banner hidden and surface only the floating trigger.
+        var Hf2 = document.getElementById("cb-initial-banner");
+        if (Hf2) {
+          Hf2.style.setProperty("display", "none", "important");
+          Hf2.style.setProperty("visibility", "hidden", "important");
+        }
+        var Hft2 = document.getElementById("cb-floating-trigger");
+        if (Hft2) Hft2.style.display = "flex";
       }
     }
     try {
@@ -2889,7 +2899,7 @@ ${inlineConfig}
   // ETag must change whenever banner customization/translation changes.
   // `Site.updatedAt` does not always update when only BannerCustomization changes, so include both.
   // Also include a script version so CDN logic changes propagate even when site/customization did not change.
-  const SCRIPT_VERSION = '2026-05-28-iab-webflow-blocking-fix';
+  const SCRIPT_VERSION = '2026-06-11-webflow-bannerenabled-geo-fix';
   const customizationUpdatedAt = customization?.updatedAt || customization?.updated_at || '';
   const translationsSig = await (async () => {
     try {

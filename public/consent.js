@@ -1399,8 +1399,8 @@ async function showAppropriateBanner() {
     hostname.includes('emergent-website.webflow.io') ||
     hostname.includes('emergent.tech');
 
-  if (isEmergentOnly || isEmergentSungreen) {
-    __cbTiming('showAppropriateBanner:skip', { reason: 'emergentOnlyOrSungreen' });
+  if (isEmergentOnly) {
+    __cbTiming('showAppropriateBanner:skip', { reason: 'emergentOnly' });
     await hideAllBanners();
     return;
   }
