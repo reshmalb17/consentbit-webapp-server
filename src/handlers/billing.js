@@ -305,8 +305,11 @@ export async function handleBillingInvoices(request, env) {
     if (custId) customerIds.add(String(custId));
   }
 
-  // Fetch invoices for all customers in parallel
-  const perCustomerLimit = Math.ceil(limit / customerIds.size);
+  // Fetch invoices for all customers in parallel.
+  // NOTE: fetch up to `limit` PER customer (not limit/customerCount). Dividing the limit across
+  // customers truncated any customer that had more than its share — invoices silently went missing
+  // even when the org-wide total was well under `limit`. We merge/dedupe/sort/slice to `limit` below.
+  const perCustomerLimit = Math.min(100, limit);
   const fetchPromises = Array.from(customerIds).map((custId) =>
     fetch(
       `https://api.stripe.com/v1/invoices?customer=${custId}&limit=${perCustomerLimit}`,

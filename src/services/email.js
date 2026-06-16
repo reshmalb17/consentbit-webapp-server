@@ -201,8 +201,17 @@ export function sendFreePlanEmail(env, ctx, { to, name, domain, scriptUrl }) {
   const displayName  = name || 'there';
   const displayDomain = domain || 'your website';
   const dashboardUrl  = (env.WEBAPP_PUBLIC_URL || 'https://accounts.consentbit.com').replace(/\/$/, '') + '/dashboard';
+  // Break the "://" and "." patterns with empty <span>s so email clients
+  // (Gmail/Apple Mail/Outlook) stop auto-linking the URL. The spans render
+  // as nothing and contribute no characters when the text is selected/copied,
+  // so the user gets a clean, selectable snippet instead of a link that
+  // navigates to the raw .js file.
+  const noAutoLink = (url) =>
+    String(url)
+      .replace('://', ':<span></span>//')
+      .replace(/\.(?=[a-z]{2,})/gi, '<span></span>.');
   const snippet = scriptUrl
-    ? `&lt;script id="consentbit" src="${scriptUrl}" async&gt;&lt;/script&gt;`
+    ? `&lt;script id="consentbit" src="${noAutoLink(scriptUrl)}" async&gt;&lt;/script&gt;`
     : '&lt;script id="consentbit" src="YOUR_SCRIPT_URL" async&gt;&lt;/script&gt;';
 
   const subject = `Your site is ready: ${displayDomain}`;

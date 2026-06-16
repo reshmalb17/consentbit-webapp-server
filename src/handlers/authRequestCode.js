@@ -16,7 +16,7 @@ async function sha256Hex(s) {
     .join('');
 }
 
-async function sendEmailViaBrevo(env, { to, subject, text }) {
+async function sendEmailViaBrevo(env, { to, subject, text, html }) {
   const apiKey = env.BREVO_API_KEY;
   const fromEmail = env.BREVO_FROM_EMAIL;
   const fromName = env.BREVO_FROM_NAME || 'ConsentBit';
@@ -29,6 +29,7 @@ async function sendEmailViaBrevo(env, { to, subject, text }) {
     to: [{ email: to }],
     subject,
     textContent: text,
+    ...(html ? { htmlContent: html } : {}),
   };
 
   const res = await fetch('https://api.brevo.com/v3/smtp/email', {
@@ -97,6 +98,23 @@ export async function handleAuthRequestCode(request, env, ctx) {
 
   const subject = `Your ConsentBit verification code`;
   const text = `Hello${displayName ? ` ${displayName}` : ''},\n\nYour verification code is: ${code}\n\nThis code will expire in ${ttlMinutes} minutes, so please use it as soon as possible.\n\nIf you did not request this verification code, you can safely ignore this email.\n\nBest regards,\nConsentBit Team\n`;
+  const html = `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f3f4f6;">
+  <div style="max-width:520px;margin:0 auto;padding:32px 24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <div style="background:#ffffff;border-radius:12px;padding:32px 28px;border:1px solid #e5e7eb;">
+      <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hello${displayName ? ` ${displayName}` : ''},</p>
+      <p style="margin:0 0 22px;color:#6b7280;font-size:15px;line-height:1.6;">Your verification code is:</p>
+
+      <!-- Large, selectable code. Tap-and-hold (mobile) or click-drag (desktop) selects it for copy. -->
+      <div style="background:#f3f4f6;border:1px solid #e5e7eb;border-radius:10px;padding:20px 16px;text-align:center;margin:0 0 22px;">
+        <span style="display:inline-block;color:#111827;font-size:40px;font-weight:700;letter-spacing:10px;font-family:'Courier New',Courier,monospace;line-height:1.2;user-select:all;-webkit-user-select:all;">${code}</span>
+      </div>
+
+      <p style="margin:0 0 18px;color:#6b7280;font-size:14px;line-height:1.6;">This code will expire in ${ttlMinutes} minutes, so please use it as soon as possible.</p>
+      <p style="margin:0 0 22px;color:#9ca3af;font-size:13px;line-height:1.6;">If you did not request this verification code, you can safely ignore this email.</p>
+      <p style="margin:0;color:#6b7280;font-size:14px;line-height:1.6;">Best regards,<br/>ConsentBit Team</p>
+    </div>
+  </div>
+  </body></html>`;
 
   const hasBrevoConfig = Boolean(env.BREVO_API_KEY && env.BREVO_FROM_EMAIL);
   const allowReturn = String(env.RETURN_OTP_IN_RESPONSE || '').toLowerCase() === 'true';
@@ -124,7 +142,7 @@ export async function handleAuthRequestCode(request, env, ctx) {
   // Brevo is configured — fire email in background and respond immediately
   console.log('[AuthRequestCode] dispatching Brevo email to:', email);
   ctx.waitUntil(
-    sendEmailViaBrevo(env, { to: email, subject, text })
+    sendEmailViaBrevo(env, { to: email, subject, text, html })
       .then(() => {
         console.log('[AuthRequestCode] ✅ Brevo email sent to:', email);
       })

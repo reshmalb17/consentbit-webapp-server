@@ -889,6 +889,33 @@ ${inlineConfig}
     var I = "consentbit_" + r;
     var O = void 0 !== l && l && null != l.cookieExpirationDays ? Math.max(1, Math.min(365, Number(l.cookieExpirationDays) || 30)) : 30;
     var A = ee();
+    // --- GPC (Global Privacy Control) gate -------------------------------------
+    // Honor navigator.globalPrivacyControl as a CCPA "Do Not Sell/Share" opt-out.
+    // MUST run here — before the script blocker (ye/ue) and boot (He) read A — so
+    // non-essential scripts are blocked from first paint. Scoped to CCPA; first
+    // visit only: a stored choice always wins, so a user who opted back in is never
+    // overridden. navigator.globalPrivacyControl is browser-set and synchronous, so
+    // no async/geo wait is needed (bannerType "i" is already resolved server-side).
+    try {
+      if (navigator.globalPrivacyControl === true && "ccpa" === i && (!A || !A.accepted)) {
+        A = {
+          accepted: !0,
+          timestamp: (new Date).toISOString(),
+          ccpa: {
+            doNotSell: !0
+          },
+          gpc: !0
+        };
+        try {
+          localStorage.setItem(I, JSON.stringify(A))
+        } catch (e) {}
+        re(A, {
+          status: "rejected",
+          consentMethod: "gpc"
+        })
+      }
+    } catch (e) {}
+    // ---------------------------------------------------------------------------
     var B = "consentbit_prefs_" + (r || "");
     var L = "cb_pv_over_limit_" + (r || "");
     var T = [];
@@ -2067,12 +2094,10 @@ ${inlineConfig}
   }
 
   function Pe() {
-    console.log("[CB] Pe() called, banner already exists:", !!document.getElementById("cb-initial-banner"), "bannerType:", i);
     if (!document.getElementById("cb-initial-banner"))
       if (document.body) {
         var e = "ccpa" === i;
         var t = document.createElement("div");
-        console.log("[CB] Building banner, ccpa:", e);
         if (e) {
           var n;
           (n = document.createElement("div")).className = "cb-banner";
@@ -2160,7 +2185,6 @@ ${inlineConfig}
           je(p);
           t.appendChild(p)
         } else {
-          console.log("[CB] GDPR banner path - building elements");
           var N = function (e) {
             var t = document.createElement("div");
             t.style.borderBottom = "1px solid #e5e7eb";
@@ -2355,7 +2379,6 @@ ${inlineConfig}
           t.appendChild(p)
         }
         document.body.appendChild(t);
-        console.log("[CB] Banner wrapper appended to body, searching for cb-initial-banner...");
         f && (document.body.style.overflow = "hidden");
         if (!window.__cbResizeInit) {
           window.__cbResizeInit = true;
@@ -2365,13 +2388,11 @@ ${inlineConfig}
           });
         }
         var K = document.getElementById("cb-initial-banner");
-        console.log("[CB] cb-initial-banner element found:", K, "current display:", K ? K.style.display : "N/A");
         if (K) {
           var ee = Z(K);
           K.style.display = "flex";
           K.style.visibility = "visible";
           K.style.opacity = "1";
-          console.log("[CB] Banner display set to flex, computedDisplay:", window.getComputedStyle(K).display, "computedVisibility:", window.getComputedStyle(K).visibility, "computedOpacity:", window.getComputedStyle(K).opacity);
           if (m) {
             var te = "";
             var ne = u;
@@ -2828,15 +2849,16 @@ ${inlineConfig}
         var Hft = document.getElementById("cb-floating-trigger");
         if (Hft) Hft.style.display = "none";
       } else {
-        // bannerEnabled === false (region-suppressed, e.g. CCPA banner for non-US):
-        // keep the initial banner hidden and surface only the floating trigger.
+        // bannerEnabled === false (region-suppressed, e.g. CCPA banner for a non-US
+        // visitor): show NO consent UI at all — hide both the banner AND the floating
+        // trigger. CCPA does not apply outside the US, so no surface is presented.
         var Hf2 = document.getElementById("cb-initial-banner");
         if (Hf2) {
           Hf2.style.setProperty("display", "none", "important");
           Hf2.style.setProperty("visibility", "hidden", "important");
         }
         var Hft2 = document.getElementById("cb-floating-trigger");
-        if (Hft2) Hft2.style.display = "flex";
+        if (Hft2) Hft2.style.setProperty("display", "none", "important");
       }
     }
     try {
@@ -2899,7 +2921,7 @@ ${inlineConfig}
   // ETag must change whenever banner customization/translation changes.
   // `Site.updatedAt` does not always update when only BannerCustomization changes, so include both.
   // Also include a script version so CDN logic changes propagate even when site/customization did not change.
-  const SCRIPT_VERSION = '2026-06-11-webflow-bannerenabled-geo-fix';
+  const SCRIPT_VERSION = '2026-06-11-gpc-ccpa-optout-nonus-hidefloat';
   const customizationUpdatedAt = customization?.updatedAt || customization?.updated_at || '';
   const translationsSig = await (async () => {
     try {
