@@ -1941,16 +1941,18 @@ ${inlineConfig}
         }
         window.gtag = gtag;
         gtag("consent", "default", {
-          ad_storage: "denied",
           analytics_storage: "denied",
+          ad_storage: "denied",
           ad_user_data: "denied",
-          ad_personalization: "denied"
+          ad_personalization: "denied",
+          functionality_storage: "denied",
+          personalization_storage: "denied",
+          security_storage: "granted",
+          wait_for_update: 500
         });
         gtag("js", new Date);
         gtag("config", s, {
-          anonymize_ip: !0,
-          allow_google_signals: !1,
-          allow_ad_personalization_signals: !1
+          anonymize_ip: !0
         });
         gtag("event", "page_view", {
           page_path: window.location.pathname,
@@ -1968,7 +1970,9 @@ ${inlineConfig}
         analytics_storage: e.analytics ? "granted" : "denied",
         ad_storage: e.marketing ? "granted" : "denied",
         ad_user_data: e.marketing ? "granted" : "denied",
-        ad_personalization: e.preferences ? "granted" : "denied"
+        ad_personalization: e.marketing ? "granted" : "denied",
+        functionality_storage: e.preferences ? "granted" : "denied",
+        personalization_storage: e.preferences ? "granted" : "denied"
       };
       if (window.gtag) window.gtag("consent", "update", n);
       else {
@@ -1980,7 +1984,33 @@ ${inlineConfig}
             window.gtag("consent", "update", n)
           } else if (a >= 20) {
             clearInterval(r);
-            
+
+          }
+        }, 100)
+      }
+    }
+  }
+
+  // CCPA consent mode: opt-out model — storage is granted unless the user opted out
+  // ("Do Not Sell/Share"). Mirrors the GDPR Te() update but keyed off a single doNotSell flag.
+  function Tc(dns) {
+    if (s || be()) {
+      var n = {
+        analytics_storage: dns ? "denied" : "granted",
+        ad_storage: dns ? "denied" : "granted",
+        ad_user_data: dns ? "denied" : "granted",
+        ad_personalization: dns ? "denied" : "granted"
+      };
+      if (window.gtag) window.gtag("consent", "update", n);
+      else {
+        var a = 0;
+        var r = setInterval(function () {
+          a++;
+          if (window.gtag) {
+            clearInterval(r);
+            window.gtag("consent", "update", n)
+          } else if (a >= 20) {
+            clearInterval(r);
           }
         }, 100)
       }
@@ -2708,7 +2738,8 @@ ${inlineConfig}
           marketing: !0,
           preferences: !0,
           essential: !0
-        })
+        });
+        Tc(!1)
       } else {
         var t = {
           accepted: !0,
@@ -2750,7 +2781,8 @@ ${inlineConfig}
           marketing: !0,
           preferences: !0,
           essential: !0
-        })
+        });
+        Tc(t)
       } else {
         var a = document.getElementById("cb-pref-analytics");
         var r = document.getElementById("cb-pref-preferences");
@@ -2811,6 +2843,24 @@ ${inlineConfig}
           wait_for_update: 500
         });
         A.accepted ? Te(A.categories || {}, "[Reload]") : s && Le()
+      }
+    } else if ("ccpa" === i) {
+      // CCPA is an opt-out regime: storage defaults to granted unless the user opted
+      // out. We still push an all-denied default first (consent-mode best practice),
+      // load GA when we manage it, then immediately update to the actual opt-out state.
+      if (s || e) {
+        window.gtag && window.gtag("consent", "default", {
+          analytics_storage: "denied",
+          ad_storage: "denied",
+          ad_user_data: "denied",
+          ad_personalization: "denied",
+          functionality_storage: "denied",
+          personalization_storage: "denied",
+          security_storage: "granted",
+          wait_for_update: 500
+        });
+        s && Le();
+        Tc(!!(A && A.accepted && A.ccpa && A.ccpa.doNotSell))
       }
     }
     if (!window.__CB_WEBFLOW_MODE__) {

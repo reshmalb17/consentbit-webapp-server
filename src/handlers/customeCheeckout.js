@@ -61,6 +61,38 @@ function getPriceId(env, planId, interval) {
   return trimEnv(env[key]);
 }
 
+/**
+ * Fire-and-forget PostHog capture. Reads POSTHOG_API_KEY (required) and
+ * POSTHOG_HOST (optional, defaults to https://us.i.posthog.com).
+ * Wrapped in ctx.waitUntil so the worker response isn't delayed.
+ * No-op when the API key is not configured — never throws.
+ */
+function capturePosthog(env, ctx, { event, distinctId, properties }) {
+  try {
+    const apiKey = trimEnv(env.POSTHOG_API_KEY);
+    if (!apiKey || !distinctId || !event) return;
+    const host = trimEnv(env.POSTHOG_HOST) || 'https://us.i.posthog.com';
+    const url = `${host.replace(/\/+$/, '')}/capture/`;
+    const payload = {
+      api_key: apiKey,
+      event,
+      distinct_id: distinctId,
+      properties: properties || {},
+      timestamp: new Date().toISOString(),
+    };
+    const p = fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).catch((err) => console.warn('[CustomCheckout] posthog capture failed', err?.message));
+    if (ctx && typeof ctx.waitUntil === 'function') {
+      ctx.waitUntil(p);
+    }
+  } catch (e) {
+    console.warn('[CustomCheckout] capturePosthog threw (non-fatal)', e?.message);
+  }
+}
+
 async function fetchStripeInvoice(secret, subId, interval) {
   if (!secret || !subId) return null;
   try {
@@ -574,6 +606,20 @@ export async function handleCustomCheckout(request, env, ctx) {
       const _invoiceData = await fetchStripeInvoice(secret, subscriptionId || sub?.id, interval);
       console.log('[CustomCheckout] sending paid-plan email', { to: _emailTo, source: _emailSource, domain: rawDomain, planId, hasInvoice: !!_invoiceData });
       sendPaidPlanEmail(env, ctx, { to: _emailTo, name: '', domain: rawDomain, planName: planId, invoice: _invoiceData });
+      capturePosthog(env, ctx, {
+        event: 'paid_plan_activated',
+        distinctId: user.email || email,
+        properties: {
+          platform: platform || null,
+          plan: planId,
+          interval,
+          domain: rawDomain,
+          siteId: site.id,
+          subscriptionId,
+          isNewUser,
+          phase: '3ds_confirm',
+        },
+      });
       return Response.json(
         { success: true, provisioned: true, isNewUser, user: { id: user.id, email: user.email, name: user.name }, siteId: site.id, subscriptionId },
         { status: 200, headers: { 'Content-Type': 'application/json', 'Set-Cookie': `sid=${session.id}; ${cookieFlags}` } },
@@ -692,6 +738,20 @@ export async function handleCustomCheckout(request, env, ctx) {
       const _invoiceData = await fetchStripeInvoice(secret, subscriptionId || sub?.id, interval);
       console.log('[CustomCheckout] sending paid-plan email', { to: _emailTo, source: _emailSource, domain: rawDomain, planId, hasInvoice: !!_invoiceData });
       sendPaidPlanEmail(env, ctx, { to: _emailTo, name: '', domain: rawDomain, planName: planId, invoice: _invoiceData });
+      capturePosthog(env, ctx, {
+        event: 'paid_plan_activated',
+        distinctId: user.email || email,
+        properties: {
+          platform: platform || null,
+          plan: planId,
+          interval,
+          domain: rawDomain,
+          siteId: site.id,
+          subscriptionId: sub.id,
+          isNewUser,
+          phase: 'immediate',
+        },
+      });
       return Response.json(
         { success: true, provisioned: true, isNewUser, user: { id: user.id, email: user.email, name: user.name }, siteId: site.id, subscriptionId: sub.id },
         { status: 201, headers: { 'Content-Type': 'application/json', 'Set-Cookie': `sid=${session.id}; ${cookieFlags}` } },
