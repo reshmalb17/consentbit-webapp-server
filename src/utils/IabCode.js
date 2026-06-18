@@ -5,9 +5,12 @@
  * can inject it directly. Inner ${...} template literals in the body are
  * pre-escaped so they survive verbatim and run in the browser at runtime.
  */
-export function getLoaderIabScript(customization, opts = {}) {
+export function getLoaderIabScript(customization, opts = {}, isGAC = false) {
   const c = customization || {};
   const o = opts || {};
+  // Google Additional Consent (AC) layer — when true the generated banner loads
+  // the ATP list and produces a Google AC string on top of the IAB TCF flow.
+  const isGoogleAC = isGAC === true;
 
   const colorsJson = JSON.stringify({
     bannerBg: c.backgroundColor || '#FFFFFF',
@@ -62,6 +65,12 @@ export function getLoaderIabScript(customization, opts = {}) {
  * Works with TCFManager for proper consent handling
  */
 const BASE_URL = "https://test-cmp.pages.dev/";
+
+
+
+// Google Additional Consent (AC) toggle — baked from the isGAC build argument.
+const IS_GAC = ${isGoogleAC};
+window.__cbIsGAC = IS_GAC;
 
 function loadScriptOnce(src, onload) {
   const existing = document.querySelector('script[src="' + src + '"]');
@@ -142,6 +151,7 @@ function injectStyles() {
 .consentBit-vendor-item{padding:16px;border:1px solid #f0f0f0;border-radius:\${brSm};background:#fafafa;transition:all .2s ease;animation:consentBit-fadeIn .3s ease}
 .consentBit-vendor-item:hover{border-color:\${s.SecButtonColor};background:#fff;box-shadow:0 4px 12px rgba(0,0,0,.1)}
 .consentBit-vendor-item.consentBit-hidden{display:none!important}
+.consentBit-vendor-item{content-visibility:auto;contain-intrinsic-size:auto 90px}
 .consentBit-vendor-header{display:flex;justify-content:space-between;align-items:center;gap:16px}
 .consentBit-vendor-info{flex:1}
 .consentBit-vendor-name{font-weight:600;font-size:15px;color:\${s.headingColor};margin-bottom:4px}
@@ -2323,11 +2333,15 @@ function updateDynamicCounts() {
     const gvl = window.tcfManager && window.tcfManager.gvl;
     if (!gvl) return;
 
-    // 1st-layer vendor count (#12)
+    // 1st-layer vendor count (#12) — when the AC layer is active, fold the Google
+    // additional partners (ATP) into the disclosed total so they're surfaced here.
     const vendorCount = gvl.vendors ? Object.keys(gvl.vendors).length : 0;
     const countEl = document.getElementById('consentBitVendorCountText');
     if (countEl && vendorCount > 0) {
-        countEl.textContent = \`\${vendorCount} third-party partner\${vendorCount === 1 ? '' : 's'}\`;
+        const atpCount = (window.__cbIsGAC && Array.isArray(window.__cbAtpProviders)) ? window.__cbAtpProviders.length : 0;
+        countEl.textContent = atpCount > 0
+            ? \`\${vendorCount + atpCount} third-party partners (\${vendorCount} IAB + \${atpCount} Google)\`
+            : \`\${vendorCount} third-party partner\${vendorCount === 1 ? '' : 's'}\`;
     }
 
     // 1st-layer purpose names (#7) — pull verbatim from GVL
@@ -2563,6 +2577,304 @@ function rebuildPurposeAccordionsFromGvl() {
 
     container.innerHTML = html;
 }
+
+// ─── Google Additional Consent (AC) layer ────────────────────────────────────
+// Fully gated on IS_GAC. When false, nothing here runs and the IAB flow is
+// untouched. When true: fetch Google's ATP list, render an "Additional
+// advertising partners" section in the Vendors tab, and build + store the AC
+// string (addtl_consent) alongside the TCF string. Self-contained: it only adds
+// DOM nodes and event listeners — it does not modify any existing function.
+(function initGoogleAC() {
+  if (!window.__cbIsGAC) return;
+
+  var ATP_LIST_URL = 'https://ancient-wind-15ae.narendra-3c5.workers.dev/gac/atp-list.json';
+  var AC_COOKIE = 'addtl_consent';
+  var AC_LS_KEY = 'cb_addtl_consent';
+  var atpProviders = [];
+
+  function allIds() {
+    return atpProviders.map(function (p) { return Number(p.id); }).filter(function (n) { return n > 0; });
+  }
+
+  function loadAtpProviders() {
+    return fetch(ATP_LIST_URL).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + r.statusText);
+      return r.json();
+    }).then(function (data) {
+      atpProviders = (data && data.providers) || [];
+      window.__cbAtpProviders = atpProviders;
+      return atpProviders;
+    }).catch(function (e) {
+      console.error('[ConsentBit][AC] Failed to load ATP list:', e);
+      atpProviders = [];
+      return [];
+    });
+  }
+
+  function parseAcString(ac) {
+    var set = {};
+    if (!ac || typeof ac !== 'string') return set;
+    var core = ac.split('~')[1] || '';
+    core.split('.').forEach(function (id) {
+      var n = Number(id);
+      if (n > 0) set[n] = true;
+    });
+    return set;
+  }
+
+  function getStoredAc() {
+    try {
+      var ls = localStorage.getItem(AC_LS_KEY);
+      if (ls) return ls;
+    } catch (e) {}
+    var m = document.cookie.match(/(?:^|;\\s*)addtl_consent=([^;]*)/);
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+
+  function buildAcString(consentedIds) {
+    var consentedSet = {};
+    (consentedIds || []).forEach(function (id) { consentedSet[Number(id)] = true; });
+    var consented = (consentedIds || []).map(Number).slice().sort(function (a, b) { return a - b; });
+    // Part 5 (dv.) = disclosed MINUS consented — consented IDs must NOT appear in
+    // the disclosed list (ACv2 spec, to keep the string short).
+    var disclosed = allIds().filter(function (id) { return !consentedSet[id]; }).sort(function (a, b) { return a - b; });
+    return '2~' + consented.join('.') + '~dv.' + disclosed.join('.');
+  }
+
+  function persistAc(consentedIds) {
+    var ac = buildAcString(consentedIds);
+    try { localStorage.setItem(AC_LS_KEY, ac); } catch (e) {}
+    try {
+      var expires = new Date(Date.now() + 365 * 864e5).toUTCString();
+      document.cookie = AC_COOKIE + '=' + ac + '; expires=' + expires + '; path=/; SameSite=None; Secure';
+    } catch (e) {}
+    window.__cbAcString = ac;
+    return ac;
+  }
+
+  function collectConsentedAtpIds() {
+    var ids = [];
+    document.querySelectorAll('input[data-atpid]').forEach(function (cb) {
+      if (cb.checked) ids.push(Number(cb.getAttribute('data-atpid')));
+    });
+    return ids;
+  }
+
+  function setAllAtp(checked) {
+    document.querySelectorAll('input[data-atpid]').forEach(function (cb) { cb.checked = checked; });
+  }
+
+  function applyStoredAtp() {
+    var set = parseAcString(getStoredAc());
+    document.querySelectorAll('input[data-atpid]').forEach(function (cb) {
+      cb.checked = !!set[Number(cb.getAttribute('data-atpid'))];
+    });
+  }
+
+  // Build the sub-tab switcher (IAB Vendors | Google Partners) inside the Vendors
+  // tab and a dedicated #cbAtpList container, so the two lists are separate and
+  // you don't have to scroll. Returns the ATP list container.
+  function ensureVendorSubTabs() {
+    var vendorsList = document.getElementById('vendorsList');
+    if (!vendorsList) return null;
+    var existing = document.getElementById('cbAtpList');
+    if (existing) return existing;
+
+    var wrapper = vendorsList.parentNode; // .consentBit-vendors-search-wrapper
+    var textColor = (typeof styleConfig !== 'undefined' && styleConfig.textColor) || '#000000';
+    var iabCount = (vendorsList.vendorsData && vendorsList.vendorsData.length) || vendorsList.children.length || 0;
+    var gCount = atpProviders.length;
+
+    function makePill(id, label) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.id = id;
+      b.textContent = label;
+      b.style.cssText = 'padding:6px 2px;border:none;background:none;color:' + textColor + ';cursor:pointer;font-size:13px;font-weight:400;text-decoration:none;text-underline-offset:4px';
+      return b;
+    }
+    var btnIab = makePill('cbSubTabIab', 'IAB Vendors (' + iabCount + ')');
+    var btnG = makePill('cbSubTabGoogle', 'Google Partners (' + gCount + ')');
+
+    var nav = document.createElement('div');
+    nav.id = 'cbVendorSubNav';
+    nav.style.cssText = 'display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap';
+    nav.appendChild(btnIab);
+    nav.appendChild(btnG);
+
+    var atpList = document.createElement('div');
+    atpList.id = 'cbAtpList';
+    atpList.className = 'consentBit-vendors-list';
+    // Kept in flow (display:block) but content hidden — content-visibility:hidden
+    // caches the rendered state so switching back is fast (unlike display:none,
+    // which rebuilds the whole subtree each time).
+    atpList.style.display = 'block';
+    atpList.style.contentVisibility = 'hidden';
+
+    wrapper.insertBefore(nav, wrapper.firstChild);
+    vendorsList.parentNode.insertBefore(atpList, vendorsList.nextSibling);
+
+    function setActive(which) {
+      var iab = which === 'iab';
+      // Toggle content-visibility (cached render state) instead of display:none
+      // (full subtree teardown/rebuild) so switching large lists is instant.
+      vendorsList.style.display = 'block';
+      atpList.style.display = 'block';
+      vendorsList.style.contentVisibility = iab ? 'visible' : 'hidden';
+      atpList.style.contentVisibility = iab ? 'hidden' : 'visible';
+      // Active tab: bold (700) + underline; inactive: 400, no underline. Size fixed 13px.
+      btnIab.style.fontWeight = iab ? '700' : '400';
+      btnIab.style.textDecoration = iab ? 'underline' : 'none';
+      btnG.style.fontWeight = iab ? '400' : '700';
+      btnG.style.textDecoration = iab ? 'none' : 'underline';
+      window.__cbVendorSubTab = which;
+    }
+    btnIab.addEventListener('click', function () { setActive('iab'); });
+    btnG.addEventListener('click', function () { setActive('google'); });
+    setActive('iab');
+    return atpList;
+  }
+
+  function renderAtpSection() {
+    var list = document.getElementById('cbAtpList');
+    if (!list) return;
+    if (list.dataset.rendered === 'true') return;
+    if (!atpProviders.length) return;
+
+    var note = document.createElement('p');
+    note.className = 'consentBit-scope-note';
+    note.style.marginBottom = '12px';
+    note.textContent = 'These Google-certified partners are not on the IAB vendor list. Choose whether they may use your data.';
+    list.appendChild(note);
+
+    atpProviders.forEach(function (p) {
+      var displayName = p.name || ('Provider ' + p.id);
+
+      // One card per provider — identical structure to the IAB vendor items.
+      var item = document.createElement('div');
+      item.className = 'consentBit-vendor-item';
+      item.dataset.atpId = String(p.id);
+      item.dataset.atpName = displayName.toLowerCase();
+
+      var header = document.createElement('div');
+      header.className = 'consentBit-vendor-header';
+
+      var info = document.createElement('div');
+      info.className = 'consentBit-vendor-info';
+      var name = document.createElement('div');
+      name.className = 'consentBit-vendor-name';
+      name.textContent = displayName;
+      var idd = document.createElement('div');
+      idd.className = 'consentBit-vendor-id';
+      idd.textContent = 'AC ID: ' + p.id;
+      info.appendChild(name);
+      info.appendChild(idd);
+
+      var sw = document.createElement('div');
+      sw.className = 'consentBit-switch-wrapper';
+      var cw = document.createElement('div');
+      cw.className = 'consentBit-consent-switch-wrapper';
+      var lbl = document.createElement('div');
+      lbl.className = 'consentBit-switch-label';
+      lbl.textContent = 'Consent';
+      var box = document.createElement('div');
+      box.className = 'cb-switch-sm';
+      var input = document.createElement('input');
+      input.type = 'checkbox';
+      input.id = 'cbAtpProvider_' + p.id + 'ToggleConsent';
+      input.setAttribute('autocomplete', 'off');
+      input.setAttribute('data-atpid', String(p.id));
+      input.setAttribute('aria-label', 'Enable ' + displayName + ' consent');
+      box.appendChild(input);
+      cw.appendChild(lbl);
+      cw.appendChild(box);
+      sw.appendChild(cw);
+
+      header.appendChild(info);
+      header.appendChild(sw);
+      item.appendChild(header);
+
+      // Privacy-policy link — name shown above, URL surfaced as a "Privacy policy" link.
+      if (p.policyUrl) {
+        var linkWrap = document.createElement('div');
+        linkWrap.className = 'consentBit-vendor-inline-links';
+        linkWrap.style.marginTop = '8px';
+        var a = document.createElement('a');
+        a.href = p.policyUrl;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = 'Privacy policy';
+        linkWrap.appendChild(a);
+        item.appendChild(linkWrap);
+      }
+
+      list.appendChild(item);
+    });
+    list.dataset.rendered = 'true';
+  }
+
+  // Filter the ATP sub-tab on the same search box (additive listener; the IAB
+  // search keeps working on its own list).
+  function wireAtpSearch() {
+    var input = document.getElementById('vendorsSearch');
+    var list = document.getElementById('cbAtpList');
+    if (!input || !list) return;
+    input.addEventListener('input', function (e) {
+      var term = (e.target.value || '').toLowerCase().trim();
+      Array.prototype.forEach.call(list.querySelectorAll('.consentBit-vendor-item'), function (item) {
+        var nm = item.dataset.atpName || '';
+        var id = item.dataset.atpId || '';
+        item.style.display = (term === '' || nm.indexOf(term) !== -1 || id.indexOf(term) !== -1) ? 'block' : 'none';
+      });
+    });
+  }
+
+  function wireButtons() {
+    var accept = document.getElementById('cbAcceptBtn');
+    var reject = document.getElementById('cbRejectBtn');
+    var save = document.getElementById('cbSaveBtn');
+    var bannerAccept = document.querySelector('.consentBit-btn-accept');
+    var bannerReject = document.querySelector('.consentBit-btn-reject');
+
+    function onAccept() { setAllAtp(true); persistAc(allIds()); }
+    function onReject() { setAllAtp(false); persistAc([]); }
+    function onSave() { persistAc(collectConsentedAtpIds()); }
+
+    if (accept) accept.addEventListener('click', onAccept);
+    if (bannerAccept) bannerAccept.addEventListener('click', onAccept);
+    if (reject) reject.addEventListener('click', onReject);
+    if (bannerReject) bannerReject.addEventListener('click', onReject);
+    if (save) save.addEventListener('click', onSave);
+  }
+
+  function boot() {
+    loadAtpProviders().then(function () {
+      var tries = 0;
+      var iv = setInterval(function () {
+        var vl = document.getElementById('vendorsList');
+        var ready = vl && (vl.children.length > 0 || vl.style.display !== 'none');
+        if (ready || tries > 150) {
+          clearInterval(iv);
+          ensureVendorSubTabs();
+          renderAtpSection();
+          applyStoredAtp();
+          wireButtons();
+          wireAtpSearch();
+          // Refresh the first-layer partner count now the ATP list is loaded
+          // (covers the case where updateDynamicCounts ran before the fetch).
+          try { if (typeof updateDynamicCounts === 'function') updateDynamicCounts(); } catch (e) {}
+        }
+        tries++;
+      }, 100);
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+})();
 
 // ✅ Handle both cases
 if (document.readyState === "loading") {
