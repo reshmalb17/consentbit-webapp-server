@@ -27,6 +27,35 @@ export function getLoaderIabScript(customization, opts = {}) {
     alignment: o.rawPos || c.position || 'bottom-left',
   });
 
+  // Banner entrance animation — pick keyframes + animation shorthand for the
+  // dashboard-selected option ('fade-in' | 'slide-up' | 'slide-down' | 'zoom-in').
+  // Baked at template-build time and injected at runtime via a <style> tag.
+  // #consentBitBanner ID selector + !important wins over the class-based
+  // animation rules in injectStyles(), so existing CSS isn't touched.
+  const __cbAnimChoice = String(o.bannerEntranceAnimation || c.bannerEntranceAnimation || 'slide-up').toLowerCase();
+  const __cbAnimPresets = {
+    'fade-in':    { kf: '@keyframes consentBitFadeInAnim{from{opacity:0}to{opacity:1}}',                                                          anim: 'consentBitFadeInAnim .4s ease' },
+    'slide-up':   { kf: '@keyframes consentBitSlideUpAnim{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}',     anim: 'consentBitSlideUpAnim .4s cubic-bezier(.25,.46,.45,.94)' },
+    'slide-down': { kf: '@keyframes consentBitSlideDownAnim{from{transform:translateY(-100%);opacity:0}to{transform:translateY(0);opacity:1}}',  anim: 'consentBitSlideDownAnim .4s cubic-bezier(.25,.46,.45,.94)' },
+    'zoom-in':    { kf: '@keyframes consentBitZoomInAnim{from{transform:scale(.85);opacity:0}to{transform:scale(1);opacity:1}}',                 anim: 'consentBitZoomInAnim .4s cubic-bezier(.25,.46,.45,.94)' },
+  };
+  // Center/popup variant (.consentBit-type-popup) is centered with translateX(-50%);
+  // its keyframes must keep that translate or the banner slides in from the side and
+  // snaps to center. Higher-specificity selector (#id.class) overrides the base rule
+  // for this variant only — box/banner variants keep the base keyframes above.
+  const __cbAnimPresetsCenter = {
+    'fade-in':    { kf: '@keyframes consentBitFadeInAnimC{from{opacity:0}to{opacity:1}}',                                                                                           anim: 'consentBitFadeInAnimC .4s ease' },
+    'slide-up':   { kf: '@keyframes consentBitSlideUpAnimC{from{transform:translateX(-50%) translateY(100%);opacity:0}to{transform:translateX(-50%) translateY(0);opacity:1}}',     anim: 'consentBitSlideUpAnimC .4s cubic-bezier(.25,.46,.45,.94)' },
+    'slide-down': { kf: '@keyframes consentBitSlideDownAnimC{from{transform:translateX(-50%) translateY(-100%);opacity:0}to{transform:translateX(-50%) translateY(0);opacity:1}}',  anim: 'consentBitSlideDownAnimC .4s cubic-bezier(.25,.46,.45,.94)' },
+    'zoom-in':    { kf: '@keyframes consentBitZoomInAnimC{from{transform:translateX(-50%) scale(.85);opacity:0}to{transform:translateX(-50%) scale(1);opacity:1}}',                 anim: 'consentBitZoomInAnimC .4s cubic-bezier(.25,.46,.45,.94)' },
+  };
+  const __cbAnimPreset = __cbAnimPresets[__cbAnimChoice] || __cbAnimPresets['slide-up'];
+  const __cbAnimPresetC = __cbAnimPresetsCenter[__cbAnimChoice] || __cbAnimPresetsCenter['slide-up'];
+  const animCssLiteral = JSON.stringify(
+    __cbAnimPreset.kf + ' #consentBitBanner{animation:' + __cbAnimPreset.anim + ' !important}'
+    + ' ' + __cbAnimPresetC.kf + ' #consentBitBanner.consentBit-type-popup{animation:' + __cbAnimPresetC.anim + ' !important}'
+  );
+
   return `
 /**
  * Cookie Consent UI Integration
@@ -222,7 +251,7 @@ function injectStyles() {
 .cb-accordion-wrapper{display:flex;flex-direction:column;gap:10px}
 .cb-accordion{border:1px solid #ebebeb;border-radius:\${brSm};overflow:hidden;background:\${s.bannerBg}}
 .cb-accordion-item,.cb-accordion-iab-item{display:flex;gap:12px;padding:14px 16px;cursor:pointer;transition:background-color .2s}
-.cb-accordion-item:hover,.cb-accordion-iab-item:hover,.cb-child-accordion-item:hover{background-color:#f9f9f9}
+.cb-accordion-item:hover,.cb-accordion-iab-item:hover,.cb-child-accordion-item:hover{}
 .cb-accordion-chevron,.cb-child-accordion-chevron{flex-shrink:0;display:flex;align-items:center;justify-content:center}
 .cb-accordion-chevron{width:20px;height:20px}
 .cb-child-accordion-chevron{width:16px;height:16px}
@@ -242,7 +271,7 @@ function injectStyles() {
 .cb-switch input[type="checkbox"]:checked::before{transform:translateX(20px)}
 .cb-accordion-body,.cb-child-accordion-body{max-height:0;overflow:hidden;transition:max-height .3s ease}
 .cb-accordion.active .cb-accordion-body,.cb-child-accordion.active .cb-child-accordion-body{max-height:2000px}
-.cb-audit-table{background-color:#f4f4f4;border:1px solid #ebebeb;border-radius:\${brSm};padding:14px}
+.cb-audit-table{border:1px solid #ebebeb;border-radius:\${brSm};padding:14px}
 .cb-child-accordion{border-top:1px solid #ebebeb}
 .cb-child-accordion:first-child{border-top:none}
 .cb-child-accordion-item{display:flex;gap:12px;padding:12px 16px;cursor:pointer;transition:background-color .2s}
@@ -868,6 +897,17 @@ function releaseBlockedScripts() {
 installConsentScriptBlocker();
 initConsentDependencies();
 
+// ─── Banner Entrance Animation (server-baked override) ───────────────────────
+// Injects a <style> with the chosen entrance animation (fade-in / slide-up /
+// slide-down / zoom-in). #consentBitBanner ID selector + !important overrides
+// the hardcoded .consentBit-consent-container and .consentBit-type-popup rules.
+(function __cbInjectBannerEntranceAnimation() {
+  if (document.getElementById('consentbit-anim-styles')) return;
+  var s = document.createElement('style');
+  s.id = 'consentbit-anim-styles';
+  s.textContent = ${animCssLiteral};
+  (document.head || document.documentElement).appendChild(s);
+})();
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Cookie Categories Data
@@ -2177,6 +2217,11 @@ function injectFloatingTrigger() {
   document.body.appendChild(btn);
 
   btn.addEventListener('click', () => {
+    // If the consent banner is currently visible, ignore the floating trigger —
+    // user must dismiss the banner first. Only after the banner is hidden does
+    // the floating trigger open the preference modal.
+    const banner = document.getElementById('consentBitBanner');
+    if (banner && getComputedStyle(banner).display !== 'none') return;
     openModal();
     // If the banner was hidden, keep it hidden — only open the preference modal
   });
@@ -2250,8 +2295,7 @@ async function initAll() {
     // Hide banner immediately if consent was already stored — avoids visible flash
     // while waiting for tcfManager to initialize (~100 ms poll in waitForTCFManager).
     try {
-      if (localStorage.getItem('TCF_TC_STRING') || localStorage.getItem('cookieConsentPrefs') ||
-          document.cookie.split(';').some(function(c){ return c.trim().indexOf('euconsent-v2=') === 0; })) {
+      if (localStorage.getItem('cookieConsentPrefs')) {
         hideBanner();
       }
     } catch(e) {}
