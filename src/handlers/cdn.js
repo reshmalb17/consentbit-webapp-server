@@ -2236,7 +2236,7 @@ ${inlineConfig}
             if (e.alwaysActive) {
               var o = document.createElement("span");
               o.style.cssText = "font-size:11px;font-weight:600;color:#374151;";
-              o.textContent = U("alwaysActive");
+              o.textContent = Y("alwaysActive", 20);
               i.appendChild(o)
             } else {
               var c = document.createElement("input");
@@ -2365,31 +2365,31 @@ ${inlineConfig}
           var q = document.createElement("div");
           q.className = "cb-gdpr-accordion";
           q.style.cssText = "border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin-bottom:4px;";
-          var H = U("strictlyNecessary") || U("essential");
+          var H = Y("strictlyNecessary", 20) || Y("essential", 20);
           q.appendChild(N({
             labelText: H,
             alwaysActive: !0,
-            descText: U("essentialDescription")
+            descText: Y("essentialDescription", 300)
           }));
           var V;
           var $ = ae() || A && A.accepted && A.categories || {};
           q.appendChild(N({
-            labelText: U("marketing"),
+            labelText: Y("marketing", 20),
             checkboxId: "cb-pref-marketing",
             defaultChecked: !!$.marketing,
-            descText: U("marketingDescription")
+            descText: Y("marketingDescription", 300)
           }));
           q.appendChild(N({
-            labelText: U("analytics"),
+            labelText: Y("analytics", 20),
             checkboxId: "cb-pref-analytics",
             defaultChecked: !!$.analytics,
-            descText: U("analyticsDescription")
+            descText: Y("analyticsDescription", 300)
           }));
           q.appendChild(N({
-            labelText: U("preferences"),
+            labelText: Y("preferences", 20),
             checkboxId: "cb-pref-preferences",
             defaultChecked: !!$.preferences,
-            descText: U("preferencesDescription")
+            descText: Y("preferencesDescription", 300)
           }));
           q.lastChild && (q.lastChild.style.borderBottom = "none");
           v.appendChild(q);

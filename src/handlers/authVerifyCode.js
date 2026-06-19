@@ -129,17 +129,19 @@ export async function handleAuthVerifyCode(request, env, ctx) {
 
     if (!userPrefetch) return Response.json({ success: false, error: 'No account found for this email. Please sign up.' }, { status: 404 });
 
-    // Consume OTP + create session + get orgs all in parallel
-    const [, session, orgsInitial] = await Promise.all([
+    // Consume OTP + create session, then respond immediately.
+    // dashboardInit is intentionally NOT built on the verify path: it runs several extra
+    // D1 queries (sites, subscriptions, plan) that can push verify past the Next proxy
+    // timeout, causing the first attempt to be canceled before the code is consumed
+    // (so the user has to submit the same code twice). The dashboard fetches the same
+    // data itself via /api/auth/dashboard-init on mount, which also creates the org if needed.
+    const [, session] = await Promise.all([
       consumeEmailVerificationCode(db, row.id),
       createSession(db, { userId: userPrefetch.id }),
-      getOrganizationsForUser(db, userPrefetch.id),
     ]);
 
-    const dashboardInit = await buildDashboardInit(db, env, request, userPrefetch, orgsInitial);
-
     return Response.json(
-      { success: true, dashboardInit },
+      { success: true },
       { status: 200, headers: { 'Content-Type': 'application/json', 'Set-Cookie': `sid=${session.id}; ${cookieFlags}` } },
     );
   }
@@ -171,19 +173,15 @@ export async function handleAuthVerifyCode(request, env, ctx) {
     createUser(db, { email, name }),
   ]);
 
-  // Create session + get orgs in parallel
-  const [session, orgsInitial] = await Promise.all([
-    createSession(db, { userId: user.id }),
-    getOrganizationsForUser(db, user.id),
-  ]);
-
-  const dashboardInit = await buildDashboardInit(db, env, request, user, orgsInitial);
+  // Create session, then respond immediately (see login-path note above — dashboardInit is
+  // built lazily by /api/auth/dashboard-init, which also creates the org on first load).
+  const session = await createSession(db, { userId: user.id });
 
   // Send welcome email in the background — non-blocking
   sendWelcomeEmail(env, ctx, { to: user.email, name: user.name || '' });
 
   return Response.json(
-    { success: true, user: { id: user.id, email: user.email, name: user.name }, dashboardInit },
+    { success: true, user: { id: user.id, email: user.email, name: user.name } },
     { status: 201, headers: { 'Content-Type': 'application/json', 'Set-Cookie': `sid=${session.id}; ${cookieFlags}` } },
   );
 }
