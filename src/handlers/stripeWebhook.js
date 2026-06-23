@@ -550,7 +550,18 @@ export async function handleStripeWebhook(request, env, ctx) {
         // PostHog: use email as canonical distinct_id to match client-side events
         if (orgId) {
           const _phEmail = (session.customer_email || session.customer_details?.email || '').trim().toLowerCase() || null;
-          const _phPlatform = platform || null;
+          // Resolve PostHog platform: checkout metadata → Site.platform (DB) → default 'webapp'.
+          // Webflow/Framer set platform explicitly (metadata and/or DB column); webapp leaves it
+          // null, so a null result here means webapp. Wrapped in try/catch so this PostHog-only
+          // lookup can never throw or affect the payment/webhook flow.
+          let _phPlatform = platform || null;
+          if (!_phPlatform && siteId && db) {
+            try {
+              const _phSiteRow = await db.prepare('SELECT platform FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
+              _phPlatform = _phSiteRow?.platform || null;
+            } catch (e) { /* ignore — PostHog attribution only */ }
+          }
+          _phPlatform = _phPlatform || 'webapp';
           if (_phEmail) {
             await capturePostHogEvent(env, _phEmail, 'paid_plan_activated', {
               status: subscriptionStatus,
@@ -867,7 +878,9 @@ export async function handleStripeWebhook(request, env, ctx) {
           ).bind(orgIdFinal).first();
           _phEmail = _phUser?.email || null;
           const _phSite = (existing?.siteId ?? existing?.siteid) ? await db.prepare('SELECT platform FROM Site WHERE id = ?1 LIMIT 1').bind(existing.siteId ?? existing.siteid).first() : null;
-          _phPlatform = _phSite?.platform || null;
+          // Site.platform is authoritative for Webflow/Framer ('webflow'/'framer'); sub metadata
+          // covers the case where siteId is missing on the local record. Null everywhere = webapp.
+          _phPlatform = _phSite?.platform || sub.metadata?.platform || 'webapp';
         } catch (e) { /* ignore */ }
 
         // Use email as distinct_id — only fire PostHog if we have the email
@@ -907,6 +920,19 @@ export async function handleStripeWebhook(request, env, ctx) {
               org_id: orgIdFinal,
               ...(_phPlatform ? { platform: _phPlatform } : {}),
             });
+            // Trial abandonment: canceled during the 14-day trial (ended at/before trial_end),
+            // i.e. never reached a paid charge. Additive — distinguishes "tried but never paid"
+            // from post-payment churn. PostHog-only; subscription_cancelled above is unchanged.
+            const _cancelTs = sub.ended_at || sub.canceled_at || null;
+            const _wasTrialCancel = !!(sub.trial_end && _cancelTs && _cancelTs <= sub.trial_end);
+            if (_wasTrialCancel) {
+              await capturePostHogEvent(env, _phEmail, 'trial_cancelled', {
+                plan: planIdFromMeta,
+                interval: intervalFromSub,
+                org_id: orgIdFinal,
+                platform: _phPlatform,
+              });
+            }
             await identifyPostHogPerson(env, _phEmail, {
               subscription_status: 'canceled',
               lifecycle_stage: 'canceled',

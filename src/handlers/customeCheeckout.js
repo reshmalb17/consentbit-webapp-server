@@ -610,6 +610,7 @@ export async function handleCustomCheckout(request, env, ctx) {
         event: 'paid_plan_activated',
         distinctId: user.email || email,
         properties: {
+          status: sub.status,
           platform: platform || null,
           plan: planId,
           interval,
@@ -742,6 +743,7 @@ export async function handleCustomCheckout(request, env, ctx) {
         event: 'paid_plan_activated',
         distinctId: user.email || email,
         properties: {
+          status: subStatus,
           platform: platform || null,
           plan: planId,
           interval,
