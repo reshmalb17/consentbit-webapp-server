@@ -703,12 +703,31 @@ export async function handleStripeWebhook(request, env, ctx) {
             sendWelcomeEmail(env, ctx, { to: emailTo, name: customerName });
           }
 
+          // For Essential/Growth plans purchased through the Webflow/Framer app,
+          // send the IAB/TCF setup email instead of the generic paid-plan email.
+          // Resolve platform: prefer checkout metadata, else look it up from the Site row.
+          let emailPlatform = platform || null;
+          if (!emailPlatform && siteId && db) {
+            try {
+              const siteRow = await db.prepare('SELECT platform FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
+              emailPlatform = siteRow?.platform || null;
+            } catch (_) {}
+          }
+          const planLc     = String(resolvedPlanId || '').toLowerCase();
+          const platformLc = String(emailPlatform || '').toLowerCase();
+          const emailVariant =
+            (planLc === 'essential' || planLc === 'growth') &&
+            (platformLc === 'webflow' || platformLc === 'framer')
+              ? 'tcf'
+              : 'default';
+
           sendPaidPlanEmail(env, ctx, {
             to:       emailTo,
             name:     customerName,
             domain:   siteDomainMeta || '',
             planName,
             invoice:  invoiceData,
+            variant:  emailVariant,
           });
         }
 

@@ -306,10 +306,13 @@ ConsentBit Team
  *   invoice?: { invoiceNumber, invoiceUrl, invoicePdf, amountPaid, currency, date, interval } | null
  * }} opts
  */
-export function sendPaidPlanEmail(env, ctx, { to, name, domain, planName, invoice = null }) {
+export function sendPaidPlanEmail(env, ctx, { to, name, domain, planName, invoice = null, variant = 'default' }) {
   const displayName   = name || 'there';
   const displayDomain = domain || 'your website';
   const displayPlan   = planName || 'Basic';
+  const dashboardUrl  = (env.WEBAPP_PUBLIC_URL || 'https://accounts.consentbit.com').replace(/\/$/, '') + '/dashboard';
+  const loginEmail    = to || 'your email';
+  const isTcf         = variant === 'tcf';
 
 
   // Invoice section HTML
@@ -348,6 +351,76 @@ ${invoice.interval     ? `Billing Cycle: ${invoice.interval}` : ''}
 ${invoice.invoicePdf   ? `Download Invoice PDF: ${invoice.invoicePdf}` : ''}
 ${invoice.invoiceUrl   ? `View Invoice Online: ${invoice.invoiceUrl}` : ''}
 ` : '';
+
+  // --- IAB/TCF setup variant (Essential/Growth purchased via Webflow/Framer app) ---
+  if (isTcf) {
+    const subject = `Your ${displayPlan} plan is active — enable your IAB TCF banner`;
+
+    const html = layout(
+      `Your ${displayPlan} plan is active. Log in to add your IAB/TCF consent banner.`,
+      `
+      <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi ${displayName},</p>
+      <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
+        Thank you for choosing <strong style="color:#111827;">ConsentBit ${displayPlan}</strong> for
+        <strong style="color:#111827;">${displayDomain}</strong> — your plan is now active.
+      </p>
+      <p style="margin:0 0 22px;color:#6b7280;font-size:15px;line-height:1.6;">
+        Your plan includes the <strong style="color:#111827;">IAB TCF (Transparency &amp; Consent Framework) banner</strong> —
+        the IAB-compliant consent banner required for sites running Google-certified ad partners and TCF vendors.
+      </p>
+
+      ${HR}
+
+      <p style="margin:0 0 12px;color:#111827;font-size:15px;font-weight:700;">Enable it from your dashboard</p>
+      <p style="margin:0 0 16px;color:#6b7280;font-size:14px;line-height:1.6;">
+        The TCF banner is set up in your ConsentBit dashboard (not from the Webflow/Framer app). Here's how:
+      </p>
+      <ol style="margin:0 0 22px;padding-left:20px;color:#374151;font-size:14px;line-height:1.8;">
+        <li>Go to <strong>accounts.consentbit.com</strong> and log in with this email — <strong style="color:#111827;">${loginEmail}</strong>. <span style="color:#9ca3af;">(Your account is already created; just request a login code if it's your first time.)</span></li>
+        <li>Open your site, <strong>${displayDomain}</strong>, and go to <strong>Cookie Banner</strong>.</li>
+        <li>In the <strong>General</strong> tab, find the <strong>"Support IAB TCF v2.3"</strong> card and turn on <strong>"Enable IAB TCF Support"</strong>.</li>
+      </ol>
+
+      <a href="${dashboardUrl}" style="${BTN}">Open Dashboard →</a>
+
+      ${invoiceHtml}
+
+      ${HR}
+
+      <p style="margin:0;color:#6b7280;font-size:14px;line-height:1.6;">
+        If you need a hand setting up the TCF banner or choosing vendors, just reply to this email and our team will help you get it live.
+      </p>
+      <p style="margin:18px 0 0;color:#6b7280;font-size:14px;line-height:1.6;">Best regards,<br/>ConsentBit Team</p>
+      `
+    );
+
+    const text = `Hi ${displayName},
+
+Thank you for choosing ConsentBit ${displayPlan} for ${displayDomain} — your plan is now active.
+
+Your plan includes the IAB TCF (Transparency & Consent Framework) banner — the IAB-compliant consent banner required for sites running Google-certified ad partners and TCF vendors.
+
+Enable it from your dashboard (not from the Webflow/Framer app):
+
+1. Go to accounts.consentbit.com and log in with this email — ${loginEmail}.
+   (Your account is already created; request a login code if it's your first time.)
+2. Open your site, ${displayDomain}, and go to Cookie Banner.
+3. In the General tab, find the "Support IAB TCF v2.3" card and turn on "Enable IAB TCF Support".
+
+Open your dashboard: ${dashboardUrl}
+${invoiceText}
+If you need a hand setting up the TCF banner or choosing vendors, just reply to this email and our team will help.
+
+Best regards,
+ConsentBit Team
+`;
+
+    const send = sendBrevoEmail(env, { to, name, subject, html, text })
+      .catch(e => console.error('[Email] sendPaidPlanEmail (tcf) failed:', e?.message));
+
+    if (ctx?.waitUntil) ctx.waitUntil(send);
+    return;
+  }
 
   const subject = `You're all set on the ${displayPlan} plan`;
 
