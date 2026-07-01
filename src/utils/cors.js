@@ -15,6 +15,9 @@ const DEV_ORIGINS = [
 // Known production frontends (kept minimal; env.WEBAPP_PUBLIC_URL remains the primary source of truth).
 const KNOWN_PROD_ORIGINS = [
   'https://accounts.consentbit.com',
+  // Cloudflare Pages test frontend (apex project domain). Preview/hash builds are
+  // covered by the *.consentbit-webapp-frontend-test.pages.dev pattern below.
+  'https://consentbit-webapp-frontend-test.pages.dev',
 ];
 
 /**
@@ -24,6 +27,9 @@ const KNOWN_PROD_ORIGINS = [
  */
 const ALLOWED_ORIGIN_PATTERNS = [
   /^https:\/\/[a-z0-9-]+\.plugins\.framercdn\.com$/i,
+  // Cloudflare Pages preview deployments of the test frontend get a per-build
+  // hash subdomain (e.g. https://abc123.consentbit-webapp-frontend-test.pages.dev).
+  /^https:\/\/[a-z0-9-]+\.consentbit-webapp-frontend-test\.pages\.dev$/i,
 ];
 
 /**
@@ -113,6 +119,8 @@ export function handleOptions(request, env) {
     '/api/scan-pending',
     '/api/v2/webflow-free-register',
     '/api/payment/subscription',
+    '/api/webflow/billing',
+    '/api/webflow/cancel-subscription',
     '/api/banner-customization',
     '/api/licenses/activate-license',
     '/api/licenses/check-domain-script',

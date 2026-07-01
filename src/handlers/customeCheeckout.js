@@ -36,6 +36,7 @@ import {
 } from '../services/db.js';
 import { injectScriptIntoWebflowHead } from './webflowFreeRegister.js';
 import { sendPaidPlanEmail } from '../services/email.js';
+import { addCustomerToClickUp } from '../services/clickup.js';
 
 const VALID_PLAN_IDS = ['basic', 'essential', 'growth'];
 
@@ -188,7 +189,7 @@ async function findOrCreateStripeCustomer(secret, email, paymentMethodId) {
  * After payment succeeds: find or create user account, create/get site, save subscription.
  * Order: payment already processed → create user → create org → create site → save sub → create session
  */
-async function provisionAccount(db, env, request, {
+async function provisionAccount(db, env, request, ctx, {
   email,
   domain,
   siteName,
@@ -248,6 +249,27 @@ async function provisionAccount(db, env, request, {
     amountCents: amountCents ?? null,
   });
 
+  // Add customer to ClickUp on new paid checkout. The Stripe webhook only creates a
+  // ClickUp task for the `checkout.session.completed` path; this direct (custom) checkout
+  // flow bypasses that webhook, so we mirror the call here. Background via ctx.waitUntil
+  // so checkout finalization isn't delayed; falls back to fire-and-forget if no ctx.
+  {
+    const _clickup = addCustomerToClickUp(env, {
+      email:          billingEmail || email || null,
+      name:           user?.name || '',
+      platform,
+      plan:           planId || null,
+      interval,
+      domain,
+      amountCents:    amountCents ?? null,
+      currency:       'usd',
+      subscriptionId: stripeSubscriptionId || null,
+      customerId:     stripeCustomerId || null,
+      isFirstPurchase: isNewUser,
+    }).catch(() => {});
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(_clickup);
+  }
+
   // Store billingEmail and platformSiteId on Site
   const billingEmailToStore = billingEmail || null;
   const platformSiteIdToStore = wfSiteId || null;
@@ -285,7 +307,7 @@ async function provisionAccount(db, env, request, {
  *   webAppSiteId, userId, cdnScriptId, paid: true
  * Everything else in the existing KV value is preserved.
  */
-async function persistPaidStatusToKv(env, { platform, platformSiteId, site, user }) {
+async function persistPaidStatusToKv(env, { platform, platformSiteId, site, user, planId }) {
   if (!platformSiteId) return;
   const p = String(platform || '').toLowerCase();
   const kv = p === 'framer' ? env.AUTH_STORE_FRAMER : env.WEBFLOW_AUTHENTICATION;
@@ -308,13 +330,16 @@ async function persistPaidStatusToKv(env, { platform, platformSiteId, site, user
       userId: user.id,
       cdnScriptId: site.cdnScriptId ?? site.cdnscriptid ?? null,
       paid: true,
+      // Stamp the plan so the Webflow status endpoint can fall back to KV when the
+      // D1 Subscription row isn't found (DB-first → KV-fallback).
+      ...(planId ? { plan: planId } : {}),
     };
     const merged = existing && typeof existing === 'object'
       ? { ...existing, ...newFields }
       : newFields;
 
     await kv.put(platformSiteId, JSON.stringify(merged));
-    console.log('[CustomCheckout] paid-status KV updated', { platform: p || 'webflow', platformSiteId, mergedWithExisting: !!existing });
+    console.log('[CustomCheckout] paid-status KV updated', { platform: p || 'webflow', platformSiteId, plan: planId || null, mergedWithExisting: !!existing });
   } catch (e) {
     console.error('[CustomCheckout] persistPaidStatusToKv failed', e?.message);
   }
@@ -364,7 +389,7 @@ async function persistPaidStatusToKv(env, { platform, platformSiteId, site, user
 //   }
 // }
 
-async function postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }) {
+async function postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail, planId }) {
   console.log('[CustomCheckout] postCheckoutWebflowInject start', { wfSiteId, siteId: site?.id, cdnScriptId: site?.cdnScriptId });
   if (!wfSiteId || !env.WEBFLOW_AUTHENTICATION) {
     console.warn('[CustomCheckout] postCheckoutWebflowInject skipped: missing wfSiteId or WEBFLOW_AUTHENTICATION binding');
@@ -397,6 +422,8 @@ async function postCheckoutWebflowInject(env, { wfSiteId, site, request, user, b
       ...(result.webflowScriptId ? { webflowScriptId: result.webflowScriptId } : {}),
       ...(user?.email ? { email: user.email } : {}),
       ...(billingEmail ? { billingEmail } : {}),
+      // Stamp the plan so the Webflow status endpoint's KV fallback can read it.
+      ...(planId ? { plan: planId } : {}),
     };
     await env.WEBFLOW_AUTHENTICATION.put(wfSiteId, JSON.stringify(updatedKv));
     console.log('[CustomCheckout] postCheckoutWebflowInject KV updated with webappSiteId:', site.id);
@@ -573,7 +600,7 @@ export async function handleCustomCheckout(request, env, ctx) {
       }, { status: 402 });
     }
     try {
-      const { user, isNewUser, session, site, org } = await provisionAccount(db, env, request, {
+      const { user, isNewUser, session, site, org } = await provisionAccount(db, env, request, ctx, {
         email,
         domain: rawDomain,
         siteName,
@@ -590,8 +617,8 @@ export async function handleCustomCheckout(request, env, ctx) {
         wfSiteId,
         platform,
       });
-      if (wfSiteId && platform === 'webflow') postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(e => console.error('[CustomCheckout] postCheckoutWebflowInject outer error', e?.message));
-      if (platform && wfSiteId) persistPaidStatusToKv(env, { platform, platformSiteId: wfSiteId, site, user }).catch(() => {});
+      if (wfSiteId && platform === 'webflow') postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail, planId }).catch(e => console.error('[CustomCheckout] postCheckoutWebflowInject outer error', e?.message));
+      if (platform && wfSiteId) persistPaidStatusToKv(env, { platform, platformSiteId: wfSiteId, site, user, planId }).catch(() => {});
       const _orgId = org?.id ?? org?.organizationId;
       let _emailTo = billingEmail || email;
       let _emailSource = billingEmail ? 'checkout-billingEmail' : 'account-email';
@@ -705,7 +732,7 @@ export async function handleCustomCheckout(request, env, ctx) {
   // Payment succeeded immediately (trial start or card charged without 3DS)
   if (subStatus === 'active' || subStatus === 'trialing') {
     try {
-      const { user, isNewUser, session, site, org } = await provisionAccount(db, env, request, {
+      const { user, isNewUser, session, site, org } = await provisionAccount(db, env, request, ctx, {
         email,
         domain: rawDomain,
         siteName,
@@ -722,8 +749,8 @@ export async function handleCustomCheckout(request, env, ctx) {
         wfSiteId,
         platform,
       });
-      if (wfSiteId && platform === 'webflow') postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(e => console.error('[CustomCheckout] postCheckoutWebflowInject outer error', e?.message));
-      if (platform && wfSiteId) persistPaidStatusToKv(env, { platform, platformSiteId: wfSiteId, site, user }).catch(() => {});
+      if (wfSiteId && platform === 'webflow') postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail, planId }).catch(e => console.error('[CustomCheckout] postCheckoutWebflowInject outer error', e?.message));
+      if (platform && wfSiteId) persistPaidStatusToKv(env, { platform, platformSiteId: wfSiteId, site, user, planId }).catch(() => {});
       const _orgId = org?.id ?? org?.organizationId;
       let _emailTo = billingEmail || email;
       let _emailSource = billingEmail ? 'checkout-billingEmail' : 'account-email';

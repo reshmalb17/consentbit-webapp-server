@@ -21,6 +21,13 @@ binding = "BANNER_CONFIG_DB"
 database_name = "banner-config-db"
 database_id = "8b467c8c-2ff8-43b5-9338-a4e9191e6014"
 
+# Cookie-scanner DB (same D1 the cookie-scanner worker writes to). Bound here so the
+# auth worker can read a handed-off scan report directly and render its PDF locally.
+[[d1_databases]]
+binding = "COOKIE_SCANNER_DB"
+database_name = "cookie-scanner-db"
+database_id = "b66e816a-d6df-463f-97aa-45ee475f6bbc"
+
 [[kv_namespaces]]
 binding = "WEBFLOW_AUTHENTICATION"
 id = "aa64050ef7804e7783fe9680daae80c5"
@@ -175,6 +182,11 @@ database_id = "3a0cf7e2-34a9-4d06-a5b7-c1238d13290e"
 binding = "BANNER_CONFIG_DB"
 database_name = "banner-config-db"
 database_id = "8b467c8c-2ff8-43b5-9338-a4e9191e6014"
+
+[[env.production.d1_databases]]
+binding = "COOKIE_SCANNER_DB"
+database_name = "cookie-scanner-db"
+database_id = "b66e816a-d6df-463f-97aa-45ee475f6bbc"
 
 [[env.production.kv_namespaces]]
 binding = "WEBFLOW_AUTHENTICATION"

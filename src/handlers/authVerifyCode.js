@@ -14,6 +14,7 @@ import {
   canonicalEmbedOrigin,
 } from '../services/db.js';
 import { sendWelcomeEmail } from '../services/email.js';
+import { sendScanReportForId } from '../services/scanReport.js';
 // Note: hashPassword removed — system is fully passwordless (OTP via email only)
 
 function isValidEmail(email) {
@@ -94,6 +95,9 @@ export async function handleAuthVerifyCode(request, env, ctx) {
   const email = (body?.email || '').trim().toLowerCase();
   const purpose = body?.purpose === 'signup' ? 'signup' : 'login';
   const code = String(body?.code || '').trim();
+  // Optional cookie-scan id handed off from the scanner landing page (sent in the body).
+  const scanId = (body?.scanId || '').trim();
+  console.log('[AuthVerifyCode] purpose:', purpose, '| scanId received:', scanId || '(none)');
   if (!isValidEmail(email)) {
     return Response.json({ success: false, error: 'Valid email is required' }, { status: 400 });
   }
@@ -140,6 +144,12 @@ export async function handleAuthVerifyCode(request, env, ctx) {
       createSession(db, { userId: userPrefetch.id }),
     ]);
 
+    // If a cookie-scan id was handed off, read it from the shared scanner DB,
+    // render the PDF locally and email it — fully in the background.
+    if (scanId && ctx?.waitUntil) {
+      ctx.waitUntil(sendScanReportForId(env, { to: email, name: userPrefetch.name || '', scanId }));
+    }
+
     return Response.json(
       { success: true },
       { status: 200, headers: { 'Content-Type': 'application/json', 'Set-Cookie': `sid=${session.id}; ${cookieFlags}` } },
@@ -179,6 +189,12 @@ export async function handleAuthVerifyCode(request, env, ctx) {
 
   // Send welcome email in the background — non-blocking
   sendWelcomeEmail(env, ctx, { to: user.email, name: user.name || '' });
+
+  // If a cookie-scan id was handed off from the scanner page, read it from the shared
+  // scanner DB, render the PDF locally and email it — fully in the background.
+  if (scanId && ctx?.waitUntil) {
+    ctx.waitUntil(sendScanReportForId(env, { to: user.email, name: user.name || '', scanId }));
+  }
 
   return Response.json(
     { success: true, user: { id: user.id, email: user.email, name: user.name } },

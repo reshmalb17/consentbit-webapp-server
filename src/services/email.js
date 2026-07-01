@@ -25,7 +25,7 @@
  * @param {object} env  Cloudflare Worker env bindings
  * @param {{ to: string, name?: string, subject: string, html: string, text: string }} opts
  */
-export async function sendBrevoEmail(env, { to, name, subject, html, text }) {
+export async function sendBrevoEmail(env, { to, name, subject, html, text, attachment }) {
   const apiKey   = env.BREVO_API_KEY;
   const fromEmail = env.BREVO_FROM_EMAIL;
   const fromName  = env.BREVO_FROM_NAME || 'ConsentBit';
@@ -40,6 +40,12 @@ export async function sendBrevoEmail(env, { to, name, subject, html, text }) {
     htmlContent: html,
     textContent: text,
   };
+
+  // Optional attachments. Brevo accepts either { url, name } (Brevo fetches the file)
+  // or { content: <base64>, name }. We use the url form for the PDF report.
+  if (Array.isArray(attachment) && attachment.length) {
+    payload.attachment = attachment;
+  }
 
   const res = await fetch('https://api.brevo.com/v3/smtp/email', {
     method:  'POST',
@@ -685,4 +691,5 @@ ConsentBit Team
 
   if (ctx?.waitUntil) ctx.waitUntil(send);
 }
+
 

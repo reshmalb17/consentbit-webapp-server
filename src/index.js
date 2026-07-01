@@ -20,6 +20,7 @@ import { handleValidatePromo } from './handlers/validatePromo.js';
 import { handleCreateCheckoutSession } from './handlers/createCheckoutSession.js';
 import { handleCheckoutSessionDetails } from './handlers/checkoutSessionDetails.js';
 import { handleCheckoutToken } from './handlers/checkoutToken.js';
+import { handleWebflowCheckoutToken } from './handlers/webflowCheckoutToken.js';
 import { handleCheckoutSuccessRedirect } from './handlers/checkoutSuccessRedirect.js';
 import { handleStripeWebhook } from './handlers/stripeWebhook.js';
 import { reportStripeMeteredUsage } from './handlers/reportStripeUsage.js';
@@ -51,6 +52,7 @@ import { handleAdminBackfillStripeSubscriptions } from './handlers/adminBackfill
 import { handleAdminBackfillPosthog } from './handlers/adminBackfillPosthog.js';
 import { handleAdminBackfillClickup } from './handlers/adminBackfillClickup.js';
 import { handleAdminMicheleClickup } from './handlers/adminMicheleClickup.js';
+import { handleAdminTestScanReport } from './handlers/adminTestScanReport.js';
 import { handleCheckLegacyScript } from './handlers/checkLegacyScript.js';
 import { handleLegacyConsentLogs } from './handlers/legacyConsentLogs.js';
 import { handleLegacyConsentCsv } from './handlers/legacyConsentCsv.js';
@@ -81,6 +83,7 @@ import { handleFeedback } from './handlers/feedback.js';
 import { handleCustomCheckout, handleValidateCoupon } from './handlers/customeCheeckout.js';
 import { handleSyncPlugin, handleSyncPluginCustomization, handleGetPluginData, handleGetPluginPlan } from './handlers/SyncPlugin.js';
 import { handlePaymentSubscription } from './handlers/paymentSubscription.js';
+import { handleWebflowBilling, handleWebflowCancelSubscription } from './handlers/webflowBilling.js';
 
 import { handleOptions, withCors, withPublicCors } from './utils/cors.js';
 import {
@@ -128,10 +131,13 @@ const PUBLIC_PATHS = new Set([
   '/api/scan-pending',
   '/api/v2/webflow-free-register',
   '/api/payment/subscription',
+  '/api/webflow/billing',
+  '/api/webflow/cancel-subscription',
   '/api/banner-customization',
   '/api/licenses/activate-license',
   '/api/licenses/check-domain-script',
   '/api/checkout-token',
+  '/api/v2/webflow-checkout-token',
   // Legacy aliases without /api/ prefix (backwards-compat for older bundles)
   '/licenses/activate-license',
   '/licenses/check-domain-script',
@@ -188,6 +194,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/admin/backfill-posthog',
   '/api/admin/backfill-clickup',
   '/api/admin/michele-clickup',
+  '/api/admin/test-scan-report',
   '/api/payment/subscription',
 ]);
 
@@ -273,6 +280,12 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     case '/api/payment/subscription':
       response = await handlePaymentSubscription(request, env); break;
 
+    // — Webflow app billing (authless, siteId-keyed): invoices + cancel
+    case '/api/webflow/billing':
+      response = await handleWebflowBilling(request, env); break;
+    case '/api/webflow/cancel-subscription':
+      response = await handleWebflowCancelSubscription(request, env); break;
+
     // — Billing / payments
     case '/api/validate-promo':
       response = await handleValidatePromo(request, env); break;
@@ -282,6 +295,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleCheckoutSessionDetails(request, env); break;
     case '/api/checkout-token':
       response = await handleCheckoutToken(request, env); break;
+    case '/api/v2/webflow-checkout-token':
+      response = await handleWebflowCheckoutToken(request, env); break;
     case '/api/checkout-success-redirect':
       response = await handleCheckoutSuccessRedirect(request, env); break;
     case '/api/billing/summary':
@@ -405,6 +420,9 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     case '/api/admin/michele-clickup':
       response = await handleAdminMicheleClickup(request, env); break;
+
+    case '/api/admin/test-scan-report':
+      response = await handleAdminTestScanReport(request, env, ctx); break;
 
     case '/api/check-legacy-script':
       response = await handleCheckLegacyScript(request, env); break;
