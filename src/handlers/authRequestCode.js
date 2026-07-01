@@ -77,6 +77,25 @@ export async function handleAuthRequestCode(request, env, ctx) {
   const code = generateCode();
   const salt = env.OTP_SECRET || 'dev-otp-secret';
 
+  // --- Fixed-code test/review account (e.g. Google app review) ---
+  // For a single allow-listed email, issue a deterministic code and skip sending
+  // an email, so reviewers can log in repeatedly with a code we hand them.
+  // verify-code is untouched: it still validates the hash and consumes the row
+  // normally — this only forces the code value and bypasses the Brevo send.
+  // Gated entirely by env: does nothing unless TEST_LOGIN_EMAIL + TEST_LOGIN_CODE are set.
+  const testEmail = (env.TEST_LOGIN_EMAIL || '').trim().toLowerCase();
+  const testCode = (env.TEST_LOGIN_CODE || '').trim();
+  if (testEmail && testCode && email === testEmail && purpose === 'login') {
+    const ttlMinutes = Number(env.OTP_TTL_MINUTES || 10) || 10;
+    const fixedHash = await sha256Hex(`${purpose}|${email}|${testCode}|${salt}`);
+    const fixedRow = await createEmailVerificationCode(db, { email, purpose, codeHash: fixedHash, name: null, ttlMinutes });
+    console.log('[AuthRequestCode] test-login: issued fixed code (email skipped) for', email, 'requestId', fixedRow.id);
+    return Response.json(
+      { success: true, requestId: fixedRow.id, expiresAt: fixedRow.expiresAt },
+      { status: 200 },
+    );
+  }
+
   // Run user lookup and hash computation in parallel — neither depends on the other
   const [existingUser, codeHash] = await Promise.all([
     getUserByEmail(db, email),

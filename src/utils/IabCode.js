@@ -66,8 +66,6 @@ export function getLoaderIabScript(customization, opts = {}, isGAC = false) {
  */
 const BASE_URL = "https://test-cmp.pages.dev/";
 
-
-
 // Google Additional Consent (AC) toggle — baked from the isGAC build argument.
 const IS_GAC = ${isGoogleAC};
 window.__cbIsGAC = IS_GAC;
@@ -151,7 +149,6 @@ function injectStyles() {
 .consentBit-vendor-item{padding:16px;border:1px solid #f0f0f0;border-radius:\${brSm};background:#fafafa;transition:all .2s ease;animation:consentBit-fadeIn .3s ease}
 .consentBit-vendor-item:hover{border-color:\${s.SecButtonColor};background:#fff;box-shadow:0 4px 12px rgba(0,0,0,.1)}
 .consentBit-vendor-item.consentBit-hidden{display:none!important}
-.consentBit-vendor-item{content-visibility:auto;contain-intrinsic-size:auto 90px}
 .consentBit-vendor-header{display:flex;justify-content:space-between;align-items:center;gap:16px}
 .consentBit-vendor-info{flex:1}
 .consentBit-vendor-name{font-weight:600;font-size:15px;color:\${s.headingColor};margin-bottom:4px}

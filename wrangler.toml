@@ -89,6 +89,12 @@ ADMIN_SECRET = "cb-admin-7Kp2vQ8mNx9LtR5yJ4hB6fW1aZ3sE0d"
 # Base URL of the cb-server (app.consentbit.com) for internal calls.
 CB_SERVER_BASE_URL = "https://app.consentbit.com"
 
+# Fixed-OTP review/test account. When both are set, request-code issues this exact
+# code for this one email and skips sending an email (see authRequestCode.js).
+# Leave blank to disable. The matching User row must exist in the DB.
+TEST_LOGIN_EMAIL = "test@consentbit.com"
+TEST_LOGIN_CODE = "424242"
+
 # Public Worker URL for stored embed `<script src>` (no trailing slash). Prefer setting **CDN_BASE_URL**
 # in Cloudflare → Workers → your worker → Settings → Variables (so production isn’t tied to this file).
 # If unset here and not in the dashboard, the Worker uses `request.url.origin` (OK when the API is called on the worker hostname).
@@ -153,6 +159,10 @@ ADMIN_SECRET = "cb-admin-7Kp2vQ8mNx9LtR5yJ4hB6fW1aZ3sE0d"
 CB_SERVER_BASE_URL = "https://app.consentbit.com"
 CDN_BASE_URL = ""
 WEBAPP_PUBLIC_URL = ""
+
+# Fixed-OTP review/test account (see top-level [vars] for details).
+TEST_LOGIN_EMAIL = "test@consentbit.com"
+TEST_LOGIN_CODE = "424242"
 
 # ── Live Stripe price IDs (replace with your live dashboard IDs) ──
 STRIPE_PRICE_BASIC_MONTHLY    = "price_1TWgLfJwcuG9163MoWMXTzwk"
