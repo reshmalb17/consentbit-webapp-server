@@ -917,6 +917,20 @@ export async function handleStripeWebhook(request, env, ctx) {
               });
             }
 
+            // Trial cancellation — fires at click time, not at trial end. The app cancels via
+            // cancel_at_period_end, so the sub stays 'trialing' now and only deletes 14 days later.
+            // Catch the intent here: cancel flag just flipped true while still in the trial.
+            if (sub.status === 'trialing' && sub.cancel_at_period_end === true && (event.data.previous_attributes || {}).cancel_at_period_end === false) {
+              await capturePostHogEvent(env, _phEmail, 'trial_cancelled', {
+                plan: planIdFromMeta,
+                interval: intervalFromSub,
+                site_id: existing?.siteId ?? existing?.siteid ?? null,
+                org_id: orgIdFinal,
+                platform: _phPlatform,
+                $set: { did_cancel_in_trial: true, trial_cancelled_at: new Date().toISOString() },
+              });
+            }
+
             const previousPlanId = existing?.planId ?? existing?.planid ?? null;
             if (planIdFromMeta && previousPlanId && planIdFromMeta !== previousPlanId) {
               const planOrder = { basic: 1, essential: 2, growth: 3 };
@@ -939,19 +953,6 @@ export async function handleStripeWebhook(request, env, ctx) {
               org_id: orgIdFinal,
               ...(_phPlatform ? { platform: _phPlatform } : {}),
             });
-            // Trial abandonment: canceled during the 14-day trial (ended at/before trial_end),
-            // i.e. never reached a paid charge. Additive — distinguishes "tried but never paid"
-            // from post-payment churn. PostHog-only; subscription_cancelled above is unchanged.
-            const _cancelTs = sub.ended_at || sub.canceled_at || null;
-            const _wasTrialCancel = !!(sub.trial_end && _cancelTs && _cancelTs <= sub.trial_end);
-            if (_wasTrialCancel) {
-              await capturePostHogEvent(env, _phEmail, 'trial_cancelled', {
-                plan: planIdFromMeta,
-                interval: intervalFromSub,
-                org_id: orgIdFinal,
-                platform: _phPlatform,
-              });
-            }
             await identifyPostHogPerson(env, _phEmail, {
               subscription_status: 'canceled',
               lifecycle_stage: 'canceled',
