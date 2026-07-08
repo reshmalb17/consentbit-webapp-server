@@ -171,6 +171,36 @@ export async function handleConsent(request, env, ctx) {
   const tcf_core_string      = null;
   const tcf_publisher_string = null;
 
+  // Idempotency guard: the embedded banner script can fire this consent POST twice for a
+  // single click (overlapping click handlers), producing two Consent rows with different
+  // ids but identical details in the same second — showing as duplicate consent-log rows.
+  // If an identical consent (same site + device + regulation + status) was recorded in the
+  // last 10s, return that row instead of inserting a duplicate. Only dedups when a deviceId
+  // is present, so two distinct anonymous visitors are never collapsed.
+  if (body.deviceId) {
+    try {
+      const dupSince = new Date(Date.now() - 10000).toISOString();
+      const existing = await db
+        .prepare(
+          `SELECT id FROM Consent
+           WHERE siteId = ?1 AND deviceId = ?2 AND status = ?3 AND regulation IS ?4 AND createdAt >= ?5
+           ORDER BY createdAt DESC LIMIT 1`,
+        )
+        .bind(siteId, body.deviceId, status, regulation ?? null, dupSince)
+        .first()
+        .catch(() => null);
+      if (existing?.id) {
+        console.log('[Consent] duplicate suppressed — existing id:', existing.id, '| siteId:', siteId, '| status:', status);
+        return new Response(
+          JSON.stringify({ success: true, id: existing.id, deduped: true }),
+          { headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+    } catch (e) {
+      console.warn('[Consent] dedup check failed (inserting anyway):', e?.message);
+    }
+  }
+
   const id = crypto.randomUUID();
 
   console.log('[Consent] inserting row — id:', id, '| siteId:', siteId, '| status:', status, '| regulation:', regulation);

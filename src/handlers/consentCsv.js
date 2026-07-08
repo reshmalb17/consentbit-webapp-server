@@ -90,7 +90,14 @@ export async function handleConsentCsv(request, env) {
     }
 
     const isCcpa = (row.regulation || '').toLowerCase() === 'ccpa' || (cats && cats.ccpa !== undefined);
-    const isAccepted = ['given', 'accepted'].includes((row.status || '').toLowerCase());
+    // Three-way status label — 'partial' must NOT collapse into 'Rejected'.
+    const statusLabel = (() => {
+      const s = (row.status || '').toLowerCase();
+      if (s === 'given' || s === 'accepted') return 'Accepted';
+      if (s === 'rejected') return 'Rejected';
+      if (s === 'partial') return 'Partial';
+      return row.status ? row.status.charAt(0).toUpperCase() + row.status.slice(1) : '';
+    })();
     const token = await createDownloadToken(env.JWT_SECRET, siteId, row.id || '');
     const pdfUrl = `${workerOrigin}/api/consent-pdf?siteId=${encodeURIComponent(siteId)}&consentId=${encodeURIComponent(row.id || '')}&token=${encodeURIComponent(token)}`;
 
@@ -98,7 +105,7 @@ export async function handleConsentCsv(request, env) {
       ${cell(i + 1)}
       ${cell(row.id || '')}
       ${cell(row.createdAt ? new Date(row.createdAt).toUTCString() : '')}
-      ${cell(isAccepted ? 'Accepted' : 'Rejected')}
+      ${cell(statusLabel)}
       ${cell((row.regulation || 'gdpr').toUpperCase())}
       ${cell(row.country || '')}
       ${cell(row.region || '')}

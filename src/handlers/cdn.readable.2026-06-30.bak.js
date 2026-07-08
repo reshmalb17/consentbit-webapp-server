@@ -35,7 +35,7 @@ async function _handleCDNScript(request, env, url) {
 
   const site = await db
     .prepare(
-      'SELECT id, organizationId, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id, pendingScan, updatedAt, platform, platformSiteId, version FROM Site WHERE cdnScriptId = ?1'
+      'SELECT id, organizationId, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id, pendingScan, updatedAt, platform, platformSiteId FROM Site WHERE cdnScriptId = ?1'
     )
     .bind(cdnScriptId)
     .first();
@@ -47,7 +47,7 @@ async function _handleCDNScript(request, env, url) {
   if (!resolvedSite) {
     resolvedSite = await db
       .prepare(
-        'SELECT id, organizationId, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id, pendingScan, updatedAt, platform, platformSiteId, version FROM Site WHERE id = ?1'
+        'SELECT id, organizationId, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id, pendingScan, updatedAt, platform, platformSiteId FROM Site WHERE id = ?1'
       )
       .bind(cdnScriptId)
       .first();
@@ -847,12 +847,6 @@ async function _handleCDNScript(request, env, url) {
   const loader = `
 ${inlineConfig}
 ! function () {
-  // Idempotency guard: if this banner script ends up embedded/executed TWICE on a page
-  // (e.g. a leftover legacy install + the current one), only the FIRST copy initialises.
-  // Without this, both copies bind the banner's click handlers and a single Accept/Reject
-  // fires the /api/consent POST twice → duplicate consent-log rows.
-  if (window.__cbBannerInit) return;
-  window.__cbBannerInit = true;
   var e = window.__CONSENT_SITE__ || {};
   var t = !0;
   ! function () {
@@ -1253,8 +1247,7 @@ ${inlineConfig}
     try {
       var t = 24 * O * 60 * 60 * 1e3;
       e.expiresAt = e.expiresAt || new Date(Date.now() + t).toISOString();
-      localStorage.setItem(I, JSON.stringify(e));
-      localStorage.removeItem(I + "_closed")
+      localStorage.setItem(I, JSON.stringify(e))
     } catch (e) {
     }
     A = e;
@@ -1450,7 +1443,22 @@ ${inlineConfig}
     return "analytics" === t ? !!a.analytics : "marketing" === t || "advertisement" === t ? !!a.marketing : "preferences" !== t && "functional" !== t && "performance" !== t || !!a.preferences
   }
 
-  function cbCatsOk(e){if(!e)return!1;var t=String(e).split(",");for(var n=0;n<t.length;n++){var a=String(t[n]||"").toLowerCase().trim();if(!a)continue;if("personalization"===a)a="preferences";if(!ue(a))return!1}return!0}
+  // Multi-value consent check: a comma-separated category list (e.g. "essential,analytics,
+  // marketing") is satisfied ONLY when every listed category is consented; essential and
+  // unknown tokens count as ok via ue(). Plain ue() can't do this (it returns true for a
+  // raw multi-value string), so multi-value reactivation must route through here to avoid
+  // releasing a script before all its categories are granted.
+  function cbCatsOk(e) {
+    if (!e) return !1;
+    var t = String(e).split(",");
+    for (var n = 0; n < t.length; n++) {
+      var a = String(t[n] || "").toLowerCase().trim();
+      if (!a) continue;
+      if ("personalization" === a) a = "preferences";
+      if (!ue(a)) return !1
+    }
+    return !0
+  }
 
   function ge(e) {
     if (!e) return null;
@@ -1465,10 +1473,24 @@ ${inlineConfig}
       var n = ge(t.getAttribute("data-consentbit"));
       if (n) return n;
       var a = t.getAttribute("data-consentbit-category");
+      // Standard (non-Webflow) mode also accepts data-category (CookieYes-style alias)
+      // so sites tagged with that attribute are gated WITHOUT editing their HTML. Guarded
+      // to non-webflow so webflow behavior is byte-identical (webflow has its own reader).
       if (!a && !window.__CB_WEBFLOW_MODE__) a = t.getAttribute("data-category");
       if (a) {
-        var cbc = [], cbp = String(a).split(",");
-        for (var cbi = 0; cbi < cbp.length; cbi++) { var cbr = String(cbp[cbi] || "").toLowerCase().trim(); if (!cbr) continue; var cbg = ge("personalization" === cbr ? "preferences" : cbr); if (cbg) for (var cbj = 0; cbj < cbg.length; cbj++) if (cbc.indexOf(cbg[cbj]) === -1) cbc.push(cbg[cbj]); }
+        // Parse comma-separated multi-category values into the full set. Returning every
+        // listed category lets ye() block until ALL non-essential ones are consented;
+        // "essential" never forces blocking on its own (fe('essential') === false), so a
+        // mixed list like "essential,analytics" can NOT leak.
+        var cbc = [];
+        var cbp = String(a).split(",");
+        for (var cbi = 0; cbi < cbp.length; cbi++) {
+          var cbr = String(cbp[cbi] || "").toLowerCase().trim();
+          if (!cbr) continue;
+          var cbg = ge("personalization" === cbr ? "preferences" : cbr);
+          if (cbg) for (var cbj = 0; cbj < cbg.length; cbj++)
+            if (cbc.indexOf(cbg[cbj]) === -1) cbc.push(cbg[cbj]);
+        }
         if (cbc.length) return cbc
       }
       var i = ge(t.getAttribute("data-cookieyes"));
@@ -2463,26 +2485,6 @@ ${inlineConfig}
     }
   }
 
-  // Cc(): should the banner stay closed (suppressed) on this page load? The user
-  // dismissed it via the close (X) button WITHOUT consenting (A.accepted stays false,
-  // so non-essential scripts remain blocked the whole time).
-  //   - Floating logo ENABLED (De() true): stay closed indefinitely — the logo is the
-  //     reopen path, so the banner never auto-returns.
-  //   - Floating logo DISABLED: stay closed for 24h, then re-show so the visitor still
-  //     has a way to consent (no dead-end when there's no logo to reopen with).
-  function Cc() {
-    try {
-      var t = parseInt(localStorage.getItem(I + "_closed") || "0", 10);
-      if (!t) return !1;
-      if (De()) return !0;
-      if (Date.now() - t < 864e5) return !0;
-      localStorage.removeItem(I + "_closed");
-      return !1
-    } catch (e) {
-      return !1
-    }
-  }
-
   function Me() {
     try {
       if (l && l.bannerLogoPosition) return "right" === l.bannerLogoPosition ? "right" : "left";
@@ -2707,11 +2709,9 @@ ${inlineConfig}
     var v = document.getElementById("cb-close-initial-btn");
     var y = document.getElementById("cb-close-prefs-btn");
     v && v.addEventListener("click", function () {
-      try { localStorage.setItem(I + "_closed", String(Date.now())) } catch (e) {}
       p()
     });
     y && y.addEventListener("click", function () {
-      try { localStorage.setItem(I + "_closed", String(Date.now())) } catch (e) {}
       p()
     });
     d && l && l.addEventListener("click", function () {
@@ -2898,7 +2898,7 @@ ${inlineConfig}
     }
     if (!window.__CB_WEBFLOW_MODE__) {
       if (o)
-        if (A.accepted || Cc()) {
+        if (A.accepted) {
           Xe();
           var t = document.getElementById("cb-floating-trigger");
           t && (t.style.display = "flex");
@@ -2910,7 +2910,7 @@ ${inlineConfig}
         } else qe();
     } else {
       Xe();
-      if (A.accepted || Cc()) {
+      if (A.accepted) {
         var Hb = document.getElementById("cb-initial-banner");
         if (Hb) {
           Hb.style.setProperty("display", "none", "important");
@@ -2961,7 +2961,6 @@ ${inlineConfig}
             if (isReset) {
               try {
                 localStorage.removeItem(I);
-                localStorage.removeItem(I + "_closed");
                 A = {
                   accepted: !1,
                   timestamp: null
@@ -3005,7 +3004,7 @@ ${inlineConfig}
   // ETag must change whenever banner customization/translation changes.
   // `Site.updatedAt` does not always update when only BannerCustomization changes, so include both.
   // Also include a script version so CDN logic changes propagate even when site/customization did not change.
-  const SCRIPT_VERSION = '2026-07-01-close-persist-floatinglogo-24h';
+  const SCRIPT_VERSION = '2026-06-11-gpc-ccpa-optout-nonus-hidefloat';
   const customizationUpdatedAt = customization?.updatedAt || customization?.updated_at || '';
   const translationsSig = await (async () => {
     try {
@@ -3053,12 +3052,7 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
   // so the IAB UI is never served.
   const iabAllowed = effectivePlanId === 'growth' || effectivePlanId === 'essential';
   const wantsIab = String(resolvedSite.banner_type || '').toLowerCase() === 'iab';
-  const rawIsWebflow = String(resolvedSite.platform || '').toLowerCase() === 'webflow';
-  // Webflow v2 sites use the standard loader (with Consent Mode bootstrap) instead of
-  // the Webflow-specific loader. Treat a v2 Webflow site as non-Webflow for loader
-  // selection so it falls through to the 'standard' path.
-  const isWebflowV2 = rawIsWebflow && String(resolvedSite.version || '').toLowerCase() === 'v2';
-  const isWebflow = rawIsWebflow && !isWebflowV2;
+  const isWebflow = String(resolvedSite.platform || '').toLowerCase() === 'webflow';
   const serveKind = (wantsIab && iabAllowed && isWebflow) ? 'iabwebflow'
     : (wantsIab && iabAllowed) ? 'iab'
     : isWebflow ? 'webflow'
@@ -3067,8 +3061,6 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
     wantsIab,
     iabAllowed,
     isWebflow,
-    isWebflowV2,
-    version: resolvedSite.version || null,
     plan: effectivePlanId,
     orgId: orgIdForDebug,
     subscriptionStatus: subStatusForDebug,

@@ -2071,12 +2071,67 @@ function closeModal() {
 function openModal() {
     document.getElementById('cbPreferenceModal').classList.remove('cb-modal-hidden');
 }
+// Record IAB/TCF consent to the backend. The external TCF manager (Tcfmanager.js)
+// only writes to localStorage + gtag + fires TCF events; it never POSTs, so without
+// this the IAB banner creates no Consent row. status: 'given' (accept) |
+// 'rejected' (reject) | 'partial' (save preferences). Mirrors the standard loader re().
+function cbRecordIabConsent(status, categories) {
+  try {
+    var cfg = (typeof window !== 'undefined' && window.__CONSENT_SITE__) || {};
+    var siteId = cfg.id || null;
+    var apiBase = cfg.apiBase;
+    if (!siteId || !apiBase) return;
+
+    var tcf = {};
+    try {
+      if (window.tcfManager && typeof window.tcfManager.getTCData === 'function') {
+        var d = window.tcfManager.getTCData();
+        tcf = {
+          version: 2,
+          cmpId: d && d.cmpId,
+          cmpVersion: d && d.cmpVersion,
+          consentScreen: 1,
+          publisherCc: d && d.publisherCC,
+          purposesConsent: d && d.purpose && d.purpose.consents,
+          purposesLI: d && d.purpose && d.purpose.legitimateInterests,
+          specialFeatures: d && d.specialFeatureOptins,
+          vendorsConsent: d && d.vendor && d.vendor.consents,
+          vendorsLI: d && d.vendor && d.vendor.legitimateInterests
+        };
+      }
+    } catch (e) {}
+
+    var body = {
+      siteId: siteId,
+      regulation: 'gdpr',
+      // Persist IAB/TCF consent as a plain GDPR record, not as bannerType 'iab'.
+      bannerType: 'gdpr',
+      consentMethod: status === 'partial' ? 'preferences' : 'banner',
+      status: status,
+      expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+      consent: {
+        accepted: status !== 'rejected',
+        timestamp: new Date().toISOString(),
+        categories: categories || { essential: true, analytics: false, marketing: false, preferences: false }
+      },
+      tcf: tcf
+    };
+
+    fetch(apiBase + '/api/consent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).catch(function () {});
+  } catch (e) {}
+}
+
 async function rejectAll() {
   // console.log('[ConsentBit][RejectAll] 🚫 User rejected all — blocking all non-essential scripts');
   if (!window.tcfManager) { return; }
   await window.tcfManager.rejectAll();
   window.__cbConsentState = { allDenied: true };
   // console.log('[ConsentBit][RejectAll] __cbConsentState set:', window.__cbConsentState);
+  cbRecordIabConsent('rejected', { essential: true, analytics: false, marketing: false, preferences: false });
   blockNonEssentialScripts();
 
     const wrapper = document.querySelector('.main-iab-wrapper');
@@ -2167,6 +2222,13 @@ async function savePreferences() {
     // console.log('[ConsentBit][SavePrefs] 💾 Preferences saved — __cbConsentState:', JSON.stringify(window.__cbConsentState));
     // console.log('[ConsentBit][SavePrefs] cookieCategories:', JSON.stringify(preferences.cookieCategories));
 
+    cbRecordIabConsent('partial', {
+      essential: true,
+      analytics:    !!(preferences.cookieCategories.analytics     && preferences.cookieCategories.analytics.enabled),
+      marketing:    !!(preferences.cookieCategories.advertisement && preferences.cookieCategories.advertisement.enabled),
+      preferences:  !!(preferences.cookieCategories.functional    && preferences.cookieCategories.functional.enabled)
+    });
+
     // Re-block any scripts whose category was just denied, then release those now allowed
     blockNonEssentialScripts();
     releaseBlockedScripts();
@@ -2180,6 +2242,7 @@ async function acceptAll() {
   await window.tcfManager.acceptAll();
   window.__cbConsentState = { allGranted: true };
   // console.log('[ConsentBit][AcceptAll] __cbConsentState set:', window.__cbConsentState);
+  cbRecordIabConsent('given', { essential: true, analytics: true, marketing: true, preferences: true });
   releaseBlockedScripts();
  const wrapper = document.querySelector('.main-iab-wrapper');
   if (wrapper) {

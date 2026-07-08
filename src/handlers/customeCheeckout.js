@@ -36,6 +36,7 @@ import {
 } from '../services/db.js';
 import { injectScriptIntoWebflowHead } from './webflowFreeRegister.js';
 import { sendPaidPlanEmail } from '../services/email.js';
+import { addCustomerToClickUp, wasClickUpTaskCreated, markClickUpTaskCreated } from '../services/clickup.js';
 
 const VALID_PLAN_IDS = ['basic', 'essential', 'growth'];
 
@@ -185,10 +186,43 @@ async function findOrCreateStripeCustomer(secret, email, paymentMethodId) {
 }
 
 /**
+ * Cancel the OLD Stripe subscription after an upgrade created a new one, so the
+ * customer isn't billed for two plans. Immediate cancel (the user is now on the
+ * new plan). Also removes the stale D1 row if it wasn't overwritten. Never throws.
+ */
+async function cancelOldStripeSubscription(secret, oldSubId, newSubId, db) {
+  if (!secret || !oldSubId || oldSubId === newSubId) return;
+  try {
+    const res = await fetch(`https://api.stripe.com/v1/subscriptions/${oldSubId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${secret}` },
+    });
+    const data = await res.json().catch(() => null);
+    if (data?.error && data.error.code !== 'resource_missing') {
+      console.warn('[CustomCheckout] upgrade: Stripe cancel of old sub failed', data.error?.message);
+    } else {
+      console.log('[CustomCheckout] upgrade: cancelled old subscription', oldSubId);
+    }
+    // Keep the old plan's D1 row (marked cancelled) instead of DELETING it, so its billing
+    // history stays tracked to the site — otherwise the pre-upgrade plan's invoices vanish
+    // from the UI, and the only way to show them would be to include untracked orphans.
+    // resolveSubscription() already prefers the active/newest row, so a leftover cancelled
+    // row never becomes the "current" plan.
+    await db
+      .prepare("UPDATE Subscription SET status = 'canceled', cancelAtPeriodEnd = 1, updatedAt = ?2 WHERE stripeSubscriptionId = ?1")
+      .bind(oldSubId, new Date().toISOString())
+      .run()
+      .catch(() => {});
+  } catch (e) {
+    console.warn('[CustomCheckout] upgrade: could not cancel old subscription', e?.message);
+  }
+}
+
+/**
  * After payment succeeds: find or create user account, create/get site, save subscription.
  * Order: payment already processed → create user → create org → create site → save sub → create session
  */
-async function provisionAccount(db, env, request, {
+async function provisionAccount(db, env, request, ctx, {
   email,
   domain,
   siteName,
@@ -248,6 +282,33 @@ async function provisionAccount(db, env, request, {
     amountCents: amountCents ?? null,
   });
 
+  // Add customer to ClickUp on new paid checkout. The Stripe webhook only creates a
+  // ClickUp task for the `checkout.session.completed` path; this direct (custom) checkout
+  // flow bypasses that webhook, so we mirror the call here. Background via ctx.waitUntil
+  // so checkout finalization isn't delayed; falls back to fire-and-forget if no ctx.
+  // Deduped by Stripe subscription id so the customer.subscription.updated webhook
+  // (which is the safety net for direct-checkout subscribers) doesn't add a duplicate.
+  {
+    const _clickup = (async () => {
+      if (stripeSubscriptionId && await wasClickUpTaskCreated(env, stripeSubscriptionId)) return;
+      const added = await addCustomerToClickUp(env, {
+        email:          billingEmail || email || null,
+        name:           user?.name || '',
+        platform,
+        plan:           planId || null,
+        interval,
+        domain,
+        amountCents:    amountCents ?? null,
+        currency:       'usd',
+        subscriptionId: stripeSubscriptionId || null,
+        customerId:     stripeCustomerId || null,
+        isFirstPurchase: isNewUser,
+      }).catch(() => false);
+      if (added && stripeSubscriptionId) await markClickUpTaskCreated(env, stripeSubscriptionId);
+    })();
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(_clickup);
+  }
+
   // Store billingEmail and platformSiteId on Site
   const billingEmailToStore = billingEmail || null;
   const platformSiteIdToStore = wfSiteId || null;
@@ -285,7 +346,7 @@ async function provisionAccount(db, env, request, {
  *   webAppSiteId, userId, cdnScriptId, paid: true
  * Everything else in the existing KV value is preserved.
  */
-async function persistPaidStatusToKv(env, { platform, platformSiteId, site, user }) {
+async function persistPaidStatusToKv(env, { platform, platformSiteId, site, user, planId }) {
   if (!platformSiteId) return;
   const p = String(platform || '').toLowerCase();
   const kv = p === 'framer' ? env.AUTH_STORE_FRAMER : env.WEBFLOW_AUTHENTICATION;
@@ -308,13 +369,16 @@ async function persistPaidStatusToKv(env, { platform, platformSiteId, site, user
       userId: user.id,
       cdnScriptId: site.cdnScriptId ?? site.cdnscriptid ?? null,
       paid: true,
+      // Stamp the plan so the Webflow status endpoint can fall back to KV when the
+      // D1 Subscription row isn't found (DB-first → KV-fallback).
+      ...(planId ? { plan: planId } : {}),
     };
     const merged = existing && typeof existing === 'object'
       ? { ...existing, ...newFields }
       : newFields;
 
     await kv.put(platformSiteId, JSON.stringify(merged));
-    console.log('[CustomCheckout] paid-status KV updated', { platform: p || 'webflow', platformSiteId, mergedWithExisting: !!existing });
+    console.log('[CustomCheckout] paid-status KV updated', { platform: p || 'webflow', platformSiteId, plan: planId || null, mergedWithExisting: !!existing });
   } catch (e) {
     console.error('[CustomCheckout] persistPaidStatusToKv failed', e?.message);
   }
@@ -364,7 +428,7 @@ async function persistPaidStatusToKv(env, { platform, platformSiteId, site, user
 //   }
 // }
 
-async function postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }) {
+async function postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail, planId }) {
   console.log('[CustomCheckout] postCheckoutWebflowInject start', { wfSiteId, siteId: site?.id, cdnScriptId: site?.cdnScriptId });
   if (!wfSiteId || !env.WEBFLOW_AUTHENTICATION) {
     console.warn('[CustomCheckout] postCheckoutWebflowInject skipped: missing wfSiteId or WEBFLOW_AUTHENTICATION binding');
@@ -397,6 +461,8 @@ async function postCheckoutWebflowInject(env, { wfSiteId, site, request, user, b
       ...(result.webflowScriptId ? { webflowScriptId: result.webflowScriptId } : {}),
       ...(user?.email ? { email: user.email } : {}),
       ...(billingEmail ? { billingEmail } : {}),
+      // Stamp the plan so the Webflow status endpoint's KV fallback can read it.
+      ...(planId ? { plan: planId } : {}),
     };
     await env.WEBFLOW_AUTHENTICATION.put(wfSiteId, JSON.stringify(updatedKv));
     console.log('[CustomCheckout] postCheckoutWebflowInject KV updated with webappSiteId:', site.id);
@@ -508,6 +574,7 @@ export async function handleCustomCheckout(request, env, ctx) {
 
   // ── Pre-payment domain check ───────────────────────────────────────────────
   // Run this before touching Stripe so we never charge for a domain conflict.
+  let oldStripeSubscriptionId = null; // set when confirmUpgrade replaces an existing active sub
   if (!subscriptionId) { // skip on phase-2 (3DS confirm) — domain was already checked in phase-1
     const canonDomain = normalizeDomain(rawDomain);
     const existingSite = canonDomain
@@ -548,6 +615,10 @@ export async function handleCustomCheckout(request, env, ctx) {
             message: `This domain already has an active ${existingSub?.planId || ''} plan on your account. Set confirmUpgrade: true to upgrade it.`,
           }, { status: 409 });
         }
+        // confirmUpgrade === true → remember the old subscription so we can cancel
+        // it once the new (upgraded) subscription is live — avoids double-billing.
+        oldStripeSubscriptionId = existingSub?.stripeSubscriptionId ?? existingSub?.stripesubscriptionid ?? null;
+        console.log('[CustomCheckout] upgrade confirmed — old sub to cancel:', oldStripeSubscriptionId);
       }
     }
   }
@@ -573,7 +644,7 @@ export async function handleCustomCheckout(request, env, ctx) {
       }, { status: 402 });
     }
     try {
-      const { user, isNewUser, session, site, org } = await provisionAccount(db, env, request, {
+      const { user, isNewUser, session, site, org } = await provisionAccount(db, env, request, ctx, {
         email,
         domain: rawDomain,
         siteName,
@@ -590,8 +661,13 @@ export async function handleCustomCheckout(request, env, ctx) {
         wfSiteId,
         platform,
       });
-      if (wfSiteId && platform === 'webflow') postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(e => console.error('[CustomCheckout] postCheckoutWebflowInject outer error', e?.message));
-      if (platform && wfSiteId) persistPaidStatusToKv(env, { platform, platformSiteId: wfSiteId, site, user }).catch(() => {});
+      if (wfSiteId && platform === 'webflow') postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail, planId }).catch(e => console.error('[CustomCheckout] postCheckoutWebflowInject outer error', e?.message));
+      if (platform && wfSiteId) persistPaidStatusToKv(env, { platform, platformSiteId: wfSiteId, site, user, planId }).catch(() => {});
+      // Upgrade path: cancel the OLD subscription now that the new (upgraded) one is live.
+      if (oldStripeSubscriptionId) {
+        const _p = cancelOldStripeSubscription(secret, oldStripeSubscriptionId, sub?.id, db);
+        if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(_p); else await _p.catch(() => {});
+      }
       const _orgId = org?.id ?? org?.organizationId;
       let _emailTo = billingEmail || email;
       let _emailSource = billingEmail ? 'checkout-billingEmail' : 'account-email';
@@ -706,7 +782,7 @@ export async function handleCustomCheckout(request, env, ctx) {
   // Payment succeeded immediately (trial start or card charged without 3DS)
   if (subStatus === 'active' || subStatus === 'trialing') {
     try {
-      const { user, isNewUser, session, site, org } = await provisionAccount(db, env, request, {
+      const { user, isNewUser, session, site, org } = await provisionAccount(db, env, request, ctx, {
         email,
         domain: rawDomain,
         siteName,
@@ -723,8 +799,13 @@ export async function handleCustomCheckout(request, env, ctx) {
         wfSiteId,
         platform,
       });
-      if (wfSiteId && platform === 'webflow') postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail }).catch(e => console.error('[CustomCheckout] postCheckoutWebflowInject outer error', e?.message));
-      if (platform && wfSiteId) persistPaidStatusToKv(env, { platform, platformSiteId: wfSiteId, site, user }).catch(() => {});
+      if (wfSiteId && platform === 'webflow') postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail, planId }).catch(e => console.error('[CustomCheckout] postCheckoutWebflowInject outer error', e?.message));
+      if (platform && wfSiteId) persistPaidStatusToKv(env, { platform, platformSiteId: wfSiteId, site, user, planId }).catch(() => {});
+      // Upgrade path: cancel the OLD subscription now that the new (upgraded) one is live.
+      if (oldStripeSubscriptionId) {
+        const _p = cancelOldStripeSubscription(secret, oldStripeSubscriptionId, sub?.id, db);
+        if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(_p); else await _p.catch(() => {});
+      }
       const _orgId = org?.id ?? org?.organizationId;
       let _emailTo = billingEmail || email;
       let _emailSource = billingEmail ? 'checkout-billingEmail' : 'account-email';
@@ -791,16 +872,22 @@ export async function handleCustomCheckout(request, env, ctx) {
 // frontend can show "Coupon X — −20%" and re-send the promotionCodeId on
 // checkout. Server-side re-validates the code before applying.
 export async function handleValidateCoupon(request, env) {
+  console.log('[ValidateCoupon] request received', { method: request.method, url: request.url });
+
   const secret = trimEnv(env.STRIPE_SECRET_KEY);
   if (!secret) {
+    console.error('[ValidateCoupon] STRIPE_SECRET_KEY not set on worker — cannot validate');
     return Response.json({ valid: false, error: 'Stripe not configured' }, { status: 503 });
   }
+  console.log('[ValidateCoupon] stripe key present', { keyPrefix: secret.slice(0, 7) });
 
   const url = new URL(request.url);
   const code = (url.searchParams.get('code') || '').trim();
   if (!code) {
+    console.warn('[ValidateCoupon] no code provided');
     return Response.json({ valid: false, error: 'code required' }, { status: 400 });
   }
+  console.log('[ValidateCoupon] looking up code', { code });
 
   let promo = null;
   try {
@@ -816,6 +903,7 @@ export async function handleValidateCoupon(request, env) {
       { headers: { Authorization: `Bearer ${secret}` } },
     );
     const data = await res.json();
+    console.log('[ValidateCoupon] stripe responded', { httpStatus: res.status, matches: data?.data?.length ?? 0 });
     if (data?.error) {
       console.warn('[ValidateCoupon] Stripe list error', data.error?.message);
       return Response.json({ valid: false, error: data.error.message || 'Coupon lookup failed' }, { status: 400 });
@@ -827,13 +915,21 @@ export async function handleValidateCoupon(request, env) {
   }
 
   if (!promo || !promo.active) {
+    console.log('[ValidateCoupon] no active promo found', { found: !!promo, active: promo?.active ?? false });
     return Response.json({ valid: false, error: 'Invalid or expired code' }, { status: 200 });
   }
 
   const c = promo.coupon || {};
+  console.log('[ValidateCoupon] valid promo', {
+    promotionCodeId: promo.id,
+    couponId: c.id || null,
+    percentOff: c.percent_off ?? null,
+    amountOff: c.amount_off ?? null,
+  });
   return Response.json({
     valid: true,
     promotionCodeId: promo.id,           // promo_xxx — send back on checkout
+    couponId: c.id || null,              // coupon_xxx — required by frontend as fallback
     code: promo.code,
     name: c.name || promo.code,
     percentOff: c.percent_off ?? null,

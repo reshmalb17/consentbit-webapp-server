@@ -88,7 +88,49 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
  * Returns ALL cookies from ALL domains (including third-party ad/tracking cookies),
  * all script URLs loaded by the page, and the page HTML.
  */
-async function scanWithBrowser(browserBinding, scanUrl) {
+// Click the cookie-banner "Accept all" button so consent-gated tags (GA, Meta,
+// Clarity, PostHog, Amplitude, etc.) actually load and drop their cookies. Puppeteer
+// has no :has-text() selector, so matching is done in-page: try the known CMP CSS
+// selectors first (passed from the cmps table), then fall back to button/link text.
+async function tryAcceptConsent(page, cssSelectors) {
+  try {
+    return await page.evaluate((selectors) => {
+      // ConsentBit (and many CMPs) render the banner inside an OPEN shadow root, which
+      // document.querySelector does not pierce. Walk the whole tree including shadow roots.
+      const allElements = () => {
+        const out = [];
+        const walk = (root) => {
+          let nodes;
+          try { nodes = root.querySelectorAll('*'); } catch (_) { return; }
+          for (const n of nodes) {
+            out.push(n);
+            if (n.shadowRoot) walk(n.shadowRoot);
+          }
+        };
+        walk(document);
+        return out;
+      };
+      const els = allElements();
+      const clickIfVisible = (el) => {
+        if (!el) return false;
+        try { el.click(); return true; } catch (_) { return false; }
+      };
+      // Match ONLY ConsentBit's own accept-all button ids, across shadow DOM.
+      for (const sel of selectors) {
+        for (const el of els) {
+          let m = false;
+          try { m = el.matches(sel); } catch (_) { m = false; }
+          if (m && clickIfVisible(el)) return `selector:${sel}`;
+        }
+      }
+      return null;
+    }, cssSelectors);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function scanWithBrowser(browserBinding, scanUrl, options = {}) {
   const browser = await puppeteer.launch(browserBinding);
   try {
     const page = await browser.newPage();
@@ -102,90 +144,164 @@ async function scanWithBrowser(browserBinding, scanUrl) {
       window.chrome = { runtime: {} };
     });
 
+    // For a consented scan we click the banner's "Accept" — which also fires ConsentBit's
+    // consent-logging POST. Intercept requests so we can ABORT that POST: the accept still
+    // unblocks the tags (cookie detection works), but the scan never writes a fake
+    // "Accepted" row into the site's consent logs.
+    const CONSENT_POST_RE = /\/api\/consent(?:[/?#]|$)|\/cmp\/consent/i;
+    if (options.acceptConsent) {
+      try { await page.setRequestInterception(true); } catch (_) { /* interception unsupported — proceed */ }
+    }
+
     const scriptUrls = new Set();
     page.on('request', (req) => {
       try {
+        const u = req.url();
         if (
           req.resourceType() === 'script' &&
-          req.url().indexOf('consentbit') === -1 &&
-          req.url().indexOf('client_data') === -1
+          u.indexOf('consentbit') === -1 &&
+          u.indexOf('client_data') === -1
         ) {
-          scriptUrls.add(req.url());
+          scriptUrls.add(u);
         }
-      } catch (_) {}
+        // When interception is on (consented scan) every request MUST be resolved.
+        if (options.acceptConsent) {
+          if (req.method() === 'POST' && CONSENT_POST_RE.test(u)) {
+            req.abort().catch(() => {});
+          } else {
+            req.continue().catch(() => {});
+          }
+        }
+      } catch (_) {
+        try { if (options.acceptConsent) req.continue(); } catch (_) {}
+      }
     });
 
-    await page.goto(scanUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+    // Use domcontentloaded (NOT networkidle2): tracking-heavy sites beacon continuously,
+    // so the network never goes idle and networkidle2 waits the full timeout — which, with
+    // the accept + reload + settle waits below, pushes the whole scan past the Worker
+    // waitUntil budget (the background task gets cancelled and the scan never completes).
+    // The fixed settle wait below gives the page time to load its scripts.
+    await page.goto(scanUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
     // Scroll to trigger lazy-loaded ad scripts, then wait again
     try {
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     } catch (_) {}
-    await new Promise((r) => setTimeout(r, 8000));
+    await new Promise((r) => setTimeout(r, options.acceptConsent ? 3000 : 8000));
 
-    // Try CDP Network.getAllCookies first (gets third-party cookies too)
-    // Fall back to page.cookies() if CDP is not supported
-    let rawCookies = [];
-    try {
-      const client = await page.createCDPSession();
-      const { cookies } = await client.send('Network.getAllCookies');
-      rawCookies = cookies;
-    } catch (cdpErr) {
-      console.warn('[ScanSite] CDP getAllCookies failed, falling back to page.cookies():', cdpErr.message);
+    // Read the cookie jar at the current moment: CDP Network.getAllCookies (captures
+    // third-party cookies too) with a page.cookies() fallback, plus document.cookie.
+    const readJar = async () => {
+      let raw = [];
       try {
-        rawCookies = await page.cookies();
-      } catch (e2) {
-        console.error('[ScanSite] page.cookies() also failed:', e2.message);
+        const client = await page.createCDPSession();
+        const { cookies } = await client.send('Network.getAllCookies');
+        raw = cookies;
+      } catch (cdpErr) {
+        console.warn('[ScanSite] CDP getAllCookies failed, falling back to page.cookies():', cdpErr.message);
+        try { raw = await page.cookies(); } catch (e2) { console.error('[ScanSite] page.cookies() also failed:', e2.message); }
+      }
+      let docStrings = [];
+      try {
+        const rawDocCookie = await page.evaluate(() => {
+          try { return (typeof document !== 'undefined' && document.cookie) ? document.cookie : ''; }
+          catch (_) { return ''; }
+        });
+        if (rawDocCookie) docStrings = String(rawDocCookie).split(';').map((s) => s.trim()).filter(Boolean);
+      } catch (_) {}
+      return {
+        rawCookies: raw.map((c) => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain ? c.domain.replace(/^\./, '') : null,
+          path: c.path || '/',
+          expires: c.expires && c.expires > 0 ? new Date(c.expires * 1000).toISOString() : null,
+          httpOnly: Boolean(c.httpOnly),
+          secure: Boolean(c.secure),
+          sameSite: c.sameSite || null,
+        })),
+        documentCookieStrings: docStrings,
+      };
+    };
+
+    // Two-phase for consented scans: capture the jar BEFORE accepting (pre-consent),
+    // then click "Accept all" so gated tags fire, wait, and capture again (post-consent).
+    // Non-consent scans just read the jar once.
+    let preJar = null;
+    let consentClicked = null;
+    if (options.acceptConsent) {
+      preJar = await readJar();
+      consentClicked = await tryAcceptConsent(page, options.acceptSelectors || []);
+      console.log('[ScanSite] consent accept attempt:', consentClicked || 'no button found');
+      if (consentClicked) {
+        // Let the consent choice persist (cookie/localStorage), then RELOAD so the now-
+        // unblocked tags initialise from the start of a fresh pageview and drop their
+        // cookies — clicking Accept mid-page usually doesn't retro-load blocked scripts.
+        await new Promise((r) => setTimeout(r, 2000));
+        // Use domcontentloaded (NOT networkidle2): once tags fire they beacon continuously,
+        // so the network never goes idle and networkidle2 would hang until timeout.
+        try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }); } catch (_) {}
+        try { await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)); } catch (_) {}
+        await new Promise((r) => setTimeout(r, 6000));
       }
     }
 
+    const postJar = await readJar();
     let html = '';
-    let documentCookieStrings = [];
     try { html = await page.content(); } catch (_) {}
-    try {
-      const rawDocCookie = await page.evaluate(() => {
-        try {
-          return (typeof document !== 'undefined' && document.cookie) ? document.cookie : '';
-        } catch (_) {
-          return '';
-        }
-      });
-      if (rawDocCookie) {
-        documentCookieStrings = String(rawDocCookie)
-          .split(';')
-          .map((s) => s.trim())
-          .filter(Boolean);
-      }
-    } catch (_) {}
 
     return {
-      rawCookies: rawCookies.map((c) => ({
-        name: c.name,
-        value: c.value,
-        domain: c.domain ? c.domain.replace(/^\./, '') : null,
-        path: c.path || '/',
-        expires: c.expires && c.expires > 0 ? new Date(c.expires * 1000).toISOString() : null,
-        httpOnly: Boolean(c.httpOnly),
-        secure: Boolean(c.secure),
-        sameSite: c.sameSite || null,
-      })),
-      documentCookieStrings,
+      rawCookies: postJar.rawCookies,
+      documentCookieStrings: postJar.documentCookieStrings,
+      preRawCookies: preJar ? preJar.rawCookies : [],
+      preDocumentCookieStrings: preJar ? preJar.documentCookieStrings : [],
       scripts: [...scriptUrls],
       html,
+      consentClicked,
     };
   } finally {
     await browser.close().catch(() => {});
   }
 }
 
-async function performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId, customRules) {
+// Load the "Accept all" CSS selectors from the shared cookie-scanner DB (cmps table),
+// with the ConsentBit selector first. Best-effort — the in-page text fallback covers misses.
+// Scanned sites always run the ConsentBit banner, so match ONLY its own accept-all
+// button ids (from consent.js) — no generic multi-CMP guessing.
+function loadAcceptSelectors() {
+  return [
+    '#cb-accept-all-btn',              // GDPR "Accept all"
+    '#consebit-ccpa-prefrence-accept', // CCPA preference accept
+  ];
+}
+
+async function performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId, customRules, options = {}) {
   const scanStartTime = Date.now();
   const siteHints = hostHintsFromSiteDomain(site?.domain ?? site?.DOMAIN ?? '');
   try {
-    const browserResult = await scanWithBrowser(env.BROWSER, scanUrl);
+    const scanOptions = { ...options };
+    if (options.acceptConsent) scanOptions.acceptSelectors = loadAcceptSelectors();
+    const browserResult = await scanWithBrowser(env.BROWSER, scanUrl, scanOptions);
     const cookies = [];
     const scripts = [];
 
     for (const s of browserResult.scripts) scripts.push(s);
+
+    // Two-phase consented scans: build the set of cookie keys that existed BEFORE the
+    // banner was accepted, so each stored cookie can be tagged pre-consent vs post-consent
+    // via its `source`. A tracking cookie tagged pre-consent = a compliance red flag.
+    const keyOf = (n, d) => `${String(n).toLowerCase()}|${String(d || '').replace(/^\./, '').toLowerCase()}`;
+    const preConsentKeys = new Set();
+    if (options.acceptConsent) {
+      for (const c of (browserResult.preRawCookies || [])) if (c?.name) preConsentKeys.add(keyOf(c.name, c.domain));
+      for (const s of (browserResult.preDocumentCookieStrings || [])) {
+        try { const p = parseCookieString(s); if (p?.name) preConsentKeys.add(keyOf(p.name, p.domain)); } catch (_) {}
+      }
+    }
+    const phaseSource = (name, domain, base) =>
+      options.acceptConsent
+        ? `${base}:${preConsentKeys.has(keyOf(name, domain)) ? 'pre-consent' : 'post-consent'}`
+        : base;
 
     for (const raw of browserResult.rawCookies) {
       if (!raw.name) continue;
@@ -196,7 +312,7 @@ async function performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId,
       const provider = String(rule?.provider || autoProvider || '').trim() || null;
       const category = String(rule?.category || autoCategory || 'uncategorized').toLowerCase();
       const description = String(rule?.description || '').trim() || null;
-      const source = rule ? 'user-rule:browser' : 'browser';
+      const source = phaseSource(raw.name, raw.domain, rule ? 'user-rule:browser' : 'browser');
       if (!cookies.find(c => c.name === raw.name && c.domain === raw.domain)) {
         cookies.push({ ...raw, provider, category, description, source, isExpected: false });
       }
@@ -217,7 +333,7 @@ async function performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId,
         const merged = {
           ...parsed,
           domain: parsed.domain || inferredHost || null,
-          source: 'browser:document.cookie',
+          source: phaseSource(parsed.name, parsed.domain || inferredHost, 'browser:document.cookie'),
         };
         const autoProvider = getCookieProvider(merged.name, merged.domain);
         const autoCategory = categorizeCookie(merged.name, merged.domain, autoProvider);
@@ -256,7 +372,14 @@ async function performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId,
   }
 }
 
-export async function handleScanSite(request, env, ctx) {
+// Same contract as handleScanSite but accepts the cookie banner during the scan so
+// consent-gated tags fire and their cookies are captured. Wired to a separate route
+// (/api/scan-site-consented) so the existing /api/scan-site is unchanged.
+export async function handleScanSiteConsented(request, env, ctx) {
+  return handleScanSite(request, env, ctx, { acceptConsent: true });
+}
+
+export async function handleScanSite(request, env, ctx, options = {}) {
   const db = env.CONSENT_WEBAPP;
 
   if (request.method !== 'POST') {
@@ -388,7 +511,7 @@ export async function handleScanSite(request, env, ctx) {
       await incrementScanUsage(db, siteId);
 
       ctx.waitUntil(
-        performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId, customRules)
+        performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId, customRules, options)
           .catch(err => console.error('[ScanSite] Background browser scan failed:', err))
       );
 
@@ -421,7 +544,9 @@ export async function handleScanSite(request, env, ctx) {
     if (env.BROWSER) {
       // ── Full browser scan (Cloudflare Browser Rendering) ──────────────────
       // Captures ALL cookies from ALL domains including third-party ad/tracking cookies.
-      const browserResult = await scanWithBrowser(env.BROWSER, scanUrl);
+      const scanOptions = { ...options };
+      if (options.acceptConsent) scanOptions.acceptSelectors = loadAcceptSelectors();
+      const browserResult = await scanWithBrowser(env.BROWSER, scanUrl, scanOptions);
       html = browserResult.html;
       for (const s of browserResult.scripts) scripts.push(s);
 

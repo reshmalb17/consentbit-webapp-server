@@ -193,6 +193,10 @@ export async function handleBannerCustomization(request, env) {
     const customization = body?.customization;
     const wfSiteId = body?.wfSiteId || postUrl.searchParams.get('wfSiteId') || null;
     const skipScriptSwap = body?.skipScriptSwap === true;
+    // Updated app installs by manual copy-paste and sends manualInstall:true — in
+    // that mode the app must NOT auto-inject the script into the head. Legacy/other
+    // callers omit the flag and keep the original auto-inject behavior.
+    const manualInstall = body?.manualInstall === true;
     // compliance: ['gdpr'], ['us'], ['gdpr','us'] — from Webflow Designer App publish
     const compliance = Array.isArray(body?.compliance) && body.compliance.length ? body.compliance : null;
 
@@ -249,6 +253,16 @@ export async function handleBannerCustomization(request, env) {
 
     try {
       await saveBannerCustomization(db, siteId, customization);
+
+      // Mark the site as v2 whenever the banner is saved from the (new) webapp/Designer app.
+      // This is the "update banner time" trigger that switches legacy Webflow users to the
+      // standard loader in cdn.js (version='v2' → serves loader, not loaderWebflow).
+      try {
+        await db.prepare("UPDATE Site SET version = 'v2', updatedAt = ?1 WHERE id = ?2")
+          .bind(new Date().toISOString(), siteId).run();
+      } catch (versionErr) {
+        console.warn('[BannerCustomization][POST] Failed to set version=v2:', versionErr?.message);
+      }
 
       // Update Site.banner_type and region_mode when compliance is set from the Webflow Designer App.
       // App always includes 'gdpr' (GDPR is forced), so:
@@ -386,7 +400,12 @@ export async function handleBannerCustomization(request, env) {
         // ── Ensure CDN script is injected into Webflow head on every publish/save ──
         // Runs regardless of skipScriptSwap — always verify the script is in the head.
         // skipScriptSwap only suppresses the post-injection Webflow site publish.
+        // manualInstall (updated app) suppresses injection entirely — the user
+        // installs by manual copy-paste, so the app must not add the script.
         try {
+          if (manualInstall) {
+            console.log('[BannerCustomization][POST] manualInstall=true — skipping head injection for webflowSiteId:', webflowSiteId);
+          } else {
           const mainKvRaw = await env.WEBFLOW_AUTHENTICATION.get(webflowSiteId);
           if (mainKvRaw) {
             const mainKvEntry = JSON.parse(mainKvRaw);
@@ -397,6 +416,7 @@ export async function handleBannerCustomization(request, env) {
             }
           } else {
             console.warn('[BannerCustomization][POST] No KV entry found for webflowSiteId:', webflowSiteId);
+          }
           }
         } catch (swapErr) {
           console.error('[BannerCustomization] Script inject error (non-fatal):', swapErr?.message || swapErr);

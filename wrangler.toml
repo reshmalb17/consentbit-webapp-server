@@ -21,6 +21,13 @@ binding = "BANNER_CONFIG_DB"
 database_name = "banner-config-db"
 database_id = "8b467c8c-2ff8-43b5-9338-a4e9191e6014"
 
+# Cookie-scanner DB (same D1 the cookie-scanner worker writes to). Bound here so the
+# auth worker can read a handed-off scan report directly and render its PDF locally.
+[[d1_databases]]
+binding = "COOKIE_SCANNER_DB"
+database_name = "cookie-scanner-db"
+database_id = "b66e816a-d6df-463f-97aa-45ee475f6bbc"
+
 [[kv_namespaces]]
 binding = "WEBFLOW_AUTHENTICATION"
 id = "aa64050ef7804e7783fe9680daae80c5"
@@ -94,6 +101,15 @@ TEST_LOGIN_CODE = "424242"
 CDN_BASE_URL = ""
 # Public origin of your Next.js app (no trailing slash). If set, embed tries https://<WEBAPP>/asset/logo.webp first; on failure it loads /embed/floating-logo.svg from this Worker. If empty, the Worker SVG is used directly.
 WEBAPP_PUBLIC_URL = ""
+# ── Webflow App OAuth (Data Client) — default env (consent-webapp-manager) ───
+#   Secrets (NOT in this file): `wrangler secret put webflow_TEST_CLIENT_ID`
+#                               `wrangler secret put WEBFLOW_CLIENT_TEST_SECRET`
+#   The REDIRECT_URI below must EXACTLY match a Redirect URI registered in the
+#   Webflow App settings. Only needed for NEW installs (authorize/callback);
+#   already-authorized users work from the stored KV/D1 token without secrets.
+WEBFLOW_OAUTH_SCOPES = "sites:read sites:write authorized_user:read custom_code:read custom_code:write"
+WEBFLOW_OAUTH_REDIRECT_URI = "https://consent-webapp-manager.web-8fb.workers.dev/api/webflow/oauth/callback"
+WEBFLOW_APP_REDIRECT = ""
 # --- Tier plans (Basic / Essential / Growth) — one Stripe *subscription* per checkout, one recurring price per line item ---
 # In Stripe Dashboard: create **3 products** (one per tier). Each product has **2 recurring prices** (month + year).
 # Map those six price_ ids here. Checkout uses exactly one price → one subscription for the chosen plan + billing interval.
@@ -152,6 +168,12 @@ ADMIN_SECRET = "cb-admin-7Kp2vQ8mNx9LtR5yJ4hB6fW1aZ3sE0d"
 CB_SERVER_BASE_URL = "https://app.consentbit.com"
 CDN_BASE_URL = ""
 WEBAPP_PUBLIC_URL = ""
+# ── Webflow App OAuth (Data Client) — production env (manager.consentbit.com) ─
+#   Secrets: `wrangler secret put webflow_TEST_CLIENT_ID --env production` (same for WEBFLOW_CLIENT_TEST_SECRET).
+#   REDIRECT_URI must EXACTLY match a Redirect URI registered in the Webflow App settings.
+WEBFLOW_OAUTH_SCOPES = "sites:read sites:write authorized_user:read custom_code:read custom_code:write"
+WEBFLOW_OAUTH_REDIRECT_URI = "https://manager.consentbit.com/api/webflow/oauth/callback"
+WEBFLOW_APP_REDIRECT = ""
 
 # Fixed-OTP review/test account (see top-level [vars] for details).
 TEST_LOGIN_EMAIL = "test@consentbit.com"
@@ -185,6 +207,11 @@ database_id = "3a0cf7e2-34a9-4d06-a5b7-c1238d13290e"
 binding = "BANNER_CONFIG_DB"
 database_name = "banner-config-db"
 database_id = "8b467c8c-2ff8-43b5-9338-a4e9191e6014"
+
+[[env.production.d1_databases]]
+binding = "COOKIE_SCANNER_DB"
+database_name = "cookie-scanner-db"
+database_id = "b66e816a-d6df-463f-97aa-45ee475f6bbc"
 
 [[env.production.kv_namespaces]]
 binding = "WEBFLOW_AUTHENTICATION"

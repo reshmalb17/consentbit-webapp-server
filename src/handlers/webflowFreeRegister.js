@@ -11,10 +11,62 @@ import {
   normalizeDomain,
   markSiteVerified,
   saveBannerCustomization,
+  getWebflowOAuthTokenBySite,
+  getWebflowOAuthTokenByUser,
 } from '../services/db.js';
 import { capturePostHogEvent, identifyPostHogPerson, identifyPostHogSite } from '../services/posthog.js';
 
 const TAG = '[webflow-free-register][webapp]';
+
+/**
+ * Resolve the authorizing Webflow user's email for a site WITHOUT the client
+ * having to send it. The new-design (v2) app authorizes via OAuth, after which
+ * the email is persisted server-side. Prefer the durable D1 record, fall back
+ * to the KV mirror (which can be evicted), then null.
+ *
+ *   D1: WebflowOAuthSite[siteId].userKey → WebflowOAuthToken.authorizedBy.user.email
+ *   KV: WEBFLOW_AUTHENTICATION[siteId].email
+ */
+async function resolveWebflowEmail(db, env, wfSiteId) {
+  if (!wfSiteId) return null;
+  // 1. D1 (authoritative, survives KV eviction)
+  try {
+    const siteRow = await getWebflowOAuthTokenBySite(db, wfSiteId);
+    console.log(`${TAG} resolveWebflowEmail: D1 WebflowOAuthSite row ${siteRow ? `found (userKey=${siteRow.userKey || 'none'})` : 'MISSING'}`);
+    if (siteRow?.userKey) {
+      const tokenRow = await getWebflowOAuthTokenByUser(db, siteRow.userKey);
+      // Webflow's /v2/token/authorized_by returns a FLAT object
+      // ({ id, email, firstName, lastName }), but our KV-backfill path stores a
+      // nested { user: { email } }. Accept either shape.
+      const email = tokenRow?.authorizedBy?.email || tokenRow?.authorizedBy?.user?.email;
+      if (email) {
+        console.log(`${TAG} resolveWebflowEmail: source=D1 email=${email}`);
+        return String(email).trim().toLowerCase();
+      }
+      console.log(`${TAG} resolveWebflowEmail: D1 token row had no authorizedBy email`);
+    }
+  } catch (e) {
+    console.warn(`${TAG} resolveWebflowEmail: D1 lookup failed (non-fatal):`, e?.message || e);
+  }
+  // 2. KV mirror fallback
+  try {
+    const kvRaw = await env.WEBFLOW_AUTHENTICATION?.get(wfSiteId);
+    if (kvRaw) {
+      const kvEntry = typeof kvRaw === 'string' ? JSON.parse(kvRaw) : kvRaw;
+      if (kvEntry?.email) {
+        console.log(`${TAG} resolveWebflowEmail: source=KV email=${kvEntry.email}`);
+        return String(kvEntry.email).trim().toLowerCase();
+      }
+      console.log(`${TAG} resolveWebflowEmail: KV entry present but no .email field`);
+    } else {
+      console.log(`${TAG} resolveWebflowEmail: no KV entry for wfSiteId=${wfSiteId}`);
+    }
+  } catch (e) {
+    console.warn(`${TAG} resolveWebflowEmail: KV lookup failed (non-fatal):`, e?.message || e);
+  }
+  console.warn(`${TAG} resolveWebflowEmail: email NOT FOUND in D1 or KV for wfSiteId=${wfSiteId}`);
+  return null;
+}
 
 export async function handleWebflowFreeRegister(request, env) {
   const db = env.CONSENT_WEBAPP;
@@ -43,13 +95,25 @@ export async function handleWebflowFreeRegister(request, env) {
     return Response.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
   }
 
-  const email = (body.email || '').trim().toLowerCase();
+  let email = (body.email || '').trim().toLowerCase();
   const domain = (body.domain || '').trim();
   const wfSiteId = (body.wfSiteId || '').trim();
   const initialCustomization = body.initialCustomization ?? null;
+  // The updated Webflow app installs the banner by MANUAL copy-paste and sends
+  // manualInstall:true — in that case the app must NOT auto-inject the script
+  // into the head (it would load twice). Legacy/other callers omit the flag and
+  // keep the original auto-inject behavior.
+  const manualInstall = body.manualInstall === true;
+
+  // Email is optional from the client: the v2 app authorizes via OAuth, so we can
+  // resolve the workspace email server-side from the stored OAuth record.
+  if (!email) {
+    email = await resolveWebflowEmail(db, env, wfSiteId);
+    console.log(`${TAG} email resolved server-side: ${email ? 'FOUND' : 'NOT FOUND'} (wfSiteId=${wfSiteId || 'none'})`);
+  }
 
   if (!email || !domain) {
-    console.warn(`${TAG} Rejected: missing email or domain`);
+    console.warn(`${TAG} Rejected: missing email or domain (email resolved=${!!email}, wfSiteId=${wfSiteId || 'none'})`);
     return Response.json({ success: false, error: 'email and domain are required' }, { status: 400 });
   }
 
@@ -378,61 +442,74 @@ export async function handleWebflowFreeRegister(request, env) {
         if (!accessToken) {
           console.warn(`${TAG} Step 7: No accessToken in KV — skipping injection`);
         } else {
-          // Read stored Webflow script ID from D1 so we reuse it instead of creating a new registered script
-          let storedWebflowScriptId = null;
-          try {
-            const siteRow = await db.prepare('SELECT webflowScriptId FROM Site WHERE id = ?1').bind(site.id).first();
-            storedWebflowScriptId = siteRow?.webflowScriptId ?? null;
-          } catch (_) {}
-
-          const result = await injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG, storedWebflowScriptId);
-          injectedIntoHead = result.success;
-
-          // Mark site as verified so scan doesn't block on published-HTML check
-          if (result.success) {
-            try { await markSiteVerified(db, site.id, scriptUrl); } catch { /* best-effort */ }
-          }
-
-          // Persist the Webflow registered script ID back to D1 for future reuse
-          if (result.webflowScriptId && result.webflowScriptId !== storedWebflowScriptId) {
-            await db.prepare('UPDATE Site SET webflowScriptId = ?1, updatedAt = ?2 WHERE id = ?3')
-              .bind(result.webflowScriptId, new Date().toISOString(), site.id).run().catch(() => {});
-          }
-
-          // Update KV with webappSiteId + scriptUrl
+          // Update KV linkage (webappSiteId + scriptUrl) regardless of install
+          // mode — status/checkout resolution needs it.
           const updatedKv = { ...kvEntry, webappSiteId: site.id, webappScriptUrl: scriptUrl, cdnScriptId: site.cdnScriptId, userId: user.id, email: user.email, registeredThroughApp: true, isWebappMigrated: true };
           await env.WEBFLOW_AUTHENTICATION?.put(wfSiteId, JSON.stringify(updatedKv));
 
-          // Publish the Webflow site so the injected script goes live immediately.
-          if (result.success && accessToken) {
+          if (manualInstall) {
+            // Updated app: the user installs the banner by manual copy-paste, so
+            // the app must NOT auto-inject the script into the head or auto-publish.
+            console.log(`${TAG} Step 7: manualInstall=true — skipping head injection + publish for wfSiteId=${wfSiteId}`);
+          } else {
+            // Read stored Webflow script ID from D1 so we reuse it instead of creating a new registered script
+            let storedWebflowScriptId = null;
             try {
-              const WEBFLOW_API = 'https://api.webflow.com/v2';
-              const pubHeaders = {
-                'Authorization': `Bearer ${accessToken}`,
-                'Content-Type': 'application/json',
-                'accept-version': '1.0.0',
-              };
-              let customDomains = [];
+              const siteRow = await db.prepare('SELECT webflowScriptId FROM Site WHERE id = ?1').bind(site.id).first();
+              storedWebflowScriptId = siteRow?.webflowScriptId ?? null;
+            } catch (_) {}
+
+            const result = await injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG, storedWebflowScriptId);
+            injectedIntoHead = result.success;
+
+            // Mark site as verified so scan doesn't block on published-HTML check
+            if (result.success) {
+              try { await markSiteVerified(db, site.id, scriptUrl); } catch { /* best-effort */ }
+              // New-version install (script injected + published) → mark v2 so cdn.js
+              // serves the standard loader instead of loaderWebflow.
               try {
-                const siteInfoRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}`, { headers: pubHeaders });
-                if (siteInfoRes.ok) {
-                  const siteInfo = await siteInfoRes.json();
-                  customDomains = (siteInfo.customDomains || []).map(d => d.url || d.name).filter(Boolean);
+                await db.prepare("UPDATE Site SET version = 'v2', updatedAt = ?1 WHERE id = ?2")
+                  .bind(new Date().toISOString(), site.id).run();
+              } catch { /* best-effort */ }
+            }
+
+            // Persist the Webflow registered script ID back to D1 for future reuse
+            if (result.webflowScriptId && result.webflowScriptId !== storedWebflowScriptId) {
+              await db.prepare('UPDATE Site SET webflowScriptId = ?1, updatedAt = ?2 WHERE id = ?3')
+                .bind(result.webflowScriptId, new Date().toISOString(), site.id).run().catch(() => {});
+            }
+
+            // Publish the Webflow site so the injected script goes live immediately.
+            if (result.success && accessToken) {
+              try {
+                const WEBFLOW_API = 'https://api.webflow.com/v2';
+                const pubHeaders = {
+                  'Authorization': `Bearer ${accessToken}`,
+                  'Content-Type': 'application/json',
+                  'accept-version': '1.0.0',
+                };
+                let customDomains = [];
+                try {
+                  const siteInfoRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}`, { headers: pubHeaders });
+                  if (siteInfoRes.ok) {
+                    const siteInfo = await siteInfoRes.json();
+                    customDomains = (siteInfo.customDomains || []).map(d => d.url || d.name).filter(Boolean);
+                  }
+                } catch (_) {}
+                const publishRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/publish`, {
+                  method: 'POST',
+                  headers: pubHeaders,
+                  body: JSON.stringify({ publishToWebflowSubdomain: true, customDomains }),
+                });
+                if (!publishRes.ok) {
+                  const err = await publishRes.text();
+                  console.warn(`${TAG} Step 7: Webflow publish failed status=${publishRes.status} body=${err}`);
+                } else {
+                  console.log(`${TAG} Step 7: Webflow site published successfully wfSiteId=${wfSiteId}`);
                 }
-              } catch (_) {}
-              const publishRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/publish`, {
-                method: 'POST',
-                headers: pubHeaders,
-                body: JSON.stringify({ publishToWebflowSubdomain: true, customDomains }),
-              });
-              if (!publishRes.ok) {
-                const err = await publishRes.text();
-                console.warn(`${TAG} Step 7: Webflow publish failed status=${publishRes.status} body=${err}`);
-              } else {
-                console.log(`${TAG} Step 7: Webflow site published successfully wfSiteId=${wfSiteId}`);
+              } catch (publishErr) {
+                console.warn(`${TAG} Step 7: Webflow publish error (non-fatal):`, publishErr?.message || publishErr);
               }
-            } catch (publishErr) {
-              console.warn(`${TAG} Step 7: Webflow publish error (non-fatal):`, publishErr?.message || publishErr);
             }
           }
         }

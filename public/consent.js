@@ -1142,6 +1142,14 @@ hideBanner(document.getElementById("cb-preferences-banner"));
         }
         hideBanner(activeBanner);
       }
+      // Persist a "closed" TIMESTAMP on every close. Consent is NOT recorded — scripts stay
+      // blocked. Reveal the floating logo if it exists. The re-show policy is decided at init
+      // (see bannerClosed below): logo enabled (cb-floating-trigger present) → stay closed
+      // indefinitely (reopen via logo); logo disabled → stay closed for 24h, then the banner
+      // returns so the user can still consent. Generic close handler → covers GDPR + CCPA.
+      try { localStorage.setItem('_cb_closed_', String(Date.now())); } catch (_) {}
+      var cbCloseFloatingTrigger = document.getElementById('cb-floating-trigger');
+      if (cbCloseFloatingTrigger) cbCloseFloatingTrigger.style.display = 'block';
       return;
     }
     if (isSaveBtn) {
@@ -1670,6 +1678,25 @@ async function showAppropriateBanner() {
       try {
         const clientId = window.location.hostname;
         const visitorId = localStorage.getItem("_cb_vid_");
+
+        // Idempotency guard: one interaction can trigger overlapping handlers
+        // (two click handlers, or a handler bound more than once), each of which
+        // calls this function. Without this, a single accept/reject writes two
+        // identical Consent rows within the same second — showing as duplicate
+        // rows in the consent logs. Collapse repeat posts of the same consent
+        // state fired within a short window (also blocks concurrent in-flight ones).
+        const dedupeKey = JSON.stringify({
+          v: visitorId,
+          b: preferences && preferences.bannerType,
+          p: preferences,
+        });
+        const nowTs = Date.now();
+        const last = window.__cbLastConsentSend;
+        if (last && last.key === dedupeKey && (nowTs - last.ts) < 5000) {
+          return;
+        }
+        window.__cbLastConsentSend = { key: dedupeKey, ts: nowTs };
+
         const policyVersion = "1.2";
         const timestamp = new Date().toISOString();
         const sessionToken = await getVisitorSessionToken();
@@ -1742,6 +1769,7 @@ async function showAppropriateBanner() {
 function clearConsentState() {
   localStorage.removeItem('_cb_cg_');   // consent given flag
   localStorage.removeItem('_cb_cexp_'); // expiry
+  localStorage.removeItem('_cb_closed_'); // "banner closed" flag — allow banner to return on reset
   // Optional: clear stored preferences if you want a clean reset
    localStorage.removeItem('_cb_cp_');
 }
@@ -2074,6 +2102,23 @@ function clearConsentState() {
          consentGiven = null;
         }
 
+      // Should the banner stay hidden because the user closed it (without consenting)?
+      //  - Floating logo present (setting ON) → stay hidden indefinitely; reopen via the logo.
+      //  - Floating logo absent (setting OFF) → stay hidden for 24h, then return so the visitor
+      //    can still consent (no dead-end with no logo to reopen).
+      // Scripts stay blocked the whole time because consentGiven is still false. The flag is a
+      // timestamp set on close, and is cleared by clearConsentState() when consent expires.
+      const bannerClosed = (function () {
+        try {
+          var _cbTs = parseInt(localStorage.getItem('_cb_closed_') || '0', 10);
+          if (!_cbTs) return false;
+          if (document.getElementById('cb-floating-trigger')) return true;
+          if (Date.now() - _cbTs < 86400000) return true;
+          localStorage.removeItem('_cb_closed_');
+          return false;
+        } catch (_e) { return false; }
+      })();
+
       // Block non-essential scripts immediately if consent not yet given.
       // Scripts placed with type="text/plain" + data-category in HTML stay inert until unblocked.
       // Scripts already executed (type="text/javascript") cannot be undone here — site owners
@@ -2091,8 +2136,8 @@ function clearConsentState() {
       // STEP 3: Show toggle button immediately if staging or consent already given
       const toggleConsentBtn = document.getElementById('cb-floating-trigger');
       if (toggleConsentBtn) {
-        // Show toggle button immediately if staging or consent already given
-        if (isStaging || consentGiven) {
+        // Show toggle button immediately if staging, consent already given, or banner was closed
+        if (isStaging || consentGiven || bannerClosed) {
           toggleConsentBtn.style.display = 'block';
         }
         
@@ -2186,7 +2231,9 @@ function clearConsentState() {
       }
       
       // STEP 4: Background operations - token generation and location detection (non-blocking)
-      if (!consentGiven) {
+      // Skip auto-showing the banner if the user already closed it (bannerClosed) — it only
+      // reopens via the floating logo. Scripts remain blocked via blockScriptsByCategory() above.
+      if (!consentGiven && !bannerClosed) {
         if (isEmergent()) {
           await hideAllBanners();
           return;

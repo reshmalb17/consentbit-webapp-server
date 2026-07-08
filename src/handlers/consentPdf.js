@@ -130,7 +130,14 @@ export function buildHtml(consent, cookies, customCookieRules, siteDomain, logoU
       : `<tr><td class="proof-td" colspan="3" style="color:#6b7280;text-align:center">No cookies recorded for accepted categories.</td></tr>`;
   })();
 
-  const consentStatusLabel = isGiven ? 'Accepted' : 'Rejected';
+  // Three-way status label — 'partial' must NOT collapse into 'Rejected'.
+  const consentStatusLabel = (() => {
+    const s = (consent.status || '').toLowerCase();
+    if (s === 'given' || s === 'accepted') return 'Accepted';
+    if (s === 'rejected') return 'Rejected';
+    if (s === 'partial') return 'Partial';
+    return consent.status ? consent.status.charAt(0).toUpperCase() + consent.status.slice(1) : 'Rejected';
+  })();
 
   return `<!DOCTYPE html>
 <html lang="en">
