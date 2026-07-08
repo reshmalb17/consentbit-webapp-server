@@ -107,6 +107,12 @@ export async function ensureSchema(db) {
     await db.prepare(`ALTER TABLE Site ADD COLUMN scanLimitNotifiedMonth TEXT`).run();
   } catch (_) {}
 
+  try {
+    // Loader version marker. Set to 'v2' when a (legacy) site installs the new
+    // script + publishes so cdn.js serves the standard loader instead of loaderWebflow.
+    await db.prepare(`ALTER TABLE Site ADD COLUMN version TEXT`).run();
+  } catch (_) {}
+
   // Create Script table if it doesn't exist
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS Script (
@@ -697,6 +703,32 @@ export async function ensureSchema(db) {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_evc_expires ON EmailVerificationCode(expiresAt)`).run();
   } catch (e) {}
 
+  // Account ownership transfer — a pending request that must be authorized by the
+  // CURRENT owner (link emailed to the old email) before the account's email/name
+  // is renamed in place to the new owner.
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS OwnershipTransfer (
+      id TEXT PRIMARY KEY,            -- token id (public, appears in the URL)
+      userId TEXT NOT NULL,          -- account being transferred (current owner user id)
+      currentEmail TEXT NOT NULL,    -- snapshot of the old owner email at request time
+      newEmail TEXT NOT NULL,        -- target owner email
+      newName TEXT,                  -- target owner name
+      tokenHash TEXT NOT NULL,       -- sha256 of the secret half of the token
+      status TEXT NOT NULL DEFAULT 'pending', -- pending | authorized | cancelled
+      attempts INTEGER DEFAULT 0,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      expiresAt DATETIME NOT NULL,
+      authorizedAt DATETIME,
+      FOREIGN KEY (userId) REFERENCES User(id)
+    )
+  `).run();
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_ownership_user_status ON OwnershipTransfer(userId, status)`).run();
+  } catch (e) {}
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_ownership_expires ON OwnershipTransfer(expiresAt)`).run();
+  } catch (e) {}
+
   // Organization + OrganizationMember
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS Organization (
@@ -741,6 +773,49 @@ export async function ensureSchema(db) {
   try { await db.prepare(`ALTER TABLE Site ADD COLUMN isLegacy INTEGER DEFAULT 0`).run(); } catch (e) {}
   try { await db.prepare(`ALTER TABLE Site ADD COLUMN legacySource TEXT`).run(); } catch (e) {}
   try { await db.prepare(`ALTER TABLE User ADD COLUMN billingEmail TEXT`).run(); } catch (e) {}
+
+  // ── Webflow App OAuth (Data Client) ──────────────────────────────────────
+  // Short-lived CSRF state issued in /authorize and consumed in /callback.
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS WebflowOAuthState (
+      state TEXT PRIMARY KEY,
+      returnTo TEXT,
+      expiresAt DATETIME NOT NULL,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_wf_oauth_state_expires ON WebflowOAuthState(expiresAt)`).run();
+  } catch (e) {}
+
+  // One row per authorizing Webflow user — the access token + metadata.
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS WebflowOAuthToken (
+      userKey TEXT PRIMARY KEY,
+      accessToken TEXT NOT NULL,
+      tokenType TEXT,
+      scope TEXT,
+      authorizedBy TEXT, -- JSON blob from /v2/token/authorized_by
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  // Per-site index — given a Webflow site id, find its token quickly.
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS WebflowOAuthSite (
+      siteId TEXT PRIMARY KEY,
+      userKey TEXT,
+      accessToken TEXT NOT NULL,
+      displayName TEXT,
+      shortName TEXT,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_wf_oauth_site_userkey ON WebflowOAuthSite(userKey)`).run();
+  } catch (e) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -2599,6 +2674,92 @@ export async function updateUserBillingEmail(db, userId, billingEmail) {
     .run();
   return getUserById(db, userId);
 }
+
+// --- Account ownership transfer ---
+
+/**
+ * Rename the account in place: swap the User row's email + name to the new owner.
+ * Every downstream record (Organization.ownerUserId, Site.organizationId, Subscription,
+ * Consent, …) references this user by id — never the email string — so this single
+ * update effectively transfers the whole account. Also keeps the Organization display
+ * name in sync when it was derived from the previous owner's name ("X's Organization").
+ */
+export async function renameUserAccount(db, userId, { email, name }) {
+  const normEmail = String(email || '').trim().toLowerCase();
+  const trimmedName = (name || '').trim() || null;
+  await db
+    .prepare(`UPDATE User SET email = ?1, name = ?2, updatedAt = datetime('now') WHERE id = ?3`)
+    .bind(normEmail, trimmedName, userId)
+    .run();
+  return getUserById(db, userId);
+}
+
+/** Revoke every active session for a user (forces re-login — used after a transfer). */
+export async function deleteSessionsForUser(db, userId) {
+  await db.prepare(`DELETE FROM Session WHERE userId = ?1`).bind(userId).run();
+  return { deleted: true };
+}
+
+/** Mark any still-pending transfers for this user as cancelled (single active request at a time). */
+export async function cancelPendingOwnershipTransfers(db, userId) {
+  await db
+    .prepare(`UPDATE OwnershipTransfer SET status = 'cancelled' WHERE userId = ?1 AND status = 'pending'`)
+    .bind(userId)
+    .run();
+}
+
+export async function createOwnershipTransfer(
+  db,
+  { userId, currentEmail, newEmail, newName, tokenHash, ttlMinutes = 60 },
+) {
+  const id = crypto.randomUUID();
+  const now = new Date();
+  const createdAt = now.toISOString();
+  const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000).toISOString();
+
+  await db
+    .prepare(
+      `INSERT INTO OwnershipTransfer
+       (id, userId, currentEmail, newEmail, newName, tokenHash, status, createdAt, expiresAt)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8)`,
+    )
+    .bind(
+      id,
+      userId,
+      String(currentEmail || '').trim().toLowerCase(),
+      String(newEmail || '').trim().toLowerCase(),
+      (newName || '').trim() || null,
+      tokenHash,
+      createdAt,
+      expiresAt,
+    )
+    .run();
+
+  return { id, createdAt, expiresAt };
+}
+
+export async function getOwnershipTransferById(db, id) {
+  if (!id) return null;
+  const row = await db
+    .prepare(`SELECT * FROM OwnershipTransfer WHERE id = ?1`)
+    .bind(id)
+    .first();
+  return row || null;
+}
+
+export async function incrementOwnershipTransferAttempts(db, id) {
+  await db
+    .prepare(`UPDATE OwnershipTransfer SET attempts = attempts + 1 WHERE id = ?1`)
+    .bind(id)
+    .run();
+}
+
+export async function markOwnershipTransferAuthorized(db, id) {
+  await db
+    .prepare(`UPDATE OwnershipTransfer SET status = 'authorized', authorizedAt = datetime('now') WHERE id = ?1`)
+    .bind(id)
+    .run();
+}
 // --- Site verification ---
 
 export async function updateSiteName(db, siteId, name) {
@@ -3279,6 +3440,29 @@ export async function getDueScheduledScans(db) {
   }
 }
 
+// Atomically claim a due scheduled scan BEFORE running it, so overlapping cron
+// invocations can't run the same schedule twice (which was creating duplicate scan
+// rows). The UPDATE is guarded by the nextRunAt value the caller read — once the first
+// invocation advances/deactivates it, concurrent invocations no longer match and get
+// changes=0. Returns true only for the invocation that actually claimed the row.
+export async function claimDueScheduledScan(db, { id, currentNextRunAt, once, newNextRunAt, now }) {
+  try {
+    const res = once
+      ? await db
+          .prepare('UPDATE ScheduledScan SET isActive = 0, lastRunAt = ?1, updatedAt = ?1 WHERE id = ?2 AND isActive = 1 AND nextRunAt = ?3')
+          .bind(now, id, currentNextRunAt)
+          .run()
+      : await db
+          .prepare('UPDATE ScheduledScan SET nextRunAt = ?1, lastRunAt = ?2, updatedAt = ?2 WHERE id = ?3 AND isActive = 1 AND nextRunAt = ?4')
+          .bind(newNextRunAt, now, id, currentNextRunAt)
+          .run();
+    return (res?.meta?.changes || 0) > 0;
+  } catch (error) {
+    console.error('[db] claimDueScheduledScan failed:', error?.message);
+    return false;
+  }
+}
+
 export async function updateScheduledScanAfterRun(db, id, lastRunAt, nextRunAt) {
   try {
     await db
@@ -3433,5 +3617,194 @@ export async function saveBannerCustomization(db, siteId, customization) {
     console.error('[db] Error saving banner customization:', error);
     throw error;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Webflow App OAuth (Data Client) — token/state persistence
+// Ported from the test worker so this (production) worker can serve the
+// /api/webflow/oauth/* + /publish + /domains routes the Designer app calls.
+// ---------------------------------------------------------------------------
+
+/** Issue a short-lived CSRF state for the OAuth authorize → callback round-trip. */
+export async function createWebflowOAuthState(db, { state, returnTo = '', ttlMinutes = 10 } = {}) {
+  await ensureSchema(db);
+  const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
+  await db
+    .prepare(
+      `INSERT INTO WebflowOAuthState (state, returnTo, expiresAt, createdAt)
+       VALUES (?1, ?2, ?3, datetime('now'))
+       ON CONFLICT(state) DO UPDATE SET returnTo = excluded.returnTo, expiresAt = excluded.expiresAt`,
+    )
+    .bind(state, returnTo || '', expiresAt)
+    .run();
+  return { state, expiresAt };
+}
+
+/**
+ * Validate and consume an OAuth state. Returns the row ({ state, returnTo })
+ * if it exists and is unexpired, else null. The row is deleted either way.
+ */
+export async function consumeWebflowOAuthState(db, state) {
+  await ensureSchema(db);
+  if (!state) return null;
+  const row = await db
+    .prepare(`SELECT state, returnTo FROM WebflowOAuthState WHERE state = ?1 AND expiresAt > datetime('now')`)
+    .bind(state)
+    .first();
+  await db.prepare(`DELETE FROM WebflowOAuthState WHERE state = ?1`).bind(state).run();
+  return row || null;
+}
+
+/**
+ * Persist an access token (one row per Webflow user) plus a per-site index.
+ * Upserts so re-authorizing refreshes the stored token.
+ */
+export async function saveWebflowOAuthToken(
+  db,
+  { userKey, accessToken, tokenType = 'bearer', scope = null, authorizedBy = null, sites = [] } = {},
+) {
+  await ensureSchema(db);
+  if (!userKey || !accessToken) throw new Error('saveWebflowOAuthToken: userKey and accessToken are required');
+
+  await db
+    .prepare(
+      `INSERT INTO WebflowOAuthToken (userKey, accessToken, tokenType, scope, authorizedBy, createdAt, updatedAt)
+       VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), datetime('now'))
+       ON CONFLICT(userKey) DO UPDATE SET
+         accessToken = excluded.accessToken,
+         tokenType   = excluded.tokenType,
+         scope       = excluded.scope,
+         authorizedBy = excluded.authorizedBy,
+         updatedAt   = datetime('now')`,
+    )
+    .bind(
+      userKey,
+      accessToken,
+      tokenType,
+      scope,
+      authorizedBy ? JSON.stringify(authorizedBy) : null,
+    )
+    .run();
+
+  for (const s of sites) {
+    if (!s?.id) continue;
+    await db
+      .prepare(
+        `INSERT INTO WebflowOAuthSite (siteId, userKey, accessToken, displayName, shortName, createdAt, updatedAt)
+         VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), datetime('now'))
+         ON CONFLICT(siteId) DO UPDATE SET
+           userKey     = excluded.userKey,
+           accessToken = excluded.accessToken,
+           displayName = excluded.displayName,
+           shortName   = excluded.shortName,
+           updatedAt   = datetime('now')`,
+      )
+      .bind(s.id, userKey, accessToken, s.displayName || null, s.shortName || null)
+      .run();
+  }
+  return { userKey, sites: sites.length };
+}
+
+/** Look up the stored token + metadata for a Webflow site id. */
+export async function getWebflowOAuthTokenBySite(db, siteId) {
+  await ensureSchema(db);
+  if (!siteId) return null;
+  const row = await db
+    .prepare(`SELECT * FROM WebflowOAuthSite WHERE siteId = ?1`)
+    .bind(siteId)
+    .first();
+  return row || null;
+}
+
+/** Look up the stored token row for a Webflow user id. */
+export async function getWebflowOAuthTokenByUser(db, userKey) {
+  await ensureSchema(db);
+  if (!userKey) return null;
+  const row = await db
+    .prepare(`SELECT * FROM WebflowOAuthToken WHERE userKey = ?1`)
+    .bind(userKey)
+    .first();
+  if (row && row.authorizedBy) {
+    try { row.authorizedBy = JSON.parse(row.authorizedBy); } catch { /* leave as string */ }
+  }
+  return row || null;
+}
+
+/**
+ * Resolve a Webflow OAuth token for a site, migrating live (v1) users on the fly.
+ * D1 first; falls back to the WEBFLOW_AUTHENTICATION KV (keyed by site id) and
+ * backfills D1 once. Returns null when no usable token exists anywhere.
+ */
+export async function resolveWebflowOAuthToken(db, kv, siteId, siteMeta = {}) {
+  await ensureSchema(db);
+  if (!siteId) return null;
+
+  // 1. D1 first — the steady state once a user has been migrated.
+  const existing = await db
+    .prepare(`SELECT * FROM WebflowOAuthSite WHERE siteId = ?1`)
+    .bind(siteId)
+    .first();
+  if (existing?.accessToken) return { ...existing, source: 'db' };
+
+  // 2. KV fallback — live v1 users still live here.
+  if (!kv) return null;
+  let kvEntry = null;
+  try {
+    const raw = await kv.get(siteId);
+    kvEntry = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
+  } catch {
+    kvEntry = null;
+  }
+  if (!kvEntry?.accessToken) return null;
+
+  // 3. Backfill D1 once so the user is "in the database" from now on.
+  const userKey = kvEntry.userId || kvEntry.email || siteId;
+  await saveWebflowOAuthToken(db, {
+    userKey,
+    accessToken: kvEntry.accessToken,
+    tokenType: kvEntry.tokenType || 'bearer',
+    scope: kvEntry.scope || null,
+    authorizedBy:
+      kvEntry.userId || kvEntry.email
+        ? { user: { id: kvEntry.userId || null, email: kvEntry.email || null } }
+        : null,
+    sites: [
+      {
+        id: siteId,
+        displayName: siteMeta.displayName || kvEntry.displayName || null,
+        shortName: siteMeta.shortName || kvEntry.shortName || null,
+      },
+    ],
+  });
+
+  const migrated = await db
+    .prepare(`SELECT * FROM WebflowOAuthSite WHERE siteId = ?1`)
+    .bind(siteId)
+    .first();
+  return migrated?.accessToken ? { ...migrated, source: 'kv-backfill' } : null;
+}
+
+/**
+ * Invalidate a stored Webflow token for a site after Webflow rejects it (HTTP 401).
+ * Removes the D1 WebflowOAuthSite row AND strips the dead accessToken from KV so the
+ * next resolve returns null (→ user re-authorizes) instead of re-reading a dead token.
+ */
+export async function invalidateWebflowOAuthToken(db, kv, siteId) {
+  await ensureSchema(db);
+  if (!siteId) return;
+  try {
+    await db.prepare(`DELETE FROM WebflowOAuthSite WHERE siteId = ?1`).bind(siteId).run();
+  } catch (_) { /* best-effort */ }
+  if (!kv) return;
+  try {
+    const raw = await kv.get(siteId);
+    if (raw) {
+      const entry = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (entry && entry.accessToken) {
+        delete entry.accessToken;
+        await kv.put(siteId, JSON.stringify(entry));
+      }
+    }
+  } catch (_) { /* best-effort */ }
 }
 

@@ -27,7 +27,7 @@ import {
   syncSubscriptionUpdateToLegacy,
   syncSubscriptionDeletedToLegacy,
 } from '../services/syncLegacy.js';
-import { addCustomerToClickUp } from '../services/clickup.js';
+import { addCustomerToClickUp, wasClickUpTaskCreated, markClickUpTaskCreated } from '../services/clickup.js';
 
 /** Find existing Stripe customer by email, or create one (Use Case 3 / bulk guest checkout). */
 async function findOrCreateStripeCustomerByEmail(env, email) {
@@ -732,8 +732,12 @@ export async function handleStripeWebhook(request, env, ctx) {
         }
 
         // Add customer to ClickUp list on new payment
-        // Resolve platform from Site table if not present in checkout metadata
+        // Resolve platform from Site table if not present in checkout metadata.
+        // Dedup by Stripe subscription id: the same subscriber may also arrive via
+        // customer.subscription.updated (see that handler below) — mark on success so
+        // it is added exactly once.
         ctx.waitUntil((async () => {
+          if (subId && await wasClickUpTaskCreated(env, subId)) return;
           let resolvedPlatform = platform || null;
           if (!resolvedPlatform && siteId && db) {
             try {
@@ -741,7 +745,7 @@ export async function handleStripeWebhook(request, env, ctx) {
               resolvedPlatform = siteRow?.platform || null;
             } catch (_) {}
           }
-          await addCustomerToClickUp(env, {
+          const added = await addCustomerToClickUp(env, {
             email:           session.customer_email || session.customer_details?.email || null,
             name:            session.customer_details?.name || '',
             platform:        resolvedPlatform,
@@ -753,7 +757,8 @@ export async function handleStripeWebhook(request, env, ctx) {
             subscriptionId:  subId || null,
             customerId:      session.customer || null,
             isFirstPurchase,
-          }).catch(() => {});
+          }).catch(() => false);
+          if (added && subId) await markClickUpTaskCreated(env, subId);
         })());
 
         // Stamp plan into WEBFLOW_AUTHENTICATION KV so the Webflow Designer Extension can
@@ -814,9 +819,13 @@ export async function handleStripeWebhook(request, env, ctx) {
       // Fallback: migrated legacy users have stripeSubscriptionId = null in D1 so the lookup
       // above returns nothing. Try matching by stripeCustomerId instead so their D1 row gets
       // updated when Stripe fires cancellation / update webhooks.
+      // IMPORTANT: restrict to rows with NO stripeSubscriptionId yet. Without this filter, a
+      // `customer.subscription.deleted` event for an OLD (just-upgraded, already-deleted) sub
+      // would grab the customer's newest row — the brand-new active upgrade row — and mark it
+      // canceled, silently reverting the upgrade. Legacy rows are the only ones missing a sub id.
       if (!existing && sub.customer) {
         existing = await db.prepare(
-          `SELECT * FROM Subscription WHERE stripeCustomerId = ?1 ORDER BY updatedAt DESC LIMIT 1`
+          `SELECT * FROM Subscription WHERE stripeCustomerId = ?1 AND stripeSubscriptionId IS NULL ORDER BY updatedAt DESC LIMIT 1`
         ).bind(sub.customer).first() ?? null;
 
         // Stamp the real stripeSubscriptionId onto the row so future webhooks hit the fast path
@@ -824,6 +833,28 @@ export async function handleStripeWebhook(request, env, ctx) {
           db.prepare(
             `UPDATE Subscription SET stripeSubscriptionId = ?1, updatedAt = ?2 WHERE id = ?3`
           ).bind(sub.id, new Date().toISOString(), existing.id).run().catch(() => {});
+        }
+      }
+
+      // Guard (belt-and-suspenders): never let an update/delete event for one subscription
+      // mutate a D1 row that belongs to a DIFFERENT subscription. Only proceed when the matched
+      // row has no sub id yet (legacy, just stamped above) or its sub id matches this event.
+      {
+        const rowSubId = existing?.stripeSubscriptionId ?? existing?.stripesubscriptionid ?? null;
+        if (existing && rowSubId && rowSubId !== sub.id) {
+          console.warn('[StripeWebhook] skipping sub update/delete — matched row belongs to a different subscription', {
+            eventSubId: sub.id,
+            rowSubId,
+            rowId: existing.id,
+          });
+          await savePaymentEvent(db, {
+            eventType: type,
+            stripeEventId: eventId,
+            subscriptionId: existing.id,
+            organizationId: existing.organizationId ?? existing.organizationid ?? null,
+            rawPayload: { status: sub.status, cancel_at_period_end: sub.cancel_at_period_end },
+          });
+          return Response.json({ received: true });
         }
       }
 
@@ -961,6 +992,72 @@ export async function handleStripeWebhook(request, env, ctx) {
             });
           }
         }
+      }
+
+      // Add subscriber to ClickUp exactly once. Trial / direct-checkout subscribers are
+      // created via the Stripe API (no hosted Checkout Session), so they never fire
+      // checkout.session.completed — this handler is their only reliable webhook. Deduped
+      // by Stripe subscription id so hosted-checkout subscribers (already added in that
+      // handler) and repeat subscription.updated events don't create duplicate tasks.
+      if (type === 'customer.subscription.updated' && status === 'active') {
+        ctx.waitUntil((async () => {
+          try {
+            if (await wasClickUpTaskCreated(env, sub.id)) return;
+
+            const cuSiteId = existing?.siteId ?? existing?.siteid ?? sub.metadata?.siteId ?? null;
+            let cuEmail = null;
+            let cuName = '';
+            let cuPlatform = sub.metadata?.platform || null;
+            let cuDomain = sub.metadata?.siteDomain || null;
+
+            if (cuSiteId && db) {
+              try {
+                const siteRow = await db.prepare('SELECT platform, domain FROM Site WHERE id = ?1 LIMIT 1').bind(cuSiteId).first();
+                cuPlatform = cuPlatform || siteRow?.platform || null;
+                cuDomain = cuDomain || siteRow?.domain || null;
+              } catch (_) {}
+            }
+
+            // Prefer the real Stripe customer email/name; fall back to the account email.
+            if (sub.customer && env.STRIPE_SECRET_KEY) {
+              try {
+                const custRes = await fetch(`https://api.stripe.com/v1/customers/${typeof sub.customer === 'string' ? sub.customer : sub.customer?.id}`, {
+                  headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
+                });
+                const cust = await custRes.json();
+                if (!cust.error) {
+                  cuEmail = cust.email || null;
+                  cuName = cust.name || '';
+                }
+              } catch (_) {}
+            }
+            if (!cuEmail && orgIdFinal) {
+              try {
+                const u = await db.prepare(
+                  'SELECT u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
+                ).bind(orgIdFinal).first();
+                cuEmail = u?.email || null;
+              } catch (_) {}
+            }
+
+            const added = await addCustomerToClickUp(env, {
+              email:           cuEmail,
+              name:            cuName,
+              platform:        cuPlatform,
+              plan:            planIdFromMeta || null,
+              interval:        intervalFromSub,
+              domain:          cuDomain,
+              amountCents:     sub.items?.data?.[0]?.price?.unit_amount ?? sub.plan?.amount ?? null,
+              currency:        sub.currency || 'usd',
+              subscriptionId:  sub.id,
+              customerId:      typeof sub.customer === 'string' ? sub.customer : (sub.customer?.id || null),
+              isFirstPurchase: false,
+            }).catch(() => false);
+            if (added) await markClickUpTaskCreated(env, sub.id);
+          } catch (e) {
+            console.warn('[StripeWebhook] subscription.updated ClickUp add failed:', e?.message);
+          }
+        })());
       }
 
       // Outbound sync → LEGACY_DB + KV (non-blocking)

@@ -1678,6 +1678,25 @@ async function showAppropriateBanner() {
       try {
         const clientId = window.location.hostname;
         const visitorId = localStorage.getItem("_cb_vid_");
+
+        // Idempotency guard: one interaction can trigger overlapping handlers
+        // (two click handlers, or a handler bound more than once), each of which
+        // calls this function. Without this, a single accept/reject writes two
+        // identical Consent rows within the same second — showing as duplicate
+        // rows in the consent logs. Collapse repeat posts of the same consent
+        // state fired within a short window (also blocks concurrent in-flight ones).
+        const dedupeKey = JSON.stringify({
+          v: visitorId,
+          b: preferences && preferences.bannerType,
+          p: preferences,
+        });
+        const nowTs = Date.now();
+        const last = window.__cbLastConsentSend;
+        if (last && last.key === dedupeKey && (nowTs - last.ts) < 5000) {
+          return;
+        }
+        window.__cbLastConsentSend = { key: dedupeKey, ts: nowTs };
+
         const policyVersion = "1.2";
         const timestamp = new Date().toISOString();
         const sessionToken = await getVisitorSessionToken();

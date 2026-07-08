@@ -101,6 +101,15 @@ TEST_LOGIN_CODE = "424242"
 CDN_BASE_URL = ""
 # Public origin of your Next.js app (no trailing slash). If set, embed tries https://<WEBAPP>/asset/logo.webp first; on failure it loads /embed/floating-logo.svg from this Worker. If empty, the Worker SVG is used directly.
 WEBAPP_PUBLIC_URL = ""
+# ── Webflow App OAuth (Data Client) — default env (consent-webapp-manager) ───
+#   Secrets (NOT in this file): `wrangler secret put webflow_TEST_CLIENT_ID`
+#                               `wrangler secret put WEBFLOW_CLIENT_TEST_SECRET`
+#   The REDIRECT_URI below must EXACTLY match a Redirect URI registered in the
+#   Webflow App settings. Only needed for NEW installs (authorize/callback);
+#   already-authorized users work from the stored KV/D1 token without secrets.
+WEBFLOW_OAUTH_SCOPES = "sites:read sites:write authorized_user:read custom_code:read custom_code:write"
+WEBFLOW_OAUTH_REDIRECT_URI = "https://consent-webapp-manager.web-8fb.workers.dev/api/webflow/oauth/callback"
+WEBFLOW_APP_REDIRECT = ""
 # --- Tier plans (Basic / Essential / Growth) — one Stripe *subscription* per checkout, one recurring price per line item ---
 # In Stripe Dashboard: create **3 products** (one per tier). Each product has **2 recurring prices** (month + year).
 # Map those six price_ ids here. Checkout uses exactly one price → one subscription for the chosen plan + billing interval.
@@ -159,6 +168,12 @@ ADMIN_SECRET = "cb-admin-7Kp2vQ8mNx9LtR5yJ4hB6fW1aZ3sE0d"
 CB_SERVER_BASE_URL = "https://app.consentbit.com"
 CDN_BASE_URL = ""
 WEBAPP_PUBLIC_URL = ""
+# ── Webflow App OAuth (Data Client) — production env (manager.consentbit.com) ─
+#   Secrets: `wrangler secret put webflow_TEST_CLIENT_ID --env production` (same for WEBFLOW_CLIENT_TEST_SECRET).
+#   REDIRECT_URI must EXACTLY match a Redirect URI registered in the Webflow App settings.
+WEBFLOW_OAUTH_SCOPES = "sites:read sites:write authorized_user:read custom_code:read custom_code:write"
+WEBFLOW_OAUTH_REDIRECT_URI = "https://manager.consentbit.com/api/webflow/oauth/callback"
+WEBFLOW_APP_REDIRECT = ""
 
 # Fixed-OTP review/test account (see top-level [vars] for details).
 TEST_LOGIN_EMAIL = "test@consentbit.com"

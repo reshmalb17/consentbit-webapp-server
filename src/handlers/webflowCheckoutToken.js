@@ -17,6 +17,8 @@
 //   body: { platformId, domain?, plan?, interval?, platform?, version?, email?, billingEmail? }
 //   → { token }  (CORS *, no session)
 
+import { getWebflowOAuthTokenBySite, getWebflowOAuthTokenByUser } from '../services/db.js';
+
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
@@ -57,6 +59,7 @@ export async function handleWebflowCheckoutToken(request, env) {
   payload.version = payload.version || 'v2';
 
   // Resolve the workspace email from the OAuth record when not provided.
+  // 1. KV mirror (fast, but can be evicted or lack the .email field).
   if (!payload.email && payload.platformId && env.WEBFLOW_AUTHENTICATION) {
     try {
       const kvRaw = await env.WEBFLOW_AUTHENTICATION.get(payload.platformId);
@@ -64,12 +67,32 @@ export async function handleWebflowCheckoutToken(request, env) {
         const kvEntry = typeof kvRaw === 'string' ? JSON.parse(kvRaw) : kvRaw;
         if (kvEntry?.email) {
           payload.email = String(kvEntry.email).trim().toLowerCase();
-          console.log('[webflow-checkout-token] resolved email from OAuth record for platformId', payload.platformId);
+          console.log('[webflow-checkout-token] resolved email from KV for platformId', payload.platformId);
         }
       }
     } catch (e) {
-      console.warn('[webflow-checkout-token] email resolve failed (non-fatal)', e?.message || e);
+      console.warn('[webflow-checkout-token] KV email resolve failed (non-fatal)', e?.message || e);
     }
+  }
+  // 2. Durable D1 OAuth record fallback (authoritative; survives KV eviction).
+  //    WebflowOAuthSite[siteId].userKey → WebflowOAuthToken.authorizedBy(.user).email
+  if (!payload.email && payload.platformId && env.CONSENT_WEBAPP) {
+    try {
+      const siteRow = await getWebflowOAuthTokenBySite(env.CONSENT_WEBAPP, payload.platformId);
+      if (siteRow?.userKey) {
+        const tokenRow = await getWebflowOAuthTokenByUser(env.CONSENT_WEBAPP, siteRow.userKey);
+        const email = tokenRow?.authorizedBy?.email || tokenRow?.authorizedBy?.user?.email;
+        if (email) {
+          payload.email = String(email).trim().toLowerCase();
+          console.log('[webflow-checkout-token] resolved email from D1 for platformId', payload.platformId);
+        }
+      }
+    } catch (e) {
+      console.warn('[webflow-checkout-token] D1 email resolve failed (non-fatal)', e?.message || e);
+    }
+  }
+  if (!payload.email) {
+    console.warn('[webflow-checkout-token] email NOT resolved for platformId', payload.platformId || 'none');
   }
 
   const token = crypto.randomUUID();

@@ -64,13 +64,13 @@ export async function addCustomerToClickUp(env, {
   const apiKey = env.CLICKUP_API_KEY;
   if (!apiKey) {
     console.warn('[ClickUp] CLICKUP_API_KEY not set — skipping');
-    return;
+    return false;
   }
 
   const listId = resolveListId(env, platform);
   if (!listId) {
     console.warn('[ClickUp] No list ID configured for platform:', platform, '— skipping');
-    return;
+    return false;
   }
 
   const platformLabel = platform ? platform.charAt(0).toUpperCase() + platform.slice(1) : 'Website';
@@ -111,11 +111,40 @@ export async function addCustomerToClickUp(env, {
     const data = await res.json();
     if (!res.ok) {
       console.error('[ClickUp] task creation failed — status:', res.status, '| error:', data?.err || JSON.stringify(data));
-    } else {
-      console.log('[ClickUp] task created — id:', data.id, '| list:', listId, '| platform:', platformLabel);
+      return false;
     }
+    console.log('[ClickUp] task created — id:', data.id, '| list:', listId, '| platform:', platformLabel);
+    return true;
   } catch (e) {
     console.error('[ClickUp] task creation exception:', e?.message);
+    return false;
+  }
+}
+
+// ── Once-only dedup ──────────────────────────────────────────────────────────
+// A subscriber can arrive via multiple Stripe events (checkout.session.completed,
+// customer.subscription.updated) and via the direct custom-checkout flow. To add
+// each subscriber to ClickUp exactly once, we stamp a flag in the CHECKOUT_TOKENS
+// KV keyed by the Stripe subscription id after a successful add, and check it before
+// adding again. Best-effort: if KV is unavailable we fall back to "not yet added".
+const CLICKUP_DEDUP_PREFIX = 'clickup-added:';
+
+export async function wasClickUpTaskCreated(env, subscriptionId) {
+  if (!subscriptionId || !env?.CHECKOUT_TOKENS) return false;
+  try {
+    return (await env.CHECKOUT_TOKENS.get(CLICKUP_DEDUP_PREFIX + subscriptionId)) != null;
+  } catch (e) {
+    console.warn('[ClickUp] dedup read failed (treating as not-added):', e?.message);
+    return false;
+  }
+}
+
+export async function markClickUpTaskCreated(env, subscriptionId) {
+  if (!subscriptionId || !env?.CHECKOUT_TOKENS) return;
+  try {
+    await env.CHECKOUT_TOKENS.put(CLICKUP_DEDUP_PREFIX + subscriptionId, new Date().toISOString());
+  } catch (e) {
+    console.warn('[ClickUp] dedup write failed:', e?.message);
   }
 }
 

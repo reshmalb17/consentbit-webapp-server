@@ -12,7 +12,7 @@ import { handlePageview } from './handlers/pageview.js';
 import { handleScanHistory } from './handlers/scanHistory.js';
 import { handleCookies } from './handlers/cookies.js';
 import { handleMarkVerified } from './handlers/markVerified.js';
-import { handleScanSite } from './handlers/scanSite.js';
+import { handleScanSite, handleScanSiteConsented } from './handlers/scanSite.js';
 import { handleBannerCustomization } from './handlers/bannerCustomization.js';
 import { handleScheduledScan } from './handlers/scheduledScan.js';
 import { handleConsentLogs } from './handlers/consentLogs.js';
@@ -32,6 +32,7 @@ import { handleCancelSubscription } from './handlers/cancelSubscription.js';
 import { handleUpgradeSubscription } from './handlers/updateSubscription.js';
 import { handleCreateSetupIntent, handleUpdatePaymentMethod } from './handlers/updatePaymentMethod.js';
 import { handleSwitchBillingInterval, handleSwitchIntervalPreview } from './handlers/switchBillingInterval.js';
+import { handleChangeTier, handleChangeTierPreview } from './handlers/changeTier.js';
 import { handleDebugSchema } from './handlers/debugSchema.js';
 import { handleAdminSeedLegacy } from './handlers/adminSeedLegacy.js';
 import { handleAdminSeedBannerConfigs } from './handlers/adminSeedBannerConfigs.js';
@@ -72,6 +73,7 @@ import { handleAuthLogin } from './handlers/authLogin.js';
 import { handleAuthSignup } from './handlers/authSignup.js';
 import { handleAuthMe } from './handlers/authMe.js';
 import { handleAuthProfile } from './handlers/authProfile.js';
+import { handleTransferOwnershipRequest, handleTransferOwnershipAuthorize } from './handlers/authTransferOwnership.js';
 import { handleAuthRequestCode } from './handlers/authRequestCode.js';
 import { handleAuthVerifyCode } from './handlers/authVerifyCode.js';
 import { handleAuthLogout } from './handlers/authLogout.js';
@@ -83,7 +85,10 @@ import { handleFeedback } from './handlers/feedback.js';
 import { handleCustomCheckout, handleValidateCoupon } from './handlers/customeCheeckout.js';
 import { handleSyncPlugin, handleSyncPluginCustomization, handleGetPluginData, handleGetPluginPlan } from './handlers/SyncPlugin.js';
 import { handlePaymentSubscription } from './handlers/paymentSubscription.js';
-import { handleWebflowBilling, handleWebflowCancelSubscription } from './handlers/webflowBilling.js';
+import { handleWebflowBilling, handleWebflowCancelSubscription, handleWebflowSwitchInterval } from './handlers/webflowBilling.js';
+import { handleWebflowScriptCleanupReport, handleWebflowScriptCleanupRemove } from './handlers/webflowScriptCleanup.js';
+import { handleWebflowOAuthAuthorize, handleWebflowOAuthCallback, handleWebflowOAuthStatus } from './handlers/webflowOAuth.js';
+import { handleWebflowPublish, handleWebflowDomains } from './handlers/webflowPublish.js';
 
 import { handleOptions, withCors, withPublicCors } from './utils/cors.js';
 import {
@@ -97,6 +102,7 @@ import {
 import {
   ensureSchema,
   getDueScheduledScans,
+  claimDueScheduledScan,
   updateScheduledScanAfterRun,
   deactivateScheduledScan,
   calculateNextRunAt,
@@ -128,11 +134,22 @@ const PUBLIC_PATHS = new Set([
   '/api/scan-cookies',
   '/api/pageview',
   '/api/scan-site',
+  '/api/scan-site-consented',
   '/api/scan-pending',
   '/api/v2/webflow-free-register',
   '/api/payment/subscription',
   '/api/webflow/billing',
   '/api/webflow/cancel-subscription',
+  '/api/webflow/switch-interval',
+  '/api/webflow/script-cleanup',
+  // Webflow OAuth (browser redirects) — must skip body-encoding so the 302
+  // Location survives, allow any origin, and skip CSRF (GET).
+  '/api/webflow/oauth/authorize',
+  '/api/webflow/oauth/callback',
+  '/api/webflow/oauth/status',
+  // Webflow site publish + domains (called from the Designer extension).
+  '/api/webflow/publish',
+  '/api/webflow/domains',
   '/api/banner-customization',
   '/api/licenses/activate-license',
   '/api/licenses/check-domain-script',
@@ -153,6 +170,7 @@ const AUTH_RATE_PATHS = new Set([
   '/api/auth/signup',
   '/api/auth/request-code',
   '/api/auth/verify-code',
+  '/api/auth/transfer-ownership/authorize',
   '/api/onboarding/first-setup',
 ]);
 
@@ -224,6 +242,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handlePageview(request, env); break;
     case '/api/scan-site':
       response = await handleScanSite(request, env, ctx); break;
+    case '/api/scan-site-consented':
+      response = await handleScanSiteConsented(request, env, ctx); break;
     case '/api/scan-pending':
       response = await handleScanPending(request, env); break;
 
@@ -244,6 +264,10 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleAuthMe(request, env); break;
     case '/api/auth/profile':
       response = await handleAuthProfile(request, env); break;
+    case '/api/auth/transfer-ownership/request':
+      response = await handleTransferOwnershipRequest(request, env, ctx); break;
+    case '/api/auth/transfer-ownership/authorize':
+      response = await handleTransferOwnershipAuthorize(request, env); break;
 
     // — Onboarding
     case '/api/onboarding/first-setup':
@@ -285,6 +309,27 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleWebflowBilling(request, env); break;
     case '/api/webflow/cancel-subscription':
       response = await handleWebflowCancelSubscription(request, env); break;
+    case '/api/webflow/switch-interval':
+      response = await handleWebflowSwitchInterval(request, env); break;
+
+    // — Legacy script cleanup (remove old auto-injected ConsentBit head script)
+    case '/api/webflow/script-cleanup':
+      response = request.method === 'POST'
+        ? await handleWebflowScriptCleanupRemove(request, env)
+        : await handleWebflowScriptCleanupReport(request, env);
+      break;
+
+    // — Webflow OAuth install (browser redirects) + Designer status/publish
+    case '/api/webflow/oauth/authorize':
+      response = await handleWebflowOAuthAuthorize(request, env); break;
+    case '/api/webflow/oauth/callback':
+      response = await handleWebflowOAuthCallback(request, env); break;
+    case '/api/webflow/oauth/status':
+      response = await handleWebflowOAuthStatus(request, env); break;
+    case '/api/webflow/publish':
+      response = await handleWebflowPublish(request, env); break;
+    case '/api/webflow/domains':
+      response = await handleWebflowDomains(request, env); break;
 
     // — Billing / payments
     case '/api/validate-promo':
@@ -327,6 +372,10 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleSwitchBillingInterval(request, env); break;
     case '/api/subscriptions/switch-interval/preview':
       response = await handleSwitchIntervalPreview(request, env); break;
+    case '/api/subscriptions/change-tier':
+      response = await handleChangeTier(request, env); break;
+    case '/api/subscriptions/change-tier/preview':
+      response = await handleChangeTierPreview(request, env); break;
     case '/api/billing/setup-intent':
       response = await handleCreateSetupIntent(request, env); break;
     case '/api/billing/update-payment-method':
@@ -482,8 +531,26 @@ async function executeScheduledScans(env, ctx) {
   await ensureSchema(db);
   try {
     const now = new Date().toISOString();
-    const scheduledScans = await getDueScheduledScans(db);
-    console.log('[Cron] executeScheduledScans —', { time: now, dueScans: scheduledScans.length });
+    const dueRaw = await getDueScheduledScans(db);
+
+    // Collapse to ONE due schedule per site. The product allows a single active schedule
+    // per site (the POST handler deactivates prior ones before creating a new one), so any
+    // extra active rows for the same site are stale duplicates — running them all is what
+    // produced multiple scan rows for a single scheduled scan. Keep the newest row per site
+    // and deactivate the older duplicates so the accumulation self-heals.
+    const bySite = new Map();
+    for (const s of dueRaw) {
+      const prev = bySite.get(s.siteId);
+      const createdAt = s.createdAt || s.createdat || '';
+      if (!prev || String(createdAt) > String(prev.createdAt || prev.createdat || '')) {
+        if (prev) { try { await deactivateScheduledScan(db, prev.id, now); } catch (_) {} }
+        bySite.set(s.siteId, s);
+      } else {
+        try { await deactivateScheduledScan(db, s.id, now); } catch (_) {}
+      }
+    }
+    const scheduledScans = [...bySite.values()];
+    console.log('[Cron] executeScheduledScans —', { time: now, dueRaw: dueRaw.length, dueScans: scheduledScans.length });
     const executed = [];
     for (const scheduledScan of scheduledScans) {
       try {
@@ -517,20 +584,47 @@ async function executeScheduledScans(env, ctx) {
           }
         }
 
+        // Atomically CLAIM the schedule before scanning. Advancing nextRunAt / deactivating
+        // up front means overlapping cron invocations can't both scan the same due schedule
+        // (which was inserting duplicate scan rows). Only the invocation that actually
+        // changes the row proceeds to scan.
+        const isOnce = scheduledScan.frequency === 'once';
+        // Advance nextRunAt to the NEXT FUTURE occurrence in a single hop. A recurring
+        // scan whose nextRunAt is several periods in the past (worker downtime, or a
+        // scheduledAt earlier the same day) would otherwise only advance one period per
+        // cron sweep — staying "due" and re-firing on every tick, which inserts multiple
+        // duplicate ScanHistory rows. Loop until strictly in the future so it fires once.
+        let newNextRunAt = null;
+        if (!isOnce) {
+          newNextRunAt = calculateNextRunAt(scheduledScan.scheduledAt, scheduledScan.frequency, scheduledScan.nextRunAt);
+          let guard = 0;
+          while (new Date(newNextRunAt).getTime() <= Date.now() && guard < 1000) {
+            newNextRunAt = calculateNextRunAt(scheduledScan.scheduledAt, scheduledScan.frequency, newNextRunAt);
+            guard++;
+          }
+        }
+        const claimed = await claimDueScheduledScan(db, {
+          id: scheduledScan.id,
+          currentNextRunAt: scheduledScan.nextRunAt,
+          once: isOnce,
+          newNextRunAt,
+          now,
+        });
+        if (!claimed) {
+          executed.push({ id: scheduledScan.id, status: 'skipped', reason: 'already_claimed' });
+          continue;
+        }
+
         const scanRequest = new Request('https://internal/scan-site', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ siteId: scheduledScan.siteId }),
         });
-        await handleScanSite(scanRequest, env, ctx);
-        if (scheduledScan.frequency === 'once') {
-          await deactivateScheduledScan(db, scheduledScan.id, now);
-          executed.push({ id: scheduledScan.id, status: 'completed', deactivated: true });
-        } else {
-          const nextRunAt = calculateNextRunAt(scheduledScan.scheduledAt, scheduledScan.frequency, scheduledScan.nextRunAt);
-          await updateScheduledScanAfterRun(db, scheduledScan.id, now, nextRunAt);
-          executed.push({ id: scheduledScan.id, status: 'completed' });
-        }
+        // Scan with consent accepted — same mode as the manual "Scan Now" button
+        // (/api/scan-site-consented). Otherwise scheduled scans capture only pre-consent
+        // cookies and their results diverge from what the user sees on a manual scan.
+        await handleScanSite(scanRequest, env, ctx, { acceptConsent: true });
+        executed.push({ id: scheduledScan.id, status: 'completed', deactivated: isOnce });
       } catch (err) {
         console.error(`[Cron] Failed to execute scheduled scan ${scheduledScan.id}:`, err);
         executed.push({ id: scheduledScan.id, status: 'failed', error: err.message });
@@ -716,7 +810,12 @@ export default {
     } catch (err) {
       console.error('[Worker] Unhandled error:', err);
       response = Response.json({ success: false, error: 'Internal server error' }, { status: 500 });
-      isPublic = false;
+      // Preserve the endpoint's public-ness on error so public routes still get
+      // withPublicCors (any-origin). Forcing false here routes the 500 through the
+      // credentialed allowlist, which drops CORS headers for non-allowlisted
+      // origins (e.g. the Webflow Designer extension) — the browser then reports a
+      // masked "Failed to fetch" instead of the real error.
+      isPublic = PUBLIC_PATHS.has(pathname);
     }
 
     // ── 8. Apply security headers ─────────────────────────────────────────

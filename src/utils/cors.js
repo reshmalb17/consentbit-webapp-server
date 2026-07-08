@@ -27,6 +27,10 @@ const KNOWN_PROD_ORIGINS = [
  */
 const ALLOWED_ORIGIN_PATTERNS = [
   /^https:\/\/[a-z0-9-]+\.plugins\.framercdn\.com$/i,
+  // Webflow Designer Extensions serve the app UI from a per-app subdomain on
+  // webflow-ext.com (assigned by Webflow, changes per app/build) — same situation as
+  // Framer plugins above, so match the host pattern rather than an exact origin.
+  /^https:\/\/[a-z0-9-]+\.webflow-ext\.com$/i,
   // Cloudflare Pages preview deployments of the test frontend get a per-build
   // hash subdomain (e.g. https://abc123.consentbit-webapp-frontend-test.pages.dev).
   /^https:\/\/[a-z0-9-]+\.consentbit-webapp-frontend-test\.pages\.dev$/i,
@@ -59,7 +63,7 @@ function isOriginAllowed(origin, env) {
 // Headers that the webapp is allowed to send with credentialed requests.
 // X-Requested-With is required for CSRF protection.
 const ALLOW_HEADERS  = 'Content-Type, X-Requested-With, X-CB-Client, Authorization';
-const ALLOW_METHODS  = 'GET, HEAD, POST, OPTIONS';
+const ALLOW_METHODS  = 'GET, HEAD, POST, DELETE, OPTIONS';
 const MAX_AGE        = '86400'; // 24 h preflight cache
 
 /**
@@ -108,7 +112,10 @@ export function handleOptions(request, env) {
   const url     = new URL(request.url);
   const headers = new Headers();
 
-  // Endpoints accessible from any customer-site origin (embed CDN calls)
+  // Endpoints accessible from any origin (embed CDN calls + Webflow Designer extension,
+  // whose per-build origin can't be allowlisted). MUST stay in sync with PUBLIC_PATHS in
+  // src/index.js — a path missing here fails its CORS preflight ("Failed to fetch") even
+  // though the actual request would be allowed.
   const PUBLIC_PATHS = new Set([
     '/api/consent',
     '/api/framer-consent',
@@ -116,15 +123,21 @@ export function handleOptions(request, env) {
     '/api/scan-cookies',
     '/api/pageview',
     '/api/scan-site',
+    '/api/scan-site-consented',
     '/api/scan-pending',
     '/api/v2/webflow-free-register',
     '/api/payment/subscription',
     '/api/webflow/billing',
     '/api/webflow/cancel-subscription',
+    '/api/webflow/switch-interval',
+    '/api/webflow/script-cleanup',
+    '/api/webflow/publish',
+    '/api/webflow/domains',
     '/api/banner-customization',
     '/api/licenses/activate-license',
     '/api/licenses/check-domain-script',
     '/api/checkout-token',
+    '/api/v2/webflow-checkout-token',
     // Legacy aliases without /api/ prefix (backwards-compat for older bundles)
     '/licenses/activate-license',
     '/licenses/check-domain-script',

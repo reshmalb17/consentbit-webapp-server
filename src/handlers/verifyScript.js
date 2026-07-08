@@ -159,10 +159,28 @@ export async function handleVerifyScript(request, env) {
     const timeoutId = setTimeout(() => controller.abort(), VERIFY_PAGE_FETCH_TIMEOUT_MS);
     let resp;
     try {
-      resp = await fetch(publicUrl, {
+      // Cache-bust so we never read a stale copy. Webflow's publish propagates
+      // asynchronously; if an earlier verify (before the script went live) let
+      // Cloudflare's edge cache store the pre-publish HTML, every later retry
+      // would keep reading that cached page and report "not found". A unique
+      // query param makes the CF cache key unique, and cache:'no-store' +
+      // cacheTtl:0 disable the Worker subrequest cache entirely.
+      const bustUrl = new URL(publicUrl);
+      bustUrl.searchParams.set('_cbverify', Date.now().toString(36));
+      resp = await fetch(bustUrl.toString(), {
         redirect: 'follow',
         signal: controller.signal,
-        headers: { 'User-Agent': 'ConsentBit-Verifier/1.0' },
+        // `cache: 'no-store'` already bypasses the cache. Do NOT also pass
+        // `cf: { cacheTtl: 0 }` — Workers rejects that combo ("CacheTtl: 0 is not
+        // compatible with cache: no-store header"), which made fetch() throw and every
+        // verify fail even when the script was present. The `_cbverify` param also keeps
+        // the edge cache key unique.
+        cache: 'no-store',
+        headers: {
+          'User-Agent': 'ConsentBit-Verifier/1.0',
+          'Cache-Control': 'no-cache, no-store, max-age=0',
+          Pragma: 'no-cache',
+        },
       });
     } finally {
       clearTimeout(timeoutId);
@@ -277,6 +295,16 @@ export async function handleVerifyScript(request, env) {
 
     if (found && siteId) {
       await markSiteVerified(db, siteId, scriptUrl);
+      // Mark as v2 on explicit verify from the new webapp/Designer app so cdn.js serves
+      // the standard loader (not loaderWebflow). Kept out of markSiteVerified() itself
+      // because that is also called by background scans (scanSite) and SyncPlugin, which
+      // must NOT flip existing v1 sites.
+      try {
+        await db.prepare("UPDATE Site SET version = 'v2', updatedAt = ?1 WHERE id = ?2")
+          .bind(new Date().toISOString(), siteId).run();
+      } catch (versionErr) {
+        console.warn('[VerifyScript] Failed to set version=v2:', versionErr?.message);
+      }
     }
 
     return Response.json({

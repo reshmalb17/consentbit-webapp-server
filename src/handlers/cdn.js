@@ -35,7 +35,7 @@ async function _handleCDNScript(request, env, url) {
 
   const site = await db
     .prepare(
-      'SELECT id, organizationId, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id, pendingScan, updatedAt, platform, platformSiteId FROM Site WHERE cdnScriptId = ?1'
+      'SELECT id, organizationId, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id, pendingScan, updatedAt, platform, platformSiteId, version FROM Site WHERE cdnScriptId = ?1'
     )
     .bind(cdnScriptId)
     .first();
@@ -47,7 +47,7 @@ async function _handleCDNScript(request, env, url) {
   if (!resolvedSite) {
     resolvedSite = await db
       .prepare(
-        'SELECT id, organizationId, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id, pendingScan, updatedAt, platform, platformSiteId FROM Site WHERE id = ?1'
+        'SELECT id, organizationId, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id, pendingScan, updatedAt, platform, platformSiteId, version FROM Site WHERE id = ?1'
       )
       .bind(cdnScriptId)
       .first();
@@ -847,6 +847,12 @@ async function _handleCDNScript(request, env, url) {
   const loader = `
 ${inlineConfig}
 ! function () {
+  // Idempotency guard: if this banner script ends up embedded/executed TWICE on a page
+  // (e.g. a leftover legacy install + the current one), only the FIRST copy initialises.
+  // Without this, both copies bind the banner's click handlers and a single Accept/Reject
+  // fires the /api/consent POST twice → duplicate consent-log rows.
+  if (window.__cbBannerInit) return;
+  window.__cbBannerInit = true;
   var e = window.__CONSENT_SITE__ || {};
   var t = !0;
   ! function () {
@@ -3047,7 +3053,12 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
   // so the IAB UI is never served.
   const iabAllowed = effectivePlanId === 'growth' || effectivePlanId === 'essential';
   const wantsIab = String(resolvedSite.banner_type || '').toLowerCase() === 'iab';
-  const isWebflow = String(resolvedSite.platform || '').toLowerCase() === 'webflow';
+  const rawIsWebflow = String(resolvedSite.platform || '').toLowerCase() === 'webflow';
+  // Webflow v2 sites use the standard loader (with Consent Mode bootstrap) instead of
+  // the Webflow-specific loader. Treat a v2 Webflow site as non-Webflow for loader
+  // selection so it falls through to the 'standard' path.
+  const isWebflowV2 = rawIsWebflow && String(resolvedSite.version || '').toLowerCase() === 'v2';
+  const isWebflow = rawIsWebflow && !isWebflowV2;
   const serveKind = (wantsIab && iabAllowed && isWebflow) ? 'iabwebflow'
     : (wantsIab && iabAllowed) ? 'iab'
     : isWebflow ? 'webflow'
@@ -3056,6 +3067,8 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
     wantsIab,
     iabAllowed,
     isWebflow,
+    isWebflowV2,
+    version: resolvedSite.version || null,
     plan: effectivePlanId,
     orgId: orgIdForDebug,
     subscriptionStatus: subStatusForDebug,
