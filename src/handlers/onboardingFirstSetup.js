@@ -9,6 +9,7 @@ import {
   normalizeDomain,
 } from '../services/db.js';
 import { sendFreePlanEmail } from '../services/email.js';
+import { capturePostHogEvent } from '../services/posthog.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -127,6 +128,22 @@ export async function handleOnboardingFirstSetup(request, env, ctx) {
     site.embedScriptUrl ||
     buildEmbedScriptUrl(embedOrigin || new URL(request.url).origin, site.cdnScriptId) ||
     `${new URL(request.url).origin}/consentbit/${site.cdnScriptId}/script.js`;
+
+  // Step 5 — the unique JS snippet has been created; fire script_generated.
+  // Only when a brand-new site was minted (not when createSite returned an existing one).
+  // Keyed by email to merge with the client-side funnel. Never let it block setup.
+  if (user.email && site._created) {
+    try {
+      await capturePostHogEvent(env, user.email, 'script_generated', {
+        site_id: site.id,
+        domain: site.domain,
+        script_url: scriptUrl,
+        plan_tier: 'free',
+        platform: 'webapp',
+        ...(site.id ? { $groups: { site: String(site.id) } } : {}),
+      });
+    } catch (e) { /* analytics only */ }
+  }
 
   // Send free-plan confirmation email in the background
   sendFreePlanEmail(env, ctx, {

@@ -257,6 +257,22 @@ async function provisionAccount(db, env, request, ctx, {
     regionMode: 'gdpr',
   });
 
+  // Step 5 — new unique JS snippet created on this direct paid-checkout path.
+  // Only fire for a brand-new site (createSite returns an existing one on re-checkout/upgrade).
+  if (site._created && (user.email || email)) {
+    capturePosthog(env, ctx, {
+      event: 'script_generated',
+      distinctId: user.email || email,
+      properties: {
+        site_id: site.id,
+        domain: site.domain,
+        plan_tier: planId,
+        platform: platform || 'webapp',
+        ...(site.id ? { $groups: { site: String(site.id) } } : {}),
+      },
+    });
+  }
+
   const trialAlreadyUsed = await getSiteTrialUsed(db, site.id);
   if (!trialAlreadyUsed && subscriptionStatus === 'trialing') {
     await markTrialUsed(db, site.id);
@@ -683,13 +699,17 @@ export async function handleCustomCheckout(request, env, ctx) {
       console.log('[CustomCheckout] sending paid-plan email', { to: _emailTo, source: _emailSource, domain: rawDomain, planId, hasInvoice: !!_invoiceData });
       sendPaidPlanEmail(env, ctx, { to: _emailTo, name: '', domain: rawDomain, planName: planId, invoice: _invoiceData });
       capturePosthog(env, ctx, {
-        event: 'paid_plan_activated',
+        event: 'subscription_activated',
         distinctId: user.email || email,
         properties: {
           status: sub.status,
           platform: platform || null,
           plan: planId,
+          plan_tier: planId,
           interval,
+          billing_cycle: /^(year|annual)/i.test(String(interval)) ? 'annual' : 'monthly',
+          ...(typeof sub.items?.data?.[0]?.price?.unit_amount === 'number' ? { price: sub.items.data[0].price.unit_amount / 100 } : {}),
+          currency: (sub.items?.data?.[0]?.price?.currency || 'usd').toUpperCase(),
           domain: rawDomain,
           siteId: site.id,
           subscriptionId,
@@ -821,13 +841,17 @@ export async function handleCustomCheckout(request, env, ctx) {
       console.log('[CustomCheckout] sending paid-plan email', { to: _emailTo, source: _emailSource, domain: rawDomain, planId, hasInvoice: !!_invoiceData });
       sendPaidPlanEmail(env, ctx, { to: _emailTo, name: '', domain: rawDomain, planName: planId, invoice: _invoiceData });
       capturePosthog(env, ctx, {
-        event: 'paid_plan_activated',
+        event: 'subscription_activated',
         distinctId: user.email || email,
         properties: {
           status: subStatus,
           platform: platform || null,
           plan: planId,
+          plan_tier: planId,
           interval,
+          billing_cycle: /^(year|annual)/i.test(String(interval)) ? 'annual' : 'monthly',
+          ...(typeof sub.items?.data?.[0]?.price?.unit_amount === 'number' ? { price: sub.items.data[0].price.unit_amount / 100 } : {}),
+          currency: (sub.items?.data?.[0]?.price?.currency || 'usd').toUpperCase(),
           domain: rawDomain,
           siteId: site.id,
           subscriptionId: sub.id,

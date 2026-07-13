@@ -81,7 +81,7 @@ export async function handleAdminBackfillPosthog(request, env) {
 
       // Webapp uses email as distinct_id (matches client-side); webflow/framer use orgId
       const distinctId = isWebapp ? row.email : row.orgId;
-      const eventName = isWebapp ? 'account_created' : 'app_installed';
+      const eventName = isWebapp ? 'user_account_created' : 'app_installed';
 
       await capturePostHogEvent(env, distinctId, eventName, {
         platform,
@@ -91,12 +91,14 @@ export async function handleAdminBackfillPosthog(request, env) {
         backfilled: true,
       });
 
-      // Send paid_plan_activated if they have/had a subscription
+      // Send subscription_activated if they have/had a subscription
       if (sub && ['active', 'trialing', 'past_due'].includes(subStatus)) {
-        await capturePostHogEvent(env, distinctId, 'paid_plan_activated', {
+        await capturePostHogEvent(env, distinctId, 'subscription_activated', {
           status: subStatus,
           plan: planId,
+          plan_tier: planId,
           interval,
+          billing_cycle: /^(year|annual)/i.test(String(interval)) ? 'annual' : 'monthly',
           platform,
           site_id: row.siteId,
           backfilled: true,

@@ -2390,6 +2390,7 @@ export async function createSite(
 
       return {
         ...existing,
+        _created: false,
         organizationId,
         name,
         cdnScriptId: keptCdnScriptId,
@@ -2419,6 +2420,7 @@ export async function createSite(
 
     return {
       ...existing,
+      _created: false,
       name,
       banner_type: bannerType,
       region_mode: regionMode,
@@ -2477,6 +2479,7 @@ export async function createSite(
     embedScriptUrl,
     createdAt: now,
     updatedAt: now,
+    _created: true,
   };
 }
 
