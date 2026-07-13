@@ -10,6 +10,7 @@ import {
   incrementScanUsage,
   markSiteVerified,
 } from '../services/db.js';
+import { captureInstallationVerified } from '../services/posthog.js';
 import {
   categorizeCookie,
   getCookieProvider,
@@ -429,6 +430,8 @@ export async function handleScanSite(request, env, ctx, options = {}) {
         // The HTML check is unreliable for staging domains (Webflow returns a 2KB placeholder).
         if (cdnScriptId) {
           try { await markSiteVerified(db, siteId); } catch { /* best-effort */ }
+          // First-time detection (we are inside `!isVerified`) — fire installation_verified.
+          try { await captureInstallationVerified(env, db, siteId, domain); } catch { /* analytics only */ }
         } else {
           // No cdnScriptId — fall back to HTML check
           let scriptFound = false;
@@ -445,6 +448,8 @@ export async function handleScanSite(request, env, ctx, options = {}) {
               if (lower.includes('consentbit') || lower.includes('/consentbit/') || lower.includes('/cdn/runtime/')) {
                 scriptFound = true;
                 try { await markSiteVerified(db, siteId); } catch { /* best-effort */ }
+                // First-time detection (we are inside `!isVerified`) — fire installation_verified.
+                try { await captureInstallationVerified(env, db, siteId, domain); } catch { /* analytics only */ }
               }
             }
           } catch (fetchErr) {

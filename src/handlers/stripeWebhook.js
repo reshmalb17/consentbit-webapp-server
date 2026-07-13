@@ -490,6 +490,20 @@ export async function handleStripeWebhook(request, env, ctx) {
               regionMode: 'gdpr',
             });
             siteId = createdSite.id;
+            // Step 5 — new unique JS snippet created via the checkout webhook path.
+            if (createdSite._created) {
+              try {
+                const _sgEmail = (session.customer_email || session.customer_details?.email || '').trim().toLowerCase();
+                if (_sgEmail) {
+                  await capturePostHogEvent(env, _sgEmail, 'script_generated', {
+                    site_id: createdSite.id,
+                    domain: createdSite.domain,
+                    platform: platform || 'webapp',
+                    ...(createdSite.id ? { $groups: { site: String(createdSite.id) } } : {}),
+                  });
+                }
+              } catch (phErr) { /* analytics only */ }
+            }
           } catch (e) {
             // Failed to create site from checkout metadata
           }
@@ -563,10 +577,14 @@ export async function handleStripeWebhook(request, env, ctx) {
           }
           _phPlatform = _phPlatform || 'webapp';
           if (_phEmail) {
-            await capturePostHogEvent(env, _phEmail, 'paid_plan_activated', {
+            await capturePostHogEvent(env, _phEmail, 'subscription_activated', {
               status: subscriptionStatus,
               plan: resolvedPlanId,
+              plan_tier: resolvedPlanId,
               interval,
+              billing_cycle: /^(year|annual)/i.test(String(interval)) ? 'annual' : 'monthly',
+              ...(typeof session.amount_total === 'number' ? { price: session.amount_total / 100 } : {}),
+              currency: (session.currency || 'usd').toUpperCase(),
               site_id: siteId || null,
               org_id: orgId,
               is_first_purchase: isFirstPurchase,
@@ -812,6 +830,86 @@ export async function handleStripeWebhook(request, env, ctx) {
       return Response.json({ received: true });
     }
 
+    // A trial (or any directly-API-created) subscription's FIRST webhook is
+    // customer.subscription.created (status 'trialing'), and Stripe may never fire a
+    // subsequent .updated during the trial. The .updated/.deleted handler below never sees
+    // these, so add them to ClickUp here. Add-only — DB sync stays with checkout.session.completed
+    // and the .updated handler. Deduped by Stripe subscription id (shared key across all three
+    // entry points) so a subscriber is added exactly once regardless of which event lands first.
+    if (type === 'customer.subscription.created') {
+      const sub = event.data.object;
+      ctx.waitUntil((async () => {
+        try {
+          if (await wasClickUpTaskCreated(env, sub.id)) return;
+
+          const existing = await getSubscriptionByStripeId(db, sub.id).catch(() => null);
+          const cuSiteId = existing?.siteId ?? existing?.siteid ?? sub.metadata?.siteId ?? null;
+          const orgIdForEmail = existing?.organizationId ?? existing?.organizationid ?? sub.metadata?.organizationId ?? null;
+
+          let cuEmail = null;
+          let cuName = '';
+          let cuPlatform = sub.metadata?.platform || null;
+          let cuDomain = sub.metadata?.siteDomain || null;
+
+          if (cuSiteId && db) {
+            try {
+              const siteRow = await db.prepare('SELECT platform, domain FROM Site WHERE id = ?1 LIMIT 1').bind(cuSiteId).first();
+              cuPlatform = cuPlatform || siteRow?.platform || null;
+              cuDomain = cuDomain || siteRow?.domain || null;
+            } catch (_) {}
+          }
+
+          // Prefer the real Stripe customer email/name; fall back to the account email.
+          if (sub.customer && env.STRIPE_SECRET_KEY) {
+            try {
+              const custRes = await fetch(`https://api.stripe.com/v1/customers/${typeof sub.customer === 'string' ? sub.customer : sub.customer?.id}`, {
+                headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
+              });
+              const cust = await custRes.json();
+              if (!cust.error) {
+                cuEmail = cust.email || null;
+                cuName = cust.name || '';
+              }
+            } catch (_) {}
+          }
+          if (!cuEmail && orgIdForEmail) {
+            try {
+              const u = await db.prepare(
+                'SELECT u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
+              ).bind(orgIdForEmail).first();
+              cuEmail = u?.email || null;
+            } catch (_) {}
+          }
+
+          let cuPlan = sub.metadata?.planId || existing?.planId || existing?.planid || null;
+          const cuPriceId = sub.items?.data?.[0]?.price?.id ?? null;
+          if (!cuPlan || !['basic', 'essential', 'growth'].includes(String(cuPlan))) {
+            const inferred = inferTierPlanIdFromStripePriceId(env, cuPriceId);
+            if (inferred) cuPlan = inferred;
+          }
+          const cuInterval = sub.items?.data?.[0]?.plan?.interval === 'year' ? 'yearly' : 'monthly';
+
+          const added = await addCustomerToClickUp(env, {
+            email:           cuEmail,
+            name:            cuName,
+            platform:        cuPlatform,
+            plan:            cuPlan,
+            interval:        cuInterval,
+            domain:          cuDomain,
+            amountCents:     sub.items?.data?.[0]?.price?.unit_amount ?? sub.plan?.amount ?? null,
+            currency:        sub.currency || 'usd',
+            subscriptionId:  sub.id,
+            customerId:      typeof sub.customer === 'string' ? sub.customer : (sub.customer?.id || null),
+            isFirstPurchase: false,
+          }).catch(() => false);
+          if (added) await markClickUpTaskCreated(env, sub.id);
+        } catch (e) {
+          console.warn('[StripeWebhook] subscription.created ClickUp add failed:', e?.message);
+        }
+      })());
+      return Response.json({ received: true });
+    }
+
     if (type === 'customer.subscription.updated' || type === 'customer.subscription.deleted') {
       const sub = event.data.object;
       let existing = await getSubscriptionByStripeId(db, sub.id);
@@ -938,10 +1036,15 @@ export async function handleStripeWebhook(request, env, ctx) {
           if (type === 'customer.subscription.updated') {
             const prevStatus = event.data.previous_attributes?.status;
             if (prevStatus === 'trialing' && sub.status === 'active') {
-              await capturePostHogEvent(env, _phEmail, 'paid_plan_activated', {
+              const _subPrice = sub.items?.data?.[0]?.price ?? null;
+              await capturePostHogEvent(env, _phEmail, 'subscription_activated', {
                 status: 'active',
                 plan: planIdFromMeta,
+                plan_tier: planIdFromMeta,
                 interval: intervalFromSub,
+                billing_cycle: /^(year|annual)/i.test(String(intervalFromSub)) ? 'annual' : 'monthly',
+                ...(typeof _subPrice?.unit_amount === 'number' ? { price: _subPrice.unit_amount / 100 } : {}),
+                currency: (_subPrice?.currency || 'usd').toUpperCase(),
                 site_id: existing?.siteId ?? existing?.siteid ?? null,
                 org_id: orgIdFinal,
                 $set: { plan: planIdFromMeta, subscription_status: 'active', plan_tier: planIdFromMeta, did_convert_to_paid: true, converted_at: new Date().toISOString(), ...(_phPlatform ? { platform: _phPlatform } : {}) },
@@ -1000,7 +1103,7 @@ export async function handleStripeWebhook(request, env, ctx) {
       // checkout.session.completed — this handler is their only reliable webhook. Deduped
       // by Stripe subscription id so hosted-checkout subscribers (already added in that
       // handler) and repeat subscription.updated events don't create duplicate tasks.
-      if (type === 'customer.subscription.updated' && status === 'active') {
+      if (type === 'customer.subscription.updated' && (status === 'active' || status === 'trialing')) {
         ctx.waitUntil((async () => {
           try {
             if (await wasClickUpTaskCreated(env, sub.id)) return;

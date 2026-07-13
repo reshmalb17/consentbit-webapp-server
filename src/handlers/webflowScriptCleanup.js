@@ -34,8 +34,9 @@ const WEBFLOW_API = 'https://api.webflow.com/v2';
 // Matching on displayName PREFIX (not an exact commit-hash URL) catches every
 // past and future version at once.
 const CB_NAME_PREFIXES = [
-  'ConsentScript2025',          // V1
-  'ConsentScriptVersion22025',  // V2
+  'ConsentScript2025',          // V1  (old live app: displayName `ConsentScript2025<ts>`)
+  'ConsentScriptV22025',        // V2  (old live app: displayName `ConsentScriptV22025<ts>`)
+  'ConsentScriptVersion22025',  // V2 (defensive: tolerate the longer variant too)
   'ConsentScriptVersion312025', // V2.1 / V3
   'appscript',                  // inline loader (api.consentbit.com/consent.js)
   'ConsentBitBanner',           // runtime loader injected by the new app's API path
@@ -44,7 +45,7 @@ const CB_NAME_PREFIXES = [
 // URL fragments (in hostedLocation for hosted scripts, or sourceCode for inline
 // scripts) that identify a ConsentBit app-injected script. Lower-cased for matching.
 const CB_URL_MARKERS = [
-  'cdn.jsdelivr.net/gh/reshmalb17/cmp_script',  // V1 + V2 jsdelivr repos
+  'cdn.jsdelivr.net/gh/reshmalb17/',            // ALL old-app jsdelivr repos (cmp_script, cmp_script_V2, …)
   'gh/seattlenewmedia/consentbit-public',       // hosted consent.js repo
   'api.consentbit.com/consent.js',              // old inline loader target
   '/api/v2/cdn/runtime/',                        // new app runtime loader
@@ -175,13 +176,28 @@ async function analyzeSite(siteId, accessToken, currentCdnScriptId) {
   const kept = [];
   let hasCurrent = false;
   for (const applied of appliedScripts) {
-    const reg = registeredById.get(applied.id) || { id: applied.id, displayName: '' };
-    let sourceCode = reg.sourceCode || null;
-    const looksConsentBit = isConsentBitScript(reg, sourceCode);
-    if (looksConsentBit && !sourceCode) {
+    let reg = registeredById.get(applied.id) || { id: applied.id, displayName: '' };
+    // Resolve full detail whenever the catalog entry is thin — the list endpoint
+    // may omit hostedLocation/sourceCode, or the script may sit beyond the first
+    // (unpaginated) catalog page, so `reg` would arrive with an empty name and no
+    // URL. Without this, a real legacy script classifies as an unrelated user
+    // script and is silently kept (the reported "old script not deleting" bug).
+    if (!reg.hostedLocation && !reg.sourceCode) {
       const detail = await fetchScriptDetail(siteId, applied.id, headers);
-      sourceCode = detail?.sourceCode || null;
+      if (detail) {
+        // Prefer whichever field is non-empty (the fallback reg carries an empty
+        // displayName that must not clobber the real name from detail).
+        reg = {
+          id: applied.id,
+          displayName: reg.displayName || detail.displayName || '',
+          hostedLocation: reg.hostedLocation || detail.hostedLocation || null,
+          sourceCode: reg.sourceCode || detail.sourceCode || null,
+          version: reg.version || detail.version || null,
+        };
+      }
     }
+    const sourceCode = reg.sourceCode || null;
+    const looksConsentBit = isConsentBitScript(reg, sourceCode);
     const keepEntry = { id: applied.id, location: applied.location, version: applied.version };
 
     if (looksConsentBit && referencesCurrentInstall(reg, sourceCode, currentCdnScriptId)) {

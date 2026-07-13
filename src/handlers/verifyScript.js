@@ -1,5 +1,6 @@
 // handlers/verifyScript.js
 import { markSiteVerified } from '../services/db.js';
+import { captureInstallationVerified } from '../services/posthog.js';
 const VERIFY_PAGE_FETCH_TIMEOUT_MS = 12000;
 
 /**
@@ -294,7 +295,17 @@ export async function handleVerifyScript(request, env) {
     }
 
     if (found && siteId) {
+      // Only fire installation_verified on the first transition to verified, so repeated
+      // manual "Verify" clicks don't double-count.
+      let wasVerified = false;
+      try {
+        const prev = await db.prepare('SELECT verified FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
+        wasVerified = prev?.verified === 1 || prev?.verified === true;
+      } catch { /* treat as unverified */ }
       await markSiteVerified(db, siteId, scriptUrl);
+      if (!wasVerified) {
+        try { await captureInstallationVerified(env, db, siteId, publicUrl); } catch { /* analytics only */ }
+      }
       // Mark as v2 on explicit verify from the new webapp/Designer app so cdn.js serves
       // the standard loader (not loaderWebflow). Kept out of markSiteVerified() itself
       // because that is also called by background scans (scanSite) and SyncPlugin, which
