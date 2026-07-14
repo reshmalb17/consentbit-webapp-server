@@ -87,6 +87,7 @@ export async function handleBannerCustomization(request, env) {
 
     try {
       const row = await getBannerCustomization(db, siteId);
+      console.log(`[banner-customization] GET siteId=${siteId} → row=${row ? 'found' : 'none'}${row ? ' bg=' + (row.backgroundColor ?? '?') : ''}`);
       let translations = null;
       if (row?.translations) {
         try {

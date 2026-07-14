@@ -52,6 +52,69 @@ const DEFAULT_SCOPES = 'sites:read sites:write authorized_user:read custom_code:
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
+/**
+ * Hosts allowed to serve the ConsentBit banner script. Mirrors the client-side
+ * allowlist (lib/scriptUrl.js) so the install-snippet URL is validated on BOTH
+ * ends: any consentbit.com subdomain, localhost (dev), and any origin the
+ * operator has explicitly pinned via env (CDN_BASE_URL / API_BASE_URL /
+ * WEBAPP_PUBLIC_URL — covers the test workers.dev host).
+ */
+function isTrustedEmbedHost(host, env) {
+  const h = String(host || '').toLowerCase();
+  if (!h) return false;
+  if (h === 'consentbit.com' || h.endsWith('.consentbit.com')) return true;
+  if (h === 'localhost' || h === '127.0.0.1') return true;
+  for (const key of ['CDN_BASE_URL', 'API_BASE_URL', 'WEBAPP_PUBLIC_URL']) {
+    const val = env?.[key];
+    if (!val) continue;
+    try {
+      if (new URL(val).hostname.toLowerCase() === h) return true;
+    } catch { /* ignore malformed env URL */ }
+  }
+  return false;
+}
+
+/** First trusted origin among the candidates (env pin, then the request origin). */
+function trustedServeOrigin(env, requestOrigin) {
+  const pin = String(env?.CDN_BASE_URL || env?.API_BASE_URL || '').trim().replace(/\/+$/, '');
+  for (const cand of [pin, requestOrigin]) {
+    if (!cand) continue;
+    try {
+      if (isTrustedEmbedHost(new URL(cand).hostname, env)) return cand.replace(/\/+$/, '');
+    } catch { /* ignore */ }
+  }
+  return null;
+}
+
+/**
+ * Validate a built install-snippet URL. If its host is already trusted, keep it.
+ * Otherwise — e.g. the site's frozen embedScriptUrl points at the raw *.workers.dev
+ * origin rather than the vanity domain — canonicalize it onto a trusted origin
+ * (env pin, else the current request origin), since the same worker serves the
+ * script there. Only when no trusted origin is available do we keep the original
+ * (logged) rather than break install.
+ */
+function sanitizeEmbedScriptUrl(scriptUrl, env, cdnScriptId, requestOrigin) {
+  if (!scriptUrl) return null;
+  let u;
+  try { u = new URL(String(scriptUrl)); } catch { return null; }
+  // Trusted if on the consentbit allowlist OR it's the worker's OWN request host
+  // (e.g. the *.workers.dev test origin serving its own script) — on Cloudflare the
+  // request host is always a configured worker domain, so it is inherently trusted.
+  let reqHost = null;
+  try { reqHost = requestOrigin ? new URL(requestOrigin).hostname.toLowerCase() : null; } catch { /* ignore */ }
+  if (isTrustedEmbedHost(u.hostname, env) || (reqHost && u.hostname.toLowerCase() === reqHost)) {
+    return u.toString();
+  }
+
+  const origin = trustedServeOrigin(env, requestOrigin);
+  if (origin && cdnScriptId) {
+    return `${origin}/consentbit/${cdnScriptId}/script.js`;
+  }
+  console.warn(`${TAG} embed scriptUrl host not trusted and no trusted origin to re-pin to (kept): ${u.hostname}`);
+  return u.toString();
+}
+
 function resolveRedirectUri(env, url) {
   if (env.WEBFLOW_OAUTH_REDIRECT_URI) return env.WEBFLOW_OAUTH_REDIRECT_URI;
   return `${url.origin}/api/webflow/oauth/callback`;
@@ -156,7 +219,14 @@ export async function handleWebflowOAuthAuthorize(request, env) {
 //   • neither                    → not authorized → app sends user to /authorize
 // When verify is on (default) the token is checked against Webflow; if it was
 // revoked (HTTP 401) it is invalidated everywhere and reported unauthorized.
-export async function handleWebflowOAuthStatus(request, env) {
+// opts.authenticated — true only when reached via the token-gated /api/wf/oauth/status
+// route. The legacy public /api/webflow/oauth/status call (authenticated=false) must
+// NOT return account PII (email / billingEmail): anyone can call it with just a
+// siteId, so leaking those was the reviewer's High-severity finding. Non-PII routing
+// fields (authorized/registered/plan/scriptUrl/…) stay, as the hosted checkout page
+// relies on them and they identify no person.
+export async function handleWebflowOAuthStatus(request, env, opts = {}) {
+  const { authenticated = false } = opts;
   if (request.method !== 'GET') {
     return Response.json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
   }
@@ -233,6 +303,10 @@ export async function handleWebflowOAuthStatus(request, env) {
         site.embedScriptUrl ||
         buildEmbedScriptUrl(canonicalEmbedOrigin(request, env) || url.origin, site.cdnScriptId) ||
         `${url.origin}/consentbit/${site.cdnScriptId}/script.js`;
+      // Integrity guard: only ever hand back a script URL on a ConsentBit-controlled
+      // host. If the built URL derived from an unexpected request host, re-pin it to a
+      // configured CDN origin (or drop it) rather than emit an untrusted <script src>.
+      scriptUrl = sanitizeEmbedScriptUrl(scriptUrl, env, site.cdnScriptId, url.origin);
       // Plan: active site subscription → org effective plan → 'free'.
       const sub = await getSubscriptionBySiteId(db, site.id);
       let planId = sub ? (sub.planId ?? sub.planid ?? null) : null;
@@ -321,7 +395,14 @@ export async function handleWebflowOAuthStatus(request, env) {
     console.warn(`${TAG} status: freeUsed check failed (non-fatal)`, e?.message || e);
   }
 
-  return Response.json({ success: true, authorized: true, source: row.source, registered, webappSiteId, plan, version, scriptUrl, cdnScriptId, bannerCreated, email, billingEmail, freeUsed });
+  // Account PII is returned ONLY on the authenticated route. The public legacy call
+  // gets the non-PII routing fields with email/billingEmail withheld.
+  return Response.json({
+    success: true, authorized: true, source: row.source, registered, webappSiteId,
+    plan, version, scriptUrl, cdnScriptId, bannerCreated, freeUsed,
+    email: authenticated ? email : null,
+    billingEmail: authenticated ? billingEmail : null,
+  });
 }
 
 // ── 2. callback — exchange code → token, store, return to app ────────────────

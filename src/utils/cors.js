@@ -62,7 +62,7 @@ function isOriginAllowed(origin, env) {
 
 // Headers that the webapp is allowed to send with credentialed requests.
 // X-Requested-With is required for CSRF protection.
-const ALLOW_HEADERS  = 'Content-Type, X-Requested-With, X-CB-Client, Authorization';
+const ALLOW_HEADERS  = 'Content-Type, X-Requested-With, X-CB-Client, Authorization, X-Webflow-Site-Id';
 const ALLOW_METHODS  = 'GET, HEAD, POST, DELETE, OPTIONS';
 const MAX_AGE        = '86400'; // 24 h preflight cache
 

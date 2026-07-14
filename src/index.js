@@ -99,6 +99,7 @@ import {
   wrapAndEncodeResponse,
   withSecurityHeaders,
 } from './middleware/security.js';
+import { requireWebflowIdentity } from './middleware/webflowIdentity.js';
 import {
   ensureSchema,
   getDueScheduledScans,
@@ -158,6 +159,63 @@ const PUBLIC_PATHS = new Set([
   // Legacy aliases without /api/ prefix (backwards-compat for older bundles)
   '/licenses/activate-license',
   '/licenses/check-domain-script',
+]);
+
+/**
+ * Authenticated Webflow Designer Extension API surface (/api/wf/*).
+ *
+ * These are dedicated copies of the Designer-app endpoints that REQUIRE a valid
+ * Webflow ID token (Authorization: Bearer <idToken>) and enforce that the caller
+ * is authorized for the site they name (see middleware/webflowIdentity.js). They
+ * reuse the exact same handler logic as the legacy public endpoints — the legacy
+ * paths are left untouched so older bundles keep working, while the updated app
+ * calls only these authenticated routes.
+ *
+ * Key: the path segment AFTER '/api/wf/'. Value: (request, env, ctx) => Response.
+ */
+const WEBFLOW_APP_ROUTES = {
+  'oauth/status':        (req, env)      => handleWebflowOAuthStatus(req, env, { authenticated: true }),
+  'verify-script':       (req, env)      => handleVerifyScript(req, env),
+  'banner-customization':(req, env)      => handleBannerCustomization(req, env),
+  'scan-site-consented': (req, env, ctx) => handleScanSiteConsented(req, env, ctx),
+  'scan-history':        (req, env)      => handleScanHistory(req, env),
+  'cookies':             (req, env)      => handleCookies(req, env),
+  'consent-logs':        (req, env)      => handleConsentLogs(req, env),
+  'consent-csv':         (req, env)      => handleConsentCsv(req, env),
+  'consent-pdf':         (req, env)      => handleConsentPdf(req, env),
+  'custom-cookie-rules': (req, env)      => handleCustomCookieRules(req, env),
+  'scheduled-scan':      (req, env)      => handleScheduledScan(req, env),
+  'script-cleanup':      (req, env)      => (req.method === 'POST'
+                                             ? handleWebflowScriptCleanupRemove(req, env)
+                                             : handleWebflowScriptCleanupReport(req, env)),
+  'publish':             (req, env)      => handleWebflowPublish(req, env),
+  'domains':             (req, env)      => handleWebflowDomains(req, env),
+  'billing':             (req, env)      => handleWebflowBilling(req, env),
+  'cancel-subscription': (req, env)      => handleWebflowCancelSubscription(req, env),
+  'switch-interval':     (req, env)      => handleWebflowSwitchInterval(req, env),
+  'payment/subscription':(req, env)      => handlePaymentSubscription(req, env),
+  'webflow-free-register':(req, env)     => handleWebflowFreeRegister(req, env),
+  'webflow-checkout-token':(req, env)    => handleWebflowCheckoutToken(req, env),
+};
+
+/**
+ * LEGACY Webflow-Designer endpoints that the updated app no longer uses (it calls
+ * the authenticated /api/wf/* copies above). They previously answered anyone with a
+ * siteId — the reviewer's "trigger publish / cancel-subscription on another
+ * installation" and account-data finding. Since the previous app is not live, these
+ * have no legitimate remaining caller, so we now require a valid Webflow ID token on
+ * them too. (oauth/status stays public but PII-stripped — the hosted checkout page
+ * still reads its non-PII fields and cannot mint an ID token.)
+ */
+const LEGACY_WEBFLOW_AUTH_PATHS = new Set([
+  '/api/webflow/publish',
+  '/api/webflow/domains',
+  '/api/webflow/billing',
+  '/api/webflow/cancel-subscription',
+  '/api/webflow/switch-interval',
+  '/api/webflow/script-cleanup',
+  '/api/v2/webflow-free-register',
+  '/api/v2/webflow-checkout-token',
 ]);
 
 /**
@@ -760,6 +818,72 @@ export default {
       return PUBLIC_PATHS.has(pathname)
         ? withPublicCors(r, request)
         : withCors(r, request, env);
+    }
+
+    // ── Authenticated Webflow Designer Extension surface (/api/wf/*) ──────
+    // Requires a valid Webflow ID token (Authorization: Bearer <idToken>) and
+    // enforces that the caller is authorized for the site they name. Reuses the
+    // legacy handler logic; CSRF is not required (Bearer auth, not cookies), and
+    // the mutating body is still sanitized. Responses go through the same
+    // security-header + envelope-encode + credentialed-CORS pipeline.
+    if (pathname.startsWith('/api/wf/')) {
+      // NOTE: these routes mirror endpoints that were previously PUBLIC and are
+      // therefore NOT run through sanitizeRequestBody — that recursive string
+      // sanitizer mangles legitimate banner-customization content (CSS custom
+      // properties like `--var`, text containing `--`, etc.) and would corrupt the
+      // saved banner. Identity is enforced by the Webflow ID token below instead.
+      const req = request;
+      console.log(`[wf] → ${request.method} ${pathname} siteHdr=${request.headers.get('X-Webflow-Site-Id') || '-'} hasToken=${!!request.headers.get('Authorization')}`);
+      const auth = await requireWebflowIdentity(req, env, {
+        // oauth/status must still answer for a not-yet-authorized site (no token
+        // stored) so the app can show the authorize screen. Such a site has no
+        // stored data, so allowing the read leaks nothing.
+        allowUnauthorizedSite: pathname === '/api/wf/oauth/status',
+      });
+      console.log(`[wf] ${pathname} → ${auth.ok ? 'OK' : 'DENIED ' + auth.status + ' ' + auth.code}`);
+      // NOTE: these routes mirror formerly-PUBLIC endpoints, so responses are NOT
+      // run through wrapAndEncodeResponse. Some handlers (e.g. banner-customization
+      // GET) already envelope-encode their own body; re-encoding here double-wraps
+      // it and the client decodes only the outer layer, losing the payload. The
+      // frontend's parseJson transparently decodes single-encoded or plain bodies.
+      if (!auth.ok) {
+        const denied = withSecurityHeaders(
+          Response.json({ success: false, error: auth.error, code: auth.code }, { status: auth.status })
+        );
+        return withCors(denied, request, env);
+      }
+      const sub = pathname.slice('/api/wf/'.length);
+      const handler = WEBFLOW_APP_ROUTES[sub];
+      if (!handler) {
+        const nf = withSecurityHeaders(Response.json({ success: false, error: 'Not Found' }, { status: 404 }));
+        return withCors(nf, request, env);
+      }
+      let wfResp;
+      try {
+        wfResp = await handler(req, env, ctx, auth.identity);
+      } catch (err) {
+        console.error('[Worker] /api/wf handler error:', err);
+        wfResp = Response.json({ success: false, error: 'Internal server error' }, { status: 500 });
+      }
+      return withCors(withSecurityHeaders(wfResp), request, env);
+    }
+
+    // ── Legacy Webflow-Designer endpoints — now require a valid ID token ──
+    // Reject any unauthenticated caller (an attacker curling with just a siteId),
+    // then fall through to the normal dispatch for authorized requests.
+    if (LEGACY_WEBFLOW_AUTH_PATHS.has(pathname)) {
+      const auth = await requireWebflowIdentity(request, env);
+      if (!auth.ok) {
+        const denied = await wrapAndEncodeResponse(
+          withSecurityHeaders(
+            Response.json({ success: false, error: auth.error, code: auth.code }, { status: auth.status })
+          )
+        );
+        return PUBLIC_PATHS.has(pathname)
+          ? withPublicCors(denied, request)
+          : withCors(denied, request, env);
+      }
+      // authorized → continue to the standard pipeline / dispatch below
     }
 
     // Additional throttling for high-volume public analytics endpoint.
