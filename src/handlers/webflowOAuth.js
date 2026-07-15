@@ -37,6 +37,7 @@ import {
   buildEmbedScriptUrl,
   getBannerCustomization,
 } from '../services/db.js';
+import { capturePostHogEvent } from '../services/posthog.js';
 
 const TAG = '[webflow-oauth]';
 
@@ -120,6 +121,33 @@ function resolveRedirectUri(env, url) {
   return `${url.origin}/api/webflow/oauth/callback`;
 }
 
+/**
+ * Only allow post-install redirect (`returnTo`) to hosts we control or Webflow's own —
+ * prevents an open redirect (…/authorize?returnTo=https://evil.com). Returns the URL
+ * if allowed, else '' (callers fall back to WEBFLOW_APP_REDIRECT / the Designer).
+ */
+function safeReturnTo(returnTo, env) {
+  if (!returnTo) return '';
+  let u;
+  try { u = new URL(returnTo); } catch { return ''; }
+  const isLocal = u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+  if (u.protocol !== 'https:' && !(u.protocol === 'http:' && isLocal)) return '';
+  const h = u.hostname.toLowerCase();
+  const ok =
+    h === 'webflow.com' || h.endsWith('.webflow.com') ||
+    h.endsWith('.webflow-ext.com') ||
+    h === 'consentbit.com' || h.endsWith('.consentbit.com') ||
+    h.endsWith('.consentbit-webapp-frontend-test.pages.dev') || h === 'consentbit-webapp-frontend-test.pages.dev' ||
+    isLocal;
+  if (ok) return u.toString();
+  for (const key of ['WEBFLOW_APP_REDIRECT', 'WEBAPP_PUBLIC_URL', 'CHECKOUT_BASE_URL']) {
+    const val = env?.[key];
+    if (!val) continue;
+    try { if (new URL(val).hostname.toLowerCase() === h) return u.toString(); } catch { /* ignore */ }
+  }
+  return '';
+}
+
 function randomState() {
   const a = new Uint8Array(16);
   crypto.getRandomValues(a);
@@ -174,7 +202,8 @@ export async function handleWebflowOAuthAuthorize(request, env) {
 
   const url = new URL(request.url);
   const state = randomState();
-  const returnTo = url.searchParams.get('returnTo') || '';
+  // Validate returnTo against a host allowlist before storing it (open-redirect guard).
+  const returnTo = safeReturnTo(url.searchParams.get('returnTo') || '', env);
   const redirectUri = resolveRedirectUri(env, url);
   const scope = env.WEBFLOW_OAUTH_SCOPES || DEFAULT_SCOPES;
 
@@ -395,6 +424,37 @@ export async function handleWebflowOAuthStatus(request, env, opts = {}) {
     console.warn(`${TAG} status: freeUsed check failed (non-fatal)`, e?.message || e);
   }
 
+  // webflow_app_opened — funnel step 1, captured SERVER-SIDE here (the app hits this
+  // status endpoint on launch). KV dedup with a ~30-min window per site prevents
+  // over-counting the repeated status calls the app fires on window focus/visibility
+  // (refreshAccount). Only for authorized+registered sites we can attribute to an account
+  // (email); this endpoint is Webflow-only so no platform check is needed.
+  console.log(`[PostHog DEBUG] webflow_app_opened guard: siteId=${siteId} authenticated=${authenticated} registered=${registered} email=${email || 'NONE'}`);
+  if (authenticated && registered && email) {
+    try {
+      const kv = env.WEBFLOW_AUTHENTICATION;
+      const seen = kv ? await kv.get(`appopen:${siteId}`) : null;
+      console.log(`[PostHog DEBUG] webflow_app_opened dedup: appopen:${siteId} seen=${seen ? 'YES (skipping)' : 'no (will fire)'}`);
+      if (!seen) {
+        let wfUserId = null;
+        try {
+          const rawAuth = kv ? await kv.get(siteId) : null;
+          if (rawAuth) {
+            const e = typeof rawAuth === 'string' ? JSON.parse(rawAuth) : rawAuth;
+            wfUserId = e?.userId || null;
+          }
+        } catch { /* no user id available */ }
+        await capturePostHogEvent(env, email, 'webflow_app_opened', {
+          site_id: siteId,
+          webflow_user_id: wfUserId,
+          plan: plan || null,
+          platform: 'webflow',
+        });
+        if (kv) await kv.put(`appopen:${siteId}`, '1', { expirationTtl: 1800 });
+      }
+    } catch { /* analytics only */ }
+  }
+
   // Account PII is returned ONLY on the authenticated route. The public legacy call
   // gets the non-PII routing fields with email/billingEmail withheld.
   return Response.json({
@@ -431,6 +491,11 @@ export async function handleWebflowOAuthCallback(request, env) {
 
   if (providerError) {
     console.warn(`${TAG} provider returned error: ${providerError}`);
+    // No user identity yet (the user denied/failed before token exchange) — track as
+    // an anonymous failure so the drop-off is still counted in the funnel.
+    await capturePostHogEvent(env, crypto.randomUUID(), 'oauth_completed', {
+      status: 'failed', error: providerError, platform: 'webflow',
+    });
     return finishToApp(env, { ok: false, error: providerError });
   }
   if (!code) {
@@ -491,6 +556,9 @@ export async function handleWebflowOAuthCallback(request, env) {
     tokenJson = await res.json().catch(() => ({}));
     if (!res.ok || !tokenJson.access_token) {
       console.error(`${TAG} token exchange failed (HTTP ${res.status})`, tokenJson);
+      await capturePostHogEvent(env, crypto.randomUUID(), 'oauth_completed', {
+        status: 'failed', error: 'token_exchange_failed', platform: 'webflow',
+      });
       return Response.json({ success: false, error: 'Token exchange failed' }, { status: 502 });
     }
     console.log(`${TAG} token exchange OK`, {
@@ -600,5 +668,18 @@ export async function handleWebflowOAuthCallback(request, env) {
   const dest = returnTo || env.WEBFLOW_APP_REDIRECT || designerUrl;
 
   console.log(`${TAG} ✓ done — authorized ${sites.length} site(s) for ${userKey}; redirecting to ${dest || '(none → JSON)'}`);
+
+  // Track oauth_completed server-side, before returning to the app extension. The
+  // authorized user's email is the distinct_id, so this merges into the same PostHog
+  // person as every later backend event (banner_verified, banner_settings_updated, …).
+  const phUserId = authorizedBy?.user?.id || authorizedBy?.id || null;
+  const phEmail = authorizedBy?.email || authorizedBy?.user?.email || null;
+  await capturePostHogEvent(env, phEmail || userKey, 'oauth_completed', {
+    status: 'success',
+    webflow_user_id: phUserId,
+    sites: sites.length,
+    platform: 'webflow',
+  });
+
   return finishToApp(env, { ok: true, sites: sites.length, returnTo: dest });
 }

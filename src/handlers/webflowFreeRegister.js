@@ -522,6 +522,14 @@ export async function handleWebflowFreeRegister(request, env) {
   // PostHog: use email as canonical distinct_id (matches client-side Webflow Designer app)
   const isNewInstall = !existingSameDomain;
   try {
+    // plan_selected — the free plan was chosen on the Designer's Select Plan screen.
+    await capturePostHogEvent(env, user.email, 'plan_selected', {
+      plan_tier: 'free',
+      billing_cycle: null,
+      plan_price: 0,
+      platform: 'webflow',
+      site_id: site.id,
+    });
     if (isNewInstall) {
       await capturePostHogEvent(env, user.email, 'app_installed', {
         platform: 'webflow',

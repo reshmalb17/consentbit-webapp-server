@@ -1,6 +1,7 @@
 // handlers/consentCsv.js
 import { getSessionById } from '../services/db.js';
 import { createDownloadToken } from '../utils/signedToken.js';
+import { capturePostHogEvent } from '../services/posthog.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -34,6 +35,7 @@ export async function handleConsentCsv(request, env) {
 
   const url = new URL(request.url);
   const siteId = url.searchParams.get('siteId');
+  console.log(`[PostHog DEBUG] consent-csv handler reached: siteId=${siteId}`);
   if (!siteId) return new Response('siteId required', { status: 400 });
 
   const year = url.searchParams.get('year');
@@ -50,6 +52,22 @@ export async function handleConsentCsv(request, env) {
     .catch(() => null);
 
   if (!site) return new Response('Site not found', { status: 404 });
+
+  // consent_logs_viewed (action: export_csv) — Webflow sites only.
+  try {
+    const ownerRow = await db.prepare(
+      `SELECT u.email AS email, s.platform AS platform FROM Site s
+         JOIN OrganizationMember om ON om.organizationId = s.organizationId
+         JOIN User u ON u.id = om.userId WHERE s.id = ?1 LIMIT 1`
+    ).bind(siteId).first();
+    if (ownerRow?.email && String(ownerRow.platform || '').toLowerCase() === 'webflow') {
+      await capturePostHogEvent(env, ownerRow.email, 'consent_logs_viewed', {
+        action: 'export_csv',
+        platform: 'webflow',
+        site_id: siteId,
+      });
+    }
+  } catch { /* analytics only */ }
 
   const hasDateFilter = year && month;
   const paddedMonth = hasDateFilter ? month.padStart(2, '0') : '';

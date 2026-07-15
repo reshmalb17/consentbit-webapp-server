@@ -167,7 +167,7 @@ export async function handleScanCookies(request, env) {
 
     // For createNewScan (triggered by "Scan Now"), always create a new scan record.
     // For passive collection, reuse the most recent browser scan within the last hour.
-    const newScanHistoryId = `client-${siteId}-${Date.now()}`;
+    const newScanHistoryId = `client-${siteId}-${crypto.randomUUID()}`;
     let currentScanHistoryId;
 
     if (createNewScan) {
@@ -214,9 +214,16 @@ export async function handleScanCookies(request, env) {
         currentScanHistoryId = pendingScan.id;
       } else {
         const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+        // Attach the on-page embed's cookies to a browser/scheduled scan that JUST ran:
+        // its 'pending' row may have flipped to 'completed' seconds before this report
+        // arrived (a race) — that's what produced a SECOND row for one scheduled scan.
+        // Keep the window SHORT and EXCLUDE 'client-detection' rows so an organic
+        // visitor's report isn't folded into a scan row; organic reports still merge
+        // into a recent 'client-detection' row (1h) via the second clause.
+        const thirtySecAgo = new Date(Date.now() - 30 * 1000).toISOString();
         const existingScan = await db
-          .prepare('SELECT id FROM ScanHistory WHERE siteId = ?1 AND scanUrl LIKE ?2 AND createdAt > ?3 ORDER BY createdAt DESC LIMIT 1')
-          .bind(siteId, '%client-detection%', oneHourAgo)
+          .prepare("SELECT id FROM ScanHistory WHERE siteId = ?1 AND ((createdAt > ?2 AND scanUrl NOT LIKE '%client-detection%') OR (scanUrl LIKE '%client-detection%' AND createdAt > ?3)) ORDER BY createdAt DESC LIMIT 1")
+          .bind(siteId, thirtySecAgo, oneHourAgo)
           .first();
 
         if (!existingScan) {

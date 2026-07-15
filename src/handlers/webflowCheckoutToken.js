@@ -18,6 +18,7 @@
 //   → { token }  (CORS *, no session)
 
 import { getWebflowOAuthTokenBySite, getWebflowOAuthTokenByUser } from '../services/db.js';
+import { capturePostHogEvent } from '../services/posthog.js';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -27,6 +28,14 @@ const CORS_HEADERS = {
 
 const STRING_KEYS = ['email', 'domain', 'platform', 'platformId', 'billingEmail', 'version', 'plan', 'interval'];
 const TOKEN_TTL_SECONDS = 600;
+
+// Displayed plan pricing (USD): monthly rate and the per-month equivalent when
+// billed yearly. Mirrors the Select Plan screen — used only for analytics props.
+const PLAN_PRICE = {
+  basic: { monthly: 9, annual: 7 },
+  essential: { monthly: 20, annual: 16 },
+  growth: { monthly: 56, annual: 45 },
+};
 
 export async function handleWebflowCheckoutToken(request, env) {
   if (request.method === 'OPTIONS') {
@@ -57,6 +66,34 @@ export async function handleWebflowCheckoutToken(request, env) {
   // Default the platform marker for the Webflow v2 flow.
   payload.platform = payload.platform || 'webflow';
   payload.version = payload.version || 'v2';
+
+  // PRIMARY (authoritative): the CURRENT ConsentBit account owner for this site.
+  // Ownership transfers rename the owner User in place, so this always reflects the
+  // latest owner — unlike the Webflow OAuth-installer email below, which never
+  // changes on transfer. Override any (possibly stale) email the client passed.
+  if (payload.platformId && env.CONSENT_WEBAPP) {
+    try {
+      const owner = await env.CONSENT_WEBAPP
+        .prepare(
+          `SELECT u.email AS email, u.billingEmail AS billingEmail
+             FROM Site s
+             JOIN OrganizationMember m ON m.organizationId = s.organizationId AND lower(m.role) = 'owner'
+             JOIN User u ON u.id = m.userId
+            WHERE s.platformSiteId = ?1
+            ORDER BY s.createdAt ASC LIMIT 1`,
+        )
+        .bind(payload.platformId)
+        .first();
+      if (owner?.email) {
+        payload.email = String(owner.email).trim().toLowerCase();
+        // Billing defaults to the account email unless the owner set a distinct one.
+        payload.billingEmail = String(owner.billingEmail || owner.email).trim().toLowerCase();
+        console.log('[webflow-checkout-token] resolved CURRENT owner email from D1 for', payload.platformId);
+      }
+    } catch (e) {
+      console.warn('[webflow-checkout-token] owner email resolve failed (non-fatal)', e?.message || e);
+    }
+  }
 
   // Resolve the workspace email from the OAuth record when not provided.
   // 1. KV mirror (fast, but can be evicted or lack the .email field).
@@ -98,6 +135,51 @@ export async function handleWebflowCheckoutToken(request, env) {
   const token = crypto.randomUUID();
   await kv.put(`checkout-token:${token}`, JSON.stringify(payload), { expirationTtl: TOKEN_TTL_SECONDS });
   console.log('[webflow-checkout-token] stored token', token, 'keys:', Object.keys(payload));
+
+  // plan_selected vs upgrade_initiated — both start checkout via this endpoint. If the
+  // site already has an active PAID plan, this is an upgrade (funnel step 10); otherwise
+  // it's the initial plan choice (step 3). Email is the distinct_id so it merges into the
+  // same PostHog person as the rest of the funnel. The actual conversion is tracked later
+  // by the Stripe webhook (subscription_activated).
+  if (payload.email && payload.plan) {
+    const billingCycle = /^(year|annual)/i.test(payload.interval || '') ? 'annual' : 'monthly';
+    let currentPlan = null;
+    try {
+      if (payload.platformId && env.CONSENT_WEBAPP) {
+        const site = await env.CONSENT_WEBAPP
+          .prepare('SELECT id, organizationId FROM Site WHERE platformSiteId = ?1 ORDER BY createdAt ASC LIMIT 1')
+          .bind(payload.platformId).first();
+        if (site?.organizationId) {
+          const sub = await env.CONSENT_WEBAPP
+            .prepare('SELECT status, planId, planid FROM Subscription WHERE organizationId = ?1 ORDER BY updatedAt DESC LIMIT 1')
+            .bind(site.organizationId).first();
+          const planId = String(sub?.planId || sub?.planid || '').toLowerCase();
+          const status = String(sub?.status || '').toLowerCase();
+          if (['basic', 'essential', 'growth'].includes(planId) && ['active', 'trialing', 'past_due'].includes(status)) {
+            currentPlan = planId;
+          }
+        }
+      }
+    } catch { /* treat as a new plan selection */ }
+
+    if (currentPlan) {
+      await capturePostHogEvent(env, payload.email, 'upgrade_initiated', {
+        current_plan: currentPlan,
+        target_plan: payload.plan,
+        billing_cycle: billingCycle,
+        platform: 'webflow',
+        site_id: payload.platformId || null,
+      });
+    } else {
+      await capturePostHogEvent(env, payload.email, 'plan_selected', {
+        plan_tier: payload.plan,
+        billing_cycle: billingCycle,
+        plan_price: PLAN_PRICE[payload.plan]?.[billingCycle] ?? null,
+        platform: 'webflow',
+        site_id: payload.platformId || null,
+      });
+    }
+  }
 
   return Response.json({ token }, { headers: CORS_HEADERS });
 }

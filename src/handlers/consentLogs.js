@@ -1,5 +1,6 @@
 // handlers/consentLogs.js
 import { ensureSchema } from '../services/db.js';
+import { capturePostHogEvent } from '../services/posthog.js';
 
 export async function handleConsentLogs(request, env) {
   const db = env.CONSENT_WEBAPP;
@@ -23,6 +24,25 @@ export async function handleConsentLogs(request, env) {
 
   try {
     await ensureSchema(db);
+
+    // consent_logs_viewed (action: view) — fire on the first page only (offset 0) so
+    // pagination doesn't double-count, and only for Webflow sites.
+    if (offset === 0) {
+      try {
+        const ownerRow = await db.prepare(
+          `SELECT u.email AS email, s.platform AS platform FROM Site s
+             JOIN OrganizationMember om ON om.organizationId = s.organizationId
+             JOIN User u ON u.id = om.userId WHERE s.id = ?1 LIMIT 1`
+        ).bind(siteId).first();
+        if (ownerRow?.email && String(ownerRow.platform || '').toLowerCase() === 'webflow') {
+          await capturePostHogEvent(env, ownerRow.email, 'consent_logs_viewed', {
+            action: 'view',
+            platform: 'webflow',
+            site_id: siteId,
+          });
+        }
+      } catch { /* analytics only */ }
+    }
 
     const hasDateFilter = year && month;
     const paddedMonth = hasDateFilter ? month.padStart(2, '0') : '';

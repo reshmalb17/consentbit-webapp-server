@@ -18,6 +18,7 @@
 // must re-authorize to mint a new token with the publish scope.
 
 import { resolveWebflowOAuthToken } from '../services/db.js';
+import { capturePostHogEvent } from '../services/posthog.js';
 
 const TAG = '[webflow-publish]';
 const PUBLISH_URL = (siteId) => `https://api.webflow.com/v2/sites/${siteId}/publish`;
@@ -169,5 +170,25 @@ export async function handleWebflowPublish(request, env) {
   }
 
   console.log(`${TAG} ✓ publish accepted for ${siteId}`, { httpStatus: res.status });
+
+  // banner_changes_published — publish succeeded on Webflow. Resolve the account owner
+  // email (distinct_id) + domain from D1 by the Webflow site id. (This endpoint is
+  // Webflow-only — it runs off the Webflow OAuth token — so no platform guard needed.)
+  try {
+    const ownerRow = await db.prepare(
+      `SELECT u.email AS email, s.domain AS domain FROM Site s
+         JOIN OrganizationMember om ON om.organizationId = s.organizationId AND lower(om.role) = 'owner'
+         JOIN User u ON u.id = om.userId
+        WHERE s.platformSiteId = ?1 ORDER BY s.createdAt ASC LIMIT 1`
+    ).bind(siteId).first();
+    if (ownerRow?.email) {
+      await capturePostHogEvent(env, ownerRow.email, 'banner_changes_published', {
+        domain_url: ownerRow.domain || null,
+        platform: 'webflow',
+        wf_site_id: siteId,
+      });
+    }
+  } catch { /* analytics only */ }
+
   return Response.json({ success: true, result: data });
 }

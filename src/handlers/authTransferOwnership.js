@@ -10,6 +10,7 @@ import {
   renameUserAccount,
   deleteSessionsForUser,
 } from '../services/db.js';
+import { capturePostHogEvent } from '../services/posthog.js';
 
 // ---------------------------------------------------------------------------
 // Account ownership transfer
@@ -106,7 +107,7 @@ function authEmailHtml({ ownerName, newEmail, newName, link, ttlMinutes }) {
       </div>
       <p style="margin:0 0 22px;color:#6b7280;font-size:15px;line-height:1.6;">If you made this request, click the button below to authorize it. After that, this account (all its sites, subscription and consent data) will belong to the new owner, and you will be signed out.</p>
       <p style="margin:0 0 24px;text-align:center;">
-        <a href="${link}" style="display:inline-block;background:#007AFF;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:14px 32px;border-radius:8px;">Authorize transfer</a>
+        <a href="${link}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#007AFF;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:14px 32px;border-radius:8px;">Authorize transfer</a>
       </p>
       <p style="margin:0 0 18px;color:#9ca3af;font-size:13px;line-height:1.6;">This link expires in ${ttlMinutes} minutes. If you did not request this, ignore this email and your account stays unchanged.</p>
       <p style="margin:0;color:#6b7280;font-size:14px;line-height:1.6;">Best regards,<br/>ConsentBit Team</p>
@@ -115,7 +116,31 @@ function authEmailHtml({ ownerName, newEmail, newName, link, ttlMinutes }) {
   </body></html>`;
 }
 
+// Resolve the ConsentBit account owner (User row) for a Webflow site: the owner
+// member of the site's organization. Returns { id, email, name } or null.
+async function resolveWebflowSiteOwner(db, webflowSiteId) {
+  if (!webflowSiteId) return null;
+  try {
+    return await db
+      .prepare(
+        `SELECT u.id, u.email, u.name
+           FROM Site s
+           JOIN OrganizationMember m ON m.organizationId = s.organizationId AND lower(m.role) = 'owner'
+           JOIN User u ON u.id = m.userId
+          WHERE s.platformSiteId = ?1
+          ORDER BY s.createdAt ASC
+          LIMIT 1`,
+      )
+      .bind(webflowSiteId)
+      .first();
+  } catch (e) {
+    console.warn('[TransferOwnership] resolveWebflowSiteOwner failed:', e?.message || e);
+    return null;
+  }
+}
+
 // ── Step 1: current owner requests the transfer ────────────────────────────
+// Session-authenticated entry point (webapp dashboard).
 export async function handleTransferOwnershipRequest(request, env, ctx) {
   const db = env.CONSENT_WEBAPP;
   if (request.method !== 'POST') {
@@ -132,6 +157,36 @@ export async function handleTransferOwnershipRequest(request, env, ctx) {
   const owner = await getUserById(db, userId);
   if (!owner) return Response.json({ success: false, error: 'User not found' }, { status: 404 });
 
+  return processTransferRequest(request, env, ctx, owner);
+}
+
+// Webflow-App entry point (Designer extension). Identity comes from the resolved
+// Webflow ID token (see middleware/webflowIdentity.js) instead of a session cookie;
+// the account owner is the owner member of the current site's organization. The
+// authorization link still goes only to that owner's email — the real gate — so a
+// non-owner collaborator cannot complete a transfer.
+export async function handleWfTransferOwnershipRequest(request, env, ctx, identity) {
+  const db = env.CONSENT_WEBAPP;
+  if (request.method !== 'POST') {
+    return Response.json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
+  }
+
+  const webflowSiteId = identity?.webflowSiteId
+    || request.headers.get('X-Webflow-Site-Id')
+    || request.headers.get('x-webflow-site-id');
+  const owner = await resolveWebflowSiteOwner(db, webflowSiteId);
+  if (!owner) {
+    return Response.json({ success: false, error: 'No account owner found for this site.' }, { status: 404 });
+  }
+
+  return processTransferRequest(request, env, ctx, owner, { platform: 'webflow' });
+}
+
+// Shared core: given the resolved current owner, validate the request, email the
+// authorization link to the owner, and record the pending transfer.
+async function processTransferRequest(request, env, ctx, owner, opts = {}) {
+  const db = env.CONSENT_WEBAPP;
+  const userId = owner.id ?? owner.userId;
   let body;
   try {
     body = await request.json();
@@ -174,6 +229,19 @@ export async function handleTransferOwnershipRequest(request, env, ctx) {
     tokenHash,
     ttlMinutes,
   });
+
+  // ownership_transfer_sent — the authorization invite is about to be sent (Webflow flow
+  // only). recipient_domain_match = does the new owner's email domain match the current
+  // owner's email domain (i.e. an in-org transfer vs. handing off to an outside party)?
+  if (opts.platform === 'webflow' && owner.email) {
+    try {
+      const domainOf = (e) => String(e || '').split('@')[1] || '';
+      await capturePostHogEvent(env, owner.email, 'ownership_transfer_sent', {
+        recipient_domain_match: domainOf(newEmail) === domainOf(owner.email),
+        platform: 'webflow',
+      });
+    } catch { /* analytics only */ }
+  }
 
   // Public token = "<id>.<secret>". id locates the row; secret is verified by hash.
   const token = `${row.id}.${secret}`;

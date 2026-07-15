@@ -1,6 +1,6 @@
 // handlers/verifyScript.js
 import { markSiteVerified } from '../services/db.js';
-import { captureInstallationVerified } from '../services/posthog.js';
+import { captureInstallationVerified, capturePostHogEvent } from '../services/posthog.js';
 const VERIFY_PAGE_FETCH_TIMEOUT_MS = 12000;
 
 /**
@@ -316,6 +316,29 @@ export async function handleVerifyScript(request, env) {
       } catch (versionErr) {
         console.warn('[VerifyScript] Failed to set version=v2:', versionErr?.message);
       }
+    }
+
+    // banner_verified — fire on every verify attempt; status reflects the result.
+    // Guarded to Webflow sites only (this handler is shared with Framer/webapp).
+    if (siteId) {
+      try {
+        const ownerRow = await db.prepare(
+          `SELECT u.email AS email, s.platform AS platform
+             FROM Site s
+             JOIN OrganizationMember om ON om.organizationId = s.organizationId
+             JOIN User u ON u.id = om.userId
+            WHERE s.id = ?1 LIMIT 1`
+        ).bind(siteId).first();
+        console.log(`[PostHog DEBUG] banner_verified guard: siteId=${siteId} email=${ownerRow?.email || 'NONE'} platform=${ownerRow?.platform || 'NONE'} found=${found}`);
+        if (ownerRow?.email && String(ownerRow.platform || '').toLowerCase() === 'webflow') {
+          await capturePostHogEvent(env, ownerRow.email, 'banner_verified', {
+            status: found ? 'verified' : 'failed',
+            domain_url: publicUrl || null,
+            platform: 'webflow',
+            site_id: siteId,
+          });
+        }
+      } catch { /* analytics only */ }
     }
 
     return Response.json({

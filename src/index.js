@@ -21,6 +21,7 @@ import { handleCreateCheckoutSession } from './handlers/createCheckoutSession.js
 import { handleCheckoutSessionDetails } from './handlers/checkoutSessionDetails.js';
 import { handleCheckoutToken } from './handlers/checkoutToken.js';
 import { handleWebflowCheckoutToken } from './handlers/webflowCheckoutToken.js';
+import { handleWebflowTrack } from './handlers/webflowTrack.js';
 import { handleCheckoutSuccessRedirect } from './handlers/checkoutSuccessRedirect.js';
 import { handleStripeWebhook } from './handlers/stripeWebhook.js';
 import { reportStripeMeteredUsage } from './handlers/reportStripeUsage.js';
@@ -73,7 +74,7 @@ import { handleAuthLogin } from './handlers/authLogin.js';
 import { handleAuthSignup } from './handlers/authSignup.js';
 import { handleAuthMe } from './handlers/authMe.js';
 import { handleAuthProfile } from './handlers/authProfile.js';
-import { handleTransferOwnershipRequest, handleTransferOwnershipAuthorize } from './handlers/authTransferOwnership.js';
+import { handleTransferOwnershipRequest, handleTransferOwnershipAuthorize, handleWfTransferOwnershipRequest } from './handlers/authTransferOwnership.js';
 import { handleAuthRequestCode } from './handlers/authRequestCode.js';
 import { handleAuthVerifyCode } from './handlers/authVerifyCode.js';
 import { handleAuthLogout } from './handlers/authLogout.js';
@@ -196,6 +197,8 @@ const WEBFLOW_APP_ROUTES = {
   'payment/subscription':(req, env)      => handlePaymentSubscription(req, env),
   'webflow-free-register':(req, env)     => handleWebflowFreeRegister(req, env),
   'webflow-checkout-token':(req, env)    => handleWebflowCheckoutToken(req, env),
+  'transfer-ownership/request': (req, env, ctx, identity) => handleWfTransferOwnershipRequest(req, env, ctx, identity),
+  'track':               (req, env, ctx, identity) => handleWebflowTrack(req, env, ctx, identity),
 };
 
 /**

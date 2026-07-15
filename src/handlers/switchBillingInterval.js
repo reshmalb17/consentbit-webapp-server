@@ -27,6 +27,20 @@ function trimEnv(v) {
 
 const fail = (error, status) => Response.json({ success: false, error }, { status });
 
+// The amount charged NOW for an interval switch is the prorated difference only — the
+// unused credit on the old price plus the prorated charge for the new price over the
+// remaining period. Sum just the proration line items; the invoice's `amount_due` would
+// wrongly include the next full renewal and overstate the charge (e.g. the whole year).
+// Mirrors changeTier.js so both flows report a consistent prorated figure.
+function sumProrationCents(invoiceBody) {
+  let total = 0;
+  let sawProration = false;
+  for (const line of invoiceBody?.lines?.data || []) {
+    if (line.proration === true) { total += line.amount || 0; sawProration = true; }
+  }
+  return sawProration ? total : (invoiceBody?.amount_due ?? invoiceBody?.total ?? null);
+}
+
 // Shared prep for both preview and commit: auth, validation, load subscription,
 // resolve the new price, and read the live Stripe subscription (item id + trial state).
 // Returns either { error: Response } or { ctx: {...} }.
@@ -143,16 +157,17 @@ export async function handleSwitchIntervalPreview(request, env) {
       return fail('Could not preview the charge', 502);
     }
   } else {
-    // Active subscription: preview the upcoming invoice (prorated balance charged immediately).
+    // Active subscription: preview the PRORATED DIFFERENCE charged immediately. Keep the
+    // existing billing cycle (no billing_cycle_anchor=now) so Stripe only prorates the delta
+    // instead of resetting the cycle and invoicing the full new-interval price. Then sum just
+    // the proration line items — using amount_due here would fold in the next full renewal and
+    // overstate the charge (that's why every plan looked like the same full yearly amount).
     const params = new URLSearchParams({
       subscription: stripeSubId,
       'subscription_items[0][id]': subItemId,
       'subscription_items[0][price]': newPriceId,
       subscription_proration_behavior: 'create_prorations',
     });
-    if (targetInterval === 'yearly') {
-      params.set('subscription_billing_cycle_anchor', 'now');
-    }
     try {
       const res = await fetch(`https://api.stripe.com/v1/invoices/upcoming?${params.toString()}`, {
         headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
@@ -162,7 +177,7 @@ export async function handleSwitchIntervalPreview(request, env) {
         console.warn('[SwitchInterval] preview upcoming-invoice error:', inv.error.message);
         return fail(inv.error.message || 'Could not preview the charge', 400);
       }
-      amountDueCents = inv.amount_due ?? inv.total ?? null;
+      amountDueCents = sumProrationCents(inv);
       currency = inv.currency || 'usd';
     } catch (e) {
       console.warn('[SwitchInterval] preview fetch failed:', e?.message);
@@ -192,16 +207,17 @@ export async function handleSwitchBillingInterval(request, env) {
     sub, stripeSubId, subItemId, newPriceId, isTrialing,
   } = prep.ctx;
 
-  // Update the subscription in Stripe: swap the price, prorate the difference.
+  // Update the subscription in Stripe: swap the price and invoice ONLY the prorated
+  // difference now. always_invoice bills the proration items immediately (matching the
+  // preview); error_if_incomplete surfaces a card decline synchronously. We deliberately
+  // do NOT set billing_cycle_anchor=now — anchoring would reset the cycle and charge the
+  // full new-interval price up front instead of just the prorated delta. Mirrors changeTier.js.
   const updateParams = new URLSearchParams({
     'items[0][id]': subItemId,
     'items[0][price]': newPriceId,
-    proration_behavior: 'create_prorations',
+    proration_behavior: isTrialing ? 'none' : 'always_invoice',
+    payment_behavior: 'error_if_incomplete',
   });
-  // Anchor the cycle now (settle prorations immediately) only when NOT trialing — see prepareSwitch.
-  if (targetInterval === 'yearly' && !isTrialing) {
-    updateParams.set('billing_cycle_anchor', 'now');
-  }
 
   const updateRes = await fetch(`https://api.stripe.com/v1/subscriptions/${stripeSubId}`, {
     method: 'POST',

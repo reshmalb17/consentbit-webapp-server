@@ -116,11 +116,11 @@ WEBFLOW_APP_REDIRECT = ""
 # Tier Basic/Essential/Growth: must be **Recurring** Stripe prices (subscription), not one-time — or Checkout returns "recurring price" errors.
 # If only Basic fails: open the Basic product in Stripe → each price must say "Recurring" / subscription. One-time prices will not work.
 STRIPE_PRICE_BASIC_MONTHLY = "price_1T7doaJwcuG9163M3fNkG77K" 
-STRIPE_PRICE_BASIC_YEARLY = "price_1T7dqFJwcuG9163MlGnV7DRn"
+STRIPE_PRICE_BASIC_YEARLY = "price_1TtakvJwcuG9163MatxKG0cp"
 STRIPE_PRICE_ESSENTIAL_MONTHLY = "price_1T7drWJwcuG9163MSZepvR2S"
 STRIPE_PRICE_ESSENTIAL_YEARLY = "price_1T7drnJwcuG9163MQ03txwwC"
 STRIPE_PRICE_GROWTH_MONTHLY = "price_1T7dsaJwcuG9163MIcICCuWk"
-STRIPE_PRICE_GROWTH_YEARLY = "price_1T7dt2JwcuG9163M9xaqMCk6"
+STRIPE_PRICE_GROWTH_YEARLY = "price_1TtalZJwcuG9163MXjzidZuI"
 
 
 # Single plan: recurring subscription prices (promo applies to initial; renewals use these)
@@ -181,11 +181,11 @@ TEST_LOGIN_CODE = "424242"
 
 # ── Live Stripe price IDs (replace with your live dashboard IDs) ──
 STRIPE_PRICE_BASIC_MONTHLY    = "price_1TWgLfJwcuG9163MoWMXTzwk"
-STRIPE_PRICE_BASIC_YEARLY     = "price_1TWgLNJwcuG9163MYXxqcRZx"
+STRIPE_PRICE_BASIC_YEARLY     = "price_1TtactJwcuG9163MIDArbT7x"
 STRIPE_PRICE_ESSENTIAL_MONTHLY = "price_1TWgKzJwcuG9163M5Wwulw84"
 STRIPE_PRICE_ESSENTIAL_YEARLY  = "price_1TWgKhJwcuG9163Mwh43smou"
 STRIPE_PRICE_GROWTH_MONTHLY   = "price_1TWgKKJwcuG9163Mwgb0LWj3"
-STRIPE_PRICE_GROWTH_YEARLY    = "price_1TWgK0JwcuG9163MvIF4V4TG"
+STRIPE_PRICE_GROWTH_YEARLY    = "price_1TtacFJwcuG9163MLkrCWlBe"
 
 # Inherited from top-level [vars] — values overridden by secrets set via wrangler secret put
 STRIPE_PRICE_MONTHLY   = ""

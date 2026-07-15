@@ -10,7 +10,7 @@ import {
   incrementScanUsage,
   markSiteVerified,
 } from '../services/db.js';
-import { captureInstallationVerified } from '../services/posthog.js';
+import { captureInstallationVerified, capturePostHogEvent } from '../services/posthog.js';
 import {
   categorizeCookie,
   getCookieProvider,
@@ -377,7 +377,7 @@ async function performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId,
 // consent-gated tags fire and their cookies are captured. Wired to a separate route
 // (/api/scan-site-consented) so the existing /api/scan-site is unchanged.
 export async function handleScanSiteConsented(request, env, ctx) {
-  return handleScanSite(request, env, ctx, { acceptConsent: true });
+  return handleScanSite(request, env, ctx, { acceptConsent: true, userInitiated: true });
 }
 
 export async function handleScanSite(request, env, ctx, options = {}) {
@@ -415,6 +415,26 @@ export async function handleScanSite(request, env, ctx, options = {}) {
         { success: false, error: 'Site not found' },
         { status: 404 },
       );
+    }
+
+    // cookie_scan_started — only for a user-initiated Webflow scan (skip background
+    // cron scans and non-Webflow platforms).
+    console.log(`[PostHog DEBUG] cookie_scan_started guard: siteId=${siteId} userInitiated=${!!options.userInitiated} platform=${site.platform ?? site.PLATFORM ?? 'NONE'}`);
+    if (options.userInitiated && String(site.platform ?? site.PLATFORM ?? '').toLowerCase() === 'webflow') {
+      try {
+        const ownerRow = await db.prepare(
+          `SELECT u.email AS email FROM Site s
+             JOIN OrganizationMember om ON om.organizationId = s.organizationId
+             JOIN User u ON u.id = om.userId WHERE s.id = ?1 LIMIT 1`
+        ).bind(siteId).first();
+        if (ownerRow?.email) {
+          await capturePostHogEvent(env, ownerRow.email, 'cookie_scan_started', {
+            domain_url: site.domain ?? site.DOMAIN ?? null,
+            platform: 'webflow',
+            site_id: siteId,
+          });
+        }
+      } catch { /* analytics only */ }
     }
 
     // Only allow scanning if the ConsentBit script has been verified on the site.
