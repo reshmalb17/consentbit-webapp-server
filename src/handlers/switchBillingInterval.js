@@ -9,6 +9,7 @@ import {
   getSessionById,
   getUserById,
   getSubscriptionByOrganization,
+  getSubscriptionBySiteId,
   getOrganizationMember,
 } from '../services/db.js';
 import { syncSubscriptionUpdateToLegacy } from '../services/syncLegacy.js';
@@ -64,6 +65,7 @@ async function prepareSwitch(request, env) {
   try { body = await request.json(); } catch { return { error: fail('Invalid JSON', 400) }; }
 
   const organizationId = (body.organizationId || '').trim();
+  const siteId = (body.siteId || '').trim() || null;
   const targetInterval = body.targetInterval === 'yearly' ? 'yearly' : body.targetInterval === 'monthly' ? 'monthly' : null;
 
   if (!organizationId) return { error: fail('organizationId required', 400) };
@@ -72,8 +74,12 @@ async function prepareSwitch(request, env) {
   const member = await getOrganizationMember(db, userId, organizationId);
   if (!member) return { error: fail('Not allowed for this organization', 403) };
 
-  // Load current subscription
-  const sub = await getSubscriptionByOrganization(db, organizationId);
+  // Load the current subscription for THIS site. An org can hold several subscriptions
+  // (one per paid site), so falling back to the org-wide lookup would pick the most
+  // recently updated one — e.g. a Growth sub — and preview/switch the wrong plan. Prefer
+  // the per-site subscription; only fall back to org when no siteId was supplied. Mirrors changeTier.js.
+  const sub = (siteId ? await getSubscriptionBySiteId(db, siteId) : null)
+    || await getSubscriptionByOrganization(db, organizationId);
   if (!sub) return { error: fail('No active subscription found', 404) };
 
   const stripeSubId = sub.stripeSubscriptionId ?? sub.stripesubscriptionid;
