@@ -87,6 +87,7 @@ import { handleCustomCheckout, handleValidateCoupon } from './handlers/customeCh
 import { handleSyncPlugin, handleSyncPluginCustomization, handleGetPluginData, handleGetPluginPlan } from './handlers/SyncPlugin.js';
 import { handlePaymentSubscription } from './handlers/paymentSubscription.js';
 import { handleWebflowBilling, handleWebflowCancelSubscription, handleWebflowSwitchInterval } from './handlers/webflowBilling.js';
+import { handleFramerBilling, handleFramerCancelSubscription, handleFramerSwitchInterval } from './handlers/framerBilling.js';
 import { handleWebflowScriptCleanupReport, handleWebflowScriptCleanupRemove } from './handlers/webflowScriptCleanup.js';
 import { handleWebflowOAuthAuthorize, handleWebflowOAuthCallback, handleWebflowOAuthStatus } from './handlers/webflowOAuth.js';
 import { handleWebflowPublish, handleWebflowDomains } from './handlers/webflowPublish.js';
@@ -144,6 +145,14 @@ const PUBLIC_PATHS = new Set([
   '/api/webflow/cancel-subscription',
   '/api/webflow/switch-interval',
   '/api/webflow/script-cleanup',
+  // Framer plugin billing surface. Public + authless by design (see the SECURITY
+  // note in handlers/framerBilling.js) — these restore the behaviour the Framer
+  // plugin had before /api/webflow/* was put behind a Webflow ID token, which
+  // Framer cannot mint. Gate these and remove them from this set when the Framer
+  // identity check lands.
+  '/api/framer/billing',
+  '/api/framer/cancel-subscription',
+  '/api/framer/switch-interval',
   // Webflow OAuth (browser redirects) — must skip body-encoding so the 302
   // Location survives, allow any origin, and skip CSRF (GET).
   '/api/webflow/oauth/authorize',
@@ -372,6 +381,14 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleWebflowCancelSubscription(request, env); break;
     case '/api/webflow/switch-interval':
       response = await handleWebflowSwitchInterval(request, env); break;
+
+    // — Framer plugin billing (authless, siteId-keyed): invoices + cancel + interval
+    case '/api/framer/billing':
+      response = await handleFramerBilling(request, env); break;
+    case '/api/framer/cancel-subscription':
+      response = await handleFramerCancelSubscription(request, env); break;
+    case '/api/framer/switch-interval':
+      response = await handleFramerSwitchInterval(request, env); break;
 
     // — Legacy script cleanup (remove old auto-injected ConsentBit head script)
     case '/api/webflow/script-cleanup':

@@ -131,6 +131,10 @@ export function handleOptions(request, env) {
     '/api/webflow/cancel-subscription',
     '/api/webflow/switch-interval',
     '/api/webflow/script-cleanup',
+    // Framer plugin billing surface — see handlers/framerBilling.js.
+    '/api/framer/billing',
+    '/api/framer/cancel-subscription',
+    '/api/framer/switch-interval',
     '/api/webflow/publish',
     '/api/webflow/domains',
     '/api/banner-customization',
