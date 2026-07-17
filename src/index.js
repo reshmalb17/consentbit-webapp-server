@@ -87,6 +87,8 @@ import { handleCustomCheckout, handleValidateCoupon } from './handlers/customeCh
 import { handleSyncPlugin, handleSyncPluginCustomization, handleGetPluginData, handleGetPluginPlan } from './handlers/SyncPlugin.js';
 import { handlePaymentSubscription } from './handlers/paymentSubscription.js';
 import { handleWebflowBilling, handleWebflowCancelSubscription, handleWebflowSwitchInterval } from './handlers/webflowBilling.js';
+import { handleWebflowBillings, handleWebflowCancelSubscriptions, handleWebflowSwitchIntervals } from './handlers/webflowBillingWf.js';
+import { requireConsentSession, requireConsentPdfAccess } from './middleware/consentAccess.js';
 import { handleFramerBilling, handleFramerCancelSubscription, handleFramerSwitchInterval } from './handlers/framerBilling.js';
 import { handleWebflowScriptCleanupReport, handleWebflowScriptCleanupRemove } from './handlers/webflowScriptCleanup.js';
 import { handleWebflowOAuthAuthorize, handleWebflowOAuthCallback, handleWebflowOAuthStatus } from './handlers/webflowOAuth.js';
@@ -200,9 +202,9 @@ const WEBFLOW_APP_ROUTES = {
                                              : handleWebflowScriptCleanupReport(req, env)),
   'publish':             (req, env)      => handleWebflowPublish(req, env),
   'domains':             (req, env)      => handleWebflowDomains(req, env),
-  'billing':             (req, env)      => handleWebflowBilling(req, env),
-  'cancel-subscription': (req, env)      => handleWebflowCancelSubscription(req, env),
-  'switch-interval':     (req, env)      => handleWebflowSwitchInterval(req, env),
+  'billings':             (req, env)     => handleWebflowBillings(req, env),
+  'cancel-subscriptions': (req, env)     => handleWebflowCancelSubscriptions(req, env),
+  'switch-intervals':     (req, env)     => handleWebflowSwitchIntervals(req, env),
   'payment/subscription':(req, env)      => handlePaymentSubscription(req, env),
   'webflow-free-register':(req, env)     => handleWebflowFreeRegister(req, env),
   'webflow-checkout-token':(req, env)    => handleWebflowCheckoutToken(req, env),
@@ -222,9 +224,6 @@ const WEBFLOW_APP_ROUTES = {
 const LEGACY_WEBFLOW_AUTH_PATHS = new Set([
   '/api/webflow/publish',
   '/api/webflow/domains',
-  '/api/webflow/billing',
-  '/api/webflow/cancel-subscription',
-  '/api/webflow/switch-interval',
   '/api/webflow/script-cleanup',
   '/api/v2/webflow-free-register',
   '/api/v2/webflow-checkout-token',
@@ -366,15 +365,22 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     case '/api/custom-cookie-rules':
       response = await handleCustomCookieRules(request, env); break;
 
-    // — Consent logs
-    case '/api/consent-logs':
+    // — Consent logs (session-gated: web-app proxy forwards the sid cookie)
+    case '/api/consent-logs': {
+      const g = await requireConsentSession(request, env);
+      if (!g.ok) { response = Response.json({ success: false, error: g.error }, { status: g.status }); break; }
       response = await handleConsentLogs(request, env); break;
+    }
 
     // — Payment subscription check (Webflow app)
     case '/api/payment/subscription':
       response = await handlePaymentSubscription(request, env); break;
 
-    // — Webflow app billing (authless, siteId-keyed): invoices + cancel
+    // — Webflow app billing (siteId-keyed): invoices + cancel + interval.
+    // KEPT and intentionally NOT in the wf identity gate — the LIVE Framer plugin
+    // still calls these singular /api/webflow/* paths directly and cannot mint a
+    // Webflow ID token. The authenticated copies the Webflow extension uses live at
+    // /api/wf/billings, /api/wf/cancel-subscriptions, /api/wf/switch-intervals.
     case '/api/webflow/billing':
       response = await handleWebflowBilling(request, env); break;
     case '/api/webflow/cancel-subscription':
@@ -577,11 +583,19 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     case '/api/legacy-consent-pdf-framer':
       response = await handleLegacyConsentPdfFramer(request, env); break;
 
-    case '/api/consent-pdf':
+    // — Consent PDF (session OR a valid signed download token from CSV-embedded links)
+    case '/api/consent-pdf': {
+      const g = await requireConsentPdfAccess(request, env);
+      if (!g.ok) { response = Response.json({ success: false, error: g.error }, { status: g.status }); break; }
       response = await handleConsentPdf(request, env); break;
+    }
 
-    case '/api/consent-csv':
+    // — Consent CSV (session-gated: web-app proxy forwards the sid cookie)
+    case '/api/consent-csv': {
+      const g = await requireConsentSession(request, env);
+      if (!g.ok) { response = Response.json({ success: false, error: g.error }, { status: g.status }); break; }
       response = await handleConsentCsv(request, env); break;
+    }
 
     // — Bidirectional sync: receives events from dashboard-server
     case '/api/sync/event':
