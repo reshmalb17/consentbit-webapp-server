@@ -142,7 +142,19 @@ export async function requireWebflowIdentity(request, env, opts = {}) {
   const row = await resolveWebflowOAuthToken(db, env.WEBFLOW_AUTHENTICATION, webflowSiteId);
   if (!row?.accessToken) {
     if (allowUnauthorizedSite) {
-      // Not authorized yet → no data exists. Let status report authorized:false.
+      // Not authorized yet → no data exists for THIS site. Let status report
+      // authorized:false.
+      //
+      // SECURITY: this branch skips ID-token resolution (there is no app token to
+      // resolve it with), so it must never be usable to read ANOTHER site. The data
+      // target must be the same unauthorized site we just checked — otherwise a
+      // caller could name a token-less site in the header (bypassing resolution)
+      // while pointing the data target at a real one, and read its account data
+      // with an unverified token.
+      if (String(target) !== String(webflowSiteId)) {
+        console.warn(`${TAG} unauthorized-site escape with mismatched target: site=${webflowSiteId} target=${target} — denying`);
+        return { ok: false, status: 403, code: 'SITE_FORBIDDEN', error: 'Not authorized for this resource.' };
+      }
       return { ok: true, identity: { userId: null, email: null, webflowSiteId: String(webflowSiteId), siteId: String(target), unverified: true } };
     }
     console.warn(`${TAG} no app token for site ${webflowSiteId} — cannot authorize`);

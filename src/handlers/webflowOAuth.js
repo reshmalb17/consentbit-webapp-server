@@ -56,15 +56,14 @@ const DEFAULT_SCOPES = 'sites:read sites:write authorized_user:read custom_code:
 /**
  * Hosts allowed to serve the ConsentBit banner script. Mirrors the client-side
  * allowlist (lib/scriptUrl.js) so the install-snippet URL is validated on BOTH
- * ends: any consentbit.com subdomain, localhost (dev), and any origin the
- * operator has explicitly pinned via env (CDN_BASE_URL / API_BASE_URL /
- * WEBAPP_PUBLIC_URL — covers the test workers.dev host).
+ * ends: any consentbit.com subdomain, and any origin the operator has explicitly
+ * pinned via env (CDN_BASE_URL / API_BASE_URL / WEBAPP_PUBLIC_URL — covers the test
+ * workers.dev host). Loopback hosts (localhost / 127.0.0.1) are NOT accepted.
  */
 function isTrustedEmbedHost(host, env) {
   const h = String(host || '').toLowerCase();
   if (!h) return false;
   if (h === 'consentbit.com' || h.endsWith('.consentbit.com')) return true;
-  if (h === 'localhost' || h === '127.0.0.1') return true;
   for (const key of ['CDN_BASE_URL', 'API_BASE_URL', 'WEBAPP_PUBLIC_URL']) {
     const val = env?.[key];
     if (!val) continue;
@@ -75,36 +74,41 @@ function isTrustedEmbedHost(host, env) {
   return false;
 }
 
-/** First trusted origin among the candidates (env pin, then the request origin). */
+/**
+ * First trusted HTTPS origin among the candidates (env pin, then the request
+ * origin). A candidate must be BOTH https and on the trusted-host allowlist.
+ */
 function trustedServeOrigin(env, requestOrigin) {
   const pin = String(env?.CDN_BASE_URL || env?.API_BASE_URL || '').trim().replace(/\/+$/, '');
   for (const cand of [pin, requestOrigin]) {
     if (!cand) continue;
     try {
-      if (isTrustedEmbedHost(new URL(cand).hostname, env)) return cand.replace(/\/+$/, '');
+      const c = new URL(cand);
+      if (c.protocol === 'https:' && isTrustedEmbedHost(c.hostname, env)) return cand.replace(/\/+$/, '');
     } catch { /* ignore */ }
   }
   return null;
 }
 
 /**
- * Validate a built install-snippet URL. If its host is already trusted, keep it.
- * Otherwise — e.g. the site's frozen embedScriptUrl points at the raw *.workers.dev
- * origin rather than the vanity domain — canonicalize it onto a trusted origin
- * (env pin, else the current request origin), since the same worker serves the
- * script there. Only when no trusted origin is available do we keep the original
- * (logged) rather than break install.
+ * Validate a built install-snippet URL before it is ever returned to the extension.
+ * A URL is only kept as-is when it is HTTPS AND on a trusted host (the consentbit
+ * allowlist, or the worker's OWN request host — on Cloudflare the request host is
+ * always a configured worker domain). Anything else — non-HTTPS, localhost, loopback,
+ * staging, or any non-ConsentBit host — is re-pinned onto a trusted HTTPS origin.
+ * If no trusted origin is available, the URL is REJECTED (null) rather than emitting
+ * an untrusted <script src> onto the customer's site.
  */
 function sanitizeEmbedScriptUrl(scriptUrl, env, cdnScriptId, requestOrigin) {
   if (!scriptUrl) return null;
   let u;
   try { u = new URL(String(scriptUrl)); } catch { return null; }
-  // Trusted if on the consentbit allowlist OR it's the worker's OWN request host
-  // (e.g. the *.workers.dev test origin serving its own script) — on Cloudflare the
-  // request host is always a configured worker domain, so it is inherently trusted.
   let reqHost = null;
   try { reqHost = requestOrigin ? new URL(requestOrigin).hostname.toLowerCase() : null; } catch { /* ignore */ }
-  if (isTrustedEmbedHost(u.hostname, env) || (reqHost && u.hostname.toLowerCase() === reqHost)) {
+  const hostTrusted = isTrustedEmbedHost(u.hostname, env) || (reqHost && u.hostname.toLowerCase() === reqHost);
+  // Keep only when it is HTTPS on a trusted host. A non-HTTPS URL is never kept as-is,
+  // even on a trusted host — it is re-pinned to the HTTPS origin below.
+  if (u.protocol === 'https:' && hostTrusted) {
     return u.toString();
   }
 
@@ -112,8 +116,8 @@ function sanitizeEmbedScriptUrl(scriptUrl, env, cdnScriptId, requestOrigin) {
   if (origin && cdnScriptId) {
     return `${origin}/consentbit/${cdnScriptId}/script.js`;
   }
-  console.warn(`${TAG} embed scriptUrl host not trusted and no trusted origin to re-pin to (kept): ${u.hostname}`);
-  return u.toString();
+  console.warn(`${TAG} embed scriptUrl not trusted and no trusted origin to re-pin to (rejected): ${u.protocol}//${u.hostname}`);
+  return null;
 }
 
 function resolveRedirectUri(env, url) {
@@ -130,15 +134,14 @@ function safeReturnTo(returnTo, env) {
   if (!returnTo) return '';
   let u;
   try { u = new URL(returnTo); } catch { return ''; }
-  const isLocal = u.hostname === 'localhost' || u.hostname === '127.0.0.1';
-  if (u.protocol !== 'https:' && !(u.protocol === 'http:' && isLocal)) return '';
+  // HTTPS required; loopback hosts are not accepted.
+  if (u.protocol !== 'https:') return '';
   const h = u.hostname.toLowerCase();
   const ok =
     h === 'webflow.com' || h.endsWith('.webflow.com') ||
     h.endsWith('.webflow-ext.com') ||
     h === 'consentbit.com' || h.endsWith('.consentbit.com') ||
-    h.endsWith('.consentbit-webapp-frontend-test.pages.dev') || h === 'consentbit-webapp-frontend-test.pages.dev' ||
-    isLocal;
+    h.endsWith('.consentbit-webapp-frontend-test.pages.dev') || h === 'consentbit-webapp-frontend-test.pages.dev';
   if (ok) return u.toString();
   for (const key of ['WEBFLOW_APP_REDIRECT', 'WEBAPP_PUBLIC_URL', 'CHECKOUT_BASE_URL']) {
     const val = env?.[key];

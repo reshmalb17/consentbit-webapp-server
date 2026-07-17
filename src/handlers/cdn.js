@@ -1,5 +1,3 @@
-﻿// @ts-nocheck
-// handlers/cdn.js
 import { getBannerCustomization, getEffectivePlanForOrganization, getSubscriptionBySiteId, inferTierPlanIdFromStripePriceId } from '../services/db.js';
 import { mergeTranslations } from '../data/defaultTranslations.js';
 import { SCRIPT_BLOCK_PROVIDERS } from '../data/scriptBlockProviders.js';
@@ -22,11 +20,9 @@ async function _handleCDNScript(request, env, url) {
   const parts = url.pathname.split('/');
 
   let cdnScriptId = parts[parts.length - 1];
-  // If last part is "script.js", get the one before it
   if (cdnScriptId === 'script.js' && parts.length > 2) {
     cdnScriptId = parts[parts.length - 2];
   }
-  // Remove .js extension if present (e.g., "abc123.js" -> "abc123")
   if (cdnScriptId.endsWith('.js')) {
     cdnScriptId = cdnScriptId.slice(0, -3);
   }
@@ -40,9 +36,6 @@ async function _handleCDNScript(request, env, url) {
     .bind(cdnScriptId)
     .first();
 
-  // Backward compatibility:
-  // - Some older installs used Site.id in the script URL instead of cdnScriptId.
-  // - Also guards against historical data issues where cdnScriptId was not stable.
   let resolvedSite = site;
   if (!resolvedSite) {
     resolvedSite = await db
@@ -60,10 +53,6 @@ async function _handleCDNScript(request, env, url) {
     });
   }
 
-  // Domain validation — only serve the banner to the registered domain.
-  // Checks both Origin (reliable, always sent by browsers on cross-origin requests)
-  // and Referer (fallback). If either header is present and the hostname does not
-  // match the registered site domain, return a no-op script so the banner never appears.
   if (resolvedSite.domain) {
     const siteHost = String(resolvedSite.domain)
       .replace(/^https?:\/\//, '')
@@ -74,14 +63,12 @@ async function _handleCDNScript(request, env, url) {
     const origin = request.headers.get('Origin') || request.headers.get('origin') || '';
     const referer = request.headers.get('Referer') || request.headers.get('referer') || '';
 
-    // Prefer Origin (more reliable — always sent by browsers on cross-origin loads).
     const sourceHeader = origin || referer;
 
     if (sourceHeader) {
       try {
         const sourceHost = new URL(sourceHeader).hostname.replace(/^www\./, '').toLowerCase();
         if (sourceHost !== siteHost) {
-          // Check if the request comes from the Webflow staging domain for this site
           let stagingHost = null;
           const platformSiteId = resolvedSite.platformSiteId ?? resolvedSite.platformsiteid ?? null;
           if (platformSiteId && env.WEBFLOW_AUTHENTICATION) {
@@ -93,12 +80,10 @@ async function _handleCDNScript(request, env, url) {
                   stagingHost = new URL(kvData.stagingUrl.startsWith('http') ? kvData.stagingUrl : `https://${kvData.stagingUrl}`).hostname.replace(/^www\./, '').toLowerCase();
                 }
               }
-            } catch { /* ignore KV errors */ }
+            } catch { }
           }
 
           if ((stagingHost && sourceHost === stagingHost) || sourceHost.endsWith('.webflow.io')) {
-            // Staging domain allowed — site-specific staging URL or Webflow infrastructure domain
-            // console.log(`[CDN] Domain mismatch allowed: script for "${siteHost}" from "${sourceHost}" (stagingHost=${stagingHost}, isWebflowIO=${sourceHost.endsWith('.webflow.io')})`);
           } else {
             console.warn(`[CDN] Domain mismatch BLOCKED: script for "${siteHost}" from "${sourceHost}" (stagingHost=${stagingHost})`);
             return new Response('// Script not authorized for this domain', {
@@ -108,7 +93,6 @@ async function _handleCDNScript(request, env, url) {
           }
         }
       } catch (domainErr) {
-        // Malformed Origin/Referer — fail safe and block
         console.warn('[CDN] Could not parse Origin/Referer, blocking. header="' + sourceHeader + '" err=' + domainErr?.message);
         return new Response('// Script not authorized for this domain', {
           status: 403,
@@ -116,23 +100,14 @@ async function _handleCDNScript(request, env, url) {
         });
       }
     } else {
-      // console.log('[CDN] No Origin/Referer header — allowing (client-side guard will enforce)');
     }
-    // Neither Origin nor Referer present: could be a direct/server-side fetch.
-    // Allow through — the client-side domain guard in the embedded script will
-    // enforce the domain restriction in the browser.
   }
 
-  // Auto-verify: domain validation just passed, so this is a genuine install.
   if (!resolvedSite.verified) {
     db.prepare(`UPDATE Site SET verified = 1, verified_at = datetime('now') WHERE id = ?1`)
       .bind(resolvedSite.id).run().catch(() => {});
   }
 
-  // Check subscription status — block banner if subscription is canceled/expired
-  // Also capture planId so we can gate IAB features below.
-  // Prefer site-specific subscription over org-level to avoid migration-created 'basic'
-  // rows for sibling sites polluting the org-level query result.
   let effectivePlanId = 'free';
   let orgIdForDebug = null;
   let subStatusForDebug = null;
@@ -140,7 +115,6 @@ async function _handleCDNScript(request, env, url) {
     const orgId = resolvedSite.organizationId ?? resolvedSite.organizationid ?? null;
     orgIdForDebug = orgId ? String(orgId) : null;
 
-    // 1. Try site-specific subscription first
     let subscription = await getSubscriptionBySiteId(db, resolvedSite.id);
     let resolvedPlanId = subscription ? (subscription.planId ?? subscription.planid ?? null) : null;
     if (resolvedPlanId) resolvedPlanId = String(resolvedPlanId).toLowerCase();
@@ -150,7 +124,6 @@ async function _handleCDNScript(request, env, url) {
       if (inferred) resolvedPlanId = inferred;
     }
 
-    // 2. Fall back to org-level if no valid site-specific subscription found
     if (!resolvedPlanId || !['basic', 'essential', 'growth'].includes(resolvedPlanId)) {
       if (orgId) {
         const orgResult = await getEffectivePlanForOrganization(db, orgId, env);
@@ -162,9 +135,6 @@ async function _handleCDNScript(request, env, url) {
     effectivePlanId = resolvedPlanId && ['basic', 'essential', 'growth'].includes(resolvedPlanId) ? resolvedPlanId : 'free';
     const status = subscription ? String(subscription.status || '').toLowerCase() : null;
     subStatusForDebug = status;
-    // Block when subscription is definitively inactive: canceled, or payment failed with no recovery path.
-    // past_due / unpaid = payment failed; incomplete_expired = trial/setup never completed.
-    // trialing, active, cancelAtPeriodEnd still get the banner (access continues until period end).
     const INACTIVE_STATUSES = ['canceled', 'cancelled', 'past_due', 'unpaid', 'incomplete_expired'];
     if (status && INACTIVE_STATUSES.includes(status)) {
       return new Response('// Subscription inactive — banner disabled', {
@@ -174,13 +144,10 @@ async function _handleCDNScript(request, env, url) {
     }
   } catch (subErr) {
     console.warn('[CDN] Subscription check failed:', subErr?.message);
-    // Fall through — do not block banner on DB errors
   }
 
-  // Load banner customization
   const customization = await getBannerCustomization(db, resolvedSite.id);
 
-  // Fetch published custom cookie rules for this site (user-defined via dashboard)
   let customCookieRules = [];
   try {
     const { results: ccrRows } = await db
@@ -203,24 +170,18 @@ async function _handleCDNScript(request, env, url) {
 
   const GA_ID = resolvedSite.ga_measurement_id || '';
 
-  // Geo info from Cloudflare
   const cf = request.cf || {};
-  const country = cf.country || null;          // e.g. "US"
-  const isEU = cf.isEUCountry === '1';         // "1" for EU members
+  const country = cf.country || null;
+  const isEU = cf.isEUCountry === '1';
 
-  const regionMode = resolvedSite.region_mode || 'gdpr';           // 'gdpr' | 'ccpa' | 'both'
-  let effectiveBannerType = resolvedSite.banner_type || 'gdpr';    // base type
-  // When false, the embed script skips the consent banner entirely (but still injects floating button)
+  const regionMode = resolvedSite.region_mode || 'gdpr';
+  let effectiveBannerType = resolvedSite.banner_type || 'gdpr';
   let bannerEnabled = true;
 
-  // IAB/TCF banner overrides all geo-based routing — show to everyone when enabled.
   const siteWantsIab = String(resolvedSite.banner_type || '').toLowerCase() === 'iab';
 
-  // Decide which banner to show (or none) based on visitor location:
-  // IAB takes priority: skip geo routing so US visitors still see the IAB/TCF banner.
   if (!siteWantsIab) {
     if (regionMode === 'both') {
-      // Both configured: EU visitors see GDPR, US visitors see CCPA, everyone else sees GDPR
       if (isEU) {
         effectiveBannerType = 'gdpr';
       } else if (country === 'US') {
@@ -229,27 +190,20 @@ async function _handleCDNScript(request, env, url) {
         effectiveBannerType = 'gdpr';
       }
     } else if (regionMode === 'ccpa') {
-      // CCPA-only: only show banner to US visitors; suppress for all other countries
       if (country === 'US') {
         effectiveBannerType = 'ccpa';
       } else {
         bannerEnabled = false;
       }
     } else if (effectiveBannerType === 'ccpa') {
-      // banner_type is CCPA but region_mode was not explicitly set to 'ccpa'.
-      // CCPA is a US-only law — still restrict to US visitors by default.
       if (country !== 'US') {
         bannerEnabled = false;
       }
     }
   }
-  // regionMode === 'gdpr': show GDPR banner everywhere (default, no change needed)
 
-  // Generate custom CSS styles from customization
   let customStyles = null;
-  /** Passed to embed config for scripts that branch on initial banner shape. */
   let bannerLayoutVisualForConfig = 'box';
-  // Map full language names to ISO codes
   const LANG_NAME_TO_CODE = {
     English: 'en', Spanish: 'es', French: 'fr', German: 'de',
     Italian: 'it', Polish: 'pl', Portuguese: 'pt', Swedish: 'sv', Dutch: 'nl'
@@ -260,8 +214,6 @@ async function _handleCDNScript(request, env, url) {
     return LANG_NAME_TO_CODE[s] || (s.length <= 3 ? s.toLowerCase() : 'en');
   }
 
-  // Section labels per language — used to fill in missing labels for existing published data
-  // that was saved before buildCustomizationPayload started writing them to translations.en
   const SECTION_LABELS = {
     en: { essential: 'Strictly Necessary', analytics: 'Analytics',   marketing: 'Marketing',      preferences: 'Preferences'  },
     es: { essential: 'Estrictamente Necesarias', analytics: 'Analíticas',  marketing: 'Marketing',      preferences: 'Preferencias' },
@@ -274,10 +226,8 @@ async function _handleCDNScript(request, env, url) {
     pl: { essential: 'Ściśle Niezbędne',         analytics: 'Analityczne', marketing: 'Marketingowe',   preferences: 'Preferencje'  },
   };
 
-  // Declared here so siteConfigPayload can reference it even when customization is null
   let enTrans = {};
   if (customization) {
-    // Normalize DB/API values (case, legacy "Right", underscores) so corner CSS matches dashboard.
     const rawPos = customization.position || 'bottom-left';
     const normPos = String(rawPos).trim().toLowerCase().replace(/_/g, '-');
     let position = 'bottom-left';
@@ -289,7 +239,6 @@ async function _handleCDNScript(request, env, url) {
     const textColor = customization.textColor || '#334155';
     const headingColor = customization.headingColor || '#0f172a';
     var _rawRadius = customization.bannerBorderRadius || '1.25rem';
-    // Cap border radius at 25px to prevent over-rounding.
     var _radiusPx = _rawRadius.endsWith('rem') ? Math.round(parseFloat(_rawRadius) * 16) : Math.round(parseFloat(_rawRadius) || 20);
     if (_radiusPx > 25) { _rawRadius = '1.5625rem'; }
     const bannerRadius = _rawRadius;
@@ -306,7 +255,6 @@ async function _handleCDNScript(request, env, url) {
     var saveBg = customization.saveButtonBg || custBg;
     var saveTx = customization.saveButtonText || '#0284c7';
 
-    /** Typography — read from translations.config (Option 2) with translations.en as backward-compat fallback. */
     var configTrans = {};
     try {
       var trRaw = customization.translations;
@@ -323,7 +271,6 @@ async function _handleCDNScript(request, env, url) {
       enTrans = {};
       configTrans = {};
     }
-    // Fill in missing section labels using languageSelected from enTrans (or DB language as fallback)
     const _langCode = enTrans.languageSelected || normalizeLangCode(customization.language);
     const _labels = SECTION_LABELS[_langCode] || SECTION_LABELS['en'];
     enTrans.essential = _labels.essential;
@@ -334,7 +281,6 @@ async function _handleCDNScript(request, env, url) {
     if (!enTrans.cookiePreferences)   enTrans.cookiePreferences   = 'Cookie Preferences';
 
 
-    /** box = corner card; banner = full-width bottom bar; bottom-center = centered full-width bottom bar; popup (legacy) = treated as bottom-center. */
     var layoutVisual = 'box';
     try {
       var _lvSrc = configTrans.bannerLayoutVisual != null ? configTrans.bannerLayoutVisual : enTrans.bannerLayoutVisual;
@@ -351,7 +297,6 @@ async function _handleCDNScript(request, env, url) {
       textAlign = 'left';
     }
     var footerJustify = textAlign === 'center' ? 'center' : textAlign === 'right' ? 'flex-end' : 'flex-start';
-    // Full-width banner: left text → buttons right, center → center, right → right
     var bannerFooterJustify = textAlign === 'center' ? 'center' : 'flex-end';
     var closeButtonEnabled = ((configTrans.closeButtonEnabled != null ? configTrans.closeButtonEnabled : enTrans.closeButtonEnabled) === '1');
     var boxPadding = closeButtonEnabled ? '28px 20px 20px 20px' : '20px';
@@ -359,10 +304,6 @@ async function _handleCDNScript(request, env, url) {
     var fontFamilyCss = "'" + _fontName + "',ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
 
     var positionStyles = '';
-    // Three-tier banner width:
-    //  1. Default (short content, normal weight) → 480px
-    //  2. Max content (long description > 120 chars, normal weight) → 560px
-    //  3. Max content + Extra Bold / Black (800/900) → 640px
     var isBoldHeavy = fontWeightStr === '800' || fontWeightStr === '900';
     var descLen = String((enTrans && enTrans.description) || '').length;
     var maxBtnLen = Math.max(
@@ -370,8 +311,6 @@ async function _handleCDNScript(request, env, url) {
       String((enTrans && enTrans.rejectAll) || '').length,
       String((enTrans && enTrans.customise) || '').length
     );
-    // Calculate width needed for 3 equal-width buttons in one row (flex:1 1 0)
-    // Each button: ~8px per char + 56px padding; 3 buttons + 32px total gap + 32px panel padding
     var perBtnPx = Math.max(maxBtnLen * 8 + 56, 90);
     var btnRowWidth = perBtnPx * 3 + 32 + 32;
     var isLongDesc = descLen > 200;
@@ -401,7 +340,6 @@ async function _handleCDNScript(request, env, url) {
       }
     }
 
-    // CCPA initial banner: wider + taller than default box
     if (effectiveBannerType === 'ccpa' && layoutVisual !== 'banner') {
       var ccpaWidthPx = Math.max(baseWidthPx, 600);
       initialSize = 'width:' + ccpaWidthPx + 'px!important;min-width:360px;max-width:min(' + ccpaWidthPx + 'px,96vw)!important;max-height:min(80vh,660px);overflow:hidden;';
@@ -487,7 +425,6 @@ async function _handleCDNScript(request, env, url) {
         "text-align:" + textAlign + "!important;" +
         "width:100%;" +
       "}" +
-      /* Explicit overrides for both banners — higher specificity to beat static base rules. */
       "#cb-initial-banner.cb-banner h3," +
       "#cb-preferences-banner.cb-banner h3{" +
         "font-weight:600!important;" +
@@ -514,7 +451,6 @@ async function _handleCDNScript(request, env, url) {
         "text-align:" + textAlign + "!important;" +
         "width:100%;" +
       "}" +
-      /* Static base uses `#cb-initial-banner… .cb-banner-body > p` — must match dashboard text color + alignment. */
       "#cb-initial-banner.cb-banner .cb-banner-body > p," +
       "#cb-preferences-banner.cb-banner .cb-banner-body > p," +
       "#cb-preferences-banner.cb-banner .cb-gdpr-cat-desc{" +
@@ -576,7 +512,6 @@ async function _handleCDNScript(request, env, url) {
       "#cb-preferences-banner.cb-banner .cb-banner-footer button{" +
         "padding:10px 36px!important;" +
       "}" +
-      /* Initial banner actions — nowrap keeps all buttons in one row regardless of text length */
       "#cb-initial-banner.cb-banner .cb-banner-footer{" +
         "display:flex;" +
         "flex-wrap:nowrap;" +
@@ -592,7 +527,7 @@ async function _handleCDNScript(request, env, url) {
         "text-overflow:clip;" +
       "}" +
       (layoutVisual === 'banner'
-        ? /* Column layout: heading, text, buttons all share same container — alignment works via text-align + justify-content */
+        ?
           "#cb-initial-banner.cb-banner{" +
             "flex-direction:column!important;align-items:stretch!important;" +
           "}" +
@@ -605,7 +540,6 @@ async function _handleCDNScript(request, env, url) {
           "#cb-initial-banner.cb-banner .cb-banner-footer button{" +
             "flex:0 0 auto!important;width:auto!important;min-width:" + perBtnPx + "px!important;max-width:none!important;white-space:nowrap!important;overflow:visible!important;text-overflow:clip!important;" +
           "}" +
-          /* Mobile: stretch edge-to-edge */
           "@media(max-width:660px){" +
             "#cb-initial-banner.cb-banner{left:0!important;right:0!important;}" +
           "}"
@@ -631,7 +565,6 @@ async function _handleCDNScript(request, env, url) {
         "padding:10px 32px!important;" +
         "font-weight:600!important;" +
       "}" +
-      /* Cookie category accordion — match banner background (rows sit on same surface as prefs panel). */
       ".cb-gdpr-accordion{" +
         "background-color:" + bgColor + ";" +
       "}" +
@@ -644,7 +577,6 @@ async function _handleCDNScript(request, env, url) {
       "#cb-preferences-banner.cb-banner .cb-banner-footer{" +
         "flex:0 0 auto;" +
       "}" +
-      /* Mobile overrides — must come LAST so they win over the desktop !important rules above */
       "@media(max-width:660px){" +
         "#cb-initial-banner.cb-banner{" +
           "width:100vw!important;" +
@@ -685,11 +617,6 @@ async function _handleCDNScript(request, env, url) {
       "}";
   }
 
-  /**
-   * Serialize JSON for embedding in a JS response body.
-   * - Escape `<` so `</script>` cannot break HTML when the script is inlined.
-   * - Catch stringify failures (e.g. unexpected values) so the worker still returns valid JS.
-   */
   function jsonForInlineScript(value) {
     try {
       return JSON.stringify(value).replace(/</g, '\\u003c');
@@ -713,9 +640,6 @@ async function _handleCDNScript(request, env, url) {
   }
   const translationsForScript = mergeTranslations(storedTranslations);
 
-  // Apply essential/strictlyNecessary overrides to TRANSLATIONS so the browser receives correct labels.
-  // Use languageSelected from within translations.en (the actual language code) — not the key name 'en',
-  // which is always 'en' regardless of the selected language.
   if (translationsForScript && translationsForScript.en) {
     const _enT = translationsForScript.en;
     const _lc = _enT.languageSelected || 'en';
@@ -724,7 +648,6 @@ async function _handleCDNScript(request, env, url) {
     _enT.strictlyNecessary = '';
   }
 
-  /** Worker-hosted SVG (same origin as the embed script). */
   function resolveWorkerFloatingLogoUrl() {
     try {
       return new URL(request.url).origin + '/embed/floating-logo.svg';
@@ -733,7 +656,6 @@ async function _handleCDNScript(request, env, url) {
     }
   }
 
-  /** Primary: Next.js /asset/logo.webp when WEBAPP_PUBLIC_URL is set; else Worker SVG. */
   function resolveFloatingLogoUrl() {
     var webapp = String(env.WEBAPP_PUBLIC_URL || '')
       .trim()
@@ -744,16 +666,11 @@ async function _handleCDNScript(request, env, url) {
     return resolveWorkerFloatingLogoUrl();
   }
 
-  /**
-   * Preference panel position in the embed. Legacy DB default was `right`.
-   * Only `left` keeps a side panel; `right` / `center` / empty → centered modal.
-   */
   function normalizePreferencePositionForEmbed(raw) {
     if (raw === 'left') return 'left';
     return 'center';
   }
 
-  // Single JSON.stringify pass avoids fragile nested `${ ... ? ... }` in template literals (browser parse errors).
   const siteConfigPayload = {
     id: resolvedSite.id,
     bannerType: effectiveBannerType,
@@ -799,14 +716,12 @@ async function _handleCDNScript(request, env, url) {
           saveButtonBg: customization.saveButtonBg || '#ffffff',
           saveButtonText: customization.saveButtonText || '#0284c7',
           bannerEntranceAnimation: (() => {
-            // Priority: translations.config → centerAnimationDirection (direct column) → translations.en → default
             const raw = (configTrans.bannerEntranceAnimation != null && configTrans.bannerEntranceAnimation !== '')
               ? configTrans.bannerEntranceAnimation
               : (customization.centerAnimationDirection != null && customization.centerAnimationDirection !== '')
                 ? customization.centerAnimationDirection
                 : (enTrans && enTrans.bannerEntranceAnimation) || 'fade-in';
             const v = String(raw || 'fade-in');
-            // Normalize legacy values: 'fade' → 'fade-in', 'zoom' → 'zoom-in'
             return v === 'zoom' ? 'zoom-in' : v === 'fade' ? 'fade-in' : v;
           })(),
           bannerFontWeight: '',
@@ -825,13 +740,9 @@ async function _handleCDNScript(request, env, url) {
       : null,
     floatingLogoUrl: resolveFloatingLogoUrl(),
     floatingLogoFallbackUrl: resolveWorkerFloatingLogoUrl(),
-    /** CookieYes-style URL → category rules (serialized into embed). */
     scriptBlockProviders: SCRIPT_BLOCK_PROVIDERS,
-    /** User-defined cookie rules published from the dashboard — used for runtime script blocking. */
     customCookieRules: customCookieRules,
-    /** When true, the next page load triggers a full browser-based cookie + script scan. */
     pendingScan: resolvedSite.pendingScan === 1,
-    /** Registered domain — used by the embed script to validate it is running on the correct site. */
     registeredDomain: resolvedSite.domain
       ? String(resolvedSite.domain).replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0].toLowerCase()
       : null,
@@ -3002,9 +2913,6 @@ ${inlineConfig}
 }();
 `;
 
-  // ETag must change whenever banner customization/translation changes.
-  // `Site.updatedAt` does not always update when only BannerCustomization changes, so include both.
-  // Also include a script version so CDN logic changes propagate even when site/customization did not change.
   const SCRIPT_VERSION = '2026-07-01-close-persist-floatinglogo-24h';
   const customizationUpdatedAt = customization?.updatedAt || customization?.updated_at || '';
   const translationsSig = await (async () => {
@@ -3034,29 +2942,18 @@ ${inlineConfig}
 ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom-left', bannerLayoutVisual: enTrans?.bannerLayoutVisual, textAlign: (typeof textAlign !== 'undefined' && (textAlign === 'center' || textAlign === 'right')) ? textAlign : 'left', bannerEntranceAnimation: siteConfigPayload?.customization?.bannerEntranceAnimation }, isGoogleAc)}
 `
 
-  // Strip the inlineConfig prefix from loader so __CONSENT_SITE__ is only assigned once
-  // in loaderWebflow (set here → read by getWebflowSetupScript → loader IIFE reads it).
   const loaderCore = loader.replace(inlineConfig, '');
   const loaderWebflow = `${inlineConfig}${getWebflowSetupScript()}
 ` + loaderCore;
 
-  // loaderIab also starts with inlineConfig — strip it to avoid a second __CONSENT_SITE__ assignment.
   const loaderIabCore = loaderIab.replace(inlineConfig, '');
-  // Execution order: inlineConfig → getWebflowSetupScript (sets __CB_WEBFLOW_MODE__, script blocking,
-  // consentUpdated listener) → TCF bridge (fires consentUpdated on IAB consent) → IAB banner UI.
   const loaderIabWebflow = `${inlineConfig}${getWebflowSetupScript()}
 (function(){function _cbInstallTcfBridge(){if(!window.__tcfapi){setTimeout(_cbInstallTcfBridge,150);return;}try{window.__tcfapi('addEventListener',2,function(a,b){if(!b)return;if(a.eventStatus==='useractioncomplete'||a.eventStatus==='tcloaded'){var c=!!(a.purpose&&a.purpose.consents&&a.purpose.consents[1]);var d={essential:true,analytics:c,marketing:c,preferences:c};window.userConsent=d;try{document.dispatchEvent(new CustomEvent('consentUpdated',{detail:d,bubbles:true}));}catch(e){}}});}catch(e){}}_cbInstallTcfBridge();})();
 ` + loaderIabCore;
 
-  // IAB/TCF banner requires a paid tier that includes IAB (Essential or Growth).
-  // If the site was downgraded to a lower plan, fall back to the standard GDPR banner
-  // so the IAB UI is never served.
   const iabAllowed = effectivePlanId === 'growth' || effectivePlanId === 'essential';
   const wantsIab = String(resolvedSite.banner_type || '').toLowerCase() === 'iab';
   const rawIsWebflow = String(resolvedSite.platform || '').toLowerCase() === 'webflow';
-  // Webflow v2 sites use the standard loader (with Consent Mode bootstrap) instead of
-  // the Webflow-specific loader. Treat a v2 Webflow site as non-Webflow for loader
-  // selection so it falls through to the 'standard' path.
   const isWebflowV2 = rawIsWebflow && String(resolvedSite.version || '').toLowerCase() === 'v2';
   const isWebflow = rawIsWebflow && !isWebflowV2;
   const serveKind = (wantsIab && iabAllowed && isWebflow) ? 'iabwebflow'
@@ -3079,16 +2976,6 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
     platform: resolvedSite.platform,
     bannerEnabled,
   };
-  // ─── Standard/general (non-Webflow) Consent Mode bootstrap ───────────────────
-  // Framer and other "standard" sites bring their OWN GTM/GA. In standard mode ye()
-  // intentionally does NOT hard-block GTM/GA URLs (the me() exemption) — it relies on
-  // Google Consent Mode. But the standard loader only pushed `consent default denied`
-  // inside He() at DOMContentLoaded, i.e. AFTER the page's GTM snippet already loaded
-  // gtm.js → GA fired before consent. Webflow mode avoids this by pushing the default
-  // synchronously at the very top (getWebflowSetupScript). We mirror that here for the
-  // standard path ONLY, baking the resolved banner type server-side. Sets
-  // window.__cbConsentDefaultSet so He() does not re-push a (possibly stale) default.
-  // NOTE: deliberately NOT added to webflow/iab paths — those are unchanged.
   const bannerIsCcpa = String(effectiveBannerType || '').toLowerCase() === 'ccpa';
   const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? 'true' : 'false'};var d=null,e=false,hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};if(!c){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else{window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',security_storage:'granted'});}window.__cbConsentDefaultSet=true;}catch(_){}})();\n`;
 
@@ -3102,7 +2989,6 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
       'Content-Type': 'application/javascript; charset=utf-8',
       'Cache-Control': 'no-store',
       'ETag': etag,
-      // Debug headers (safe, non-sensitive): helps confirm which loader was served and why.
       'X-ConsentBit-Loader': serveKind,
       'X-ConsentBit-Plan': String(effectivePlanId || 'free'),
       'X-ConsentBit-IabAllowed': iabAllowed ? '1' : '0',
