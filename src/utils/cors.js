@@ -135,6 +135,8 @@ export function handleOptions(request, env) {
     '/api/framer/billing',
     '/api/framer/cancel-subscription',
     '/api/framer/switch-interval',
+    // Framer account ownership transfer — see handlers/authTransferOwnershipFramer.js.
+    '/api/framer/transfer-ownership/request',
     '/api/webflow/publish',
     '/api/webflow/domains',
     '/api/banner-customization',

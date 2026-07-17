@@ -88,6 +88,7 @@ import { handleSyncPlugin, handleSyncPluginCustomization, handleGetPluginData, h
 import { handlePaymentSubscription } from './handlers/paymentSubscription.js';
 import { handleWebflowBilling, handleWebflowCancelSubscription, handleWebflowSwitchInterval } from './handlers/webflowBilling.js';
 import { handleFramerBilling, handleFramerCancelSubscription, handleFramerSwitchInterval } from './handlers/framerBilling.js';
+import { handleFramerTransferOwnershipRequest } from './handlers/authTransferOwnershipFramer.js';
 import { handleWebflowScriptCleanupReport, handleWebflowScriptCleanupRemove } from './handlers/webflowScriptCleanup.js';
 import { handleWebflowOAuthAuthorize, handleWebflowOAuthCallback, handleWebflowOAuthStatus } from './handlers/webflowOAuth.js';
 import { handleWebflowPublish, handleWebflowDomains } from './handlers/webflowPublish.js';
@@ -153,6 +154,11 @@ const PUBLIC_PATHS = new Set([
   '/api/framer/billing',
   '/api/framer/cancel-subscription',
   '/api/framer/switch-interval',
+  // Framer account ownership transfer (request step). Authless by design — the
+  // authorization link is emailed only to the resolved owner, who must click it to
+  // complete the transfer (see SECURITY note in authTransferOwnershipFramer.js).
+  // The authorize step reuses /api/auth/transfer-ownership/authorize (token-only).
+  '/api/framer/transfer-ownership/request',
   // Webflow OAuth (browser redirects) — must skip body-encoding so the 302
   // Location survives, allow any origin, and skip CSRF (GET).
   '/api/webflow/oauth/authorize',
@@ -389,6 +395,10 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleFramerCancelSubscription(request, env); break;
     case '/api/framer/switch-interval':
       response = await handleFramerSwitchInterval(request, env); break;
+
+    // — Framer account ownership transfer (request step; authorize reuses /api/auth/*)
+    case '/api/framer/transfer-ownership/request':
+      response = await handleFramerTransferOwnershipRequest(request, env, ctx); break;
 
     // — Legacy script cleanup (remove old auto-injected ConsentBit head script)
     case '/api/webflow/script-cleanup':
