@@ -82,6 +82,7 @@ CLICKUP_FIELD_STAGING_EMAIL = "ec4069b3-96a9-4a7c-91a4-96600f69c9fc"
 
 POSTHOG_API_KEY = "phc_pACPAPjdZRJRopr5EkE4AEHMwS9qqYdQC4pvEVMYdLzJ"
 JWT_SECRET="x7K9pL2mQ5vR8tY1nB4jH7uF0zA3eD6cK9pL2mQ5vR8tY1nB4jH7uF0zA3eD6cK9p"
+FRAMER_JWT_SECRET="trdgdcvhdchd"
 # Shared secret for calling cb-server internal APIs. Must match cb-server's LEGACY_API_SECRET.
 LEGACY_API_SECRET = "cb-internal-legacy-2025"
 # Admin key for /api/admin/* routes — send as `X-Admin-Key` header.
@@ -163,6 +164,8 @@ CLICKUP_FIELD_STAGING_EMAIL = "ec4069b3-96a9-4a7c-91a4-96600f69c9fc"
 
 POSTHOG_API_KEY = "phc_pACPAPjdZRJRopr5EkE4AEHMwS9qqYdQC4pvEVMYdLzJ"
 JWT_SECRET="x7K9pL2mQ5vR8tY1nB4jH7uF0zA3eD6cK9pL2mQ5vR8tY1nB4jH7uF0zA3eD6cK9p"
+FRAMER_JWT_SECRET="trdgdcvhdchd"
+
 LEGACY_API_SECRET = "cb-internal-legacy-2025"
 ADMIN_SECRET = "cb-admin-7Kp2vQ8mNx9LtR5yJ4hB6fW1aZ3sE0d"
 CB_SERVER_BASE_URL = "https://app.consentbit.com"

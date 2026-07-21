@@ -90,6 +90,12 @@ import { handleWebflowBilling, handleWebflowCancelSubscription, handleWebflowSwi
 import { handleWebflowBillings, handleWebflowCancelSubscriptions, handleWebflowSwitchIntervals } from './handlers/webflowBillingWf.js';
 import { requireConsentSession, requireConsentPdfAccess } from './middleware/consentAccess.js';
 import { handleFramerBilling, handleFramerCancelSubscription, handleFramerSwitchInterval } from './handlers/framerBilling.js';
+import {
+  handleFramerChangeTier,
+  handleFramerChangeTierPreview,
+  handleFramerSwitchInterval as handleFramerUpgradeSwitchInterval,
+  handleFramerSwitchIntervalPreview as handleFramerUpgradeSwitchIntervalPreview,
+} from './handlers/framerUpgrade.js';
 import { handleFramerTransferOwnershipRequest } from './handlers/authTransferOwnershipFramer.js';
 import { handleWebflowScriptCleanupReport, handleWebflowScriptCleanupRemove } from './handlers/webflowScriptCleanup.js';
 import { handleWebflowOAuthAuthorize, handleWebflowOAuthCallback, handleWebflowOAuthStatus } from './handlers/webflowOAuth.js';
@@ -156,6 +162,15 @@ const PUBLIC_PATHS = new Set([
   '/api/framer/billing',
   '/api/framer/cancel-subscription',
   '/api/framer/switch-interval',
+  // Framer plugin UPGRADE surface (tier change + interval switch, with proration
+  // preview). These are "public" only for TRANSPORT (any-origin CORS, no cookie/CSRF,
+  // plain-JSON responses) — authorization is enforced INSIDE each handler via the
+  // Framer plugin's JWT (Authorization: Bearer <auth_token>), verified with
+  // env.FRAMER_JWT_SECRET. See handlers/framerUpgrade.js.
+  '/api/framer/upgrade/change-tier',
+  '/api/framer/upgrade/change-tier/preview',
+  '/api/framer/upgrade/switch-interval',
+  '/api/framer/upgrade/switch-interval/preview',
   // Framer account ownership transfer (request step). Authless by design — the
   // authorization link is emailed only to the resolved owner, who must click it to
   // complete the transfer (see SECURITY note in authTransferOwnershipFramer.js).
@@ -401,6 +416,17 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleFramerCancelSubscription(request, env); break;
     case '/api/framer/switch-interval':
       response = await handleFramerSwitchInterval(request, env); break;
+
+    // — Framer plugin UPGRADE (JWT-authed, siteId-keyed): tier change + interval switch,
+    //   each with a prorated preview. See handlers/framerUpgrade.js.
+    case '/api/framer/upgrade/change-tier':
+      response = await handleFramerChangeTier(request, env); break;
+    case '/api/framer/upgrade/change-tier/preview':
+      response = await handleFramerChangeTierPreview(request, env); break;
+    case '/api/framer/upgrade/switch-interval':
+      response = await handleFramerUpgradeSwitchInterval(request, env); break;
+    case '/api/framer/upgrade/switch-interval/preview':
+      response = await handleFramerUpgradeSwitchIntervalPreview(request, env); break;
 
     // — Framer account ownership transfer (request step; authorize reuses /api/auth/*)
     case '/api/framer/transfer-ownership/request':

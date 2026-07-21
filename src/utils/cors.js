@@ -135,6 +135,11 @@ export function handleOptions(request, env) {
     '/api/framer/billing',
     '/api/framer/cancel-subscription',
     '/api/framer/switch-interval',
+    // Framer plugin upgrade surface (JWT-authed inside the handler) — see handlers/framerUpgrade.js.
+    '/api/framer/upgrade/change-tier',
+    '/api/framer/upgrade/change-tier/preview',
+    '/api/framer/upgrade/switch-interval',
+    '/api/framer/upgrade/switch-interval/preview',
     // Framer account ownership transfer — see handlers/authTransferOwnershipFramer.js.
     '/api/framer/transfer-ownership/request',
     '/api/webflow/publish',
