@@ -731,6 +731,21 @@ export async function handleCustomCheckout(request, env, ctx) {
   }
 
   // ── Phase 1: create customer + subscription ────────────────────────────────
+  // Fire plan_selected once the user has chosen a plan and is starting the paid
+  // checkout (distinct id = email). Not fired on the phase-2 3DS re-post above,
+  // so a single checkout emits it exactly once.
+  capturePosthog(env, ctx, {
+    event: 'plan_selected',
+    distinctId: email,
+    properties: {
+      plan_tier: planId,
+      billing_cycle: /^(year|annual)/i.test(String(interval)) ? 'annual' : 'monthly',
+      interval,
+      platform: platform || null,
+      domain: rawDomain,
+    },
+  });
+
   let customerId;
   try {
     customerId = await findOrCreateStripeCustomer(secret, email, paymentMethodId);
