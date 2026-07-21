@@ -579,11 +579,37 @@ export async function handleGetPluginPlan(request, env) {
     planId = ['basic', 'essential', 'growth'].includes(resolved) ? resolved : 'free';
   }
 
+  // Resolve the account owner (Site → Organization owner → User) for this site.
+  // Best-effort — a lookup failure just leaves email/name null rather than failing the request.
+  let email = null;
+  let name = null;
+  try {
+    const owner = await db
+      .prepare(
+        `SELECT u.email, u.name
+           FROM Site s
+           JOIN Organization o ON o.id = s.organizationId
+           JOIN User u ON u.id = o.ownerUserId
+          WHERE s.id = ?1
+          LIMIT 1`,
+      )
+      .bind(webAppSiteId)
+      .first();
+    if (owner) {
+      email = owner.email ?? null;
+      name = owner.name ?? null;
+    }
+  } catch (e) {
+    console.warn('[GetPluginPlan] owner lookup failed (non-fatal)', e?.message);
+  }
+
   return Response.json({
     success: true,
     webAppSiteId,
     planId,
     status,
+    email,
+    name,
     subscription: sub
       ? {
           id: sub.id,
