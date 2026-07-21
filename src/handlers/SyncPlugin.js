@@ -49,6 +49,35 @@ function isValidEmail(email) {
   return e.includes('@') && e.includes('.') && e.length <= 320;
 }
 
+/**
+ * Fire a PostHog capture. Reads POSTHOG_API_KEY (required) and POSTHOG_HOST
+ * (optional, defaults to https://us.i.posthog.com). No-op when the API key is
+ * not configured — never throws, so a capture failure can't break the flow.
+ * Awaited by the caller so the event is delivered before the worker responds
+ * (this handler has no ctx.waitUntil available).
+ */
+async function capturePosthog(env, { event, distinctId, properties }) {
+  try {
+    const apiKey = (env.POSTHOG_API_KEY || '').trim();
+    if (!apiKey || !distinctId || !event) return;
+    const host = ((env.POSTHOG_HOST || '').trim()) || 'https://us.i.posthog.com';
+    const url = `${host.replace(/\/+$/, '')}/capture/`;
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: apiKey,
+        event,
+        distinct_id: distinctId,
+        properties: properties || {},
+        timestamp: new Date().toISOString(),
+      }),
+    }).catch((err) => console.warn('[SyncPlugin] posthog capture failed', err?.message));
+  } catch (e) {
+    console.warn('[SyncPlugin] capturePosthog threw (non-fatal)', e?.message);
+  }
+}
+
 /** Returns the first site under this org that is NOT on a paid plan (no active/trialing subscription). */
 async function findFreePlanSite(db, organizationId) {
   if (!organizationId) return null;
@@ -376,6 +405,22 @@ export async function handleSyncPlugin(request, env) {
       console.warn('[SyncPlugin] markSiteVerified failed for new site (non-fatal)', e?.message);
     }
   }
+
+  // Analytics: free plan selected — only fired here, after the site, customization,
+  // KV mapping and verification have all completed successfully. Every failure path
+  // above returns before this point, so the event never fires on error.
+  await capturePosthog(env, {
+    event: 'plan_selected',
+    distinctId: email,
+    properties: {
+      plan_tier: 'free',
+      billing_cycle: 'monthly',
+      plan_price: 0,
+      platform: 'framer',
+      domain: rawDomain,
+      siteId: site.id,
+    },
+  });
 
   return Response.json({
     success: true,

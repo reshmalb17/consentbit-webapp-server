@@ -1397,15 +1397,89 @@ ${inlineConfig}
     return unique
   }
 
-  /** True when the page carries a GA/GTM tag — including one we have already blocked. */
+  /**
+   * Any Google tag host whose behaviour Consent Mode governs — analytics (GA/GTM) AND
+   * advertising (Ads, AdSense, Ad Manager). A site may run ads with no analytics tag at
+   * all, so the advertising hosts must be here or such a site gets no consent signal.
+   */
+  function isGoogleTagUrl(src) {
+    if (!src || "string" != typeof src) return false;
+    var lower = src.toLowerCase();
+    return -1 !== lower.indexOf("googletagmanager.com/gtag/js") ||
+      -1 !== lower.indexOf("googletagmanager.com/gtm.js") ||
+      -1 !== lower.indexOf("google-analytics.com") ||
+      -1 !== lower.indexOf("googlesyndication.com") ||
+      -1 !== lower.indexOf("googleadservices.com") ||
+      -1 !== lower.indexOf("googletagservices.com") ||
+      -1 !== lower.indexOf("securepubads.g.doubleclick.net")
+  }
+
+  /** True when the page carries a Google tag — including one we have already blocked. */
   function hasGoogleTagScript() {
     var scripts = document.scripts;
     for (var i = 0; i < scripts.length; i++) {
       var script = scripts[i];
       var src = script.src || script.getAttribute("data-cb-blocked-src") || "";
-      if (-1 !== src.indexOf("googletagmanager.com/gtag/js") || -1 !== src.indexOf("googletagmanager.com/gtm.js") || -1 !== src.indexOf("google-analytics.com")) return true
+      if (isGoogleTagUrl(src)) return true
     }
-    return false
+    // Ad tags are often bootstrapped inline rather than by <script src>.
+    return !!(window.adsbygoogle || window.googletag)
+  }
+
+  /**
+   * Guarantee window.dataLayer + window.gtag exist so Consent Mode commands can always
+   * be queued, even when no Google tag has loaded yet. Pushes are inert until a tag
+   * consumes them and are replayed in order when one arrives — which is why the CMP
+   * must never condition its signalling on detecting a tag first.
+   */
+  function ensureGtag() {
+    window.dataLayer = window.dataLayer || [];
+    if (!window.gtag) window.gtag = function () {
+      dataLayer.push(arguments)
+    };
+    return window.gtag
+  }
+
+  /**
+   * Consent Mode companion flags. Both must be set before any Google tag fires.
+   *   ads_data_redaction — while ad_storage is denied, strip ad click identifiers from
+   *     outgoing requests so no user-level ad data leaves the page.
+   *   url_passthrough — carry gclid/dclid/wbraid across navigations in the URL, so
+   *     conversions still attribute for users who declined cookies.
+   * Idempotent: repeat calls just re-push the same value.
+   */
+  function setConsentModeFlags() {
+    var g = ensureGtag();
+    g("set", "ads_data_redaction", true);
+    g("set", "url_passthrough", true)
+  }
+
+  /**
+   * Publish the consent decision to the dataLayer as a NAMED event, so a Google Tag
+   * Manager container can fire tags from it (Custom Event trigger on
+   * "consentbit_consent_update", with Data Layer Variables reading the flat keys below).
+   *
+   * gtag("consent","update") alone is not enough for GTM: it updates the built-in
+   * consent state but raises no event, so a container has nothing to trigger on.
+   *
+   * MUST be called AFTER the gtag consent update, so any tag this event fires already
+   * sees the new consent state. Keys are prefixed to avoid colliding with the host
+   * page's own dataLayer variables.
+   */
+  function pushConsentDataLayerEvent(categories, source) {
+    try {
+      var cats = categories || {};
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: "consentbit_consent_update",
+        consentbit_regulation: bannerType,
+        consentbit_source: String(source || "banner").replace(/[\[\]]/g, "").toLowerCase(),
+        consentbit_essential: true,
+        consentbit_analytics: !!cats.analytics,
+        consentbit_marketing: !!cats.marketing,
+        consentbit_preferences: !!cats.preferences
+      })
+    } catch (err) {}
   }
 
   /** Categories that require consent. Anything else ("essential", "uncategorized") is never blocked. */
@@ -2000,6 +2074,7 @@ ${inlineConfig}
           dataLayer.push(arguments)
         }
         window.gtag = gtag;
+        setConsentModeFlags();
         gtag("consent", "default", {
           analytics_storage: "denied",
           ad_storage: "denied",
@@ -2029,56 +2104,51 @@ ${inlineConfig}
    * gtag may not exist yet (the tag is still loading), so poll for up to 2s.
    */
   function updateGoogleConsentMode(categories, source) {
-    if (gaMeasurementId || hasGoogleTagScript()) {
-      var consentUpdate = {
-        analytics_storage: categories.analytics ? "granted" : "denied",
-        ad_storage: categories.marketing ? "granted" : "denied",
-        ad_user_data: categories.marketing ? "granted" : "denied",
-        ad_personalization: categories.marketing ? "granted" : "denied",
-        functionality_storage: categories.preferences ? "granted" : "denied",
-        personalization_storage: categories.preferences ? "granted" : "denied"
-      };
-      if (window.gtag) window.gtag("consent", "update", consentUpdate);
-      else {
-        var attempts = 0;
-        var timer = setInterval(function () {
-          attempts++;
-          if (window.gtag) {
-            clearInterval(timer);
-            window.gtag("consent", "update", consentUpdate)
-          } else if (attempts >= 20) {
-            clearInterval(timer);
-          }
-        }, 100)
-      }
-    }
+    var consentUpdate = {
+      analytics_storage: categories.analytics ? "granted" : "denied",
+      ad_storage: categories.marketing ? "granted" : "denied",
+      ad_user_data: categories.marketing ? "granted" : "denied",
+      ad_personalization: categories.marketing ? "granted" : "denied",
+      functionality_storage: categories.preferences ? "granted" : "denied",
+      personalization_storage: categories.preferences ? "granted" : "denied"
+    };
+    // Always signal — never gate on tag detection. A tag that loads later replays the
+    // queued dataLayer commands, so an early push is correct and a skipped push is not.
+    ensureGtag()("consent", "update", consentUpdate);
+    pushConsentDataLayerEvent(categories, source)
   }
 
   // CCPA consent mode: opt-out model — storage is granted unless the user opted out
   // ("Do Not Sell/Share"). Mirrors updateGoogleConsentMode() but keyed off a single
   // doNotSell flag rather than per-category toggles.
   function updateGoogleConsentModeCcpa(doNotSell) {
-    if (gaMeasurementId || hasGoogleTagScript()) {
-      var consentUpdate = {
-        analytics_storage: doNotSell ? "denied" : "granted",
-        ad_storage: doNotSell ? "denied" : "granted",
-        ad_user_data: doNotSell ? "denied" : "granted",
-        ad_personalization: doNotSell ? "denied" : "granted"
-      };
-      if (window.gtag) window.gtag("consent", "update", consentUpdate);
-      else {
-        var attempts = 0;
-        var timer = setInterval(function () {
-          attempts++;
-          if (window.gtag) {
-            clearInterval(timer);
-            window.gtag("consent", "update", consentUpdate)
-          } else if (attempts >= 20) {
-            clearInterval(timer);
-          }
-        }, 100)
-      }
-    }
+    // Every signal is declared explicitly. An omitted signal is treated by Google as
+    // unset (i.e. unconstrained), so functionality_storage / personalization_storage
+    // must be sent even under an opt-out regime — they track doNotSell for consistency
+    // with analytics_storage, which this codebase already denies on opt-out.
+    var consentUpdate = {
+      analytics_storage: doNotSell ? "denied" : "granted",
+      ad_storage: doNotSell ? "denied" : "granted",
+      ad_user_data: doNotSell ? "denied" : "granted",
+      ad_personalization: doNotSell ? "denied" : "granted",
+      functionality_storage: doNotSell ? "denied" : "granted",
+      personalization_storage: doNotSell ? "denied" : "granted"
+    };
+    ensureGtag()("consent", "update", consentUpdate);
+    // CCPA has no per-category model — project the single opt-out onto the same
+    // category keys so one GTM trigger works for both regulations, and expose the
+    // raw flag as well for containers that need to branch on it.
+    var ccpaCats = {
+      analytics: !doNotSell,
+      marketing: !doNotSell,
+      preferences: !doNotSell
+    };
+    pushConsentDataLayerEvent(ccpaCats, "ccpa");
+    try {
+      window.dataLayer.push({
+        consentbit_do_not_sell: !!doNotSell
+      })
+    } catch (err) {}
   }
 
   /**
@@ -3051,14 +3121,13 @@ ${inlineConfig}
    * 3. Report the pageview and start listening for the site's own "open banner" triggers.
    */
   function boot() {
-    var pageHasGoogleTag = hasGoogleTagScript();
-
     if ("gdpr" === bannerType) {
       blockExistingScripts();
-      if (gaMeasurementId || pageHasGoogleTag) {
-        // consentModeBootstrap (served ahead of this script on the standard path) may
-        // already have pushed the default — do not overwrite it with a stale one.
-        !window.__cbConsentDefaultSet && window.gtag && window.gtag("consent", "default", {
+      // consentModeBootstrap (served ahead of this script on the standard path) may
+      // already have pushed the default — do not overwrite it with a stale one.
+      if (!window.__cbConsentDefaultSet) {
+        setConsentModeFlags();
+        ensureGtag()("consent", "default", {
           analytics_storage: "denied",
           ad_storage: "denied",
           ad_user_data: "denied",
@@ -3068,14 +3137,16 @@ ${inlineConfig}
           security_storage: "granted",
           wait_for_update: 500
         });
-        consentState.accepted ? updateGoogleConsentMode(consentState.categories || {}, "[Reload]") : gaMeasurementId && bootstrapGoogleAnalytics()
+        window.__cbConsentDefaultSet = true
       }
+      consentState.accepted ? updateGoogleConsentMode(consentState.categories || {}, "[Reload]") : gaMeasurementId && bootstrapGoogleAnalytics()
     } else if ("ccpa" === bannerType) {
       // CCPA is an opt-out regime: storage defaults to granted unless the user opted
       // out. We still push an all-denied default first (consent-mode best practice),
       // load GA when we manage it, then immediately update to the actual opt-out state.
-      if (gaMeasurementId || pageHasGoogleTag) {
-        !window.__cbConsentDefaultSet && window.gtag && window.gtag("consent", "default", {
+      if (!window.__cbConsentDefaultSet) {
+        setConsentModeFlags();
+        ensureGtag()("consent", "default", {
           analytics_storage: "denied",
           ad_storage: "denied",
           ad_user_data: "denied",
@@ -3085,9 +3156,10 @@ ${inlineConfig}
           security_storage: "granted",
           wait_for_update: 500
         });
-        gaMeasurementId && bootstrapGoogleAnalytics();
-        updateGoogleConsentModeCcpa(!!(consentState && consentState.accepted && consentState.ccpa && consentState.ccpa.doNotSell))
+        window.__cbConsentDefaultSet = true
       }
+      gaMeasurementId && bootstrapGoogleAnalytics();
+      updateGoogleConsentModeCcpa(!!(consentState && consentState.accepted && consentState.ccpa && consentState.ccpa.doNotSell))
     }
 
     if (!window.__CB_WEBFLOW_MODE__) {
@@ -3206,7 +3278,7 @@ ${inlineConfig}
 }();
 `;
 
-  const SCRIPT_VERSION = '2026-07-01-close-persist-floatinglogo-24h';
+  const SCRIPT_VERSION = '2026-07-21-consentmode-v2-gtm-event';
   const customizationUpdatedAt = customization?.updatedAt || customization?.updated_at || '';
   const translationsSig = await (async () => {
     try {
@@ -3270,7 +3342,7 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
     bannerEnabled,
   };
   const bannerIsCcpa = String(effectiveBannerType || '').toLowerCase() === 'ccpa';
-  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? 'true' : 'false'};var d=null,e=false,hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};if(!c){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else{window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',security_storage:'granted'});}window.__cbConsentDefaultSet=true;}catch(_){}})();\n`;
+  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? 'true' : 'false'};var d=null,e=false,hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);if(!c){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else{window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}window.__cbConsentDefaultSet=true;}catch(_){}})();\n`;
 
   const scriptToServe =
     (serveKind === 'iab' ? loaderIab : serveKind === 'iabwebflow' ? loaderIabWebflow : serveKind === 'webflow' ? loaderWebflow : (consentModeBootstrap + loader));
