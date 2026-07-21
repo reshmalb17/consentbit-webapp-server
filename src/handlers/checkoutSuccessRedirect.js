@@ -3,6 +3,28 @@
 // appends them as URL params to the redirect destination, then 302 redirects.
 // No auth required — this is a browser redirect from Stripe.
 
+// Open-redirect guard. This endpoint runs on the Worker (manager.consentbit.com)
+// but redirects OUT to the app front-end, so a same-origin check won't do —
+// we allow-list trusted ConsentBit app hosts instead. Every legitimate caller
+// passes its own app origin (accounts/dashboard.consentbit.com). Extra hosts can
+// be added via the REDIRECT_ALLOWED_HOSTS env var (comma-separated) for
+// staging/preview domains without a code change.
+function isAllowedRedirect(url, env) {
+  // Block non-web schemes (javascript:, data:, etc.). Allow http only for local dev.
+  const host = url.hostname.toLowerCase();
+  const isLocal = host === 'localhost' || host === '127.0.0.1';
+  if (url.protocol !== 'https:' && !isLocal) return false;
+  if (isLocal) return true;
+
+  if (host === 'consentbit.com' || host.endsWith('.consentbit.com')) return true;
+
+  const extra = (env && env.REDIRECT_ALLOWED_HOSTS ? String(env.REDIRECT_ALLOWED_HOSTS) : '')
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+  return extra.includes(host);
+}
+
 export async function handleCheckoutSuccessRedirect(request, env) {
   if (request.method !== 'GET') {
     return new Response('Method Not Allowed', { status: 405 });
@@ -21,16 +43,21 @@ export async function handleCheckoutSuccessRedirect(request, env) {
     return new Response('Bad Request: missing redirect param', { status: 400 });
   }
 
-  // If session_id is missing or invalid, redirect without extra params
-  if (!sessionId.startsWith('cs_')) {
-    return Response.redirect(redirectTo, 302);
-  }
-
   let dest;
   try {
     dest = new URL(redirectTo);
   } catch {
     return new Response('Bad Request: invalid redirect URL', { status: 400 });
+  }
+
+  // Open-redirect guard: only ever redirect to a trusted ConsentBit app host.
+  if (!isAllowedRedirect(dest, env)) {
+    return new Response('Bad Request: redirect not allowed', { status: 400 });
+  }
+
+  // If session_id is missing or invalid, redirect without extra params
+  if (!sessionId.startsWith('cs_')) {
+    return Response.redirect(dest.toString(), 302);
   }
 
   try {
