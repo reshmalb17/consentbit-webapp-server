@@ -172,20 +172,27 @@ export async function listUsers(
     mapped = mapped.filter((u) => u.plans.some((p) => p !== 'free'));
   }
 
-  if (plan && plan !== 'all') {
-    mapped = mapped.filter((u) => u.plans.includes(plan));
+  /**
+   * `plan` and `status` are comma-separated lists ("basic,growth"); a user
+   * matches if ANY of their values is in the list. A single value still works,
+   * so old links keep filtering the way they always did.
+   */
+  function wanted(raw, normalize) {
+    return new Set(
+      String(raw || '')
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter((s) => s && s !== 'all')
+        .map(normalize || ((s) => s))
+    );
   }
 
-  // `status` is a comma-separated list ("trialing,active"); a user matches if ANY
-  // of their subscription statuses is in it. A single value still works, so old
-  // links keep filtering the way they always did.
-  const wantedStatuses = new Set(
-    String(status || '')
-      .split(',')
-      .map((s) => s.trim().toLowerCase())
-      .filter((s) => s && s !== 'all')
-      .map((s) => (s === 'cancelled' ? 'canceled' : s))
-  );
+  const wantedPlans = wanted(plan);
+  if (wantedPlans.size) {
+    mapped = mapped.filter((u) => u.plans.some((p) => wantedPlans.has(p)));
+  }
+
+  const wantedStatuses = wanted(status, (s) => (s === 'cancelled' ? 'canceled' : s));
   if (wantedStatuses.size) {
     mapped = mapped.filter((u) => u.statuses.some((s) => wantedStatuses.has(s)));
   }
@@ -453,8 +460,8 @@ export async function getUserDetail(db, userId, scannerDb = null) {
   for (const org of orgs) {
     const { results: sites = [] } = await db
       .prepare(
-        `SELECT id, name, domain, platform, verified, isLegacy, legacySource, createdAt,
-                banner_type, region_mode
+        `SELECT id, name, domain, customDomain, stagingUrl, platform, verified,
+                isLegacy, legacySource, createdAt, banner_type, region_mode
            FROM Site WHERE organizationId = ? ORDER BY createdAt DESC`
       )
       .bind(org.id)
@@ -467,6 +474,8 @@ export async function getUserDetail(db, userId, scannerDb = null) {
         id: s.id,
         name: s.name,
         domain: s.domain,
+        customDomain: s.customDomain ?? null,
+        stagingUrl: s.stagingUrl ?? null,
         platform: p,
         rawPlatform: s.platform ?? null,
         verified: Number(s.verified) || 0,
@@ -544,23 +553,142 @@ export async function getUserDetail(db, userId, scannerDb = null) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Update user                                                        */
+/* Edit user / organization / site                                    */
 /* ------------------------------------------------------------------ */
+//
+// What an admin may edit, and what stays read-only:
+//
+//   editable   User.name / .email / .billingEmail
+//              Organization.name
+//              Site.name / .domain / .customDomain / .stagingUrl / .platform
+//                   / .banner_type / .region_mode / .verified
+//
+//   read-only  Everything Stripe owns — stripeSubscriptionId, stripeCustomerId,
+//              stripePriceId, and the whole Subscription row (status, interval,
+//              amount, period). Those are mirrors of Stripe's state; editing the
+//              mirror desynchronises it and the next webhook overwrites the edit
+//              anyway. Change them in Stripe.
+//              Also read-only: primary keys, apiKey / cdnScriptId (the embed
+//              would stop resolving), licenseKey, and createdAt.
+//
+// "Cascading" here means the follow-on writes a rename implies. The schema keys
+// nearly everything by userId / organizationId / siteId, so a rename mostly
+// needs no fan-out at all — the short list of genuine duplicates is handled in
+// cascadeEmailRename() below, and what is deliberately NOT rewritten is
+// documented there.
+
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+/** Matches services/db.js — protocol and trailing slash off, lower-cased. */
+function normalizeDomain(raw) {
+  return String(raw || '')
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/, '')
+    .trim()
+    .toLowerCase();
+}
+
+/** Runs one cascade statement, tolerating a table this database doesn't have. */
+async function runCounted(db, sql, binds, onError, label) {
+  try {
+    const res = await db.prepare(sql).bind(...binds).run();
+    return Number(res?.meta?.changes) || 0;
+  } catch (err) {
+    if (!isMissingTable(err)) onError?.(`${label}: ${err?.message || err}`);
+    return 0;
+  }
+}
+
+/**
+ * Follow-on writes for an account-email rename.
+ *
+ * Rewritten — these are live copies of "the address this account uses":
+ *   User.billingEmail, Site.billingEmail, but ONLY where they still hold the old
+ *   address. This is checked against the value already in the row, after the
+ *   main UPDATE, so a billing address the admin deliberately set to something
+ *   else in the same request is left alone whichever order the fields arrived in.
+ *
+ * Revoked rather than re-pointed — re-pointing would let a credential delivered
+ * to the old inbox act on the new address:
+ *   EmailVerificationCode (pending login codes), OwnershipTransfer (a transfer
+ *   still in flight, whose authorization link went to the old inbox)
+ *
+ * Deliberately untouched — records of what was true when they were written, so
+ * rewriting them would falsify a compliance or delivery log:
+ *   Consent.domain, SentPaymentFailureEmail.recipientEmail, and completed or
+ *   already-cancelled OwnershipTransfer rows.
+ *
+ * Stripe is not touched at all: the customer's billing email lives in Stripe and
+ * is changed there.
+ */
+async function cascadeEmailRename(db, userId, oldEmail, newEmail) {
+  const changed = {};
+  const errors = [];
+  const onError = (m) => errors.push(m);
+  const bump = (k, n) => { if (n) changed[k] = n; };
+
+  bump('User.billingEmail', await runCounted(
+    db,
+    `UPDATE User SET billingEmail = ?1, updatedAt = CURRENT_TIMESTAMP
+      WHERE id = ?2 AND LOWER(billingEmail) = ?3`,
+    [newEmail, userId, oldEmail],
+    onError, 'User.billingEmail'
+  ));
+
+  bump('Site.billingEmail', await runCounted(
+    db,
+    `UPDATE Site SET billingEmail = ?1, updatedAt = CURRENT_TIMESTAMP
+      WHERE LOWER(billingEmail) = ?2
+        AND organizationId IN (SELECT id FROM Organization WHERE ownerUserId = ?3)`,
+    [newEmail, oldEmail, userId],
+    onError, 'Site.billingEmail'
+  ));
+
+  bump('EmailVerificationCode.revoked', await runCounted(
+    db,
+    `DELETE FROM EmailVerificationCode WHERE LOWER(email) = ?1`,
+    [oldEmail],
+    onError, 'EmailVerificationCode'
+  ));
+
+  bump('OwnershipTransfer.cancelled', await runCounted(
+    db,
+    `UPDATE OwnershipTransfer SET status = 'cancelled' WHERE userId = ?1 AND status = 'pending'`,
+    [userId],
+    onError, 'OwnershipTransfer'
+  ));
+
+  return { changed, errors };
+}
 
 export async function updateUser(db, userId, fields) {
-  const existing = await db.prepare(`SELECT id FROM User WHERE id = ?`).bind(userId).first();
+  const existing = await db
+    .prepare(`SELECT id, email, billingEmail FROM User WHERE id = ?`)
+    .bind(userId)
+    .first();
   if (!existing) return { ok: false, error: 'User not found' };
 
+  const oldEmail = String(existing.email || '').trim().toLowerCase();
+
+  let newEmail;
   if (fields.email !== undefined) {
-    const email = String(fields.email).trim().toLowerCase();
-    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    newEmail = String(fields.email).trim().toLowerCase();
+    if (!newEmail || !EMAIL_RE.test(newEmail)) {
       return { ok: false, error: 'Invalid email address' };
     }
     const clash = await db
-      .prepare(`SELECT id FROM User WHERE email = ? AND id != ?`)
-      .bind(email, userId)
+      .prepare(`SELECT id FROM User WHERE LOWER(email) = ? AND id != ?`)
+      .bind(newEmail, userId)
       .first();
     if (clash) return { ok: false, error: 'Another user already uses that email' };
+  }
+
+  // Empty clears it — Stripe then bills the account email.
+  let billingEmail;
+  if (fields.billingEmail !== undefined) {
+    const b = String(fields.billingEmail ?? '').trim().toLowerCase();
+    if (b && !EMAIL_RE.test(b)) return { ok: false, error: 'Invalid billing email address' };
+    billingEmail = b || null;
   }
 
   const sets = [];
@@ -569,16 +697,111 @@ export async function updateUser(db, userId, fields) {
     sets.push('name = ?');
     params.push(fields.name);
   }
-  if (fields.email !== undefined) {
+  if (newEmail !== undefined) {
     sets.push('email = ?');
-    params.push(String(fields.email).trim().toLowerCase());
+    params.push(newEmail);
   }
-  if (!sets.length) return { ok: true };
+  if (billingEmail !== undefined) {
+    sets.push('billingEmail = ?');
+    params.push(billingEmail);
+  }
+  if (!sets.length) return { ok: true, cascade: {}, errors: [] };
 
   sets.push('updatedAt = CURRENT_TIMESTAMP');
   params.push(userId);
   await db.prepare(`UPDATE User SET ${sets.join(', ')} WHERE id = ?`).bind(...params).run();
-  return { ok: true };
+
+  if (newEmail === undefined || newEmail === oldEmail) {
+    return { ok: true, cascade: {}, errors: [] };
+  }
+  const { changed, errors } = await cascadeEmailRename(db, userId, oldEmail, newEmail);
+  return { ok: true, cascade: changed, errors };
+}
+
+export async function updateOrganization(db, orgId, fields) {
+  const org = await db
+    .prepare(`SELECT id, name FROM Organization WHERE id = ?`)
+    .bind(orgId)
+    .first();
+  if (!org) return { ok: false, error: 'Organization not found' };
+
+  if (fields.name === undefined) return { ok: true, before: org };
+  const name = String(fields.name ?? '').trim();
+  if (!name) return { ok: false, error: 'Organization name cannot be empty' };
+
+  // updatedAt only exists on databases that ran the later migration.
+  try {
+    await db
+      .prepare(`UPDATE Organization SET name = ?1, updatedAt = CURRENT_TIMESTAMP WHERE id = ?2`)
+      .bind(name, orgId)
+      .run();
+  } catch (_) {
+    await db.prepare(`UPDATE Organization SET name = ?1 WHERE id = ?2`).bind(name, orgId).run();
+  }
+  return { ok: true, before: org };
+}
+
+/** Columns updateSite will write, and how each value is cleaned up first. */
+const SITE_EDITABLE = {
+  name: (v) => String(v ?? '').trim(),
+  customDomain: (v) => normalizeDomain(v) || null,
+  stagingUrl: (v) => normalizeDomain(v) || null,
+  platform: (v) => (String(v ?? '').trim().toLowerCase() || null),
+  banner_type: (v) => (String(v ?? '').trim().toLowerCase() || null),
+  region_mode: (v) => (String(v ?? '').trim().toLowerCase() || null),
+  verified: (v) => (v ? 1 : 0),
+};
+
+export async function updateSite(db, siteId, fields) {
+  const site = await db
+    .prepare(
+      `SELECT id, organizationId, name, domain, customDomain, stagingUrl, platform,
+              banner_type, region_mode, verified
+         FROM Site WHERE id = ?`
+    )
+    .bind(siteId)
+    .first();
+  if (!site) return { ok: false, error: 'Site not found' };
+
+  const sets = [];
+  const params = [];
+
+  // domain is UNIQUE and is also the CDN's authorization check (cdn.js compares
+  // the requesting page's host against it), so it gets its own validation.
+  if (fields.domain !== undefined) {
+    const domain = normalizeDomain(fields.domain);
+    if (!domain) return { ok: false, error: 'Domain cannot be empty' };
+    if (/[\s/]/.test(domain)) return { ok: false, error: 'Domain must be a bare host, e.g. example.com' };
+    if (domain !== normalizeDomain(site.domain)) {
+      const clash = await db
+        .prepare(`SELECT id FROM Site WHERE LOWER(domain) = ? AND id != ?`)
+        .bind(domain, siteId)
+        .first();
+      if (clash) return { ok: false, error: 'Another site already uses that domain' };
+    }
+    sets.push('domain = ?');
+    params.push(domain);
+  }
+
+  for (const [col, clean] of Object.entries(SITE_EDITABLE)) {
+    if (fields[col] === undefined) continue;
+    const value = clean(fields[col]);
+    if (col === 'name' && !value) return { ok: false, error: 'Site name cannot be empty' };
+    sets.push(`${col} = ?`);
+    params.push(value);
+  }
+
+  if (!sets.length) return { ok: true, before: site };
+
+  // Flipping verified on stamps the time it happened, matching the verify flow.
+  if (fields.verified !== undefined && !site.verified && fields.verified) {
+    sets.push('verified_at = CURRENT_TIMESTAMP');
+  }
+
+  sets.push('updatedAt = CURRENT_TIMESTAMP');
+  params.push(siteId);
+  await db.prepare(`UPDATE Site SET ${sets.join(', ')} WHERE id = ?`).bind(...params).run();
+  return { ok: true, before: site };
 }
 
 /* ------------------------------------------------------------------ */

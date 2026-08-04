@@ -61,6 +61,7 @@ import {
   handleAdminDashboardUsers,
   handleAdminDashboardUser,
   handleAdminDashboardSite,
+  handleAdminDashboardOrganization,
   handleAdminDashboardAuth,
   handleAdminDashboardAccounts,
   handleAdminDashboardAccountSetup,
@@ -225,6 +226,7 @@ const PUBLIC_PATHS = new Set([
   '/api/admin/dashboard/users',
   '/api/admin/dashboard/user',
   '/api/admin/dashboard/site',
+  '/api/admin/dashboard/organization',
   '/api/admin/dashboard/auth',
   '/api/admin/dashboard/accounts',
   '/api/admin/dashboard/audit',
@@ -664,6 +666,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleAdminDashboardUser(request, env); break;
     case '/api/admin/dashboard/site':
       response = await handleAdminDashboardSite(request, env); break;
+    case '/api/admin/dashboard/organization':
+      response = await handleAdminDashboardOrganization(request, env); break;
     case '/api/admin/dashboard/auth':
       response = await handleAdminDashboardAuth(request, env); break;
     case '/api/admin/dashboard/accounts':
