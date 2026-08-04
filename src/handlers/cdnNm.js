@@ -2082,6 +2082,11 @@ ${inlineConfig}
           if (isBlockableCategory(category))
             if ("analytics" === category && gaMeasurementId && isGoogleAnalyticsUrl(src)) {
               // We manage this GA tag through Consent Mode — leave it loading.
+            } else if (clarityConsentEnabled && isClarityTagUrl(src)) {
+              // Microsoft Clarity is gated by Consent API v2, not by blocking: it must
+              // load even with consent denied so it can run cookieless. This sweep
+              // duplicates shouldBlockScript()'s logic rather than calling it, so the
+              // exemption has to be repeated here — see isConsentSignalGoverned().
             } else if (isCategoryAllowed(category)) {
               // Consent already granted for this category.
             } else try {
