@@ -96,15 +96,21 @@ export const COOKIE_DATABASE = {
       { name: '__zlcmid', category: 'functional', provider: 'Zopim/Zendesk', description: 'Zendesk Live Chat cookie - stores a unique visitor ID for the chat session.' },
     ],
   },
+  // Categories here mirror the two switches Microsoft's Clarity Consent API v2 exposes,
+  // so what we disclose matches the signal we send (see updateClarityConsent()):
+  //   analytics_Storage gates the first-party Clarity cookies -> 'behavioral' (= analytics)
+  //   ad_Storage        gates the MUID family, which identifies a browser ACROSS Microsoft
+  //                     properties (Bing, LinkedIn, ad networks) -> 'marketing'
+  // Ref: https://learn.microsoft.com/en-us/clarity/setup-and-installation/cmp-integration-guide
   'microsoft-clarity': {
     cookies: [
       { name: '_clck', category: 'behavioral', provider: 'Microsoft Clarity', description: 'Microsoft Clarity cookie - persists the Clarity User ID and preferences, unique to that site.' },
       { name: '_clsk', category: 'behavioral', provider: 'Microsoft Clarity', description: 'Microsoft Clarity cookie - connects multiple page views by a user into a single Clarity session recording.' },
       { name: 'CLID', category: 'behavioral', provider: 'Microsoft Clarity', description: 'Microsoft Clarity cookie - identifies the first time Clarity saw this user on any site using Clarity.' },
-      { name: 'ANONCHK', category: 'behavioral', provider: 'Microsoft Clarity', description: 'Microsoft Clarity cookie - used to verify if cookies are enabled on a user\'s browser.' },
-      { name: 'MR', category: 'behavioral', provider: 'Microsoft Clarity', description: 'Microsoft cookie - used to refresh the MUID cookie.' },
-      { name: 'MUID', category: 'behavioral', provider: 'Microsoft', description: 'Microsoft cookie - identifies unique web browsers visiting Microsoft sites.' },
-      { name: 'SM', category: 'behavioral', provider: 'Microsoft Clarity', description: 'Microsoft cookie - used in synchronizing the MUID across Microsoft domains.' },
+      { name: 'ANONCHK', category: 'marketing', provider: 'Microsoft Clarity', description: 'Microsoft cookie - indicates whether MUID is transferred to ANID, an advertising cookie. Set only when advertising storage is consented to.' },
+      { name: 'MR', category: 'marketing', provider: 'Microsoft Clarity', description: 'Microsoft cookie - used to refresh the MUID advertising cookie.' },
+      { name: 'MUID', category: 'marketing', provider: 'Microsoft', description: 'Microsoft cookie - identifies unique web browsers across Microsoft sites and is used for advertising, analytics and personalisation.' },
+      { name: 'SM', category: 'marketing', provider: 'Microsoft Clarity', description: 'Microsoft cookie - used in synchronizing the MUID advertising identifier across Microsoft domains.' },
     ],
   },
   'marketo': {

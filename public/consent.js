@@ -1,6 +1,45 @@
+// Microsoft Clarity CMP partner "source" identifier.
+// >>> REPLACE THIS with the CMP ID Microsoft issues (request it from
+// >>> clarity-cmp@microsoft.com). Unlike the other loaders, this one is served as a
+// >>> static asset with no server-injected __CONSENT_SITE__ payload, so the ID cannot
+// >>> be configured per site - it has to be edited here.
+window.__CB_CLARITY_CMP_ID__ = 'consentbit';
+
 // CRITICAL: Initialize consent mode IMMEDIATELY (before IIFE) to prevent blocking
 // This ensures consent mode is set even if script loads asynchronously
 (function() {
+  // Microsoft Clarity Consent API v2 - signalled FIRST, before the Google Consent Mode
+  // work below, because Microsoft asks for the signal as early as possible and because
+  // a throw in the gtag section must not cost us the Clarity call.
+  //
+  // setConsentState() mirrors the decision into plain cb-consent-* cookies alongside the
+  // encrypted blob, so the stored choice is readable synchronously here. That lets us
+  // send ONE call carrying the real decision rather than default-then-stored, which
+  // Microsoft explicitly asks CMPs to avoid. Note we do NOT mirror the analytics_storage
+  // 'granted' default used for gtag below - Clarity defaults to denied until the visitor
+  // actually chooses, which is what their validation checks.
+  try {
+    var cbCfg = window.__CONSENT_SITE__ || {};
+    if (cbCfg.clarityConsentMode !== false) {
+      var cbCk = function (n) {
+        var m = document.cookie.match('(^|;)\\s*' + n + '\\s*=\\s*([^;]+)');
+        return m ? m[2] : null;
+      };
+      var cbAn = 'denied', cbAd = 'denied';
+      var cbDns = cbCk('cb-consent-donotshare');
+      if (cbDns !== null) {
+        // CCPA opt-out regime: allowed unless the visitor opted out.
+        cbAn = cbAd = (cbDns === 'true') ? 'denied' : 'granted';
+      } else {
+        if (cbCk('cb-consent-analytics_storage') === 'true' || cbCk('_cb_cas_') === 'true') cbAn = 'granted';
+        if (cbCk('cb-consent-marketing_storage') === 'true' || cbCk('_cb_cms_') === 'true') cbAd = 'granted';
+      }
+      window.clarity = window.clarity || function () { (window.clarity.q = window.clarity.q || []).push(arguments); };
+      window.clarity('consentv2', { source: (cbCfg.clarityCmpId || window.__CB_CLARITY_CMP_ID__ || 'consentbit'), ad_Storage: cbAd, analytics_Storage: cbAn });
+      window.__cbClaritySignal = cbAd + '|' + cbAn;
+    }
+  } catch (e) {}
+
   // CRITICAL: Initialize dataLayer and gtag IMMEDIATELY (before any other code)
   window.dataLayer = window.dataLayer || [];
   if (typeof window.gtag === 'undefined') {
@@ -103,9 +142,34 @@ window.gtag('consent', 'default', {
     }
   
     // Global function to check if a script is a Google script
+    /**
+     * Microsoft Clarity's tag. Like the Google tags below, Clarity is governed by a
+     * consent SIGNAL rather than by category blocking: Microsoft's CMP integration guide
+     * requires it to load regardless of consent status, and with consent denied Clarity
+     * runs cookieless on its own (no _clck / _clsk / MUID). Blocking it would leave it
+     * with no signal at all, so it would apply its own regional default instead of ours.
+     */
+    function isClarityScript(script) {
+      if (!script) return false;
+      try {
+        var cfg = window.__CONSENT_SITE__ || {};
+        if (cfg.clarityConsentMode === false) return false;
+      } catch (e) {}
+      var src = (script.src || '').toLowerCase();
+      if (src) return src.indexOf('clarity.ms') !== -1 || src.indexOf('clarity.microsoft.com') !== -1;
+      var inline = (script.innerHTML || '').toLowerCase();
+      return inline.indexOf('clarity.ms') !== -1 || inline.indexOf('window.clarity') !== -1;
+    }
+
+    // NOTE: despite the name, this predicate now answers "is this script governed by a
+    // consent signal rather than by blocking?" - true for Google tags (Consent Mode) and
+    // for Microsoft Clarity (Consent API v2). Extending it here rather than at all 17
+    // call sites keeps the two exemptions consistent everywhere.
     function isGoogleScript(script) {
       if (!script) return false;
-      
+
+      if (isClarityScript(script)) return true;
+
       // Check external scripts by src
       if (script.src) {
         return (
@@ -527,7 +591,45 @@ window.gtag('consent', 'default', {
       // Ensure gtag is properly initialized after all scripts are loaded
       setTimeout(ensureGtagInitialization, 100);
     }
+    /**
+     * Signal the visitor's decision to Microsoft Clarity's Consent API v2.
+     *   analytics_Storage - analytics purposes; gates the _clck / _clsk cookies
+     *   ad_Storage        - advertising purposes; gates MUID
+     * Key names are case sensitive (capital S) and values must be lowercase
+     * "granted" / "denied". Granular choices are respected: analytics-only consent must
+     * NOT grant ad_Storage. Deduped on __cbClaritySignal because Microsoft asks CMPs to
+     * avoid redundant consent-state changes, and this runs on every decision.
+     * Ref: learn.microsoft.com/en-us/clarity/setup-and-installation/cmp-integration-guide
+     */
+    function updateClarityConsent(preferences) {
+      try {
+        var cfg = (typeof window !== 'undefined' && window.__CONSENT_SITE__) || {};
+        if (cfg.clarityConsentMode === false) return;
+        var prefs = preferences || {};
+        var analyticsOn, marketingOn;
+        if (prefs.hasOwnProperty('doNotShare') || prefs.hasOwnProperty('doNotSell')) {
+          // CCPA is an opt-out regime: everything is allowed until the visitor opts out.
+          var allowTracking = !(prefs.doNotShare || prefs.doNotSell);
+          analyticsOn = allowTracking;
+          marketingOn = allowTracking;
+        } else {
+          analyticsOn = !!prefs.analytics;
+          marketingOn = !!prefs.marketing;
+        }
+        var ad = marketingOn ? 'granted' : 'denied';
+        var an = analyticsOn ? 'granted' : 'denied';
+        var sg = ad + '|' + an;
+        if (window.__cbClaritySignal === sg) return;
+        window.__cbClaritySignal = sg;
+        window.clarity = window.clarity || function () { (window.clarity.q = window.clarity.q || []).push(arguments); };
+        window.clarity('consentv2', { source: (cfg.clarityCmpId || window.__CB_CLARITY_CMP_ID__ || 'consentbit'), ad_Storage: ad, analytics_Storage: an });
+      } catch (e) {}
+    }
+
     function updateGtagConsent(preferences) {
+      // Microsoft Clarity first, and outside the gtag guard below: Clarity must be told
+      // the decision even on pages where no Google tag ever loads.
+      updateClarityConsent(preferences);
       // Use window.gtag to ensure we're calling the actual Google gtag function
       if (typeof window.gtag === "function") {
         // Handle CCPA preferences (doNotShare/doNotSell) vs GDPR preferences (analytics/marketing/personalization)

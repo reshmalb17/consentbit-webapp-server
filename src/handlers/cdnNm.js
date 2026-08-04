@@ -677,6 +677,15 @@ async function _handleCDNScript(request, env, url) {
     bannerEnabled,
     apiBase,
     gaId: GA_ID,
+    // Microsoft Clarity Consent API v2.
+    //   clarityCmpId — the partner "source" identifier Microsoft issues to a CMP (request
+    //     it from clarity-cmp@microsoft.com). Until one is assigned we send our own name,
+    //     which Clarity accepts but cannot attribute to a listed partner.
+    //   clarityConsentMode — escape hatch. Off means Clarity's tag is hard-blocked like
+    //     any other analytics script instead of being consent-gated. Defaults on; no DB
+    //     column is required for that default to hold.
+    clarityCmpId: resolvedSite.clarityCmpId || 'consentbit',
+    clarityConsentMode: resolvedSite.clarityConsentMode !== 0 && resolvedSite.clarityConsentMode !== false,
     platform: resolvedSite.platform || null,
     styles: customStyles || null,
     customization: customization
@@ -788,6 +797,8 @@ ${inlineConfig}
     var bannerEnabled = false !== SITE.bannerEnabled;
     var apiBase = SITE.apiBase;
     var gaMeasurementId = SITE.gaId || null;
+    var clarityConsentEnabled = false !== SITE.clarityConsentMode;
+    var clarityCmpId = SITE.clarityCmpId || "consentbit";
     var customization = SITE.customization || null;
     var pendingScan = true === SITE.pendingScan;
     var bannerLayoutVisual = customization && customization.bannerLayoutVisual || "box";
@@ -1455,6 +1466,69 @@ ${inlineConfig}
   }
 
   /**
+   * Microsoft Clarity tag hosts. Clarity is governed by a consent SIGNAL, not by the
+   * script blocker — Microsoft's CMP integration guide requires the tag to load
+   * regardless of consent status, as early as possible. With consent denied Clarity
+   * runs cookieless (no _clck/_clsk/MUID) on its own; hard-blocking it instead would
+   * leave it with no signal at all, so it would fall back to its own regional default.
+   * Exactly the arrangement isGoogleAnalyticsUrl() already provides for Google tags.
+   */
+  function isClarityTagUrl(src) {
+    if (!src || "string" != typeof src) return false;
+    var lower = src.toLowerCase();
+    return -1 !== lower.indexOf("clarity.ms") || -1 !== lower.indexOf("clarity.microsoft.com")
+  }
+
+  /** True when a consent signal — not the script blocker — governs this script. */
+  function isConsentSignalGoverned(category, src) {
+    if ("analytics" === category && isGoogleAnalyticsUrl(src)) return true;
+    return clarityConsentEnabled && isClarityTagUrl(src)
+  }
+
+  /**
+   * Guarantee window.clarity exists as a queueing stub before clarity.js loads, exactly
+   * as Microsoft's CMP integration guide specifies. The real tag drains window.clarity.q
+   * on arrival, so a consent call made this early is deferred rather than lost — the
+   * same contract as pushing to dataLayer before a Google tag exists.
+   */
+  function ensureClarityQueue() {
+    if (!window.clarity) window.clarity = function () {
+      (window.clarity.q = window.clarity.q || []).push(arguments)
+    };
+    return window.clarity
+  }
+
+  /**
+   * Signal the visitor's decision to Microsoft Clarity's Consent API v2.
+   *   analytics_Storage — statistics/analytics purposes; gates the _clck / _clsk cookies
+   *   ad_Storage        — marketing/advertising purposes; gates MUID
+   * Key names are case-sensitive (capital S) and values must be lowercase
+   * "granted"/"denied". Granular choices are respected: analytics-only consent must NOT
+   * grant ad_Storage — over-granting is called out explicitly in Microsoft's guide.
+   *
+   * Microsoft also asks CMPs to avoid redundant consent-state changes, and every banner
+   * interaction plus every page load routes through here, so an unchanged decision is
+   * dropped. The fingerprint is shared with the server-baked bootstrap, which signals
+   * the stored decision before this script even parses.
+   */
+  function updateClarityConsent(categories) {
+    if (!clarityConsentEnabled) return;
+    try {
+      var cats = categories || {};
+      var adStorage = cats.marketing ? "granted" : "denied";
+      var analyticsStorage = cats.analytics ? "granted" : "denied";
+      var signal = adStorage + "|" + analyticsStorage;
+      if (window.__cbClaritySignal === signal) return;
+      window.__cbClaritySignal = signal;
+      ensureClarityQueue()("consentv2", {
+        source: clarityCmpId,
+        ad_Storage: adStorage,
+        analytics_Storage: analyticsStorage
+      })
+    } catch (err) {}
+  }
+
+  /**
    * Publish the consent decision to the dataLayer as a NAMED event, so a Google Tag
    * Manager container can fire tags from it (Custom Event trigger on
    * "consentbit_consent_update", with Data Layer Variables reading the flat keys below).
@@ -1587,8 +1661,9 @@ ${inlineConfig}
 
   /**
    * Should this script be prevented from running right now?
-   * Note the GA/GTM exemption: Google tags are allowed to load and are gated by
-   * Google Consent Mode instead of being hard-blocked.
+   * Note the signal-governed exemptions: Google tags (Consent Mode) and Microsoft
+   * Clarity (Consent API v2) are allowed to load and are gated by a consent signal
+   * instead of being hard-blocked. See isConsentSignalGoverned().
    */
   function shouldBlockScript(src, scriptEl) {
     if (isInjectingScript) return false;
@@ -1600,7 +1675,7 @@ ${inlineConfig}
     if ("ccpa" === bannerType) return !!(consentState && consentState.accepted && consentState.ccpa && consentState.ccpa.doNotSell);
     for (var i = 0; i < categories.length; i++) {
       var category = categories[i];
-      if (isBlockableCategory(category) && !("analytics" === category && isGoogleAnalyticsUrl(src) || isCategoryAllowed(category))) return true
+      if (isBlockableCategory(category) && !isConsentSignalGoverned(category, src) && !isCategoryAllowed(category)) return true
     }
     return false
   }
@@ -1615,7 +1690,9 @@ ${inlineConfig}
     if (content.indexOf("_linkedin_partner_id") >= 0 || content.indexOf("lintrk(") >= 0 || content.indexOf("lintrk (") >= 0) return "marketing";
     if (content.indexOf("bat.bing.com") >= 0) return "marketing";
     if (content.indexOf("hotjar.com") >= 0) return "analytics";
-    if (content.indexOf("window.clarity") >= 0) return "analytics";
+    // Clarity's own bootstrap snippet (and any window.clarity API call) is left to run:
+    // its storage is governed by the Consent API v2 signal. See isClarityTagUrl().
+    if (content.indexOf("window.clarity") >= 0 || content.indexOf("clarity.ms") >= 0) return clarityConsentEnabled ? null : "analytics";
     return null;
   }
 
@@ -2115,6 +2192,7 @@ ${inlineConfig}
     // Always signal — never gate on tag detection. A tag that loads later replays the
     // queued dataLayer commands, so an early push is correct and a skipped push is not.
     ensureGtag()("consent", "update", consentUpdate);
+    updateClarityConsent(categories);
     pushConsentDataLayerEvent(categories, source)
   }
 
@@ -2143,6 +2221,7 @@ ${inlineConfig}
       marketing: !doNotSell,
       preferences: !doNotSell
     };
+    updateClarityConsent(ccpaCats);
     pushConsentDataLayerEvent(ccpaCats, "ccpa");
     try {
       window.dataLayer.push({
@@ -3139,7 +3218,14 @@ ${inlineConfig}
         });
         window.__cbConsentDefaultSet = true
       }
-      consentState.accepted ? updateGoogleConsentMode(consentState.categories || {}, "[Reload]") : gaMeasurementId && bootstrapGoogleAnalytics()
+      if (consentState.accepted) {
+        updateGoogleConsentMode(consentState.categories || {}, "[Reload]")
+      } else {
+        // Undecided: Clarity still needs an explicit denied signal, otherwise it applies
+        // its own regional default rather than ours. Deduped against the bootstrap.
+        updateClarityConsent({});
+        gaMeasurementId && bootstrapGoogleAnalytics()
+      }
     } else if ("ccpa" === bannerType) {
       // CCPA is an opt-out regime: storage defaults to granted unless the user opted
       // out. We still push an all-denied default first (consent-mode best practice),
@@ -3342,7 +3428,29 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
     bannerEnabled,
   };
   const bannerIsCcpa = String(effectiveBannerType || '').toLowerCase() === 'ccpa';
-  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? 'true' : 'false'};var d=null,e=false,hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);if(!c){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else{window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}window.__cbConsentDefaultSet=true;}catch(_){}})();\n`;
+
+  // Microsoft Clarity Consent API v2, signalled ahead of clarity.js: install the queue
+  // stub the CMP integration guide mandates, then send exactly ONE consentv2 call
+  // carrying the stored decision (default-denied when there is none). Deliberately not a
+  // default-then-stored pair — Microsoft asks CMPs to avoid that redundant state change.
+  // __cbClaritySignal is the same fingerprint updateClarityConsent() dedupes against, so
+  // the loader will not re-send this decision. Reuses c/d/e resolved just above:
+  // c = CCPA regime, d = stored categories, e = "Do Not Sell" opt-out.
+  const clarityCmpSource = String(siteConfigPayload.clarityCmpId || 'consentbit');
+  // Emitted BEFORE the Google Consent Mode work below, for two reasons: Microsoft asks
+  // for the signal as early as possible, and the enclosing IIFE has a single catch — a
+  // throw anywhere in the gtag section would otherwise skip the Clarity call entirely
+  // and leave Clarity on its own regional default. The inner try/catch is the mirror
+  // image: a failure here must not cost us Google Consent Mode.
+  const clarityBootstrap = siteConfigPayload.clarityConsentMode === false ? '' :
+    `try{` +
+    `window.clarity=window.clarity||function(){(window.clarity.q=window.clarity.q||[]).push(arguments);};` +
+    `var ca=c?(e?'denied':'granted'):(d&&d.analytics?'granted':'denied');` +
+    `var cm=c?(e?'denied':'granted'):(d&&d.marketing?'granted':'denied');` +
+    `window.clarity('consentv2',{source:${JSON.stringify(clarityCmpSource)},ad_Storage:cm,analytics_Storage:ca});` +
+    `window.__cbClaritySignal=cm+'|'+ca;` +
+    `}catch(_){}`;
+  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? 'true' : 'false'};var d=null,e=false,hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}${clarityBootstrap}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);if(!c){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else{window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}window.__cbConsentDefaultSet=true;}catch(_){}})();\n`;
 
   const scriptToServe =
     (serveKind === 'iab' ? loaderIab : serveKind === 'iabwebflow' ? loaderIabWebflow : serveKind === 'webflow' ? loaderWebflow : (consentModeBootstrap + loader));

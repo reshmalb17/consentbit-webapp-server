@@ -687,12 +687,50 @@ function isCategoryAllowed(category) {
 }
 
 /**
+ * Microsoft Clarity tag hosts. Clarity is governed by a consent SIGNAL, not by this
+ * blocker: Microsoft's CMP integration guide requires the tag to load regardless of
+ * consent status, and with consent denied Clarity runs cookieless on its own (no
+ * _clck / _clsk / MUID). Hard-blocking it would leave it with no signal at all.
+ */
+function cbIsClarityUrl(u) {
+  var s = typeof u === 'string' ? u.toLowerCase() : '';
+  if (!s) return false;
+  var cfg = (typeof window !== 'undefined' && window.__CONSENT_SITE__) || {};
+  if (cfg.clarityConsentMode === false) return false;
+  return s.indexOf('clarity.ms') !== -1 || s.indexOf('clarity.microsoft.com') !== -1;
+}
+
+/**
+ * Signal the visitor's decision to Microsoft Clarity's Consent API v2.
+ *   analytics_Storage — analytics purposes; gates _clck / _clsk
+ *   ad_Storage        — advertising purposes; gates MUID
+ * Key names are case-sensitive (capital S); values must be lowercase. Granular choices
+ * are respected — analytics-only consent must not grant ad_Storage. Deduped on
+ * __cbClaritySignal because Microsoft asks CMPs to avoid redundant state changes.
+ */
+function cbClarityConsent(categories) {
+  try {
+    var cfg = (typeof window !== 'undefined' && window.__CONSENT_SITE__) || {};
+    if (cfg.clarityConsentMode === false) return;
+    var cats = categories || {};
+    var ad = cats.marketing ? 'granted' : 'denied';
+    var an = cats.analytics ? 'granted' : 'denied';
+    var sg = ad + '|' + an;
+    if (window.__cbClaritySignal === sg) return;
+    window.__cbClaritySignal = sg;
+    window.clarity = window.clarity || function () { (window.clarity.q = window.clarity.q || []).push(arguments); };
+    window.clarity('consentv2', { source: (cfg.clarityCmpId || 'consentbit'), ad_Storage: ad, analytics_Storage: an });
+  } catch (e) {}
+}
+
+/**
  * Decide whether a script URL should be blocked given current consent state.
  */
 function shouldBlockScript(url, el) {
   if (__cbInternalCreate) return false;
   var u = typeof url === 'string' ? url.toLowerCase() : '';
   if (u && (u.indexOf('consentbit') !== -1 || u.indexOf('consentv2') !== -1 || u.indexOf('tcfmanager') !== -1)) return false;
+  if (cbIsClarityUrl(u)) return false;
 
   var cats = resolveScriptCategories(url, el);
   if (!cats || cats.length === 0) return false; // unmanaged → allow
@@ -903,6 +941,12 @@ function releaseBlockedScripts() {
 // Install blocker immediately — don't wait for DOMContentLoaded
 installConsentScriptBlocker();
 initConsentDependencies();
+
+// Signal the stored decision (or default-denied) to Microsoft Clarity as early as
+// possible, queueing it if clarity.js has not loaded yet. isCategoryAllowed() already
+// understands every storage format we support, so one call covers first visits,
+// returning visitors, and the accept-all shortcut alike.
+cbClarityConsent({ analytics: isCategoryAllowed('analytics'), marketing: isCategoryAllowed('advertisement') });
 
 // ─── Banner Entrance Animation (server-baked override) ───────────────────────
 // Injects a <style> with the chosen entrance animation (fade-in / slide-up /
@@ -1929,6 +1973,13 @@ window.__cbConsentState = {
 };
 // console.log('[ConsentBit][LoadPrefs] __cbConsentState restored:', JSON.stringify(window.__cbConsentState));
 
+// Returning visitor: replay their stored decision to Clarity. Deduped, so this is a
+// no-op when the install-time signal above already sent the same values.
+cbClarityConsent({
+  analytics: !!(preferences.cookieCategories && preferences.cookieCategories.analytics && preferences.cookieCategories.analytics.enabled),
+  marketing: !!(preferences.cookieCategories && preferences.cookieCategories.advertisement && preferences.cookieCategories.advertisement.enabled)
+});
+
 // Release scripts whose categories are now consented to (CDN-style)
 releaseBlockedScripts();
     // Load vendors (will be loaded when vendor tab is opened)
@@ -2076,6 +2127,10 @@ function openModal() {
 // this the IAB banner creates no Consent row. status: 'given' (accept) |
 // 'rejected' (reject) | 'partial' (save preferences). Mirrors the standard loader re().
 function cbRecordIabConsent(status, categories) {
+  // Signal Clarity first: this is the single funnel every accept / reject / save passes
+  // through, and it must not depend on the backend POST below (which returns early when
+  // the site is unconfigured).
+  cbClarityConsent(categories);
   try {
     var cfg = (typeof window !== 'undefined' && window.__CONSENT_SITE__) || {};
     var siteId = cfg.id || null;
