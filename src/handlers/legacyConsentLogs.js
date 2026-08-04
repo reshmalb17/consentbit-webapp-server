@@ -1,5 +1,6 @@
 // handlers/legacyConsentLogs.js
 import { getSessionById } from '../services/db.js';
+import { requireActiveSubscriptionForConsentReport } from '../services/subscriptionGate.js';
 import { buildSearchKeys, getConsentRowsFromR2, getConsentRowsFromKV, transformEntry } from './legacyConsentHelpers.js';
 
 function getSessionIdFromCookie(request) {
@@ -64,6 +65,15 @@ export async function handleLegacyConsentLogs(request, env) {
   if (!site) {
     console.warn('[LegacyConsentLogs] site not found — siteId:', siteId, 'userId:', userId);
     return Response.json({ success: false, error: 'Legacy site not found or access denied' }, { status: 404 });
+  }
+
+  // Paid deliverable — no report for lapsed/cancelled/deleted subscriptions.
+  const gate = await requireActiveSubscriptionForConsentReport(env, site.id);
+  if (!gate.ok) {
+    return Response.json(
+      { success: false, error: gate.error, code: gate.code, subscriptionStatus: gate.subscriptionStatus },
+      { status: gate.status },
+    );
   }
 
   const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;

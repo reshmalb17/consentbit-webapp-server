@@ -19,8 +19,10 @@ import {
   createSite,
   inferTierPlanIdFromStripePriceId,
   markTrialUsed,
+  claimPaymentFailureEmail,
 } from '../services/db.js';
 import { capturePostHogEvent as _phCapture, identifyPostHogPerson as _phIdentify, identifyPostHogSite as _phSite } from '../services/posthog.js';
+import { captureGa4Event as _ga4Capture } from '../services/ga4.js';
 import { sendWelcomeEmail, sendPaidPlanEmail, sendPaymentFailureEmail } from '../services/email.js';
 import {
   syncPurchaseToLegacy,
@@ -28,6 +30,18 @@ import {
   syncSubscriptionDeletedToLegacy,
 } from '../services/syncLegacy.js';
 import { addCustomerToClickUp, wasClickUpTaskCreated, markClickUpTaskCreated } from '../services/clickup.js';
+
+/**
+ * ClickUp gets NEW PURCHASES ONLY — never a failed/pending transaction.
+ * A subscription counts as purchased when Stripe says it is 'active' or 'trialing'.
+ * Anything else ('incomplete', 'incomplete_expired', 'past_due', 'unpaid', 'canceled')
+ * means no money settled. When the subscription status isn't known (no subscription on
+ * the session yet), fall back to the Checkout Session's own payment_status.
+ */
+function isPaidForClickUp({ rawSubStatus, paymentStatus }) {
+  if (rawSubStatus) return rawSubStatus === 'active' || rawSubStatus === 'trialing';
+  return paymentStatus === 'paid' || paymentStatus === 'no_payment_required';
+}
 
 /** Find existing Stripe customer by email, or create one (Use Case 3 / bulk guest checkout). */
 async function findOrCreateStripeCustomerByEmail(env, email) {
@@ -402,6 +416,10 @@ export async function handleStripeWebhook(request, env, ctx) {
       let subMeta = {};
       let stripePriceFromSub = null;
       let subscriptionStatus = 'active';
+      // Real Stripe status, unclamped. `subscriptionStatus` above is normalised to
+      // 'active' for the DB write, so it can't be used to tell a paid subscriber from
+      // an `incomplete` / `incomplete_expired` (failed payment) one.
+      let rawSubStatus = null;
 
       // Metadata is on the Subscription, not Session — fetch subscription to get siteId/siteName/siteDomain
       if (subId && env.STRIPE_SECRET_KEY) {
@@ -411,6 +429,7 @@ export async function handleStripeWebhook(request, env, ctx) {
           });
           const subData = await subRes.json();
           subMeta = subData.metadata || {};
+          rawSubStatus = subData.status || null;
           if (subData.status === 'trialing' || subData.status === 'active') {
             subscriptionStatus = subData.status;
           }
@@ -501,6 +520,11 @@ export async function handleStripeWebhook(request, env, ctx) {
                     platform: platform || 'webapp',
                     ...(createdSite.id ? { $groups: { site: String(createdSite.id) } } : {}),
                   });
+                  await _ga4Capture(env, _sgEmail, 'script_generated', {
+                    site_id: createdSite.id,
+                    domain: createdSite.domain,
+                    platform: platform || 'webapp',
+                  });
                 }
               } catch (phErr) { /* analytics only */ }
             }
@@ -590,6 +614,18 @@ export async function handleStripeWebhook(request, env, ctx) {
               is_first_purchase: isFirstPurchase,
               ...(siteId ? { $groups: { site: siteId } } : {}),
               $set: { email: _phEmail, plan: resolvedPlanId, subscription_status: subscriptionStatus, plan_tier: resolvedPlanId, ...(_phPlatform ? { platform: _phPlatform } : {}), did_start_trial: subscriptionStatus === 'trialing', ...(subscriptionStatus === 'trialing' ? { trial_started_at: new Date().toISOString() } : { did_convert_to_paid: true, converted_at: new Date().toISOString() }) },
+            });
+            // Step 10 — same event to GA4 via Measurement Protocol. `value` +
+            // `currency` are GA4's monetization params, so revenue shows up in
+            // reports without needing a separate `purchase` event.
+            await _ga4Capture(env, _phEmail, 'subscription_activated', {
+              plan_tier: resolvedPlanId,
+              billing_cycle: /^(year|annual)/i.test(String(interval)) ? 'annual' : 'monthly',
+              ...(typeof session.amount_total === 'number' ? { value: session.amount_total / 100 } : {}),
+              currency: (session.currency || 'usd').toUpperCase(),
+              status: subscriptionStatus,
+              site_id: siteId || null,
+              platform: _phPlatform || 'webapp',
             });
             // Update site group with new plan — tracks per-site status independently
             if (siteId) {
@@ -755,6 +791,16 @@ export async function handleStripeWebhook(request, env, ctx) {
         // customer.subscription.updated (see that handler below) — mark on success so
         // it is added exactly once.
         ctx.waitUntil((async () => {
+          // Only real purchases go to ClickUp. checkout.session.completed also fires for
+          // sessions whose payment never settled (delayed/async payment methods, cards that
+          // fail the first invoice → subscription 'incomplete' → 'incomplete_expired').
+          // Those subscribers must NOT create a task; when/if the payment does succeed,
+          // customer.subscription.updated (active/trialing) picks them up instead.
+          if (!isPaidForClickUp({ rawSubStatus, paymentStatus: session.payment_status })) {
+            console.log('[ClickUp] skipped — payment not settled. subId:', subId,
+              '| subStatus:', rawSubStatus, '| payment_status:', session.payment_status);
+            return;
+          }
           if (subId && await wasClickUpTaskCreated(env, subId)) return;
           let resolvedPlatform = platform || null;
           if (!resolvedPlatform && siteId && db) {
@@ -840,6 +886,16 @@ export async function handleStripeWebhook(request, env, ctx) {
       const sub = event.data.object;
       ctx.waitUntil((async () => {
         try {
+          // Only real purchases. The custom-checkout flow creates subscriptions with
+          // payment_behavior=default_incomplete, so EVERY card entry — including declines
+          // and abandoned 3DS — fires this event with status 'incomplete' before any money
+          // moves. Adding those put failed transactions into ClickUp. Trials arrive here as
+          // 'trialing' (their only reliable webhook); everything else is picked up by
+          // customer.subscription.updated once it actually turns active.
+          if (sub.status !== 'trialing' && sub.status !== 'active') {
+            console.log('[ClickUp] skipped — subscription.created status not paid:', sub.status, '| subId:', sub.id);
+            return;
+          }
           if (await wasClickUpTaskCreated(env, sub.id)) return;
 
           const existing = await getSubscriptionByStripeId(db, sub.id).catch(() => null);
@@ -1049,6 +1105,15 @@ export async function handleStripeWebhook(request, env, ctx) {
                 org_id: orgIdFinal,
                 $set: { plan: planIdFromMeta, subscription_status: 'active', plan_tier: planIdFromMeta, did_convert_to_paid: true, converted_at: new Date().toISOString(), ...(_phPlatform ? { platform: _phPlatform } : {}) },
               });
+              await _ga4Capture(env, _phEmail, 'subscription_activated', {
+                plan_tier: planIdFromMeta,
+                billing_cycle: /^(year|annual)/i.test(String(intervalFromSub)) ? 'annual' : 'monthly',
+                ...(typeof _subPrice?.unit_amount === 'number' ? { value: _subPrice.unit_amount / 100 } : {}),
+                currency: (_subPrice?.currency || 'usd').toUpperCase(),
+                status: 'active',
+                site_id: existing?.siteId ?? existing?.siteid ?? null,
+                platform: _phPlatform || 'webapp',
+              });
             }
 
             // Trial cancellation — fires at click time, not at trial end. The app cancels via
@@ -1103,7 +1168,10 @@ export async function handleStripeWebhook(request, env, ctx) {
       // checkout.session.completed — this handler is their only reliable webhook. Deduped
       // by Stripe subscription id so hosted-checkout subscribers (already added in that
       // handler) and repeat subscription.updated events don't create duplicate tasks.
-      if (type === 'customer.subscription.updated' && (status === 'active' || status === 'trialing')) {
+      // NOTE: guard on `sub.status` (the raw Stripe status), NOT the `status` local above —
+      // that one collapses incomplete / incomplete_expired / past_due into 'active' for the
+      // DB write, so using it here let failed transactions through into ClickUp.
+      if (type === 'customer.subscription.updated' && (sub.status === 'active' || sub.status === 'trialing')) {
         ctx.waitUntil((async () => {
           try {
             if (await wasClickUpTaskCreated(env, sub.id)) return;
@@ -1215,23 +1283,40 @@ export async function handleStripeWebhook(request, env, ctx) {
         rawPayload: { attempt_count: invoice.attempt_count },
       });
 
-      // Send payment failure reminder email based on attempt count
+      // Send payment failure reminder email based on attempt count.
+      //
+      // Stripe retries an invoice up to 8 times (~every 42h) and re-delivers each
+      // webhook until we 2xx, so attempt count alone is not a safe trigger. Only
+      // reminders 1 and 2 fire here, each claimed once per invoice; the final
+      // notice is sent by the cron FINAL_REMINDER_DELAY_DAYS after reminder 2
+      // (see processFinalPaymentReminders in index.js), so attempts 3-8 send
+      // nothing. Net: at most 3 emails per invoice.
       const orgId = existing?.organizationId ?? existing?.organizationid;
       if (orgId) {
         try {
+          const attempt = invoice.attempt_count || 1;
+          const reminderNumber = attempt >= 2 ? 2 : 1;
           const userRow = await db.prepare(
             'SELECT u.email, u.name FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
           ).bind(orgId).first();
           if (userRow?.email) {
-            const attempt = invoice.attempt_count || 1;
-            const reminderNumber = attempt >= 3 ? 3 : attempt;
-            const billingUrl = (env.WEBAPP_PUBLIC_URL || 'https://app.consentbit.com').replace(/\/$/, '') + '/billing';
-            sendPaymentFailureEmail(env, ctx, {
-              to: userRow.email,
-              name: userRow.name || '',
-              updatePaymentUrl: billingUrl,
+            const claimed = await claimPaymentFailureEmail(db, {
+              invoiceId: invoice.id,
               reminderNumber,
+              recipientEmail: userRow.email,
+              recipientName: userRow.name || '',
             });
+            if (claimed) {
+              const billingUrl = (env.WEBAPP_PUBLIC_URL || 'https://accounts.consentbit.com').replace(/\/$/, '');
+              sendPaymentFailureEmail(env, ctx, {
+                to: userRow.email,
+                name: userRow.name || '',
+                updatePaymentUrl: billingUrl,
+                reminderNumber,
+              });
+            } else {
+              console.log('[StripeWebhook] dunning reminder', reminderNumber, 'already sent for invoice', invoice.id, '— skipping');
+            }
           }
         } catch (e) {
           console.warn('[StripeWebhook] payment failure email lookup failed:', e?.message);

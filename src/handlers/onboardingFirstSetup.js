@@ -10,6 +10,7 @@ import {
 } from '../services/db.js';
 import { sendFreePlanEmail } from '../services/email.js';
 import { capturePostHogEvent } from '../services/posthog.js';
+import { captureGa4Event } from '../services/ga4.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -141,6 +142,12 @@ export async function handleOnboardingFirstSetup(request, env, ctx) {
         plan_tier: 'free',
         platform: 'webapp',
         ...(site.id ? { $groups: { site: String(site.id) } } : {}),
+      });
+      await captureGa4Event(env, user.email, 'script_generated', {
+        site_id: site.id,
+        domain: site.domain,
+        plan_tier: 'free',
+        platform: 'webapp',
       });
     } catch (e) { /* analytics only */ }
   }

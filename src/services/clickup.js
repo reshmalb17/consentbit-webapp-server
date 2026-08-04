@@ -74,7 +74,7 @@ export async function addCustomerToClickUp(env, {
   }
 
   const platformLabel = platform ? platform.charAt(0).toUpperCase() + platform.slice(1) : 'Website';
-  const taskName = `${email || 'Unknown'} — ${plan || 'Paid'} (${platformLabel})`;
+  const taskName = email || 'Unknown';
 
   const descLines = [
     `**Email:** ${email || '—'}`,

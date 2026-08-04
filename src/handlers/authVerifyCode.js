@@ -15,6 +15,7 @@ import {
 } from '../services/db.js';
 import { sendWelcomeEmail } from '../services/email.js';
 import { sendScanReportForId } from '../services/scanReport.js';
+import { recordScanClaim } from './adminDashboard/scans.js';
 // Note: hashPassword removed — system is fully passwordless (OTP via email only)
 
 function isValidEmail(email) {
@@ -148,6 +149,18 @@ export async function handleAuthVerifyCode(request, env, ctx) {
     // render the PDF locally and email it — fully in the background.
     if (scanId && ctx?.waitUntil) {
       ctx.waitUntil(sendScanReportForId(env, { to: email, name: userPrefetch.name || '', scanId }));
+      // Record who this scan belongs to. The scanner stores no identity of its
+      // own, so this claim is the only thing that ever links a checked URL to a
+      // person — and it can only be captured here, at the moment the address is
+      // proven. Best-effort: never fail a login over bookkeeping.
+      ctx.waitUntil(
+        recordScanClaim(env.COOKIE_SCANNER_DB, {
+          scanId,
+          email,
+          userId: userPrefetch.id,
+          purpose: 'login',
+        })
+      );
     }
 
     return Response.json(
@@ -194,6 +207,15 @@ export async function handleAuthVerifyCode(request, env, ctx) {
   // scanner DB, render the PDF locally and email it — fully in the background.
   if (scanId && ctx?.waitUntil) {
     ctx.waitUntil(sendScanReportForId(env, { to: user.email, name: user.name || '', scanId }));
+    // See the login path above — this is the only point identity is recoverable.
+    ctx.waitUntil(
+      recordScanClaim(env.COOKIE_SCANNER_DB, {
+        scanId,
+        email: user.email,
+        userId: user.id,
+        purpose: 'signup',
+      })
+    );
   }
 
   return Response.json(

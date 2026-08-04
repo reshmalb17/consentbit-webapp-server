@@ -1,3 +1,5 @@
+import { captureGa4Event } from './ga4.js';
+
 export async function capturePostHogEvent(env, distinctId, eventName, properties = {}) {
   const apiKey = env.POSTHOG_API_KEY;
   // [PostHog DEBUG] temporary diagnostics — remove once tracking is confirmed.
@@ -31,7 +33,8 @@ export async function identifyPostHogPerson(env, distinctId, properties = {}) {
 // live on a site's domain (manual verify or the scheduled scan cron). Keyed by the owner's
 // email so it merges into the same person as the client-side funnel events.
 export async function captureInstallationVerified(env, db, siteId, domain) {
-  if (!env.POSTHOG_API_KEY || !siteId || !db) return;
+  // GA4 can be enabled independently of PostHog, so only bail when neither is configured.
+  if ((!env.POSTHOG_API_KEY && !env.GA4_API_SECRET) || !siteId || !db) return;
   try {
     const row = await db.prepare(
       `SELECT u.email AS email FROM User u
@@ -46,6 +49,12 @@ export async function captureInstallationVerified(env, db, siteId, domain) {
       domain: domain || null,
       source: 'backend_detect',
       $groups: { site: String(siteId) },
+    });
+    await captureGa4Event(env, email, 'installation_verified', {
+      site_id: String(siteId),
+      domain: domain || null,
+      source: 'backend_detect',
+      platform: 'webapp',
     });
   } catch (e) {
     console.warn('[PostHog] installation_verified failed:', e?.message);

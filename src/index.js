@@ -52,9 +52,23 @@ import { handleAdminMigrateFromDashboard } from './handlers/adminMigrateFromDash
 import { handleAdminBackfillConsentR2 } from './handlers/adminBackfillConsentR2.js';
 import { handleAdminBackfillStripeSubscriptions } from './handlers/adminBackfillStripeSubscriptions.js';
 import { handleAdminBackfillPosthog } from './handlers/adminBackfillPosthog.js';
+import { handleAdminGa4Test } from './handlers/adminGa4Test.js';
 import { handleAdminBackfillClickup } from './handlers/adminBackfillClickup.js';
 import { handleAdminMicheleClickup } from './handlers/adminMicheleClickup.js';
 import { handleAdminTestScanReport } from './handlers/adminTestScanReport.js';
+import {
+  handleAdminDashboardStats,
+  handleAdminDashboardUsers,
+  handleAdminDashboardUser,
+  handleAdminDashboardSite,
+  handleAdminDashboardAuth,
+  handleAdminDashboardAccounts,
+  handleAdminDashboardAccountSetup,
+  handleAdminDashboardRecover,
+  handleAdminDashboardAudit,
+  handleAdminDashboardScans,
+  handleAdminDashboardSites,
+} from './handlers/adminDashboard/index.js';
 import { handleCheckLegacyScript } from './handlers/checkLegacyScript.js';
 import { handleLegacyConsentLogs } from './handlers/legacyConsentLogs.js';
 import { handleLegacyConsentCsv } from './handlers/legacyConsentCsv.js';
@@ -89,6 +103,7 @@ import { handlePaymentSubscription } from './handlers/paymentSubscription.js';
 import { handleWebflowBilling, handleWebflowCancelSubscription, handleWebflowSwitchInterval } from './handlers/webflowBilling.js';
 import { handleWebflowBillings, handleWebflowCancelSubscriptions, handleWebflowSwitchIntervals } from './handlers/webflowBillingWf.js';
 import { requireConsentSession, requireConsentPdfAccess } from './middleware/consentAccess.js';
+import { requireActiveSubscriptionForConsentReport } from './services/subscriptionGate.js';
 import { handleFramerBilling, handleFramerCancelSubscription, handleFramerSwitchInterval } from './handlers/framerBilling.js';
 import {
   handleFramerChangeTier,
@@ -96,6 +111,12 @@ import {
   handleFramerSwitchInterval as handleFramerUpgradeSwitchInterval,
   handleFramerSwitchIntervalPreview as handleFramerUpgradeSwitchIntervalPreview,
 } from './handlers/framerUpgrade.js';
+import {
+  handleWebflowChangeTier,
+  handleWebflowChangeTierPreview,
+  handleWebflowSwitchInterval as handleWebflowUpgradeSwitchInterval,
+  handleWebflowSwitchIntervalPreview as handleWebflowUpgradeSwitchIntervalPreview,
+} from './handlers/webflowUpgrade.js';
 import { handleFramerTransferOwnershipRequest } from './handlers/authTransferOwnershipFramer.js';
 import { handleWebflowScriptCleanupReport, handleWebflowScriptCleanupRemove } from './handlers/webflowScriptCleanup.js';
 import { handleWebflowOAuthAuthorize, handleWebflowOAuthCallback, handleWebflowOAuthStatus } from './handlers/webflowOAuth.js';
@@ -127,8 +148,10 @@ import {
   getEffectivePlanForOrganization,
   getOrgOwnerEmail,
   markScanLimitNotified,
+  getPendingFinalPaymentReminders,
+  claimPaymentFailureEmail,
 } from './services/db.js';
-import { sendScanLimitEmail } from './services/email.js';
+import { sendScanLimitEmail, sendPaymentFailureEmail } from './services/email.js';
 
 // ---------------------------------------------------------------------------
 // Endpoint classification sets
@@ -192,6 +215,26 @@ const PUBLIC_PATHS = new Set([
   // Legacy aliases without /api/ prefix (backwards-compat for older bundles)
   '/licenses/activate-license',
   '/licenses/check-domain-script',
+  // Standalone Admin Dashboard (Next.js) backend. "Public" for TRANSPORT ONLY —
+  // any-origin CORS, plain JSON, no CSRF — with authorization enforced INSIDE each
+  // handler (handlers/adminDashboard/auth.js): X-Admin-User + X-Admin-Key must match
+  // an AdminDashboardAccount row (or X-Admin-Key alone may be env.ADMIN_SECRET), and
+  // the resolved role gates writes. Called server-to-server from the dashboard's
+  // Next.js routes, so no key reaches a browser.
+  '/api/admin/dashboard/stats',
+  '/api/admin/dashboard/users',
+  '/api/admin/dashboard/user',
+  '/api/admin/dashboard/site',
+  '/api/admin/dashboard/auth',
+  '/api/admin/dashboard/accounts',
+  '/api/admin/dashboard/audit',
+  '/api/admin/dashboard/scans',
+  '/api/admin/dashboard/sites',
+  // Emailed-link surfaces. Unauthenticated by design — the single-use token in
+  // the link is the credential, and recover always answers identically so it
+  // cannot be used to discover who has an account.
+  '/api/admin/dashboard/account-setup',
+  '/api/admin/dashboard/account-recover',
 ]);
 
 /**
@@ -226,12 +269,27 @@ const WEBFLOW_APP_ROUTES = {
   'billings':             (req, env)     => handleWebflowBillings(req, env),
   'cancel-subscriptions': (req, env)     => handleWebflowCancelSubscriptions(req, env),
   'switch-intervals':     (req, env)     => handleWebflowSwitchIntervals(req, env),
+  // Designer-app UPGRADE surface (tier change + interval switch, each with a prorated
+  // preview). Webflow twin of the Framer /api/framer/upgrade/* routes — same Stripe
+  // logic, but the identity comes from the Webflow ID token already resolved above and
+  // is passed straight into the handler. See handlers/webflowUpgrade.js.
+  'upgrade/change-tier':             (req, env, ctx, identity) => handleWebflowChangeTier(req, env, ctx, identity),
+  'upgrade/change-tier/preview':     (req, env, ctx, identity) => handleWebflowChangeTierPreview(req, env, ctx, identity),
+  'upgrade/switch-interval':         (req, env, ctx, identity) => handleWebflowUpgradeSwitchInterval(req, env, ctx, identity),
+  'upgrade/switch-interval/preview': (req, env, ctx, identity) => handleWebflowUpgradeSwitchIntervalPreview(req, env, ctx, identity),
   'payment/subscription':(req, env)      => handlePaymentSubscription(req, env),
   'webflow-free-register':(req, env)     => handleWebflowFreeRegister(req, env),
   'webflow-checkout-token':(req, env)    => handleWebflowCheckoutToken(req, env),
   'transfer-ownership/request': (req, env, ctx, identity) => handleWfTransferOwnershipRequest(req, env, ctx, identity),
   'track':               (req, env, ctx, identity) => handleWebflowTrack(req, env, ctx, identity),
 };
+
+/**
+ * The /api/wf/* routes that return end-user consent records. These carry the extra
+ * requirement of an ACTIVE subscription on the target site (see
+ * services/subscriptionGate.js) on top of the Webflow identity check.
+ */
+const WF_CONSENT_REPORT_ROUTES = new Set(['consent-logs', 'consent-csv', 'consent-pdf']);
 
 /**
  * LEGACY Webflow-Designer endpoints that the updated app no longer uses (it calls
@@ -300,6 +358,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/admin/backfill-consent-r2',
   '/api/admin/backfill-stripe-subscriptions',
   '/api/admin/backfill-posthog',
+  '/api/admin/ga4-test',
   '/api/admin/backfill-clickup',
   '/api/admin/michele-clickup',
   '/api/admin/test-scan-report',
@@ -584,6 +643,9 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     case '/api/admin/backfill-posthog':
       response = await handleAdminBackfillPosthog(request, env); break;
 
+    case '/api/admin/ga4-test':
+      response = await handleAdminGa4Test(request, env); break;
+
     case '/api/admin/backfill-clickup':
       response = await handleAdminBackfillClickup(request, env); break;
 
@@ -592,6 +654,30 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     case '/api/admin/test-scan-report':
       response = await handleAdminTestScanReport(request, env, ctx); break;
+
+    // — Admin Dashboard (standalone Next.js app) — read/edit/delete users
+    case '/api/admin/dashboard/stats':
+      response = await handleAdminDashboardStats(request, env); break;
+    case '/api/admin/dashboard/users':
+      response = await handleAdminDashboardUsers(request, env); break;
+    case '/api/admin/dashboard/user':
+      response = await handleAdminDashboardUser(request, env); break;
+    case '/api/admin/dashboard/site':
+      response = await handleAdminDashboardSite(request, env); break;
+    case '/api/admin/dashboard/auth':
+      response = await handleAdminDashboardAuth(request, env); break;
+    case '/api/admin/dashboard/accounts':
+      response = await handleAdminDashboardAccounts(request, env, ctx); break;
+    case '/api/admin/dashboard/account-setup':
+      response = await handleAdminDashboardAccountSetup(request, env); break;
+    case '/api/admin/dashboard/account-recover':
+      response = await handleAdminDashboardRecover(request, env, ctx); break;
+    case '/api/admin/dashboard/audit':
+      response = await handleAdminDashboardAudit(request, env); break;
+    case '/api/admin/dashboard/scans':
+      response = await handleAdminDashboardScans(request, env); break;
+    case '/api/admin/dashboard/sites':
+      response = await handleAdminDashboardSites(request, env); break;
 
     case '/api/check-legacy-script':
       response = await handleCheckLegacyScript(request, env); break;
@@ -831,6 +917,72 @@ async function processSubscriptionQueue(env) {
   }
 }
 
+// Days to wait after the second dunning email before the single final notice.
+const FINAL_REMINDER_DELAY_DAYS = 5;
+
+/**
+ * Sends the one-and-only "final notice" dunning email, FINAL_REMINDER_DELAY_DAYS
+ * after the second one. It is cron-driven rather than webhook-driven because
+ * Stripe's retry attempts land roughly every 42h, which never lines up with a
+ * fixed 5-day offset. Reminder 3 is claimed even when the invoice has since been
+ * paid, so a resolved invoice stops being re-checked on every tick.
+ */
+async function processFinalPaymentReminders(env, ctx) {
+  const db = env.CONSENT_WEBAPP;
+  if (!db || !env.STRIPE_SECRET_KEY) return;
+  try { await ensureSchema(db); } catch (err) {
+    console.error('[Cron] processFinalPaymentReminders ensureSchema failed', err);
+    return;
+  }
+  const cutoff = new Date(Date.now() - FINAL_REMINDER_DELAY_DAYS * 86400000).toISOString();
+  let pending;
+  try {
+    pending = await getPendingFinalPaymentReminders(db, cutoff, 20);
+  } catch (err) {
+    console.error('[Cron] getPendingFinalPaymentReminders failed', err);
+    return;
+  }
+  if (pending.length === 0) return;
+  console.log('[Cron] final dunning reminders due:', pending.length);
+
+  for (const row of pending) {
+    const invoiceId = getRow(row, 'invoiceId');
+    const to        = getRow(row, 'recipientEmail');
+    const name      = getRow(row, 'recipientName') || '';
+    try {
+      // Only chase invoices that are still genuinely unpaid.
+      const res = await fetch(`https://api.stripe.com/v1/invoices/${invoiceId}`, {
+        headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
+      });
+      const invoice = await res.json();
+      if (!res.ok) {
+        console.warn('[Cron] final reminder: Stripe invoice fetch failed for', invoiceId, invoice?.error?.message);
+        continue; // transient — retry on the next tick rather than burning the claim
+      }
+      const stillOwing = invoice.status === 'open' || invoice.status === 'past_due';
+
+      // Claim first, then send: a lost race means another tick already handled it.
+      const claimed = await claimPaymentFailureEmail(db, {
+        invoiceId,
+        reminderNumber: 3,
+        recipientEmail: to,
+        recipientName: name,
+      });
+      if (!claimed) continue;
+
+      if (!stillOwing) {
+        console.log('[Cron] final reminder skipped — invoice', invoiceId, 'is', invoice.status);
+        continue;
+      }
+      const billingUrl = (env.WEBAPP_PUBLIC_URL || 'https://accounts.consentbit.com').replace(/\/$/, '');
+      sendPaymentFailureEmail(env, ctx, { to, name, updatePaymentUrl: billingUrl, reminderNumber: 3 });
+      console.log('[Cron] final dunning reminder sent for invoice', invoiceId);
+    } catch (err) {
+      console.error('[Cron] final reminder failed for invoice', invoiceId, err);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Worker entry point
 // ---------------------------------------------------------------------------
@@ -843,6 +995,7 @@ export default {
         executeScheduledScans(env, ctx),
         processSubscriptionQueue(env),
         reportStripeMeteredUsage(env),
+        processFinalPaymentReminders(env, ctx),
       ])
     );
   },
@@ -927,6 +1080,20 @@ export default {
       if (!handler) {
         const nf = withSecurityHeaders(Response.json({ success: false, error: 'Not Found' }, { status: 404 }));
         return withCors(nf, request, env);
+      }
+      // Consent reports are a paid deliverable — a verified Webflow identity is not
+      // enough, the site must still hold an active/trialing subscription.
+      if (WF_CONSENT_REPORT_ROUTES.has(sub)) {
+        const gate = await requireActiveSubscriptionForConsentReport(env, auth.identity.siteId);
+        if (!gate.ok) {
+          const denied = withSecurityHeaders(
+            Response.json(
+              { success: false, error: gate.error, code: gate.code, subscriptionStatus: gate.subscriptionStatus },
+              { status: gate.status },
+            )
+          );
+          return withCors(denied, request, env);
+        }
       }
       let wfResp;
       try {

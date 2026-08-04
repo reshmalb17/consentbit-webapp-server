@@ -18,6 +18,7 @@
 
 import { getSessionById } from '../services/db.js';
 import { verifyDownloadToken } from '../utils/signedToken.js';
+import { requireActiveSubscriptionForConsentReport } from '../services/subscriptionGate.js';
 
 function sidFromCookie(request) {
   const cookie = request.headers.get('Cookie') || request.headers.get('cookie') || '';
@@ -47,17 +48,23 @@ async function sessionOwnsSite(request, env, siteId) {
 }
 
 // Gate for /api/consent-logs and /api/consent-csv — require a session that owns
-// the requested site. Returns { ok } or { ok:false, status, error }.
+// the requested site AND an active subscription on it. Returns { ok } or
+// { ok:false, status, error }.
 export async function requireConsentSession(request, env) {
   const url = new URL(request.url);
   const siteId = url.searchParams.get('siteId') || url.searchParams.get('site_id');
   if (!siteId) return { ok: false, status: 400, error: 'siteId is required' };
-  if (await sessionOwnsSite(request, env, siteId)) return { ok: true };
-  return { ok: false, status: 401, error: 'Authentication required.' };
+  if (!(await sessionOwnsSite(request, env, siteId))) {
+    return { ok: false, status: 401, error: 'Authentication required.' };
+  }
+  // Owning the site is not enough — consent reports are a paid deliverable.
+  return requireActiveSubscriptionForConsentReport(env, siteId);
 }
 
 // Gate for /api/consent-pdf — a valid session that owns the site, OR a valid signed
 // download token bound to this exact siteId+consentId (the CSV-embedded links).
+// Either way the site must still hold an active subscription: a previously exported
+// CSV must not keep minting consent records after the plan lapses.
 export async function requireConsentPdfAccess(request, env) {
   const url = new URL(request.url);
   const siteId = url.searchParams.get('siteId') || url.searchParams.get('site_id');
@@ -65,9 +72,10 @@ export async function requireConsentPdfAccess(request, env) {
   if (!siteId || !consentId) return { ok: false, status: 400, error: 'siteId and consentId required' };
 
   const token = url.searchParams.get('token');
-  if (token && env.JWT_SECRET && await verifyDownloadToken(env.JWT_SECRET, token, siteId, consentId)) {
-    return { ok: true };
-  }
-  if (await sessionOwnsSite(request, env, siteId)) return { ok: true };
-  return { ok: false, status: 401, error: 'Authentication required.' };
+  const authorized =
+    (token && env.JWT_SECRET && await verifyDownloadToken(env.JWT_SECRET, token, siteId, consentId)) ||
+    (await sessionOwnsSite(request, env, siteId));
+  if (!authorized) return { ok: false, status: 401, error: 'Authentication required.' };
+
+  return requireActiveSubscriptionForConsentReport(env, siteId);
 }

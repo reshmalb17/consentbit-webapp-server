@@ -6,6 +6,7 @@
 // /api/legacy-consent-logs so the dashboard can render the same way.
 
 import { getSessionById } from '../services/db.js';
+import { requireActiveSubscriptionForConsentReport } from '../services/subscriptionGate.js';
 import { transformEntry } from './legacyConsentHelpers.js';
 
 function getSessionIdFromCookie(request) {
@@ -83,6 +84,15 @@ export async function handleLegacyConsentLogsFramer(request, env) {
     .catch(() => null);
 
   if (!site) return Response.json({ success: false, error: 'Site not found or access denied' }, { status: 404 });
+
+  // Paid deliverable — no report for lapsed/cancelled/deleted subscriptions.
+  const gate = await requireActiveSubscriptionForConsentReport(env, site.id);
+  if (!gate.ok) {
+    return Response.json(
+      { success: false, error: gate.error, code: gate.code, subscriptionStatus: gate.subscriptionStatus },
+      { status: gate.status },
+    );
+  }
 
   console.log('[legacyConsentLogsFramer] site row', { id: site.id, domain: site.domain, platformSiteId: site.platformSiteId ?? site.platformsiteid });
   const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
@@ -164,6 +174,10 @@ export async function handleLegacyConsentFramerRaw(request, env) {
     .catch(() => null);
 
   if (!site) return Response.json({ error: 'Site not found' }, { status: 404 });
+
+  // Paid deliverable — no report for lapsed/cancelled/deleted subscriptions.
+  const gate = await requireActiveSubscriptionForConsentReport(env, site.id);
+  if (!gate.ok) return Response.json({ error: gate.error, code: gate.code }, { status: gate.status });
 
   const siteId = site.id;
   const clientId = site.domain || '';

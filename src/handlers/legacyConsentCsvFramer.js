@@ -5,6 +5,7 @@
 // links pointing at /api/legacy-consent-pdf-framer.
 
 import { getSessionById } from '../services/db.js';
+import { requireActiveSubscriptionForConsentReport } from '../services/subscriptionGate.js';
 import { createDownloadToken } from '../utils/signedToken.js';
 
 function getSessionIdFromCookie(request) {
@@ -69,6 +70,10 @@ export async function handleLegacyConsentCsvFramer(request, env) {
     .catch(() => null);
 
   if (!site) return new Response('Site not found', { status: 404 });
+
+  // Paid deliverable — no export for lapsed/cancelled/deleted subscriptions.
+  const gate = await requireActiveSubscriptionForConsentReport(env, site.id);
+  if (!gate.ok) return new Response(gate.error, { status: gate.status });
 
   const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
   if (!platformSiteId) return new Response('Site missing platformSiteId', { status: 400 });

@@ -1034,18 +1034,25 @@ __export(db_exports, {
   addOrganizationMember: () => addOrganizationMember,
   buildEmbedScriptUrl: () => buildEmbedScriptUrl,
   calculateNextRunAt: () => calculateNextRunAt,
+  cancelPendingOwnershipTransfers: () => cancelPendingOwnershipTransfers,
   canonicalEmbedOrigin: () => canonicalEmbedOrigin,
+  claimDueScheduledScan: () => claimDueScheduledScan,
+  claimPaymentFailureEmail: () => claimPaymentFailureEmail,
   consumeEmailVerificationCode: () => consumeEmailVerificationCode,
+  consumeWebflowOAuthState: () => consumeWebflowOAuthState,
   createEmailVerificationCode: () => createEmailVerificationCode,
   createOrganization: () => createOrganization,
+  createOwnershipTransfer: () => createOwnershipTransfer,
   createScanHistory: () => createScanHistory,
   createScheduledScan: () => createScheduledScan,
   createSession: () => createSession,
   createSite: () => createSite,
   createUser: () => createUser,
+  createWebflowOAuthState: () => createWebflowOAuthState,
   deactivateScheduledScan: () => deactivateScheduledScan,
   deleteScheduledScan: () => deleteScheduledScan,
   deleteSessionById: () => deleteSessionById,
+  deleteSessionsForUser: () => deleteSessionsForUser,
   deleteSubscriptionQueueRow: () => deleteSubscriptionQueueRow,
   enqueueBulkLicenseJobs: () => enqueueBulkLicenseJobs,
   ensureDefaultPlans: () => ensureDefaultPlans,
@@ -1066,8 +1073,10 @@ __export(db_exports, {
   getOrgOwnerEmail: () => getOrgOwnerEmail,
   getOrganizationMember: () => getOrganizationMember,
   getOrganizationsForUser: () => getOrganizationsForUser,
+  getOwnershipTransferById: () => getOwnershipTransferById,
   getPageviewUsageForOrganization: () => getPageviewUsageForOrganization,
   getPageviewUsageForSite: () => getPageviewUsageForSite,
+  getPendingFinalPaymentReminders: () => getPendingFinalPaymentReminders,
   getPendingSubscriptionQueue: () => getPendingSubscriptionQueue,
   getPlanById: () => getPlanById,
   getPromoByCode: () => getPromoByCode,
@@ -1088,15 +1097,20 @@ __export(db_exports, {
   getSubscriptionsBySiteIds: () => getSubscriptionsBySiteIds,
   getUserByEmail: () => getUserByEmail,
   getUserById: () => getUserById,
+  getWebflowOAuthTokenBySite: () => getWebflowOAuthTokenBySite,
+  getWebflowOAuthTokenByUser: () => getWebflowOAuthTokenByUser,
   hashPassword: () => hashPassword,
   incrementEmailVerificationAttempts: () => incrementEmailVerificationAttempts,
+  incrementOwnershipTransferAttempts: () => incrementOwnershipTransferAttempts,
   incrementPageviewUsage: () => incrementPageviewUsage,
   incrementPromoRedemption: () => incrementPromoRedemption,
   incrementScanUsage: () => incrementScanUsage,
   inferTierPlanIdFromStripePriceId: () => inferTierPlanIdFromStripePriceId,
   insertScripts: () => insertScripts,
+  invalidateWebflowOAuthToken: () => invalidateWebflowOAuthToken,
   isPromoValid: () => isPromoValid,
   listSites: () => listSites,
+  markOwnershipTransferAuthorized: () => markOwnershipTransferAuthorized,
   markPaymentIntentProcessed: () => markPaymentIntentProcessed,
   markScanLimitNotified: () => markScanLimitNotified,
   markSiteVerified: () => markSiteVerified,
@@ -1108,10 +1122,13 @@ __export(db_exports, {
   normalizeDomain: () => normalizeDomain,
   recordConsent: () => recordConsent,
   recordScanHistory: () => recordScanHistory,
+  renameUserAccount: () => renameUserAccount,
+  resolveWebflowOAuthToken: () => resolveWebflowOAuthToken,
   saveBannerCustomization: () => saveBannerCustomization,
   savePaymentEvent: () => savePaymentEvent,
   saveReportedScripts: () => saveReportedScripts,
   saveSubscription: () => saveSubscription,
+  saveWebflowOAuthToken: () => saveWebflowOAuthToken,
   updateScheduledScanAfterRun: () => updateScheduledScanAfterRun,
   updateSiteFromPatch: () => updateSiteFromPatch,
   updateSiteName: () => updateSiteName,
@@ -1211,6 +1228,10 @@ async function ensureSchema(db) {
   }
   try {
     await db.prepare(`ALTER TABLE Site ADD COLUMN scanLimitNotifiedMonth TEXT`).run();
+  } catch (_) {
+  }
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN version TEXT`).run();
   } catch (_) {
   }
   await db.prepare(`
@@ -1679,6 +1700,16 @@ async function ensureSchema(db) {
     )
   `).run();
   await db.prepare(`
+    CREATE TABLE IF NOT EXISTS SentPaymentFailureEmail (
+      invoiceId TEXT NOT NULL,
+      reminderNumber INTEGER NOT NULL,
+      recipientEmail TEXT,
+      recipientName TEXT,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (invoiceId, reminderNumber)
+    )
+  `).run();
+  await db.prepare(`
     CREATE TABLE IF NOT EXISTS SubscriptionQueue (
       id TEXT PRIMARY KEY,
       organizationId TEXT NOT NULL,
@@ -1752,6 +1783,30 @@ async function ensureSchema(db) {
   } catch (e) {
   }
   await db.prepare(`
+    CREATE TABLE IF NOT EXISTS OwnershipTransfer (
+      id TEXT PRIMARY KEY,            -- token id (public, appears in the URL)
+      userId TEXT NOT NULL,          -- account being transferred (current owner user id)
+      currentEmail TEXT NOT NULL,    -- snapshot of the old owner email at request time
+      newEmail TEXT NOT NULL,        -- target owner email
+      newName TEXT,                  -- target owner name
+      tokenHash TEXT NOT NULL,       -- sha256 of the secret half of the token
+      status TEXT NOT NULL DEFAULT 'pending', -- pending | authorized | cancelled
+      attempts INTEGER DEFAULT 0,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      expiresAt DATETIME NOT NULL,
+      authorizedAt DATETIME,
+      FOREIGN KEY (userId) REFERENCES User(id)
+    )
+  `).run();
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_ownership_user_status ON OwnershipTransfer(userId, status)`).run();
+  } catch (e) {
+  }
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_ownership_expires ON OwnershipTransfer(expiresAt)`).run();
+  } catch (e) {
+  }
+  await db.prepare(`
     CREATE TABLE IF NOT EXISTS Organization (
       id TEXT PRIMARY KEY,
       ownerUserId TEXT NOT NULL,
@@ -1810,6 +1865,44 @@ async function ensureSchema(db) {
   }
   try {
     await db.prepare(`ALTER TABLE User ADD COLUMN billingEmail TEXT`).run();
+  } catch (e) {
+  }
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS WebflowOAuthState (
+      state TEXT PRIMARY KEY,
+      returnTo TEXT,
+      expiresAt DATETIME NOT NULL,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_wf_oauth_state_expires ON WebflowOAuthState(expiresAt)`).run();
+  } catch (e) {
+  }
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS WebflowOAuthToken (
+      userKey TEXT PRIMARY KEY,
+      accessToken TEXT NOT NULL,
+      tokenType TEXT,
+      scope TEXT,
+      authorizedBy TEXT, -- JSON blob from /v2/token/authorized_by
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS WebflowOAuthSite (
+      siteId TEXT PRIMARY KEY,
+      userKey TEXT,
+      accessToken TEXT NOT NULL,
+      displayName TEXT,
+      shortName TEXT,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_wf_oauth_site_userkey ON WebflowOAuthSite(userKey)`).run();
   } catch (e) {
   }
 }
@@ -2359,8 +2452,9 @@ async function ensureDefaultPlans(db) {
       id: "basic",
       name: "Basic plan",
       monthlyAmountCents: 900,
-      yearlyAmountCents: 800,
-      yearlyTotalCents: 9600,
+      yearlyAmountCents: 717,
+      // 8600 / 12
+      yearlyTotalCents: 8600,
       domainsIncluded: 1,
       scansIncluded: 750,
       pageviewsIncluded: 1e5,
@@ -2388,8 +2482,9 @@ async function ensureDefaultPlans(db) {
       id: "growth",
       name: "Growth plan",
       monthlyAmountCents: 5600,
-      yearlyAmountCents: 4200,
-      yearlyTotalCents: 50400,
+      yearlyAmountCents: 4483,
+      // 53800 / 12
+      yearlyTotalCents: 53800,
       domainsIncluded: 1,
       scansIncluded: 1e4,
       pageviewsIncluded: 2e6,
@@ -2467,9 +2562,9 @@ async function getPageviewUsageForOrganization(db, organizationId, date = /* @__
   const sitesRes = await db.prepare("SELECT id FROM Site WHERE organizationId = ?1").bind(organizationId).all();
   const siteIds = (sitesRes.results || []).map((r) => r.id).filter(Boolean);
   if (siteIds.length === 0) return { yearMonth, pageviewCount: 0, siteCount: 0 };
-  const placeholders = siteIds.map(() => "?").join(",");
+  const placeholders2 = siteIds.map(() => "?").join(",");
   const sumRes = await db.prepare(
-    `SELECT COALESCE(SUM(pageviewCount), 0) AS total FROM PageviewUsage WHERE siteId IN (${placeholders}) AND yearMonth = ?`
+    `SELECT COALESCE(SUM(pageviewCount), 0) AS total FROM PageviewUsage WHERE siteId IN (${placeholders2}) AND yearMonth = ?`
   ).bind(...siteIds, yearMonth).first();
   return {
     yearMonth,
@@ -2600,8 +2695,8 @@ async function getScanUsageForOrganization(db, organizationId, date = /* @__PURE
   const sitesRes = await db.prepare("SELECT id FROM Site WHERE organizationId = ?1").bind(organizationId).all();
   const siteIds = (sitesRes.results || []).map((r) => r.id).filter(Boolean);
   if (siteIds.length === 0) return { yearMonth, scanCount: 0 };
-  const placeholders = siteIds.map(() => "?").join(",");
-  const sumRes = await db.prepare(`SELECT COALESCE(SUM(scanCount), 0) AS total FROM ScanUsage WHERE siteId IN (${placeholders}) AND yearMonth = ?`).bind(...siteIds, yearMonth).first();
+  const placeholders2 = siteIds.map(() => "?").join(",");
+  const sumRes = await db.prepare(`SELECT COALESCE(SUM(scanCount), 0) AS total FROM ScanUsage WHERE siteId IN (${placeholders2}) AND yearMonth = ?`).bind(...siteIds, yearMonth).first();
   return { yearMonth, scanCount: Number(sumRes?.total ?? 0) };
 }
 async function getScanUsageForSite(db, siteId, date = /* @__PURE__ */ new Date()) {
@@ -2689,9 +2784,9 @@ async function markTrialUsed(db, siteId) {
 }
 async function getSubscriptionsBySiteIds(db, siteIds) {
   if (!siteIds || siteIds.length === 0) return {};
-  const placeholders = siteIds.map((_, i) => `?${i + 1}`).join(", ");
+  const placeholders2 = siteIds.map((_, i) => `?${i + 1}`).join(", ");
   const { results } = await db.prepare(
-    `SELECT * FROM Subscription WHERE siteId IN (${placeholders}) AND status IN ('active', 'trialing', 'canceled') ORDER BY updatedAt DESC`
+    `SELECT * FROM Subscription WHERE siteId IN (${placeholders2}) AND status IN ('active', 'trialing', 'canceled') ORDER BY updatedAt DESC`
   ).bind(...siteIds).all();
   const rows = results || [];
   const now = Date.now();
@@ -2791,6 +2886,29 @@ async function deleteSubscriptionQueueRow(db, id) {
 async function markSubscriptionQueueFailed(db, id, errorMessage) {
   const now = (/* @__PURE__ */ new Date()).toISOString();
   await db.prepare("UPDATE SubscriptionQueue SET status = ?1, errorMessage = ?2, updatedAt = ?3 WHERE id = ?4").bind("failed", errorMessage || null, now, id).run();
+}
+async function claimPaymentFailureEmail(db, { invoiceId, reminderNumber, recipientEmail, recipientName }) {
+  if (!invoiceId) return true;
+  const res = await db.prepare(
+    `INSERT OR IGNORE INTO SentPaymentFailureEmail (invoiceId, reminderNumber, recipientEmail, recipientName, createdAt)
+       VALUES (?1, ?2, ?3, ?4, ?5)`
+  ).bind(invoiceId, reminderNumber, recipientEmail || null, recipientName || null, (/* @__PURE__ */ new Date()).toISOString()).run();
+  return Number(res?.meta?.changes ?? 0) > 0;
+}
+async function getPendingFinalPaymentReminders(db, cutoffIso2, limit = 20) {
+  const { results } = await db.prepare(
+    `SELECT s2.invoiceId AS invoiceId, s2.recipientEmail AS recipientEmail, s2.recipientName AS recipientName
+         FROM SentPaymentFailureEmail s2
+         LEFT JOIN SentPaymentFailureEmail s3
+           ON s3.invoiceId = s2.invoiceId AND s3.reminderNumber = 3
+        WHERE s2.reminderNumber = 2
+          AND s3.invoiceId IS NULL
+          AND s2.recipientEmail IS NOT NULL
+          AND s2.createdAt <= ?1
+        ORDER BY s2.createdAt
+        LIMIT ?2`
+  ).bind(cutoffIso2, limit).all();
+  return results || [];
 }
 async function savePaymentEvent(db, data) {
   const id = data.id || `evt_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
@@ -2918,6 +3036,7 @@ async function createSite(db, { organizationId, name, domain: domain2, origin, b
       ).run();
       return {
         ...existing,
+        _created: false,
         organizationId,
         name,
         cdnScriptId: keptCdnScriptId,
@@ -2940,6 +3059,7 @@ async function createSite(db, { organizationId, name, domain: domain2, origin, b
     ).bind(name, bannerType, regionMode, now, backfillEmbed, existing.id).run();
     return {
       ...existing,
+      _created: false,
       name,
       banner_type: bannerType,
       region_mode: regionMode,
@@ -2991,7 +3111,8 @@ async function createSite(db, { organizationId, name, domain: domain2, origin, b
     region_mode: regionMode,
     embedScriptUrl,
     createdAt: now,
-    updatedAt: now
+    updatedAt: now,
+    _created: true
   };
 }
 async function saveReportedScripts(db, { siteId, scripts }) {
@@ -3051,10 +3172,10 @@ function fromHex(hex) {
 }
 async function hashPassword(plainPassword) {
   const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
-  const enc = new TextEncoder();
+  const enc2 = new TextEncoder();
   const key = await crypto.subtle.importKey(
     "raw",
-    enc.encode(plainPassword),
+    enc2.encode(plainPassword),
     "PBKDF2",
     false,
     ["deriveBits"]
@@ -3075,10 +3196,10 @@ async function verifyPassword(plainPassword, storedSaltHash) {
   const [saltHex, hashHex] = storedSaltHash.split(":");
   if (!saltHex || !hashHex) return false;
   const salt = fromHex(saltHex);
-  const enc = new TextEncoder();
+  const enc2 = new TextEncoder();
   const key = await crypto.subtle.importKey(
     "raw",
-    enc.encode(plainPassword),
+    enc2.encode(plainPassword),
     "PBKDF2",
     false,
     ["deriveBits"]
@@ -3134,6 +3255,51 @@ async function getUserById(db, id) {
 async function updateUserBillingEmail(db, userId, billingEmail) {
   await db.prepare(`UPDATE User SET billingEmail = ?1, updatedAt = datetime('now') WHERE id = ?2`).bind(billingEmail || null, userId).run();
   return getUserById(db, userId);
+}
+async function renameUserAccount(db, userId, { email, name }) {
+  const normEmail2 = String(email || "").trim().toLowerCase();
+  const trimmedName = (name || "").trim() || null;
+  await db.prepare(`UPDATE User SET email = ?1, name = ?2, updatedAt = datetime('now') WHERE id = ?3`).bind(normEmail2, trimmedName, userId).run();
+  return getUserById(db, userId);
+}
+async function deleteSessionsForUser(db, userId) {
+  await db.prepare(`DELETE FROM Session WHERE userId = ?1`).bind(userId).run();
+  return { deleted: true };
+}
+async function cancelPendingOwnershipTransfers(db, userId) {
+  await db.prepare(`UPDATE OwnershipTransfer SET status = 'cancelled' WHERE userId = ?1 AND status = 'pending'`).bind(userId).run();
+}
+async function createOwnershipTransfer(db, { userId, currentEmail, newEmail, newName, tokenHash, ttlMinutes = 60 }) {
+  const id = crypto.randomUUID();
+  const now = /* @__PURE__ */ new Date();
+  const createdAt = now.toISOString();
+  const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1e3).toISOString();
+  await db.prepare(
+    `INSERT INTO OwnershipTransfer
+       (id, userId, currentEmail, newEmail, newName, tokenHash, status, createdAt, expiresAt)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8)`
+  ).bind(
+    id,
+    userId,
+    String(currentEmail || "").trim().toLowerCase(),
+    String(newEmail || "").trim().toLowerCase(),
+    (newName || "").trim() || null,
+    tokenHash,
+    createdAt,
+    expiresAt
+  ).run();
+  return { id, createdAt, expiresAt };
+}
+async function getOwnershipTransferById(db, id) {
+  if (!id) return null;
+  const row = await db.prepare(`SELECT * FROM OwnershipTransfer WHERE id = ?1`).bind(id).first();
+  return row || null;
+}
+async function incrementOwnershipTransferAttempts(db, id) {
+  await db.prepare(`UPDATE OwnershipTransfer SET attempts = attempts + 1 WHERE id = ?1`).bind(id).run();
+}
+async function markOwnershipTransferAuthorized(db, id) {
+  await db.prepare(`UPDATE OwnershipTransfer SET status = 'authorized', authorizedAt = datetime('now') WHERE id = ?1`).bind(id).run();
 }
 async function updateSiteName(db, siteId, name) {
   await db.prepare(`UPDATE Site SET name = ?1, updatedAt = datetime('now') WHERE id = ?2`).bind(name, siteId).run();
@@ -3593,6 +3759,15 @@ async function getDueScheduledScans(db) {
     return [];
   }
 }
+async function claimDueScheduledScan(db, { id, currentNextRunAt, once: once2, newNextRunAt, now }) {
+  try {
+    const res = once2 ? await db.prepare("UPDATE ScheduledScan SET isActive = 0, lastRunAt = ?1, updatedAt = ?1 WHERE id = ?2 AND isActive = 1 AND nextRunAt = ?3").bind(now, id, currentNextRunAt).run() : await db.prepare("UPDATE ScheduledScan SET nextRunAt = ?1, lastRunAt = ?2, updatedAt = ?2 WHERE id = ?3 AND isActive = 1 AND nextRunAt = ?4").bind(newNextRunAt, now, id, currentNextRunAt).run();
+    return (res?.meta?.changes || 0) > 0;
+  } catch (error) {
+    console.error("[db] claimDueScheduledScan failed:", error?.message);
+    return false;
+  }
+}
 async function updateScheduledScanAfterRun(db, id, lastRunAt, nextRunAt) {
   try {
     await db.prepare("UPDATE ScheduledScan SET lastRunAt = ?1, nextRunAt = ?2, updatedAt = ?3 WHERE id = ?4").bind(lastRunAt, nextRunAt, (/* @__PURE__ */ new Date()).toISOString(), id).run();
@@ -3726,6 +3901,127 @@ async function saveBannerCustomization(db, siteId, customization) {
     throw error;
   }
 }
+async function createWebflowOAuthState(db, { state, returnTo = "", ttlMinutes = 10 } = {}) {
+  await ensureSchema(db);
+  const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1e3).toISOString();
+  await db.prepare(
+    `INSERT INTO WebflowOAuthState (state, returnTo, expiresAt, createdAt)
+       VALUES (?1, ?2, ?3, datetime('now'))
+       ON CONFLICT(state) DO UPDATE SET returnTo = excluded.returnTo, expiresAt = excluded.expiresAt`
+  ).bind(state, returnTo || "", expiresAt).run();
+  return { state, expiresAt };
+}
+async function consumeWebflowOAuthState(db, state) {
+  await ensureSchema(db);
+  if (!state) return null;
+  const row = await db.prepare(`SELECT state, returnTo FROM WebflowOAuthState WHERE state = ?1 AND expiresAt > datetime('now')`).bind(state).first();
+  await db.prepare(`DELETE FROM WebflowOAuthState WHERE state = ?1`).bind(state).run();
+  return row || null;
+}
+async function saveWebflowOAuthToken(db, { userKey, accessToken, tokenType = "bearer", scope = null, authorizedBy = null, sites = [] } = {}) {
+  await ensureSchema(db);
+  if (!userKey || !accessToken) throw new Error("saveWebflowOAuthToken: userKey and accessToken are required");
+  await db.prepare(
+    `INSERT INTO WebflowOAuthToken (userKey, accessToken, tokenType, scope, authorizedBy, createdAt, updatedAt)
+       VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), datetime('now'))
+       ON CONFLICT(userKey) DO UPDATE SET
+         accessToken = excluded.accessToken,
+         tokenType   = excluded.tokenType,
+         scope       = excluded.scope,
+         authorizedBy = excluded.authorizedBy,
+         updatedAt   = datetime('now')`
+  ).bind(
+    userKey,
+    accessToken,
+    tokenType,
+    scope,
+    authorizedBy ? JSON.stringify(authorizedBy) : null
+  ).run();
+  for (const s of sites) {
+    if (!s?.id) continue;
+    await db.prepare(
+      `INSERT INTO WebflowOAuthSite (siteId, userKey, accessToken, displayName, shortName, createdAt, updatedAt)
+         VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), datetime('now'))
+         ON CONFLICT(siteId) DO UPDATE SET
+           userKey     = excluded.userKey,
+           accessToken = excluded.accessToken,
+           displayName = excluded.displayName,
+           shortName   = excluded.shortName,
+           updatedAt   = datetime('now')`
+    ).bind(s.id, userKey, accessToken, s.displayName || null, s.shortName || null).run();
+  }
+  return { userKey, sites: sites.length };
+}
+async function getWebflowOAuthTokenBySite(db, siteId) {
+  await ensureSchema(db);
+  if (!siteId) return null;
+  const row = await db.prepare(`SELECT * FROM WebflowOAuthSite WHERE siteId = ?1`).bind(siteId).first();
+  return row || null;
+}
+async function getWebflowOAuthTokenByUser(db, userKey) {
+  await ensureSchema(db);
+  if (!userKey) return null;
+  const row = await db.prepare(`SELECT * FROM WebflowOAuthToken WHERE userKey = ?1`).bind(userKey).first();
+  if (row && row.authorizedBy) {
+    try {
+      row.authorizedBy = JSON.parse(row.authorizedBy);
+    } catch {
+    }
+  }
+  return row || null;
+}
+async function resolveWebflowOAuthToken(db, kv, siteId, siteMeta = {}) {
+  await ensureSchema(db);
+  if (!siteId) return null;
+  const existing = await db.prepare(`SELECT * FROM WebflowOAuthSite WHERE siteId = ?1`).bind(siteId).first();
+  if (existing?.accessToken) return { ...existing, source: "db" };
+  if (!kv) return null;
+  let kvEntry = null;
+  try {
+    const raw = await kv.get(siteId);
+    kvEntry = raw ? typeof raw === "string" ? JSON.parse(raw) : raw : null;
+  } catch {
+    kvEntry = null;
+  }
+  if (!kvEntry?.accessToken) return null;
+  const userKey = kvEntry.userId || kvEntry.email || siteId;
+  await saveWebflowOAuthToken(db, {
+    userKey,
+    accessToken: kvEntry.accessToken,
+    tokenType: kvEntry.tokenType || "bearer",
+    scope: kvEntry.scope || null,
+    authorizedBy: kvEntry.userId || kvEntry.email ? { user: { id: kvEntry.userId || null, email: kvEntry.email || null } } : null,
+    sites: [
+      {
+        id: siteId,
+        displayName: siteMeta.displayName || kvEntry.displayName || null,
+        shortName: siteMeta.shortName || kvEntry.shortName || null
+      }
+    ]
+  });
+  const migrated = await db.prepare(`SELECT * FROM WebflowOAuthSite WHERE siteId = ?1`).bind(siteId).first();
+  return migrated?.accessToken ? { ...migrated, source: "kv-backfill" } : null;
+}
+async function invalidateWebflowOAuthToken(db, kv, siteId) {
+  await ensureSchema(db);
+  if (!siteId) return;
+  try {
+    await db.prepare(`DELETE FROM WebflowOAuthSite WHERE siteId = ?1`).bind(siteId).run();
+  } catch (_) {
+  }
+  if (!kv) return;
+  try {
+    const raw = await kv.get(siteId);
+    if (raw) {
+      const entry = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (entry && entry.accessToken) {
+        delete entry.accessToken;
+        await kv.put(siteId, JSON.stringify(entry));
+      }
+    }
+  } catch (_) {
+  }
+}
 var _schemaEnsured, LICENSE_KEY_CHARS, PBKDF2_ITERATIONS, SALT_BYTES, HASH_BYTES;
 var init_db = __esm({
   "src/services/db.js"() {
@@ -3788,6 +4084,8 @@ var init_db = __esm({
     __name(getPendingSubscriptionQueue, "getPendingSubscriptionQueue");
     __name(deleteSubscriptionQueueRow, "deleteSubscriptionQueueRow");
     __name(markSubscriptionQueueFailed, "markSubscriptionQueueFailed");
+    __name(claimPaymentFailureEmail, "claimPaymentFailureEmail");
+    __name(getPendingFinalPaymentReminders, "getPendingFinalPaymentReminders");
     __name(savePaymentEvent, "savePaymentEvent");
     __name(getSiteByCdnId, "getSiteByCdnId");
     __name(getSiteById, "getSiteById");
@@ -3810,6 +4108,13 @@ var init_db = __esm({
     __name(createUser, "createUser");
     __name(getUserById, "getUserById");
     __name(updateUserBillingEmail, "updateUserBillingEmail");
+    __name(renameUserAccount, "renameUserAccount");
+    __name(deleteSessionsForUser, "deleteSessionsForUser");
+    __name(cancelPendingOwnershipTransfers, "cancelPendingOwnershipTransfers");
+    __name(createOwnershipTransfer, "createOwnershipTransfer");
+    __name(getOwnershipTransferById, "getOwnershipTransferById");
+    __name(incrementOwnershipTransferAttempts, "incrementOwnershipTransferAttempts");
+    __name(markOwnershipTransferAuthorized, "markOwnershipTransferAuthorized");
     __name(updateSiteName, "updateSiteName");
     __name(updateSiteFromPatch, "updateSiteFromPatch");
     __name(markSiteVerified, "markSiteVerified");
@@ -3835,10 +4140,18 @@ var init_db = __esm({
     __name(createScheduledScan, "createScheduledScan");
     __name(deleteScheduledScan, "deleteScheduledScan");
     __name(getDueScheduledScans, "getDueScheduledScans");
+    __name(claimDueScheduledScan, "claimDueScheduledScan");
     __name(updateScheduledScanAfterRun, "updateScheduledScanAfterRun");
     __name(deactivateScheduledScan, "deactivateScheduledScan");
     __name(calculateNextRunAt, "calculateNextRunAt");
     __name(saveBannerCustomization, "saveBannerCustomization");
+    __name(createWebflowOAuthState, "createWebflowOAuthState");
+    __name(consumeWebflowOAuthState, "consumeWebflowOAuthState");
+    __name(saveWebflowOAuthToken, "saveWebflowOAuthToken");
+    __name(getWebflowOAuthTokenBySite, "getWebflowOAuthTokenBySite");
+    __name(getWebflowOAuthTokenByUser, "getWebflowOAuthTokenByUser");
+    __name(resolveWebflowOAuthToken, "resolveWebflowOAuthToken");
+    __name(invalidateWebflowOAuthToken, "invalidateWebflowOAuthToken");
   }
 });
 
@@ -4408,7 +4721,7 @@ var require_node = __commonJS({
     var tty = require_tty();
     var util = require_util();
     exports.init = init;
-    exports.log = log;
+    exports.log = log2;
     exports.formatArgs = formatArgs;
     exports.save = save;
     exports.load = load;
@@ -4546,10 +4859,10 @@ var require_node = __commonJS({
       return (/* @__PURE__ */ new Date()).toISOString() + " ";
     }
     __name(getDate, "getDate");
-    function log(...args) {
+    function log2(...args) {
       return process.stderr.write(util.formatWithOptions(exports.inspectOpts, ...args) + "\n");
     }
-    __name(log, "log");
+    __name(log2, "log");
     function save(namespaces) {
       if (namespaces) {
         process.env.DEBUG = namespaces;
@@ -4953,7 +5266,7 @@ async function handleSites(request, env2) {
 }
 __name(handleSites, "handleSites");
 
-// src/handlers/cdn.js
+// src/handlers/cdnNm.js
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
@@ -5079,8 +5392,6 @@ function getLoaderIabScript(customization, opts = {}, isGAC = false) {
  */
 const BASE_URL = "https://test-cmp.pages.dev/";
 
-
-
 // Google Additional Consent (AC) toggle \u2014 baked from the isGAC build argument.
 const IS_GAC = ${isGoogleAC};
 window.__cbIsGAC = IS_GAC;
@@ -5164,7 +5475,6 @@ function injectStyles() {
 .consentBit-vendor-item{padding:16px;border:1px solid #f0f0f0;border-radius:\${brSm};background:#fafafa;transition:all .2s ease;animation:consentBit-fadeIn .3s ease}
 .consentBit-vendor-item:hover{border-color:\${s.SecButtonColor};background:#fff;box-shadow:0 4px 12px rgba(0,0,0,.1)}
 .consentBit-vendor-item.consentBit-hidden{display:none!important}
-.consentBit-vendor-item{content-visibility:auto;contain-intrinsic-size:auto 90px}
 .consentBit-vendor-header{display:flex;justify-content:space-between;align-items:center;gap:16px}
 .consentBit-vendor-info{flex:1}
 .consentBit-vendor-name{font-weight:600;font-size:15px;color:\${s.headingColor};margin-bottom:4px}
@@ -7087,12 +7397,67 @@ function closeModal() {
 function openModal() {
     document.getElementById('cbPreferenceModal').classList.remove('cb-modal-hidden');
 }
+// Record IAB/TCF consent to the backend. The external TCF manager (Tcfmanager.js)
+// only writes to localStorage + gtag + fires TCF events; it never POSTs, so without
+// this the IAB banner creates no Consent row. status: 'given' (accept) |
+// 'rejected' (reject) | 'partial' (save preferences). Mirrors the standard loader re().
+function cbRecordIabConsent(status, categories) {
+  try {
+    var cfg = (typeof window !== 'undefined' && window.__CONSENT_SITE__) || {};
+    var siteId = cfg.id || null;
+    var apiBase = cfg.apiBase;
+    if (!siteId || !apiBase) return;
+
+    var tcf = {};
+    try {
+      if (window.tcfManager && typeof window.tcfManager.getTCData === 'function') {
+        var d = window.tcfManager.getTCData();
+        tcf = {
+          version: 2,
+          cmpId: d && d.cmpId,
+          cmpVersion: d && d.cmpVersion,
+          consentScreen: 1,
+          publisherCc: d && d.publisherCC,
+          purposesConsent: d && d.purpose && d.purpose.consents,
+          purposesLI: d && d.purpose && d.purpose.legitimateInterests,
+          specialFeatures: d && d.specialFeatureOptins,
+          vendorsConsent: d && d.vendor && d.vendor.consents,
+          vendorsLI: d && d.vendor && d.vendor.legitimateInterests
+        };
+      }
+    } catch (e) {}
+
+    var body = {
+      siteId: siteId,
+      regulation: 'gdpr',
+      // Persist IAB/TCF consent as a plain GDPR record, not as bannerType 'iab'.
+      bannerType: 'gdpr',
+      consentMethod: status === 'partial' ? 'preferences' : 'banner',
+      status: status,
+      expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+      consent: {
+        accepted: status !== 'rejected',
+        timestamp: new Date().toISOString(),
+        categories: categories || { essential: true, analytics: false, marketing: false, preferences: false }
+      },
+      tcf: tcf
+    };
+
+    fetch(apiBase + '/api/consent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).catch(function () {});
+  } catch (e) {}
+}
+
 async function rejectAll() {
   // console.log('[ConsentBit][RejectAll] \u{1F6AB} User rejected all \u2014 blocking all non-essential scripts');
   if (!window.tcfManager) { return; }
   await window.tcfManager.rejectAll();
   window.__cbConsentState = { allDenied: true };
   // console.log('[ConsentBit][RejectAll] __cbConsentState set:', window.__cbConsentState);
+  cbRecordIabConsent('rejected', { essential: true, analytics: false, marketing: false, preferences: false });
   blockNonEssentialScripts();
 
     const wrapper = document.querySelector('.main-iab-wrapper');
@@ -7183,6 +7548,13 @@ async function savePreferences() {
     // console.log('[ConsentBit][SavePrefs] \u{1F4BE} Preferences saved \u2014 __cbConsentState:', JSON.stringify(window.__cbConsentState));
     // console.log('[ConsentBit][SavePrefs] cookieCategories:', JSON.stringify(preferences.cookieCategories));
 
+    cbRecordIabConsent('partial', {
+      essential: true,
+      analytics:    !!(preferences.cookieCategories.analytics     && preferences.cookieCategories.analytics.enabled),
+      marketing:    !!(preferences.cookieCategories.advertisement && preferences.cookieCategories.advertisement.enabled),
+      preferences:  !!(preferences.cookieCategories.functional    && preferences.cookieCategories.functional.enabled)
+    });
+
     // Re-block any scripts whose category was just denied, then release those now allowed
     blockNonEssentialScripts();
     releaseBlockedScripts();
@@ -7196,6 +7568,7 @@ async function acceptAll() {
   await window.tcfManager.acceptAll();
   window.__cbConsentState = { allGranted: true };
   // console.log('[ConsentBit][AcceptAll] __cbConsentState set:', window.__cbConsentState);
+  cbRecordIabConsent('given', { essential: true, analytics: true, marketing: true, preferences: true });
   releaseBlockedScripts();
  const wrapper = document.querySelector('.main-iab-wrapper');
   if (wrapper) {
@@ -7905,12 +8278,12 @@ __name(getLoaderIabScript, "getLoaderIabScript");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 function getWebflowSetupScript() {
-  return `(function(){window.__CB_WEBFLOW_MODE__=true;(function(){try{var a=window.__CONSENT_SITE__||{};var b=(a.bannerType||'gdpr').toLowerCase();var c=b==='ccpa';var d=null;var e=false;var hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}/* GPC: honor navigator.globalPrivacyControl as a CCPA opt-out on first visit (no stored choice), BEFORE gtag default + script-block decision below. Stored choice wins. */try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};if(!c){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else{window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',security_storage:'granted'});}var f=c?e:true;var g=a.scriptBlockProviders||[];var h=a.customCookieRules||[];var j=[{domain:'google-analytics.com',category:'analytics'},{domain:'googletagmanager.com',category:'analytics'},{domain:'gtag/js',category:'analytics'},{domain:'gtm.js',category:'analytics'},{domain:'hotjar.com',category:'analytics'},{domain:'clarity.ms',category:'analytics'},{domain:'scorecardresearch.com',category:'analytics'},{domain:'quantserve.com',category:'analytics'},{domain:'facebook.com',category:'marketing'},{domain:'facebook.net',category:'marketing'},{domain:'fbcdn.net',category:'marketing'},{domain:'doubleclick.net',category:'marketing'},{domain:'googleadservices.com',category:'marketing'},{domain:'googlesyndication.com',category:'marketing'},{domain:'bing.com',category:'marketing'},{domain:'bat.bing.com',category:'marketing'},{domain:'twitter.com',category:'marketing'},{domain:'analytics.twitter.com',category:'marketing'},{domain:'t.co',category:'marketing'},{domain:'linkedin.com',category:'marketing'},{domain:'ads.linkedin.com',category:'marketing'},{domain:'pinterest.com',category:'marketing'},{domain:'ct.pinterest.com',category:'marketing'},{domain:'tiktok.com',category:'marketing'},{domain:'analytics.tiktok.com',category:'marketing'},{domain:'outbrain.com',category:'marketing'},{domain:'taboola.com',category:'marketing'},{domain:'criteo.com',category:'marketing'},{domain:'criteo.net',category:'marketing'},{domain:'zemanta.com',category:'marketing'},{domain:'adroll.com',category:'marketing'},{domain:'d.adroll.com',category:'marketing'},{domain:'smartlook.com',category:'analytics'},{domain:'smartlookcloud.com',category:'analytics'},{domain:'rec.smartlook.com',category:'analytics'},{domain:'posthog.com',category:'analytics'},{domain:'app.posthog.com',category:'analytics'},{domain:'eu.posthog.com',category:'analytics'},{domain:'matomo.cloud',category:'analytics'},{domain:'matomo.js',category:'analytics'},{domain:'piwik.js',category:'analytics'},{domain:'piwik.php',category:'analytics'}];function k(z){var lo=(z||'').trim().toLowerCase();return lo==='necessary'||lo==='essential';}function m(z){var lo=z.trim().toLowerCase();if(lo==='advertising'||lo==='advertisement')return'marketing';if(lo==='functional'||lo==='performance'||lo==='personalization')return'preferences';return lo;}function n(u){if(!u)return null;var lo=u.toLowerCase();for(var bi=0;bi<j.length;bi++){if(lo.indexOf(j[bi].domain)!==-1)return j[bi].category;}for(var ki=0;ki<g.length;ki++){try{if(g[ki]&&g[ki].pattern&&new RegExp(g[ki].pattern,'i').test(u))return(g[ki].categories&&g[ki].categories[0])||'analytics';}catch(_){}}for(var li=0;li<h.length;li++){try{if(h[li]&&h[li].scriptUrlPattern&&new RegExp(h[li].scriptUrlPattern,'i').test(u))return h[li].category||'analytics';}catch(_){}}return null;}function o(el){if(!f)return;if(!el||el.nodeName!=='SCRIPT')return;var u=(el.getAttribute&&el.getAttribute('src'))||'';if(u.indexOf('consentbit')!==-1||u.indexOf('consent.js')!==-1)return;if(el.getAttribute&&el.getAttribute('type')==='text/plain')return;var t=el.getAttribute&&el.getAttribute('data-category');if(t){var cl=t.split(',').map(function(z){return z.trim().toLowerCase();});if(cl.every(k))return;if(!c&&d){if(cl.every(function(z){return k(z)||!!d[m(z)];}))return;}if(u){el.setAttribute('data-cb-blocked-src',u);el.removeAttribute('src');}el.setAttribute('type','text/plain');}else if(u){var r2=n(u);if(!r2)return;if(k(r2))return;if(!c&&d&&!!d[m(r2)])return;el.setAttribute('data-cb-blocked-src',u);el.setAttribute('data-category',r2);el.removeAttribute('src');el.setAttribute('type','text/plain');}}var p=document.createElement.bind(document);document.createElement=function(tag){var el=p(tag);if(typeof tag==='string'&&tag.toLowerCase()==='script'){var sv='';try{Object.defineProperty(el,'src',{configurable:true,enumerable:true,get:function(){return sv;},set:function(val){sv=val;if(!f){el.setAttribute('src',val);return;}var t=el.getAttribute('data-category');var r2=n(val);var blk=false;if(t){var cl=t.split(',').map(function(z){return z.trim().toLowerCase();});if(!cl.every(k)){blk=!(!c&&d&&cl.every(function(z){return k(z)||!!d[m(z)];}));}}else if(r2&&!k(r2)){blk=!(!c&&d&&!!d[m(r2)]);}if(blk){el.setAttribute('data-cb-blocked-src',val);if(!t&&r2)el.setAttribute('data-category',r2);el.setAttribute('type','text/plain');}else{el.setAttribute('src',val);}}});}catch(_){}}return el;};var q=new MutationObserver(function(ms){ms.forEach(function(mu){mu.addedNodes.forEach(o);});});q.observe(document.documentElement,{childList:true,subtree:true});function r(){q.disconnect();document.querySelectorAll('script[type="text/plain"]').forEach(function(el){var u=el.getAttribute('src')||'';if(u&&!el.getAttribute('data-cb-blocked-src')){el.setAttribute('data-cb-blocked-src',u);if(!el.getAttribute('data-category')){var t=n(u);if(t)el.setAttribute('data-category',t);else{var t2=el.getAttribute('data-consentbit-category')||el.getAttribute('data-category-cb');if(t2)el.setAttribute('data-category',t2.trim().toLowerCase());}}}if(!u&&!el.getAttribute('data-cb-inline-blocked')){el.setAttribute('data-cb-inline-blocked','1');if(!el.getAttribute('data-category')){var t2=el.getAttribute('data-consentbit-category')||el.getAttribute('data-category-cb');if(t2)el.setAttribute('data-category',t2.trim().toLowerCase());}}});}document.readyState==='loading'?document.addEventListener('DOMContentLoaded',r,{once:true}):r();document.addEventListener('consentUpdated',function(ev){var cats=(ev&&ev.detail)||{};if(c){var dns2=!!(cats.doNotSell||(cats.ccpa&&cats.ccpa.doNotSell));e=dns2;window.gtag&&window.gtag('consent','update',{ad_storage:dns2?'denied':'granted',analytics_storage:dns2?'denied':'granted',ad_user_data:dns2?'denied':'granted',ad_personalization:dns2?'denied':'granted'});if(dns2&&!f){f=true;document.querySelectorAll('script[data-cb-blocked-src]').forEach(o);return;}if(!dns2)f=false;}else{d={analytics:!!cats.analytics,marketing:!!cats.marketing,preferences:!!cats.preferences,essential:true};}function s(t){if(c)return cats.doNotSell===false;if(!t)return!!(cats.analytics||cats.marketing||cats.preferences);var dca=t.split(',').map(function(z){return z.trim().toLowerCase();});return dca.every(function(z){if(z==='necessary'||z==='essential')return true;if(z==='analytics')return!!cats.analytics;if(z==='marketing'||z==='advertising'||z==='advertisement')return!!cats.marketing;if(z==='preferences'||z==='functional'||z==='performance'||z==='personalization')return!!cats.preferences;return true;});}var bl=document.querySelectorAll('script[type="text/plain"][data-cb-blocked-src],script[type="text/plain"][data-cb-inline-blocked]');for(var ii=0;ii<bl.length;ii++){var s2=bl[ii];var bsrc=s2.getAttribute('data-cb-blocked-src')||'';var dc=s2.getAttribute('data-category')||'';var ok=s(dc);if(ok){try{var ns2=p('script');if(bsrc){ns2.src=bsrc;if(s2.hasAttribute('async'))ns2.async=true;if(s2.hasAttribute('defer'))ns2.defer=true;var at2=s2.attributes;for(var ai=0;ai<at2.length;ai++){var an2=at2[ai].name;if(an2!=='src'&&an2!=='type'&&an2!=='data-cb-blocked-src'&&an2!=='data-cb-inline-blocked')ns2.setAttribute(an2,at2[ai].value);}ns2.setAttribute('data-cb-released-src',bsrc);s2.parentNode?s2.parentNode.replaceChild(ns2,s2):document.head.appendChild(ns2);}else{var ic=s2.textContent||s2.innerHTML||'';var nl=String.fromCharCode(10);var ls=ic.split(nl);var si=0;while(si<ls.length&&si<10){var lt=ls[si].trim();if(lt.length===0||(lt.charAt(0)==='/'&&lt.charAt(1)==='/'))si++;else break;}var fc=(si<ls.length?ls.slice(si).join(nl):'').trim().charAt(0);if(fc!=='{'&&fc!=='['){ns2.textContent=ic;var at3=s2.attributes;for(var aj=0;aj<at3.length;aj++){var an3=at3[aj].name;if(an3!=='type'&&an3!=='data-cb-inline-blocked')ns2.setAttribute(an3,at3[aj].value);}ns2.setAttribute('data-cb-released-inline','1');s2.parentNode&&s2.parentNode.replaceChild(ns2,s2);}}}catch(_){}}}var rl=document.querySelectorAll('script[data-cb-released-src],script[data-cb-released-inline]');for(var ri=0;ri<rl.length;ri++){var rs=rl[ri];var rdc=rs.getAttribute('data-category')||'';var rok=s(rdc);if(!rok){try{var rb=p('script');rb.setAttribute('type','text/plain');if(rdc)rb.setAttribute('data-category',rdc);var rIsInline=rs.hasAttribute('data-cb-released-inline');if(rIsInline){rb.textContent=rs.textContent||rs.innerHTML||'';rb.setAttribute('data-cb-inline-blocked','1');}else{var rSrc=rs.getAttribute('data-cb-released-src')||'';rb.setAttribute('data-cb-blocked-src',rSrc);if(rs.hasAttribute('async'))rb.setAttribute('async','');if(rs.hasAttribute('defer'))rb.setAttribute('defer','');}rs.parentNode&&rs.parentNode.replaceChild(rb,rs);}catch(_){}}}});
+  return `(function(){window.__CB_WEBFLOW_MODE__=true;(function(){try{var a=window.__CONSENT_SITE__||{};var b=(a.bannerType||'gdpr').toLowerCase();var c=b==='ccpa';var d=null;var e=false;var hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}/* GPC: honor navigator.globalPrivacyControl as a CCPA opt-out on first visit (no stored choice), BEFORE gtag default + script-block decision below. Stored choice wins. */try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);if(!c){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else{window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}window.__cbConsentDefaultSet=true;var f=c?e:true;var g=a.scriptBlockProviders||[];var h=a.customCookieRules||[];var j=[{domain:'google-analytics.com',category:'analytics'},{domain:'googletagmanager.com',category:'analytics'},{domain:'gtag/js',category:'analytics'},{domain:'gtm.js',category:'analytics'},{domain:'hotjar.com',category:'analytics'},{domain:'clarity.ms',category:'analytics'},{domain:'scorecardresearch.com',category:'analytics'},{domain:'quantserve.com',category:'analytics'},{domain:'facebook.com',category:'marketing'},{domain:'facebook.net',category:'marketing'},{domain:'fbcdn.net',category:'marketing'},{domain:'doubleclick.net',category:'marketing'},{domain:'googleadservices.com',category:'marketing'},{domain:'googlesyndication.com',category:'marketing'},{domain:'bing.com',category:'marketing'},{domain:'bat.bing.com',category:'marketing'},{domain:'twitter.com',category:'marketing'},{domain:'analytics.twitter.com',category:'marketing'},{domain:'t.co',category:'marketing'},{domain:'linkedin.com',category:'marketing'},{domain:'ads.linkedin.com',category:'marketing'},{domain:'pinterest.com',category:'marketing'},{domain:'ct.pinterest.com',category:'marketing'},{domain:'tiktok.com',category:'marketing'},{domain:'analytics.tiktok.com',category:'marketing'},{domain:'outbrain.com',category:'marketing'},{domain:'taboola.com',category:'marketing'},{domain:'criteo.com',category:'marketing'},{domain:'criteo.net',category:'marketing'},{domain:'zemanta.com',category:'marketing'},{domain:'adroll.com',category:'marketing'},{domain:'d.adroll.com',category:'marketing'},{domain:'smartlook.com',category:'analytics'},{domain:'smartlookcloud.com',category:'analytics'},{domain:'rec.smartlook.com',category:'analytics'},{domain:'posthog.com',category:'analytics'},{domain:'app.posthog.com',category:'analytics'},{domain:'eu.posthog.com',category:'analytics'},{domain:'matomo.cloud',category:'analytics'},{domain:'matomo.js',category:'analytics'},{domain:'piwik.js',category:'analytics'},{domain:'piwik.php',category:'analytics'}];function k(z){var lo=(z||'').trim().toLowerCase();return lo==='necessary'||lo==='essential';}function m(z){var lo=z.trim().toLowerCase();if(lo==='advertising'||lo==='advertisement')return'marketing';if(lo==='functional'||lo==='performance'||lo==='personalization')return'preferences';return lo;}function n(u){if(!u)return null;var lo=u.toLowerCase();for(var bi=0;bi<j.length;bi++){if(lo.indexOf(j[bi].domain)!==-1)return j[bi].category;}for(var ki=0;ki<g.length;ki++){try{if(g[ki]&&g[ki].pattern&&new RegExp(g[ki].pattern,'i').test(u))return(g[ki].categories&&g[ki].categories[0])||'analytics';}catch(_){}}for(var li=0;li<h.length;li++){try{if(h[li]&&h[li].scriptUrlPattern&&new RegExp(h[li].scriptUrlPattern,'i').test(u))return h[li].category||'analytics';}catch(_){}}return null;}function o(el){if(!f)return;if(!el||el.nodeName!=='SCRIPT')return;var u=(el.getAttribute&&el.getAttribute('src'))||'';if(u.indexOf('consentbit')!==-1||u.indexOf('consent.js')!==-1)return;if(el.getAttribute&&el.getAttribute('type')==='text/plain')return;var t=el.getAttribute&&el.getAttribute('data-category');if(t){var cl=t.split(',').map(function(z){return z.trim().toLowerCase();});if(cl.every(k))return;if(!c&&d){if(cl.every(function(z){return k(z)||!!d[m(z)];}))return;}if(u){el.setAttribute('data-cb-blocked-src',u);el.removeAttribute('src');}el.setAttribute('type','text/plain');}else if(u){var r2=n(u);if(!r2)return;if(k(r2))return;if(!c&&d&&!!d[m(r2)])return;el.setAttribute('data-cb-blocked-src',u);el.setAttribute('data-category',r2);el.removeAttribute('src');el.setAttribute('type','text/plain');}}var p=document.createElement.bind(document);document.createElement=function(tag){var el=p(tag);if(typeof tag==='string'&&tag.toLowerCase()==='script'){var sv='';try{Object.defineProperty(el,'src',{configurable:true,enumerable:true,get:function(){return sv;},set:function(val){sv=val;if(!f){el.setAttribute('src',val);return;}var t=el.getAttribute('data-category');var r2=n(val);var blk=false;if(t){var cl=t.split(',').map(function(z){return z.trim().toLowerCase();});if(!cl.every(k)){blk=!(!c&&d&&cl.every(function(z){return k(z)||!!d[m(z)];}));}}else if(r2&&!k(r2)){blk=!(!c&&d&&!!d[m(r2)]);}if(blk){el.setAttribute('data-cb-blocked-src',val);if(!t&&r2)el.setAttribute('data-category',r2);el.setAttribute('type','text/plain');}else{el.setAttribute('src',val);}}});}catch(_){}}return el;};var q=new MutationObserver(function(ms){ms.forEach(function(mu){mu.addedNodes.forEach(o);});});q.observe(document.documentElement,{childList:true,subtree:true});function r(){q.disconnect();document.querySelectorAll('script[type="text/plain"]').forEach(function(el){var u=el.getAttribute('src')||'';if(u&&!el.getAttribute('data-cb-blocked-src')){el.setAttribute('data-cb-blocked-src',u);if(!el.getAttribute('data-category')){var t=n(u);if(t)el.setAttribute('data-category',t);else{var t2=el.getAttribute('data-consentbit-category')||el.getAttribute('data-category-cb');if(t2)el.setAttribute('data-category',t2.trim().toLowerCase());}}}if(!u&&!el.getAttribute('data-cb-inline-blocked')){el.setAttribute('data-cb-inline-blocked','1');if(!el.getAttribute('data-category')){var t2=el.getAttribute('data-consentbit-category')||el.getAttribute('data-category-cb');if(t2)el.setAttribute('data-category',t2.trim().toLowerCase());}}});}document.readyState==='loading'?document.addEventListener('DOMContentLoaded',r,{once:true}):r();document.addEventListener('consentUpdated',function(ev){var cats=(ev&&ev.detail)||{};if(c){var dns2=!!(cats.doNotSell||(cats.ccpa&&cats.ccpa.doNotSell));e=dns2;window.gtag&&window.gtag('consent','update',{ad_storage:dns2?'denied':'granted',analytics_storage:dns2?'denied':'granted',ad_user_data:dns2?'denied':'granted',ad_personalization:dns2?'denied':'granted',functionality_storage:dns2?'denied':'granted',personalization_storage:dns2?'denied':'granted'});if(dns2&&!f){f=true;document.querySelectorAll('script[data-cb-blocked-src]').forEach(o);return;}if(!dns2)f=false;}else{d={analytics:!!cats.analytics,marketing:!!cats.marketing,preferences:!!cats.preferences,essential:true};}function s(t){if(c)return cats.doNotSell===false;if(!t)return!!(cats.analytics||cats.marketing||cats.preferences);var dca=t.split(',').map(function(z){return z.trim().toLowerCase();});return dca.every(function(z){if(z==='necessary'||z==='essential')return true;if(z==='analytics')return!!cats.analytics;if(z==='marketing'||z==='advertising'||z==='advertisement')return!!cats.marketing;if(z==='preferences'||z==='functional'||z==='performance'||z==='personalization')return!!cats.preferences;return true;});}var bl=document.querySelectorAll('script[type="text/plain"][data-cb-blocked-src],script[type="text/plain"][data-cb-inline-blocked]');for(var ii=0;ii<bl.length;ii++){var s2=bl[ii];var bsrc=s2.getAttribute('data-cb-blocked-src')||'';var dc=s2.getAttribute('data-category')||'';var ok=s(dc);if(ok){try{var ns2=p('script');if(bsrc){ns2.src=bsrc;if(s2.hasAttribute('async'))ns2.async=true;if(s2.hasAttribute('defer'))ns2.defer=true;var at2=s2.attributes;for(var ai=0;ai<at2.length;ai++){var an2=at2[ai].name;if(an2!=='src'&&an2!=='type'&&an2!=='data-cb-blocked-src'&&an2!=='data-cb-inline-blocked')ns2.setAttribute(an2,at2[ai].value);}ns2.setAttribute('data-cb-released-src',bsrc);s2.parentNode?s2.parentNode.replaceChild(ns2,s2):document.head.appendChild(ns2);}else{var ic=s2.textContent||s2.innerHTML||'';var nl=String.fromCharCode(10);var ls=ic.split(nl);var si=0;while(si<ls.length&&si<10){var lt=ls[si].trim();if(lt.length===0||(lt.charAt(0)==='/'&&lt.charAt(1)==='/'))si++;else break;}var fc=(si<ls.length?ls.slice(si).join(nl):'').trim().charAt(0);if(fc!=='{'&&fc!=='['){ns2.textContent=ic;var at3=s2.attributes;for(var aj=0;aj<at3.length;aj++){var an3=at3[aj].name;if(an3!=='type'&&an3!=='data-cb-inline-blocked')ns2.setAttribute(an3,at3[aj].value);}ns2.setAttribute('data-cb-released-inline','1');s2.parentNode&&s2.parentNode.replaceChild(ns2,s2);}}}catch(_){}}}var rl=document.querySelectorAll('script[data-cb-released-src],script[data-cb-released-inline]');for(var ri=0;ri<rl.length;ri++){var rs=rl[ri];var rdc=rs.getAttribute('data-category')||'';var rok=s(rdc);if(!rok){try{var rb=p('script');rb.setAttribute('type','text/plain');if(rdc)rb.setAttribute('data-category',rdc);var rIsInline=rs.hasAttribute('data-cb-released-inline');if(rIsInline){rb.textContent=rs.textContent||rs.innerHTML||'';rb.setAttribute('data-cb-inline-blocked','1');}else{var rSrc=rs.getAttribute('data-cb-released-src')||'';rb.setAttribute('data-cb-blocked-src',rSrc);if(rs.hasAttribute('async'))rb.setAttribute('async','');if(rs.hasAttribute('defer'))rb.setAttribute('defer','');}rs.parentNode&&rs.parentNode.replaceChild(rb,rs);}catch(_){}}}});
 }catch(_){}})();}());`;
 }
 __name(getWebflowSetupScript, "getWebflowSetupScript");
 
-// src/handlers/cdn.js
+// src/handlers/cdnNm.js
 async function handleCDNScript(request, env2, url) {
   try {
     return await _handleCDNScript(request, env2, url);
@@ -7934,12 +8307,12 @@ async function _handleCDNScript(request, env2, url) {
   }
   const db = env2.CONSENT_WEBAPP;
   const site = await db.prepare(
-    "SELECT id, organizationId, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id, pendingScan, updatedAt, platform, platformSiteId FROM Site WHERE cdnScriptId = ?1"
+    "SELECT id, organizationId, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id, pendingScan, updatedAt, platform, platformSiteId, version FROM Site WHERE cdnScriptId = ?1"
   ).bind(cdnScriptId).first();
   let resolvedSite = site;
   if (!resolvedSite) {
     resolvedSite = await db.prepare(
-      "SELECT id, organizationId, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id, pendingScan, updatedAt, platform, platformSiteId FROM Site WHERE id = ?1"
+      "SELECT id, organizationId, name, domain, cdnScriptId, banner_type, region_mode, ga_measurement_id, pendingScan, updatedAt, platform, platformSiteId, version FROM Site WHERE id = ?1"
     ).bind(cdnScriptId).first();
   }
   if (!resolvedSite) {
@@ -8216,10 +8589,7 @@ async function _handleCDNScript(request, env2, url) {
       var ccpaWidthPx = Math.max(baseWidthPx, 600);
       initialSize = "width:" + ccpaWidthPx + "px!important;min-width:360px;max-width:min(" + ccpaWidthPx + "px,96vw)!important;max-height:min(80vh,660px);overflow:hidden;";
     }
-    customStyles = ".cb-banner{border:none !important;}#cb-initial-banner.cb-banner{" + initialSize + "background-color:" + bgColor + "!important;color:" + textColor + ";position:fixed!important;" + positionStyles + "padding:" + (layoutVisual === "banner" ? "28px 48px" : boxPadding) + "!important;border:1px solid #e2e8f0;" + initialRadius + "box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;align-items:stretch;font-family:" + fontFamilyCss + ";font-size:14px!important;line-height:1.5!important;font-weight:" + fontWeightStr + ";}#cb-initial-banner.cb-banner .cb-banner-body{flex:0 1 auto;min-width:0;min-height:0;overflow-y:auto;}#cb-initial-banner.cb-banner #cb-close-initial-btn,#cb-initial-banner.cb-banner [consentbit='close']{position:absolute!important;top:8px!important;right:20px!important;width:10px!important;height:10px!important;cursor:pointer!important;background:transparent!important;border:none!important;padding:0!important;z-index:10!important;display:" + (closeButtonEnabled ? "block" : "none") + "!important;}#cb-preferences-banner.cb-banner{width:600px;max-width:94vw;max-height:min(88vh,640px);min-height:0;overflow:hidden;background-color:" + bgColor + ";color:" + textColor + ";position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);padding:28px;border:1px solid #e2e8f0;border-radius:" + bannerRadius + ";box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;font-family:" + fontFamilyCss + ";font-size:14px!important;line-height:1.5!important;font-weight:" + fontWeightStr + ";}#cb-preferences-banner.cb-banner .cb-banner-body{flex:1 1 auto;min-height:0;overflow-y:auto;}.cb-banner h3{margin:0 0 8px;font-size:16px!important;line-height:1.4!important;font-weight:600;font-family:inherit;color:" + headingColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-weight:600!important;font-family:inherit!important;color:" + headingColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner .cb-banner-body h3,#cb-preferences-banner.cb-banner .cb-banner-body h3{padding-right:0!important;}.cb-gdpr-cat-label{color:" + headingColor + ";}#cb-preferences-banner.cb-banner .cb-gdpr-cat-label ~ div > span{color:" + textColor + "!important;}.cb-banner p{margin:0 0 12px;font-size:14px!important;line-height:1.5!important;color:" + textColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-gdpr-cat-desc{color:" + textColor + ";text-align:" + textAlign + "!important;opacity:0.92;width:100%;}.cb-banner button{padding:6px 12px;border-radius:" + buttonRadius + ";cursor:pointer;font-size:14px;font-weight:600;border:1px solid #e2e8f0;transition:opacity 0.2s;}.cb-banner button#cb-accept-all-btn{background-color:" + acceptBg + ";color:" + acceptTx + ";}.cb-banner button#cb-reject-all-btn{background-color:" + rejectBg + ";color:" + rejectTx + ";}.cb-banner button#cb-preferences-btn,.cb-banner button#cb-ccpa-donotsell-link{background-color:" + custBg + ";color:" + custTx + ";}.cb-banner button#cb-prefs-reject-btn{background-color:" + rejectBg + ";color:" + rejectTx + ";}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer{display:flex!important;flex-direction:row!important;gap:10px!important;width:100%!important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button{flex:1 1 0!important;width:0!important;min-width:0!important;white-space:nowrap!important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{background-color:" + acceptBg + ";color:" + acceptTx + ";}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-save-prefs-btn{background-color:" + saveBg + ";color:" + saveTx + ";}#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{background-color:" + saveBg + ";color:" + saveTx + ";}#cb-preferences-banner.cb-banner .cb-banner-footer button{padding:10px 36px!important;}#cb-initial-banner.cb-banner .cb-banner-footer{display:flex;flex-wrap:nowrap;gap:8px;justify-content:" + footerJustify + "!important;flex-shrink:0;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 0;min-width:" + perBtnPx + "px;white-space:nowrap;overflow:visible;text-overflow:clip;}" + (layoutVisual === "banner" ? (
-      /* Column layout: heading, text, buttons all share same container — alignment works via text-align + justify-content */
-      "#cb-initial-banner.cb-banner{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-body{flex:1 1 auto!important;min-width:0!important;overflow-y:visible!important;padding:0!important;margin:0!important;}#cb-initial-banner.cb-banner .cb-banner-footer{position:relative!important;flex:0 0 auto!important;flex-wrap:nowrap!important;justify-content:" + bannerFooterJustify + "!important;padding:0!important;margin:0!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto!important;width:auto!important;min-width:" + perBtnPx + "px!important;max-width:none!important;white-space:nowrap!important;overflow:visible!important;text-overflow:clip!important;}@media(max-width:660px){#cb-initial-banner.cb-banner{left:0!important;right:0!important;}}"
-    ) : "") + "#cb-initial-banner.cb-banner #cb-preferences-btn{background:" + custBg + "!important;color:" + custTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-reject-all-btn{background:" + rejectBg + "!important;color:" + rejectTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-accept-all-btn{background:" + acceptBg + "!important;color:" + acceptTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}.cb-gdpr-accordion{background-color:" + bgColor + ";}.cb-banner-footer{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex:0 0 auto;}@media(max-width:660px){#cb-initial-banner.cb-banner{width:100vw!important;max-width:100vw!important;min-width:0!important;left:0!important;right:0!important;bottom:0!important;transform:none!important;border-radius:0!important;border-left:none!important;border-right:none!important;border-bottom:none!important;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}#cb-preferences-banner.cb-banner{width:calc(100vw - 32px)!important;max-width:calc(100vw - 32px)!important;padding:20px!important;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-preferences-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}}";
+    customStyles = ".cb-banner{border:none !important;}#cb-initial-banner.cb-banner{" + initialSize + "background-color:" + bgColor + "!important;color:" + textColor + ";position:fixed!important;" + positionStyles + "padding:" + (layoutVisual === "banner" ? "28px 48px" : boxPadding) + "!important;border:1px solid #e2e8f0;" + initialRadius + "box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;align-items:stretch;font-family:" + fontFamilyCss + ";font-size:14px!important;line-height:1.5!important;font-weight:" + fontWeightStr + ";}#cb-initial-banner.cb-banner .cb-banner-body{flex:0 1 auto;min-width:0;min-height:0;overflow-y:auto;}#cb-initial-banner.cb-banner #cb-close-initial-btn,#cb-initial-banner.cb-banner [consentbit='close']{position:absolute!important;top:8px!important;right:20px!important;width:10px!important;height:10px!important;cursor:pointer!important;background:transparent!important;border:none!important;padding:0!important;z-index:10!important;display:" + (closeButtonEnabled ? "block" : "none") + "!important;}#cb-preferences-banner.cb-banner{width:600px;max-width:94vw;max-height:min(88vh,640px);min-height:0;overflow:hidden;background-color:" + bgColor + ";color:" + textColor + ";position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);padding:28px;border:1px solid #e2e8f0;border-radius:" + bannerRadius + ";box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;font-family:" + fontFamilyCss + ";font-size:14px!important;line-height:1.5!important;font-weight:" + fontWeightStr + ";}#cb-preferences-banner.cb-banner .cb-banner-body{flex:1 1 auto;min-height:0;overflow-y:auto;}.cb-banner h3{margin:0 0 8px;font-size:16px!important;line-height:1.4!important;font-weight:600;font-family:inherit;color:" + headingColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-weight:600!important;font-family:inherit!important;color:" + headingColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner .cb-banner-body h3,#cb-preferences-banner.cb-banner .cb-banner-body h3{padding-right:0!important;}.cb-gdpr-cat-label{color:" + headingColor + ";}#cb-preferences-banner.cb-banner .cb-gdpr-cat-label ~ div > span{color:" + textColor + "!important;}.cb-banner p{margin:0 0 12px;font-size:14px!important;line-height:1.5!important;color:" + textColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-gdpr-cat-desc{color:" + textColor + ";text-align:" + textAlign + "!important;opacity:0.92;width:100%;}.cb-banner button{padding:6px 12px;border-radius:" + buttonRadius + ";cursor:pointer;font-size:14px;font-weight:600;border:1px solid #e2e8f0;transition:opacity 0.2s;}.cb-banner button#cb-accept-all-btn{background-color:" + acceptBg + ";color:" + acceptTx + ";}.cb-banner button#cb-reject-all-btn{background-color:" + rejectBg + ";color:" + rejectTx + ";}.cb-banner button#cb-preferences-btn,.cb-banner button#cb-ccpa-donotsell-link{background-color:" + custBg + ";color:" + custTx + ";}.cb-banner button#cb-prefs-reject-btn{background-color:" + rejectBg + ";color:" + rejectTx + ";}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer{display:flex!important;flex-direction:row!important;gap:10px!important;width:100%!important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button{flex:1 1 0!important;width:0!important;min-width:0!important;white-space:nowrap!important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{background-color:" + acceptBg + ";color:" + acceptTx + ";}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-save-prefs-btn{background-color:" + saveBg + ";color:" + saveTx + ";}#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{background-color:" + saveBg + ";color:" + saveTx + ";}#cb-preferences-banner.cb-banner .cb-banner-footer button{padding:10px 36px!important;}#cb-initial-banner.cb-banner .cb-banner-footer{display:flex;flex-wrap:nowrap;gap:8px;justify-content:" + footerJustify + "!important;flex-shrink:0;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 0;min-width:" + perBtnPx + "px;white-space:nowrap;overflow:visible;text-overflow:clip;}" + (layoutVisual === "banner" ? "#cb-initial-banner.cb-banner{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-body{flex:1 1 auto!important;min-width:0!important;overflow-y:visible!important;padding:0!important;margin:0!important;}#cb-initial-banner.cb-banner .cb-banner-footer{position:relative!important;flex:0 0 auto!important;flex-wrap:nowrap!important;justify-content:" + bannerFooterJustify + "!important;padding:0!important;margin:0!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto!important;width:auto!important;min-width:" + perBtnPx + "px!important;max-width:none!important;white-space:nowrap!important;overflow:visible!important;text-overflow:clip!important;}@media(max-width:660px){#cb-initial-banner.cb-banner{left:0!important;right:0!important;}}" : "") + "#cb-initial-banner.cb-banner #cb-preferences-btn{background:" + custBg + "!important;color:" + custTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-reject-all-btn{background:" + rejectBg + "!important;color:" + rejectTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-accept-all-btn{background:" + acceptBg + "!important;color:" + acceptTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}.cb-gdpr-accordion{background-color:" + bgColor + ";}.cb-banner-footer{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex:0 0 auto;}@media(max-width:660px){#cb-initial-banner.cb-banner{width:100vw!important;max-width:100vw!important;min-width:0!important;left:0!important;right:0!important;bottom:0!important;transform:none!important;border-radius:0!important;border-left:none!important;border-right:none!important;border-bottom:none!important;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}#cb-preferences-banner.cb-banner{width:calc(100vw - 32px)!important;max-width:calc(100vw - 32px)!important;padding:20px!important;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-preferences-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}}";
   }
   function jsonForInlineScript(value) {
     try {
@@ -8327,13 +8697,9 @@ async function _handleCDNScript(request, env2, url) {
     } : null,
     floatingLogoUrl: resolveFloatingLogoUrl(),
     floatingLogoFallbackUrl: resolveWorkerFloatingLogoUrl(),
-    /** CookieYes-style URL → category rules (serialized into embed). */
     scriptBlockProviders: SCRIPT_BLOCK_PROVIDERS,
-    /** User-defined cookie rules published from the dashboard — used for runtime script blocking. */
     customCookieRules,
-    /** When true, the next page load triggers a full browser-based cookie + script scan. */
     pendingScan: resolvedSite.pendingScan === 1,
-    /** Registered domain — used by the embed script to validate it is running on the correct site. */
     registeredDomain: resolvedSite.domain ? String(resolvedSite.domain).replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0].toLowerCase() : null
   };
   const inlineConfig = `
@@ -8343,83 +8709,107 @@ async function _handleCDNScript(request, env2, url) {
   const loader = `
 ${inlineConfig}
 ! function () {
-  var e = window.__CONSENT_SITE__ || {};
-  var t = !0;
+  // Idempotency guard: if this banner script ends up embedded/executed TWICE on a page
+  // (e.g. a leftover legacy install + the current one), only the FIRST copy initialises.
+  // Without this, both copies bind the banner's click handlers and a single Accept/Reject
+  // fires the /api/consent POST twice \u2192 duplicate consent-log rows.
+  if (window.__cbBannerInit) return;
+  window.__cbBannerInit = true;
+  var SITE = window.__CONSENT_SITE__ || {};
+  var domainAllowed = true;
+
+  // Client-side domain guard: this script only runs on the registered domain.
+  // Webflow-hosted sites and *.webflow.io staging domains are exempt.
   ! function () {
-    var n = e.registeredDomain;
-    if (n) try {
-      var a = window.location.hostname.replace(/^www./, "").toLowerCase();
-      if (a !== n && e.platform !== 'webflow' && !a.endsWith('.webflow.io')) {
+    var expectedDomain = SITE.registeredDomain;
+    if (expectedDomain) try {
+      var currentHost = window.location.hostname.replace(/^www./, "").toLowerCase();
+      if (currentHost !== expectedDomain && SITE.platform !== 'webflow' && !currentHost.endsWith('.webflow.io')) {
         window.__CONSENT_SITE__ = null;
-        t = !1
+        domainAllowed = false
       }
-    } catch (e) {}
+    } catch (err) {}
   }();
-  if (t) {
-    var n = e.floatingLogoUrl || "";
-    var a = e.floatingLogoFallbackUrl || "";
-    var r = e.id || null;
-    var i = e.bannerType || "gdpr";
-    var o = !1 !== e.bannerEnabled;
-    var c = e.apiBase;
-    var s = e.gaId || null;
-    var l = e.customization || null;
-    var d = !0 === e.pendingScan;
-    var p = l && l.bannerLayoutVisual || "box";
-    var b = l ? l.privacyPolicyUrl : null;
-    var f = !!l && l.stopScroll;
-    var m = !l || !1 !== l.animationEnabled;
-    var u = l && l.bannerEntranceAnimation || "fade-in";
-    var g = l && l.preferencePosition || "center";
-    var v = l && l.centerAnimationDirection || "fade";
-    var y = l && l.language || "en";
-    var h = !!l && !0 === l.autoDetectLanguage;
+
+  if (domainAllowed) {
+    var floatingLogoUrl = SITE.floatingLogoUrl || "";
+    var floatingLogoFallbackUrl = SITE.floatingLogoFallbackUrl || "";
+    var siteId = SITE.id || null;
+    var bannerType = SITE.bannerType || "gdpr";
+    var bannerEnabled = false !== SITE.bannerEnabled;
+    var apiBase = SITE.apiBase;
+    var gaMeasurementId = SITE.gaId || null;
+    var customization = SITE.customization || null;
+    var pendingScan = true === SITE.pendingScan;
+    var bannerLayoutVisual = customization && customization.bannerLayoutVisual || "box";
+    var privacyPolicyUrl = customization ? customization.privacyPolicyUrl : null;
+    var stopScroll = !!customization && customization.stopScroll;
+    var animationEnabled = !customization || false !== customization.animationEnabled;
+    var entranceAnimation = customization && customization.bannerEntranceAnimation || "fade-in";
+    var preferencePosition = customization && customization.preferencePosition || "center";
+    var centerAnimationDirection = customization && customization.centerAnimationDirection || "fade";
+    var configuredLanguage = customization && customization.language || "en";
+    var autoDetectLanguage = !!customization && true === customization.autoDetectLanguage;
     ${translationsVar}
-    var x = ["customise", "rejectAll", "acceptAll", "save", "back", "doNotSell", "saveMyPreferences", "confirmChoice", "cancel", "optOutPreference"];
-    var w = 30,
-      k = 320,
-      C = 20,
-      E = 30,
-      S = 200;
-    var _ = 56;
-    var I = "consentbit_" + r;
-    var O = void 0 !== l && l && null != l.cookieExpirationDays ? Math.max(1, Math.min(365, Number(l.cookieExpirationDays) || 30)) : 30;
-    var A = ee();
+    var BUTTON_TEXT_KEYS = ["customise", "rejectAll", "acceptAll", "save", "back", "doNotSell", "saveMyPreferences", "confirmChoice", "cancel", "optOutPreference"];
+
+    // Character caps applied to translated copy so a long translation cannot break the layout.
+    var MAX_TITLE_LEN = 30,
+      MAX_DESCRIPTION_LEN = 320,
+      MAX_BUTTON_LEN = 20,
+      MAX_LINK_LEN = 30,
+      MAX_LONG_TEXT_LEN = 200;
+    var FLOATING_LOGO_SIZE_PX = 56;
+
+    var STORAGE_KEY = "consentbit_" + siteId;
+    var cookieExpirationDays = void 0 !== customization && customization && null != customization.cookieExpirationDays ? Math.max(1, Math.min(365, Number(customization.cookieExpirationDays) || 30)) : 30;
+    var consentState = loadConsentState();
     // --- GPC (Global Privacy Control) gate -------------------------------------
     // Honor navigator.globalPrivacyControl as a CCPA "Do Not Sell/Share" opt-out.
-    // MUST run here \u2014 before the script blocker (ye/ue) and boot (He) read A \u2014 so
-    // non-essential scripts are blocked from first paint. Scoped to CCPA; first
-    // visit only: a stored choice always wins, so a user who opted back in is never
-    // overridden. navigator.globalPrivacyControl is browser-set and synchronous, so
-    // no async/geo wait is needed (bannerType "i" is already resolved server-side).
+    // MUST run here \u2014 before the script blocker (shouldBlockScript/isCategoryAllowed)
+    // and boot() read consentState \u2014 so non-essential scripts are blocked from first
+    // paint. Scoped to CCPA; first visit only: a stored choice always wins, so a user
+    // who opted back in is never overridden. navigator.globalPrivacyControl is
+    // browser-set and synchronous, so no async/geo wait is needed (the banner type is
+    // already resolved server-side).
     try {
-      if (navigator.globalPrivacyControl === true && "ccpa" === i && (!A || !A.accepted)) {
-        A = {
-          accepted: !0,
+      if (navigator.globalPrivacyControl === true && "ccpa" === bannerType && (!consentState || !consentState.accepted)) {
+        consentState = {
+          accepted: true,
           timestamp: (new Date).toISOString(),
           ccpa: {
-            doNotSell: !0
+            doNotSell: true
           },
-          gpc: !0
+          gpc: true
         };
         try {
-          localStorage.setItem(I, JSON.stringify(A))
-        } catch (e) {}
-        re(A, {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(consentState))
+        } catch (err) {}
+        postConsentToApi(consentState, {
           status: "rejected",
           consentMethod: "gpc"
         })
       }
-    } catch (e) {}
+    } catch (err) {}
     // ---------------------------------------------------------------------------
-    var B = "consentbit_prefs_" + (r || "");
-    var L = "cb_pv_over_limit_" + (r || "");
-    var T = [];
-    var z = !1;
-    var N = null;
-    var j = e.scriptBlockProviders || [];
-    var P = e.customCookieRules || [];
-    var F = [{
+
+    var PREFS_STORAGE_KEY = "consentbit_prefs_" + (siteId || "");
+    var PAGEVIEW_LIMIT_KEY = "cb_pv_over_limit_" + (siteId || "");
+
+    /** Scripts deferred until consent allows them (see flushQueuedScripts). */
+    var queuedScripts = [];
+    /** Re-entrancy guard: true while we inject a script ourselves, so the blocker ignores it. */
+    var isInjectingScript = false;
+    /** Original document.createElement, captured before we patch it. */
+    var nativeCreateElement = null;
+
+    /** URL-pattern \u2192 category rules shipped by the worker. */
+    var scriptBlockProviders = SITE.scriptBlockProviders || [];
+    /** URL-pattern \u2192 category rules defined by the site owner in the dashboard. */
+    var customCookieRules = SITE.customCookieRules || [];
+
+    /** Fallback domain \u2192 category map, used for iframes and for scripts no rule matched. */
+    var KNOWN_TRACKER_DOMAINS = [{
       domain: "facebook.com",
       category: "marketing"
     }, {
@@ -8495,503 +8885,679 @@ ${inlineConfig}
       domain: "zemanta.com",
       category: "marketing"
     }];
-    var D = ".cb-banner,.cb-banner *{box-sizing:border-box;}#cb-initial-banner.cb-banner{width:440px;min-width:280px;max-width:min(440px,92vw);max-height:min(80vh,420px);min-height:0;overflow:hidden;overflow-x:hidden;background-color:#ffffff;color:#334155;position:fixed;bottom:32px;left:32px;right:auto;padding:16px;border:1px solid #e2e8f0;border-radius:0.375rem;box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:inline-flex;flex-direction:column;align-items:stretch;font-family:Montserrat,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px!important;line-height:1.5!important;}#cb-initial-banner.cb-banner .cb-banner-body{flex:0 1 auto;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;}#cb-preferences-banner.cb-banner{width:540px;max-width:92vw;max-height:min(85vh,580px);min-height:0;overflow:hidden;overflow-x:hidden;background-color:#ffffff;color:#334155;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);padding:20px;border:1px solid #e2e8f0;border-radius:0.375rem;box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;font-family:Montserrat,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px!important;line-height:1.5!important;}#cb-preferences-banner.cb-banner .cb-banner-body{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;}#cb-preferences-banner.cb-banner.prefs-left{left:32px;right:auto;top:50%;transform:translateY(-50%);}#cb-preferences-banner.cb-banner.prefs-right{right:32px;left:auto;top:50%;transform:translateY(-50%);}#cb-preferences-banner.cb-banner.prefs-center{left:50%;top:50%;transform:translate(-50%,-50%);}.cb-banner-body{overflow-y:auto;overflow-x:hidden;margin-bottom:12px;}.cb-banner h3{margin:0 0 8px;font-size:16px!important;line-height:1.4!important;font-weight:600;color:#0f172a;word-break:break-word;overflow-wrap:anywhere;max-width:100%;}#cb-initial-banner.cb-banner h3{font-size:16px!important;font-weight:600;color:rgba(0,0,0,0.8);padding-right:36px;}#cb-initial-banner.cb-banner .cb-banner-body > p{color:rgba(0,0,0,0.8);}.cb-gdpr-accordion{margin-top:4px;margin-bottom:4px;}.cb-gdpr-cat-label{color:#0f172a;}.cb-gdpr-cat-desc{color:#64748b;}.cb-banner p{margin:0 0 12px;font-size:14px!important;line-height:1.5!important;color:#334155;word-break:break-word;overflow-wrap:anywhere;max-width:100%;}.cb-banner-footer{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;align-items:center;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex:0 0 auto;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-wrap:wrap;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 auto;min-width:80px;}" + (l && "banner" === l.bannerLayoutVisual ? "#cb-initial-banner.cb-banner .cb-banner-footer{flex-wrap:nowrap;justify-content:flex-end;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto;width:auto;min-width:80px;max-width:140px;}" : "") + ".cb-banner button{padding:12px 32px;border-radius:0.375rem;cursor:pointer;font-size:14px;font-weight:600;border:1px solid #e2e8f0;transition:opacity 0.2s;white-space:normal;word-break:break-word;min-width:0;text-align:center;}@media (max-width:660px){#cb-initial-banner.cb-banner{width:100vw!important;max-width:100vw!important;left:0!important;right:0!important;bottom:0!important;transform:none!important;border-radius:0!important;border-left:none!important;border-right:none!important;border-bottom:none!important;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}#cb-preferences-banner.cb-banner{width:calc(100vw - 32px)!important;max-width:calc(100vw - 32px)!important;padding:20px!important;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-preferences-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}}@media (max-width:350px){#cb-initial-banner.cb-banner,#cb-preferences-banner.cb-banner{font-size:12px!important;}#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-size:13px!important;}#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,.cb-gdpr-cat-desc{font-size:12px!important;}#cb-initial-banner.cb-banner .cb-banner-footer button,#cb-preferences-banner.cb-banner .cb-banner-footer button{font-size:12px!important;padding:10px 16px!important;}}.cb-banner button:hover:not(.cb-pref-toggle-track){opacity:0.8;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track{display:block !important;width:40px !important;min-width:40px !important;height:22px !important;padding:0 !important;margin:0 !important;border:none !important;border-radius:11px !important;background:#d1d5db !important;box-shadow:none !important;flex-shrink:0 !important;position:relative !important;overflow:visible !important;box-sizing:border-box !important;cursor:pointer !important;appearance:none !important;-webkit-appearance:none !important;font-size:0 !important;line-height:0 !important;opacity:1 !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track[aria-checked='true']{background:#22c55e !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track::after{content:'' !important;position:absolute !important;top:2px !important;left:2px !important;width:18px !important;height:18px !important;border-radius:50% !important;background:#ffffff !important;box-shadow:0 1px 3px rgba(0,0,0,.2) !important;pointer-events:none !important;transition:left .15s ease !important;z-index:2 !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track[aria-checked='true']::after{left:20px !important;}.cb-banner button#cb-accept-all-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}.cb-banner button#cb-reject-all-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}.cb-banner button#cb-preferences-btn,.cb-banner button#cb-ccpa-donotsell-link{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}.cb-banner button#cb-prefs-reject-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}.cb-banner label{display:block;margin-bottom:6px;font-size:11px;}.cb-banner input[type='checkbox']{margin-right:6px;}.cb-banner a{color:#007aff !important;text-decoration:underline !important;font-size:inherit !important;display:inline !important;font-weight:inherit !important;white-space:normal;}@keyframes slideInFromLeft{from{transform:translateX(-100%);opacity:0;}to{transform:translateX(0);opacity:1;}}@keyframes slideInFromRight{from{transform:translateX(100%);opacity:0;}to{transform:translateX(0);opacity:1;}}@keyframes slideInFromTop{from{transform:translateY(-100%);opacity:0;}to{transform:translateY(0);opacity:1;}}@keyframes slideInFromBottom{from{transform:translateY(100%);opacity:0;}to{transform:translateY(0);opacity:1;}}@keyframes fadeIn{from{opacity:0;}to{opacity:1;}}@keyframes prefsSlideInFromLeft{from{transform:translate(-120%,-50%);opacity:0;}to{transform:translate(0,-50%);opacity:1;}}@keyframes prefsSlideInFromRight{from{transform:translate(120%,-50%);opacity:0;}to{transform:translate(0,-50%);opacity:1;}}@keyframes prefsSlideCenterFromBottom{from{transform:translate(-50%,calc(-50% + 28px));opacity:0;}to{transform:translate(-50%,-50%);opacity:1;}}@keyframes prefsSlideCenterFromTop{from{transform:translate(-50%,calc(-50% - 28px));opacity:0;}to{transform:translate(-50%,-50%);opacity:1;}}@keyframes zoomIn{from{transform:scale(0.85);opacity:0;}to{transform:scale(1);opacity:1;}}@keyframes cbInitialCenterSlideFromBottom{from{transform:translate(-50%,100%);opacity:0;}to{transform:translate(-50%,0);opacity:1;}}@keyframes cbInitialCenterSlideFromTop{from{transform:translate(-50%,-100%);opacity:0;}to{transform:translate(-50%,0);opacity:1;}}@keyframes cbInitialCenterZoomIn{from{transform:translateX(-50%) scale(0.85);opacity:0;}to{transform:translateX(-50%) scale(1);opacity:1;}}.cb-banner-animate-initial-center-bottom{animation:cbInitialCenterSlideFromBottom 0.35s ease-out;}.cb-banner-animate-initial-center-top{animation:cbInitialCenterSlideFromTop 0.35s ease-out;}.cb-banner-animate-initial-center-zoom{animation:cbInitialCenterZoomIn 0.3s ease-out;}@keyframes prefsZoomIn{from{transform:translate(-50%,-50%) scale(0.85);opacity:0;}to{transform:translate(-50%,-50%) scale(1);opacity:1;}}.cb-banner-animate-left{animation:slideInFromLeft 0.4s ease-out;}.cb-banner-animate-right{animation:slideInFromRight 0.4s ease-out;}.cb-banner-animate-top{animation:slideInFromTop 0.4s ease-out;}.cb-banner-animate-bottom{animation:slideInFromBottom 0.4s ease-out;}.cb-banner-animate-fade{animation:fadeIn 0.3s ease-out;}.cb-banner-animate-prefs-left{animation:prefsSlideInFromLeft 0.4s ease-out;}.cb-banner-animate-prefs-right{animation:prefsSlideInFromRight 0.4s ease-out;}.cb-banner-animate-center-top{animation:prefsSlideCenterFromTop 0.35s ease-out;}.cb-banner-animate-center-bottom{animation:prefsSlideCenterFromBottom 0.35s ease-out;}.cb-banner-animate-zoom-in{animation:zoomIn 0.3s ease-out;}.cb-banner-animate-prefs-zoom-in{animation:prefsZoomIn 0.3s ease-out;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-save-prefs-btn{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}#cb-initial-banner.cb-banner .cb-banner-footer{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;flex-shrink:0;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 auto;min-width:80px;}#cb-initial-banner.cb-banner #cb-preferences-btn{background:#ffffff!important;color:#334155!important;border:1px solid #334155!important;font-size:13px!important;padding:10px 12px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-reject-all-btn,#cb-initial-banner.cb-banner #cb-accept-all-btn{background:#007aff!important;color:#ffffff!important;border-color:#007aff!important;font-size:13px!important;padding:10px 12px!important;font-weight:600!important;}#cb-floating-trigger{position:fixed;z-index:2147483646!important;width:56px;height:56px;border:none;border-radius:9999px;background:transparent;cursor:pointer;padding:0;box-shadow:none;}#cb-floating-trigger img,#cb-floating-trigger svg{display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;}";
-    e.styles && (D = D + "\\n" + e.styles);
-    var M = "cb-banner-animate-left cb-banner-animate-right cb-banner-animate-top cb-banner-animate-bottom cb-banner-animate-fade cb-banner-animate-prefs-left cb-banner-animate-prefs-right cb-banner-animate-center-top cb-banner-animate-center-bottom cb-banner-animate-zoom-in cb-banner-animate-prefs-zoom-in";
-    Oe();
-    "complete" === document.readyState || "interactive" === document.readyState ? He() : window.addEventListener("DOMContentLoaded", He)
+    /** Baseline stylesheet for both banners; the dashboard's custom CSS is appended below. */
+    var BASE_CSS = ".cb-banner,.cb-banner *{box-sizing:border-box;}#cb-initial-banner.cb-banner{width:440px;min-width:280px;max-width:min(440px,92vw);max-height:min(80vh,420px);min-height:0;overflow:hidden;overflow-x:hidden;background-color:#ffffff;color:#334155;position:fixed;bottom:32px;left:32px;right:auto;padding:16px;border:1px solid #e2e8f0;border-radius:0.375rem;box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:inline-flex;flex-direction:column;align-items:stretch;font-family:Montserrat,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px!important;line-height:1.5!important;}#cb-initial-banner.cb-banner .cb-banner-body{flex:0 1 auto;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;}#cb-preferences-banner.cb-banner{width:540px;max-width:92vw;max-height:min(85vh,580px);min-height:0;overflow:hidden;overflow-x:hidden;background-color:#ffffff;color:#334155;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);padding:20px;border:1px solid #e2e8f0;border-radius:0.375rem;box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;font-family:Montserrat,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px!important;line-height:1.5!important;}#cb-preferences-banner.cb-banner .cb-banner-body{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;}#cb-preferences-banner.cb-banner.prefs-left{left:32px;right:auto;top:50%;transform:translateY(-50%);}#cb-preferences-banner.cb-banner.prefs-right{right:32px;left:auto;top:50%;transform:translateY(-50%);}#cb-preferences-banner.cb-banner.prefs-center{left:50%;top:50%;transform:translate(-50%,-50%);}.cb-banner-body{overflow-y:auto;overflow-x:hidden;margin-bottom:12px;}.cb-banner h3{margin:0 0 8px;font-size:16px!important;line-height:1.4!important;font-weight:600;color:#0f172a;word-break:break-word;overflow-wrap:anywhere;max-width:100%;}#cb-initial-banner.cb-banner h3{font-size:16px!important;font-weight:600;color:rgba(0,0,0,0.8);padding-right:36px;}#cb-initial-banner.cb-banner .cb-banner-body > p{color:rgba(0,0,0,0.8);}.cb-gdpr-accordion{margin-top:4px;margin-bottom:4px;}.cb-gdpr-cat-label{color:#0f172a;}.cb-gdpr-cat-desc{color:#64748b;}.cb-banner p{margin:0 0 12px;font-size:14px!important;line-height:1.5!important;color:#334155;word-break:break-word;overflow-wrap:anywhere;max-width:100%;}.cb-banner-footer{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;align-items:center;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex:0 0 auto;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-wrap:wrap;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 auto;min-width:80px;}" + (customization && "banner" === customization.bannerLayoutVisual ? "#cb-initial-banner.cb-banner .cb-banner-footer{flex-wrap:nowrap;justify-content:flex-end;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto;width:auto;min-width:80px;max-width:140px;}" : "") + ".cb-banner button{padding:12px 32px;border-radius:0.375rem;cursor:pointer;font-size:14px;font-weight:600;border:1px solid #e2e8f0;transition:opacity 0.2s;white-space:normal;word-break:break-word;min-width:0;text-align:center;}@media (max-width:660px){#cb-initial-banner.cb-banner{width:100vw!important;max-width:100vw!important;left:0!important;right:0!important;bottom:0!important;transform:none!important;border-radius:0!important;border-left:none!important;border-right:none!important;border-bottom:none!important;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}#cb-preferences-banner.cb-banner{width:calc(100vw - 32px)!important;max-width:calc(100vw - 32px)!important;padding:20px!important;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-preferences-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}}@media (max-width:350px){#cb-initial-banner.cb-banner,#cb-preferences-banner.cb-banner{font-size:12px!important;}#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-size:13px!important;}#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,.cb-gdpr-cat-desc{font-size:12px!important;}#cb-initial-banner.cb-banner .cb-banner-footer button,#cb-preferences-banner.cb-banner .cb-banner-footer button{font-size:12px!important;padding:10px 16px!important;}}.cb-banner button:hover:not(.cb-pref-toggle-track){opacity:0.8;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track{display:block !important;width:40px !important;min-width:40px !important;height:22px !important;padding:0 !important;margin:0 !important;border:none !important;border-radius:11px !important;background:#d1d5db !important;box-shadow:none !important;flex-shrink:0 !important;position:relative !important;overflow:visible !important;box-sizing:border-box !important;cursor:pointer !important;appearance:none !important;-webkit-appearance:none !important;font-size:0 !important;line-height:0 !important;opacity:1 !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track[aria-checked='true']{background:#22c55e !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track::after{content:'' !important;position:absolute !important;top:2px !important;left:2px !important;width:18px !important;height:18px !important;border-radius:50% !important;background:#ffffff !important;box-shadow:0 1px 3px rgba(0,0,0,.2) !important;pointer-events:none !important;transition:left .15s ease !important;z-index:2 !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track[aria-checked='true']::after{left:20px !important;}.cb-banner button#cb-accept-all-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}.cb-banner button#cb-reject-all-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}.cb-banner button#cb-preferences-btn,.cb-banner button#cb-ccpa-donotsell-link{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}.cb-banner button#cb-prefs-reject-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}.cb-banner label{display:block;margin-bottom:6px;font-size:11px;}.cb-banner input[type='checkbox']{margin-right:6px;}.cb-banner a{color:#007aff !important;text-decoration:underline !important;font-size:inherit !important;display:inline !important;font-weight:inherit !important;white-space:normal;}@keyframes slideInFromLeft{from{transform:translateX(-100%);opacity:0;}to{transform:translateX(0);opacity:1;}}@keyframes slideInFromRight{from{transform:translateX(100%);opacity:0;}to{transform:translateX(0);opacity:1;}}@keyframes slideInFromTop{from{transform:translateY(-100%);opacity:0;}to{transform:translateY(0);opacity:1;}}@keyframes slideInFromBottom{from{transform:translateY(100%);opacity:0;}to{transform:translateY(0);opacity:1;}}@keyframes fadeIn{from{opacity:0;}to{opacity:1;}}@keyframes prefsSlideInFromLeft{from{transform:translate(-120%,-50%);opacity:0;}to{transform:translate(0,-50%);opacity:1;}}@keyframes prefsSlideInFromRight{from{transform:translate(120%,-50%);opacity:0;}to{transform:translate(0,-50%);opacity:1;}}@keyframes prefsSlideCenterFromBottom{from{transform:translate(-50%,calc(-50% + 28px));opacity:0;}to{transform:translate(-50%,-50%);opacity:1;}}@keyframes prefsSlideCenterFromTop{from{transform:translate(-50%,calc(-50% - 28px));opacity:0;}to{transform:translate(-50%,-50%);opacity:1;}}@keyframes zoomIn{from{transform:scale(0.85);opacity:0;}to{transform:scale(1);opacity:1;}}@keyframes cbInitialCenterSlideFromBottom{from{transform:translate(-50%,100%);opacity:0;}to{transform:translate(-50%,0);opacity:1;}}@keyframes cbInitialCenterSlideFromTop{from{transform:translate(-50%,-100%);opacity:0;}to{transform:translate(-50%,0);opacity:1;}}@keyframes cbInitialCenterZoomIn{from{transform:translateX(-50%) scale(0.85);opacity:0;}to{transform:translateX(-50%) scale(1);opacity:1;}}.cb-banner-animate-initial-center-bottom{animation:cbInitialCenterSlideFromBottom 0.35s ease-out;}.cb-banner-animate-initial-center-top{animation:cbInitialCenterSlideFromTop 0.35s ease-out;}.cb-banner-animate-initial-center-zoom{animation:cbInitialCenterZoomIn 0.3s ease-out;}@keyframes prefsZoomIn{from{transform:translate(-50%,-50%) scale(0.85);opacity:0;}to{transform:translate(-50%,-50%) scale(1);opacity:1;}}.cb-banner-animate-left{animation:slideInFromLeft 0.4s ease-out;}.cb-banner-animate-right{animation:slideInFromRight 0.4s ease-out;}.cb-banner-animate-top{animation:slideInFromTop 0.4s ease-out;}.cb-banner-animate-bottom{animation:slideInFromBottom 0.4s ease-out;}.cb-banner-animate-fade{animation:fadeIn 0.3s ease-out;}.cb-banner-animate-prefs-left{animation:prefsSlideInFromLeft 0.4s ease-out;}.cb-banner-animate-prefs-right{animation:prefsSlideInFromRight 0.4s ease-out;}.cb-banner-animate-center-top{animation:prefsSlideCenterFromTop 0.35s ease-out;}.cb-banner-animate-center-bottom{animation:prefsSlideCenterFromBottom 0.35s ease-out;}.cb-banner-animate-zoom-in{animation:zoomIn 0.3s ease-out;}.cb-banner-animate-prefs-zoom-in{animation:prefsZoomIn 0.3s ease-out;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-save-prefs-btn{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}#cb-initial-banner.cb-banner .cb-banner-footer{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;flex-shrink:0;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 auto;min-width:80px;}#cb-initial-banner.cb-banner #cb-preferences-btn{background:#ffffff!important;color:#334155!important;border:1px solid #334155!important;font-size:13px!important;padding:10px 12px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-reject-all-btn,#cb-initial-banner.cb-banner #cb-accept-all-btn{background:#007aff!important;color:#ffffff!important;border-color:#007aff!important;font-size:13px!important;padding:10px 12px!important;font-weight:600!important;}#cb-floating-trigger{position:fixed;z-index:2147483646!important;width:56px;height:56px;border:none;border-radius:9999px;background:transparent;cursor:pointer;padding:0;box-shadow:none;}#cb-floating-trigger img,#cb-floating-trigger svg{display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;}";
+    SITE.styles && (BASE_CSS = BASE_CSS + "\\n" + SITE.styles);
+
+    /** Every entrance-animation class, so we can strip whichever one is currently applied. */
+    var ANIMATION_CLASSES = "cb-banner-animate-left cb-banner-animate-right cb-banner-animate-top cb-banner-animate-bottom cb-banner-animate-fade cb-banner-animate-prefs-left cb-banner-animate-prefs-right cb-banner-animate-center-top cb-banner-animate-center-bottom cb-banner-animate-zoom-in cb-banner-animate-prefs-zoom-in";
+
+    installScriptBlocker();
+    "complete" === document.readyState || "interactive" === document.readyState ? boot() : window.addEventListener("DOMContentLoaded", boot)
   }
 
-  function R() {
-    if (h) {
-      var e = (navigator.language || navigator.userLanguage || "en").split("-")[0].toLowerCase();
-      return TRANSLATIONS[e] ? e : "en"
+  /** Language to render in: the visitor's browser language when auto-detect is on, else the configured one. */
+  function getActiveLanguage() {
+    if (autoDetectLanguage) {
+      var browserLang = (navigator.language || navigator.userLanguage || "en").split("-")[0].toLowerCase();
+      return TRANSLATIONS[browserLang] ? browserLang : "en"
     }
-    return y
+    return configuredLanguage
   }
 
-  function U(e) {
-    var t = R();
-    var n = TRANSLATIONS[t] || TRANSLATIONS.en;
-    var a = null != n[e] ? n[e] : null != TRANSLATIONS.en[e] ? TRANSLATIONS.en[e] : "";
-    return "" === a && "title" === e ? "We value your privacy" : "" === a && "description" === e ? "We use cookies to provide you with the best possible experience. They also allow us to analyze user behavior in order to constantly improve the website for you." : a
+  /** Translate a key, falling back to English and then to a hard-coded default for title/description. */
+  function translate(key) {
+    var lang = getActiveLanguage();
+    var bundle = TRANSLATIONS[lang] || TRANSLATIONS.en;
+    var value = null != bundle[key] ? bundle[key] : null != TRANSLATIONS.en[key] ? TRANSLATIONS.en[key] : "";
+    return "" === value && "title" === key ? "We value your privacy" : "" === value && "description" === key ? "We use cookies to provide you with the best possible experience. They also allow us to analyze user behavior in order to constantly improve the website for you." : value
   }
 
-  function W(e) {
-    var t = R();
-    var n;
-    var a = (TRANSLATIONS[t] || TRANSLATIONS.en)[e];
-    a && a.length > 80 && (a = TRANSLATIONS.en[e] || e);
-    return a || TRANSLATIONS.en[e] || e
+  /** Translate a button label. Anything over 80 chars is not a real label \u2014 fall back to English. */
+  function translateButton(key) {
+    var lang = getActiveLanguage();
+    var value = (TRANSLATIONS[lang] || TRANSLATIONS.en)[key];
+    value && value.length > 80 && (value = TRANSLATIONS.en[key] || key);
+    return value || TRANSLATIONS.en[key] || key
   }
 
-  function J(e, t) {
-    var n = null == e ? "" : String(e);
-    return n.length > t ? n.slice(0, t) : n
+  function truncate(value, maxLength) {
+    var text = null == value ? "" : String(value);
+    return text.length > maxLength ? text.slice(0, maxLength) : text
   }
 
-  function Y(e, t) {
-    return J(U(e), t)
+  function translateTruncated(key, maxLength) {
+    return truncate(translate(key), maxLength)
   }
 
-  function X() {
+  /**
+   * Feature flags live in TRANSLATIONS.config, with the per-language bundle as a
+   * legacy fallback. All four default to enabled when unset or unparseable.
+   */
+  function isCookiePolicyLinkEnabled() {
     try {
-      var e = R();
-      var cf = TRANSLATIONS.config || {};
-      var n = cf.cookiePolicyLinkEnabled != null ? cf.cookiePolicyLinkEnabled : (TRANSLATIONS[e] || TRANSLATIONS.en || {}).cookiePolicyLinkEnabled;
-      return !1 !== n && "0" !== n && "false" !== String(n).toLowerCase()
-    } catch (e) {
-      return !0
+      var lang = getActiveLanguage();
+      var config = TRANSLATIONS.config || {};
+      var value = config.cookiePolicyLinkEnabled != null ? config.cookiePolicyLinkEnabled : (TRANSLATIONS[lang] || TRANSLATIONS.en || {}).cookiePolicyLinkEnabled;
+      return false !== value && "0" !== value && "false" !== String(value).toLowerCase()
+    } catch (err) {
+      return true
     }
   }
 
-  function q() {
+  function isCloseButtonEnabled() {
     try {
-      var e = R();
-      var cf = TRANSLATIONS.config || {};
-      var n = cf.closeButtonEnabled != null ? cf.closeButtonEnabled : (TRANSLATIONS[e] || TRANSLATIONS.en || {}).closeButtonEnabled;
-      return !0 === n || 1 === n || !1 !== n && "0" !== n && "false" !== String(n).toLowerCase()
-    } catch (e) {
-      return !0
+      var lang = getActiveLanguage();
+      var config = TRANSLATIONS.config || {};
+      var value = config.closeButtonEnabled != null ? config.closeButtonEnabled : (TRANSLATIONS[lang] || TRANSLATIONS.en || {}).closeButtonEnabled;
+      return true === value || 1 === value || false !== value && "0" !== value && "false" !== String(value).toLowerCase()
+    } catch (err) {
+      return true
     }
   }
 
-  function qR() {
+  function isRejectButtonEnabled() {
     try {
-      var e = R();
-      var cf = TRANSLATIONS.config || {};
-      var n = cf.rejectButtonEnabled != null ? cf.rejectButtonEnabled : (TRANSLATIONS[e] || TRANSLATIONS.en || {}).rejectButtonEnabled;
-      return !0 === n || 1 === n || !1 !== n && "0" !== n && "false" !== String(n).toLowerCase()
-    } catch (e) {
-      return !0
+      var lang = getActiveLanguage();
+      var config = TRANSLATIONS.config || {};
+      var value = config.rejectButtonEnabled != null ? config.rejectButtonEnabled : (TRANSLATIONS[lang] || TRANSLATIONS.en || {}).rejectButtonEnabled;
+      return true === value || 1 === value || false !== value && "0" !== value && "false" !== String(value).toLowerCase()
+    } catch (err) {
+      return true
     }
   }
 
-  function qC() {
+  function isCustomizeButtonEnabled() {
     try {
-      var e = R();
-      var cf = TRANSLATIONS.config || {};
-      var n = cf.customizeButtonEnabled != null ? cf.customizeButtonEnabled : (TRANSLATIONS[e] || TRANSLATIONS.en || {}).customizeButtonEnabled;
-      return !0 === n || 1 === n || !1 !== n && "0" !== n && "false" !== String(n).toLowerCase()
-    } catch (e) {
-      return !0
+      var lang = getActiveLanguage();
+      var config = TRANSLATIONS.config || {};
+      var value = config.customizeButtonEnabled != null ? config.customizeButtonEnabled : (TRANSLATIONS[lang] || TRANSLATIONS.en || {}).customizeButtonEnabled;
+      return true === value || 1 === value || false !== value && "0" !== value && "false" !== String(value).toLowerCase()
+    } catch (err) {
+      return true
     }
   }
 
-  function H(e) {
-    var t = String(e || "bottom-left").trim().toLowerCase().replace(/_/g, "-");
-    return "bottom-right" === t || "right" === t ? "bottom-right" : "bottom" === t || "bottom-center" === t ? "bottom" : "bottom-left"
+  /** Collapse the dashboard's position values (incl. legacy spellings) to one of three corners. */
+  function normalizeBannerPosition(raw) {
+    var position = String(raw || "bottom-left").trim().toLowerCase().replace(/_/g, "-");
+    return "bottom-right" === position || "right" === position ? "bottom-right" : "bottom" === position || "bottom-center" === position ? "bottom" : "bottom-left"
   }
 
-  function V(e) {
-    if (e) {
-      e.style.marginLeft = "";
-      e.style.marginRight = "";
-      e.style.paddingLeft = "";
-      e.style.paddingRight = "";
-      if (De()) {
-        var t = p || "box";
-        var n = H(l && l.position);
-        var a = Me();
-        var r = "56px";
-        "banner" !== t ? "left" === a ? "bottom-center" !== t && "popup" !== t && "bottom" !== n || (e.style.marginLeft = r) : "bottom-center" !== t && "popup" !== t && "bottom" !== n || (e.style.marginRight = r) : "left" === a ? e.style.paddingLeft = r : e.style.paddingRight = r
+  /**
+   * Reserve space for the floating logo so it never overlaps the banner.
+   * A corner box gets a margin; a full-width bar gets padding on the logo's side.
+   */
+  function applyFloatingLogoOffset(bannerEl) {
+    if (bannerEl) {
+      bannerEl.style.marginLeft = "";
+      bannerEl.style.marginRight = "";
+      bannerEl.style.paddingLeft = "";
+      bannerEl.style.paddingRight = "";
+      if (isFloatingLogoEnabled()) {
+        var layout = bannerLayoutVisual || "box";
+        var position = normalizeBannerPosition(customization && customization.position);
+        var logoSide = getFloatingLogoPosition();
+        var offset = "56px";
+        "banner" !== layout ? "left" === logoSide ? "bottom-center" !== layout && "popup" !== layout && "bottom" !== position || (bannerEl.style.marginLeft = offset) : "bottom-center" !== layout && "popup" !== layout && "bottom" !== position || (bannerEl.style.marginRight = offset) : "left" === logoSide ? bannerEl.style.paddingLeft = offset : bannerEl.style.paddingRight = offset
       }
     }
   }
 
-  function Z(e) {
-    if (!e) return !1;
-    var t = p || "box";
-    var n = H(l && l.position);
-    e.style.left = "";
-    e.style.right = "";
-    e.style.top = "";
-    e.style.bottom = "";
-    e.style.transform = "";
-    e.style.width = "";
-    e.style.maxWidth = "";
-    e.style.marginLeft = "";
-    e.style.marginRight = "";
-    e.style.paddingLeft = "";
-    e.style.paddingRight = "";
-    if ("banner" === t) {
-      e.style.left = "0";
-      e.style.right = "0";
-      e.style.bottom = "0";
-      e.style.transform = "none";
-      e.style.width = "100%";
-      e.style.maxWidth = "none";
-      e.setAttribute("data-cb-initial-centered", "0");
-      V(e);
-      return !1
+  /**
+   * Position the initial banner for the current layout, corner setting and viewport.
+   * Returns true when the banner ended up horizontally centered \u2014 the caller uses that
+   * to pick the matching entrance animation (centered banners animate differently).
+   */
+  function positionInitialBanner(bannerEl) {
+    if (!bannerEl) return false;
+    var layout = bannerLayoutVisual || "box";
+    var position = normalizeBannerPosition(customization && customization.position);
+    bannerEl.style.left = "";
+    bannerEl.style.right = "";
+    bannerEl.style.top = "";
+    bannerEl.style.bottom = "";
+    bannerEl.style.transform = "";
+    bannerEl.style.width = "";
+    bannerEl.style.maxWidth = "";
+    bannerEl.style.marginLeft = "";
+    bannerEl.style.marginRight = "";
+    bannerEl.style.paddingLeft = "";
+    bannerEl.style.paddingRight = "";
+
+    // Full-width bar pinned to the bottom edge.
+    if ("banner" === layout) {
+      bannerEl.style.left = "0";
+      bannerEl.style.right = "0";
+      bannerEl.style.bottom = "0";
+      bannerEl.style.transform = "none";
+      bannerEl.style.width = "100%";
+      bannerEl.style.maxWidth = "none";
+      bannerEl.setAttribute("data-cb-initial-centered", "0");
+      applyFloatingLogoOffset(bannerEl);
+      return false
     }
+
+    // Mobile: always edge-to-edge along the bottom, regardless of the configured corner.
     if (window.innerWidth <= 660) {
-      e.style.setProperty("left", "0", "important");
-      e.style.setProperty("right", "0", "important");
-      e.style.setProperty("bottom", "0", "important");
-      e.style.setProperty("transform", "none", "important");
-      e.style.setProperty("width", "100vw", "important");
-      e.style.setProperty("max-width", "100vw", "important");
-      e.style.setProperty("min-width", "0", "important");
-      e.style.setProperty("border-radius", "0", "important");
-      e.style.setProperty("border-left", "none", "important");
-      e.style.setProperty("border-right", "none", "important");
-      e.style.setProperty("border-bottom", "none", "important");
-      e.setAttribute("data-cb-initial-centered", "0");
-      return !1
+      bannerEl.style.setProperty("left", "0", "important");
+      bannerEl.style.setProperty("right", "0", "important");
+      bannerEl.style.setProperty("bottom", "0", "important");
+      bannerEl.style.setProperty("transform", "none", "important");
+      bannerEl.style.setProperty("width", "100vw", "important");
+      bannerEl.style.setProperty("max-width", "100vw", "important");
+      bannerEl.style.setProperty("min-width", "0", "important");
+      bannerEl.style.setProperty("border-radius", "0", "important");
+      bannerEl.style.setProperty("border-left", "none", "important");
+      bannerEl.style.setProperty("border-right", "none", "important");
+      bannerEl.style.setProperty("border-bottom", "none", "important");
+      bannerEl.setAttribute("data-cb-initial-centered", "0");
+      return false
     }
-    if ("bottom-center" === t || "popup" === t || "bottom" === n) {
-      e.style.bottom = "32px";
-      e.style.left = "50%";
-      e.style.transform = "translateX(-50%)";
-      e.setAttribute("data-cb-initial-centered", "1");
-      V(e);
-      return !0
+
+    // Centered card above the bottom edge.
+    if ("bottom-center" === layout || "popup" === layout || "bottom" === position) {
+      bannerEl.style.bottom = "32px";
+      bannerEl.style.left = "50%";
+      bannerEl.style.transform = "translateX(-50%)";
+      bannerEl.setAttribute("data-cb-initial-centered", "1");
+      applyFloatingLogoOffset(bannerEl);
+      return true
     }
-    e.style.bottom = "32px";
-    "bottom-right" === n ? e.style.right = "32px" : e.style.left = "32px";
-    e.style.transform = "none";
-    e.setAttribute("data-cb-initial-centered", "0");
-    V(e);
-    return !1
+
+    // Corner card.
+    bannerEl.style.bottom = "32px";
+    "bottom-right" === position ? bannerEl.style.right = "32px" : bannerEl.style.left = "32px";
+    bannerEl.style.transform = "none";
+    bannerEl.setAttribute("data-cb-initial-centered", "0");
+    applyFloatingLogoOffset(bannerEl);
+    return false
   }
 
-  function $(e) {
-    var t = e;
-    var n = t.indexOf("#");
-    n >= 0 && (t = t.slice(0, n));
-    (n = t.indexOf("?")) >= 0 && (t = t.slice(0, n));
-    (n = t.indexOf("/")) >= 0 && (t = t.slice(0, n));
-    return t.trim()
+  /** Strip the fragment, query and path so only the host part of a bare URL remains. */
+  function extractHostname(value) {
+    var host = value;
+    var cut = host.indexOf("#");
+    cut >= 0 && (host = host.slice(0, cut));
+    (cut = host.indexOf("?")) >= 0 && (host = host.slice(0, cut));
+    (cut = host.indexOf("/")) >= 0 && (host = host.slice(0, cut));
+    return host.trim()
   }
 
-  function G(e) {
-    var t = e.lastIndexOf(".");
-    if (t < 0) return !1;
-    var n = e.slice(t).toLowerCase();
-    return ".js" === n || ".mjs" === n || ".css" === n || ".png" === n || ".jpg" === n || ".jpeg" === n || ".gif" === n || ".svg" === n || ".webp" === n || ".pdf" === n || ".json" === n || ".xml" === n || ".ico" === n || ".woff" === n || ".woff2" === n
+  /** True when the string ends in a known file extension \u2014 i.e. it is a filename, not a hostname. */
+  function looksLikeFilename(value) {
+    var dot = value.lastIndexOf(".");
+    if (dot < 0) return false;
+    var ext = value.slice(dot).toLowerCase();
+    return ".js" === ext || ".mjs" === ext || ".css" === ext || ".png" === ext || ".jpg" === ext || ".jpeg" === ext || ".gif" === ext || ".svg" === ext || ".webp" === ext || ".pdf" === ext || ".json" === ext || ".xml" === ext || ".ico" === ext || ".woff" === ext || ".woff2" === ext
   }
 
-  function K(e) {
-    if (!e || "string" != typeof e) return "";
-    var t = e.trim();
-    if (!t) return "";
-    var n = t.toLowerCase();
-    if (0 === n.indexOf("mailto:") || 0 === n.indexOf("tel:")) return t;
-    if (0 === n.indexOf("http://") || 0 === n.indexOf("https://")) return t;
-    if (0 === t.indexOf("//")) return "https:" + t;
-    if ("/" === t.charAt(0) || 0 === t.indexOf("./") || 0 === t.indexOf("../")) {
+  /**
+   * Turn whatever the site owner typed into the privacy-policy field into a usable href:
+   * absolute URLs and mailto:/tel: pass through, protocol-relative gets https:, relative
+   * paths resolve against the page, and a bare "example.com/privacy" gets https:// prefixed.
+   */
+  function normalizeUrl(raw) {
+    if (!raw || "string" != typeof raw) return "";
+    var url = raw.trim();
+    if (!url) return "";
+    var lower = url.toLowerCase();
+    if (0 === lower.indexOf("mailto:") || 0 === lower.indexOf("tel:")) return url;
+    if (0 === lower.indexOf("http://") || 0 === lower.indexOf("https://")) return url;
+    if (0 === url.indexOf("//")) return "https:" + url;
+    if ("/" === url.charAt(0) || 0 === url.indexOf("./") || 0 === url.indexOf("../")) {
       try {
-        if ("undefined" != typeof window && window.location) return new URL(t, window.location.href).href
-      } catch (e) {}
-      return t
+        if ("undefined" != typeof window && window.location) return new URL(url, window.location.href).href
+      } catch (err) {}
+      return url
     }
-    var a = $(t);
-    if (a.indexOf(".") > 0 && !G(a)) {
-      for (; t.length > 0 && "/" === t.charAt(0);) t = t.slice(1);
-      return "https://" + t
+    var host = extractHostname(url);
+    if (host.indexOf(".") > 0 && !looksLikeFilename(host)) {
+      for (; url.length > 0 && "/" === url.charAt(0);) url = url.slice(1);
+      return "https://" + url
     }
     try {
-      if ("undefined" != typeof window && window.location) return new URL(t, window.location.href).href
-    } catch (e) {}
-    return t
+      if ("undefined" != typeof window && window.location) return new URL(url, window.location.href).href
+    } catch (err) {}
+    return url
   }
 
-  function Q(e, t) {
-    var n = K(t);
-    if (n) {
-      e.href = n;
-      e.target = "_blank";
-      e.rel = "noopener noreferrer";
-      e.addEventListener("click", function (e) {
-        e.stopPropagation && e.stopPropagation();
-        e.preventDefault && e.preventDefault();
+  /**
+   * Point an anchor at an external URL. The capture-phase handler opens the link
+   * itself so a host page that swallows clicks inside the banner cannot break it.
+   */
+  function bindExternalLink(anchorEl, rawUrl) {
+    var href = normalizeUrl(rawUrl);
+    if (href) {
+      anchorEl.href = href;
+      anchorEl.target = "_blank";
+      anchorEl.rel = "noopener noreferrer";
+      anchorEl.addEventListener("click", function (event) {
+        event.stopPropagation && event.stopPropagation();
+        event.preventDefault && event.preventDefault();
         try {
-          window.open(n, "_blank", "noopener,noreferrer")
-        } catch (e) {}
-      }, !0)
+          window.open(href, "_blank", "noopener,noreferrer")
+        } catch (err) {}
+      }, true)
     }
   }
 
-  function ee() {
+  /**
+   * Read the stored consent decision. An expired decision (past expiresAt, or older
+   * than cookieExpirationDays when no expiresAt was stored) counts as no decision,
+   * so the banner comes back.
+   */
+  function loadConsentState() {
     try {
-      var e = localStorage.getItem(I);
-      var t = e ? JSON.parse(e) : {
-        accepted: !1,
+      var stored = localStorage.getItem(STORAGE_KEY);
+      var state = stored ? JSON.parse(stored) : {
+        accepted: false,
         timestamp: null
       };
-      if (!t || !t.accepted) return t || {
-        accepted: !1,
+      if (!state || !state.accepted) return state || {
+        accepted: false,
         timestamp: null
       };
-      var n = Date.now();
-      var a = 24 * O * 60 * 60 * 1e3;
-      var r = t.expiresAt ? new Date(t.expiresAt).getTime() : t.timestamp ? new Date(t.timestamp).getTime() + a : 0;
-      return r > 0 && n > r ? {
-        accepted: !1,
+      var now = Date.now();
+      var lifetimeMs = 24 * cookieExpirationDays * 60 * 60 * 1000;
+      var expiresAt = state.expiresAt ? new Date(state.expiresAt).getTime() : state.timestamp ? new Date(state.timestamp).getTime() + lifetimeMs : 0;
+      return expiresAt > 0 && now > expiresAt ? {
+        accepted: false,
         timestamp: null
-      } : t
-    } catch (e) {
+      } : state
+    } catch (err) {
       return {
-        accepted: !1,
+        accepted: false,
         timestamp: null
       }
     }
   }
 
-  function te(e) {
+  /** Persist a decision, clear the "dismissed" marker, and release any scripts it now allows. */
+  function saveConsentState(state) {
     try {
-      var t = 24 * O * 60 * 60 * 1e3;
-      e.expiresAt = e.expiresAt || new Date(Date.now() + t).toISOString();
-      localStorage.setItem(I, JSON.stringify(e))
-    } catch (e) {
+      var lifetimeMs = 24 * cookieExpirationDays * 60 * 60 * 1000;
+      state.expiresAt = state.expiresAt || new Date(Date.now() + lifetimeMs).toISOString();
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      localStorage.removeItem(STORAGE_KEY + "_closed")
+    } catch (err) {
     }
-    A = e;
+    consentState = state;
     try {
-      ke()
-    } catch (e) {
+      unblockAllowedScripts()
+    } catch (err) {
     }
   }
 
-  function ne(e) {
+  /** Remember the toggle states so the preferences panel reopens pre-filled. */
+  function savePreferenceCategories(categories) {
     try {
-      var t = {
-        analytics: !!e.analytics,
-        preferences: !!e.preferences,
-        marketing: !!e.marketing
+      var toStore = {
+        analytics: !!categories.analytics,
+        preferences: !!categories.preferences,
+        marketing: !!categories.marketing
       };
-      var n = btoa(JSON.stringify(t));
-      localStorage.setItem(B, n)
-    } catch (e) {
+      var encoded = btoa(JSON.stringify(toStore));
+      localStorage.setItem(PREFS_STORAGE_KEY, encoded)
+    } catch (err) {
     }
   }
 
-  function ae() {
+  function loadPreferenceCategories() {
     try {
-      var e = localStorage.getItem(B);
-      if (!e) return null;
-      var t = JSON.parse(atob(e));
-      return t && "object" == typeof t ? {
-        analytics: !!t.analytics,
-        preferences: !!t.preferences,
-        marketing: !!t.marketing
+      var encoded = localStorage.getItem(PREFS_STORAGE_KEY);
+      if (!encoded) return null;
+      var decoded = JSON.parse(atob(encoded));
+      return decoded && "object" == typeof decoded ? {
+        analytics: !!decoded.analytics,
+        preferences: !!decoded.preferences,
+        marketing: !!decoded.marketing
       } : null
-    } catch (e) {
+    } catch (err) {
       return null
     }
   }
 
-  function re(e, t) {
-    if (r && c) {
-      t = t || {};
-      var n = e && e.expiresAt || t.expiresAt || new Date(Date.now() + 24 * O * 60 * 60 * 1e3).toISOString();
-      var a = {
-        siteId: r,
-        regulation: "gdpr" === i ? "gdpr" : "ccpa",
-        bannerType: i,
-        consentMethod: t.consentMethod || "banner",
-        status: t.status || "given",
-        expiresAt: n,
-        consent: e
+  /** Fire-and-forget the consent decision to the API for the audit log. */
+  function postConsentToApi(state, options) {
+    if (siteId && apiBase) {
+      options = options || {};
+      var expiresAt = state && state.expiresAt || options.expiresAt || new Date(Date.now() + 24 * cookieExpirationDays * 60 * 60 * 1000).toISOString();
+      var payload = {
+        siteId: siteId,
+        regulation: "gdpr" === bannerType ? "gdpr" : "ccpa",
+        bannerType: bannerType,
+        consentMethod: options.consentMethod || "banner",
+        status: options.status || "given",
+        expiresAt: expiresAt,
+        consent: state
       };
       try {
-        fetch(c + "/api/consent", {
+        fetch(apiBase + "/api/consent", {
           method: "POST",
           headers: {
             "Content-Type": "application/json"
           },
-          body: JSON.stringify(a)
-        }).catch(function (e) {
+          body: JSON.stringify(payload)
+        }).catch(function (err) {
         })
-      } catch (e) {
+      } catch (err) {
       }
     }
   }
 
-  function ie() {
+  /** True when this site already blew its monthly pageview quota (cached per calendar month). */
+  function isPageviewOverLimit() {
     try {
-      var e = localStorage.getItem(L);
-      if (!e) return !1;
-      var t = JSON.parse(e);
-      var n = new Date;
-      var a = n.getFullYear() + "-" + String(n.getMonth() + 1).padStart(2, "0");
-      return t.yearMonth === a && !0 === t.overLimit
-    } catch (e) {
-      return !1
+      var stored = localStorage.getItem(PAGEVIEW_LIMIT_KEY);
+      if (!stored) return false;
+      var record = JSON.parse(stored);
+      var now = new Date;
+      var yearMonth = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
+      return record.yearMonth === yearMonth && true === record.overLimit
+    } catch (err) {
+      return false
     }
   }
 
-  function oe(e) {
+  function markPageviewOverLimit(yearMonth) {
     try {
-      localStorage.setItem(L, JSON.stringify({
-        overLimit: !0,
-        yearMonth: e
+      localStorage.setItem(PAGEVIEW_LIMIT_KEY, JSON.stringify({
+        overLimit: true,
+        yearMonth: yearMonth
       }))
-    } catch (e) {}
+    } catch (err) {}
   }
 
-  function ce() {
-    if (r && c && !ie()) try {
-      var e = {
-        siteId: r,
+  /** Report a pageview, and cache an over-limit response so we stop reporting this month. */
+  function recordPageview() {
+    if (siteId && apiBase && !isPageviewOverLimit()) try {
+      var payload = {
+        siteId: siteId,
         pageUrl: "undefined" != typeof window && window.location ? window.location.href : null
       };
-      fetch(c + "/api/pageview", {
+      fetch(apiBase + "/api/pageview", {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify(e),
-        keepalive: !0
-      }).then(function (e) {
-        return e.json()
-      }).then(function (e) {
-        if (e && e.overLimit) {
-          var t = new Date;
-          var n;
-          oe(e.yearMonth || t.getFullYear() + "-" + String(t.getMonth() + 1).padStart(2, "0"))
+        body: JSON.stringify(payload),
+        keepalive: true
+      }).then(function (response) {
+        return response.json()
+      }).then(function (result) {
+        if (result && result.overLimit) {
+          var now = new Date;
+          markPageviewOverLimit(result.yearMonth || now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0"))
         }
-      }).catch(function (e) {
+      }).catch(function (err) {
       })
-    } catch (e) {
+    } catch (err) {
     }
   }
 
-  function se() {
+  /** All cookies currently set on the page, as raw "name=value" strings. */
+  function getCookieList() {
     try {
-      var e = "undefined" != typeof document && document.cookie ? document.cookie : "";
-      return e ? e.split(";").map(function (e) {
-        return e.trim()
+      var raw = "undefined" != typeof document && document.cookie ? document.cookie : "";
+      return raw ? raw.split(";").map(function (cookie) {
+        return cookie.trim()
       }).filter(Boolean) : []
-    } catch (e) {
+    } catch (err) {
       return []
     }
   }
 
-  function le() {
+  /** Every third-party script src on the page (our own scripts excluded). */
+  function getThirdPartyScriptSrcs() {
     try {
-      var e = [];
-      var t = document.getElementsByTagName("script");
-      for (var n = 0; n < t.length; n++) {
-        var a = t[n].src;
-        a && -1 === a.indexOf("consentbit") && -1 === a.indexOf("client_data") && e.push(a)
+      var srcs = [];
+      var scripts = document.getElementsByTagName("script");
+      for (var i = 0; i < scripts.length; i++) {
+        var src = scripts[i].src;
+        src && -1 === src.indexOf("consentbit") && -1 === src.indexOf("client_data") && srcs.push(src)
       }
-      return e
-    } catch (e) {
+      return srcs
+    } catch (err) {
       return []
     }
   }
 
-  function de(e) {
+  /** Best-effort category for a script URL, by well-known vendor host. */
+  function guessScriptCategory(src) {
     try {
-      var t;
-      var n = new URL(e).hostname;
-      return -1 !== n.indexOf("google-analytics.com") || -1 !== e.indexOf("gtag/js") || -1 !== n.indexOf("googletagmanager.com") ? "analytics" : -1 !== n.indexOf("facebook.com") || -1 !== n.indexOf("fbcdn.net") || -1 !== n.indexOf("doubleclick.net") || 0 === n.indexOf("ads.") ? "marketing" : -1 !== n.indexOf("hotjar.com") || -1 !== n.indexOf("intercom.io") || -1 !== n.indexOf("fullstory.com") ? "behavioral" : "uncategorized"
-    } catch (e) {
+      var host = new URL(src).hostname;
+      return -1 !== host.indexOf("google-analytics.com") || -1 !== src.indexOf("gtag/js") || -1 !== host.indexOf("googletagmanager.com") ? "analytics" : -1 !== host.indexOf("facebook.com") || -1 !== host.indexOf("fbcdn.net") || -1 !== host.indexOf("doubleclick.net") || 0 === host.indexOf("ads.") ? "marketing" : -1 !== host.indexOf("hotjar.com") || -1 !== host.indexOf("intercom.io") || -1 !== host.indexOf("fullstory.com") ? "behavioral" : "uncategorized"
+    } catch (err) {
       return "uncategorized"
     }
   }
 
-  function pe() {
-    var e = {};
-    var t = [];
-    var n = document.scripts;
-    for (var a = 0; a < n.length; a++) {
-      var r = n[a];
-      if (r.src && !e[r.src]) {
-        e[r.src] = !0;
-        t.push(r)
+  /** Script elements with a src, de-duplicated by URL. */
+  function getUniqueScriptElements() {
+    var seenSrcs = {};
+    var unique = [];
+    var scripts = document.scripts;
+    for (var i = 0; i < scripts.length; i++) {
+      var script = scripts[i];
+      if (script.src && !seenSrcs[script.src]) {
+        seenSrcs[script.src] = true;
+        unique.push(script)
       }
     }
-    return t
+    return unique
   }
 
-  function be() {
-    var e = document.scripts;
-    for (var t = 0; t < e.length; t++) {
-      var n = e[t];
-      var a = n.src || n.getAttribute("data-cb-blocked-src") || "";
-      if (-1 !== a.indexOf("googletagmanager.com/gtag/js") || -1 !== a.indexOf("googletagmanager.com/gtm.js") || -1 !== a.indexOf("google-analytics.com")) return !0
+  /**
+   * Any Google tag host whose behaviour Consent Mode governs \u2014 analytics (GA/GTM) AND
+   * advertising (Ads, AdSense, Ad Manager). A site may run ads with no analytics tag at
+   * all, so the advertising hosts must be here or such a site gets no consent signal.
+   */
+  function isGoogleTagUrl(src) {
+    if (!src || "string" != typeof src) return false;
+    var lower = src.toLowerCase();
+    return -1 !== lower.indexOf("googletagmanager.com/gtag/js") ||
+      -1 !== lower.indexOf("googletagmanager.com/gtm.js") ||
+      -1 !== lower.indexOf("google-analytics.com") ||
+      -1 !== lower.indexOf("googlesyndication.com") ||
+      -1 !== lower.indexOf("googleadservices.com") ||
+      -1 !== lower.indexOf("googletagservices.com") ||
+      -1 !== lower.indexOf("securepubads.g.doubleclick.net")
+  }
+
+  /** True when the page carries a Google tag \u2014 including one we have already blocked. */
+  function hasGoogleTagScript() {
+    var scripts = document.scripts;
+    for (var i = 0; i < scripts.length; i++) {
+      var script = scripts[i];
+      var src = script.src || script.getAttribute("data-cb-blocked-src") || "";
+      if (isGoogleTagUrl(src)) return true
     }
-    return !1
+    // Ad tags are often bootstrapped inline rather than by <script src>.
+    return !!(window.adsbygoogle || window.googletag)
   }
 
-  function fe(e) {
-    return "analytics" === e || "marketing" === e || "behavioral" === e || "advertisement" === e || "functional" === e || "performance" === e
+  /**
+   * Guarantee window.dataLayer + window.gtag exist so Consent Mode commands can always
+   * be queued, even when no Google tag has loaded yet. Pushes are inert until a tag
+   * consumes them and are replayed in order when one arrives \u2014 which is why the CMP
+   * must never condition its signalling on detecting a tag first.
+   */
+  function ensureGtag() {
+    window.dataLayer = window.dataLayer || [];
+    if (!window.gtag) window.gtag = function () {
+      dataLayer.push(arguments)
+    };
+    return window.gtag
   }
 
-  function me(e) {
-    if (!e || "string" != typeof e) return !1;
-    var t = e.toLowerCase();
-    return -1 !== t.indexOf("googletagmanager.com/gtag/js") || -1 !== t.indexOf("googletagmanager.com/gtm.js") || -1 !== t.indexOf("google-analytics.com")
+  /**
+   * Consent Mode companion flags. Both must be set before any Google tag fires.
+   *   ads_data_redaction \u2014 while ad_storage is denied, strip ad click identifiers from
+   *     outgoing requests so no user-level ad data leaves the page.
+   *   url_passthrough \u2014 carry gclid/dclid/wbraid across navigations in the URL, so
+   *     conversions still attribute for users who declined cookies.
+   * Idempotent: repeat calls just re-push the same value.
+   */
+  function setConsentModeFlags() {
+    var g = ensureGtag();
+    g("set", "ads_data_redaction", true);
+    g("set", "url_passthrough", true)
   }
 
-  function ue(e) {
-    var t = e;
-    "behavioral" === t && (t = "analytics");
-    if ("essential" === t) return !0;
-    if ("ccpa" === i) {
-      return !(A && A.accepted && A.ccpa && A.ccpa.doNotSell && fe(t));
-      var n
+  /**
+   * Publish the consent decision to the dataLayer as a NAMED event, so a Google Tag
+   * Manager container can fire tags from it (Custom Event trigger on
+   * "consentbit_consent_update", with Data Layer Variables reading the flat keys below).
+   *
+   * gtag("consent","update") alone is not enough for GTM: it updates the built-in
+   * consent state but raises no event, so a container has nothing to trigger on.
+   *
+   * MUST be called AFTER the gtag consent update, so any tag this event fires already
+   * sees the new consent state. Keys are prefixed to avoid colliding with the host
+   * page's own dataLayer variables.
+   */
+  function pushConsentDataLayerEvent(categories, source) {
+    try {
+      var cats = categories || {};
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: "consentbit_consent_update",
+        consentbit_regulation: bannerType,
+        consentbit_source: String(source || "banner").replace(/[[]]/g, "").toLowerCase(),
+        consentbit_essential: true,
+        consentbit_analytics: !!cats.analytics,
+        consentbit_marketing: !!cats.marketing,
+        consentbit_preferences: !!cats.preferences
+      })
+    } catch (err) {}
+  }
+
+  /** Categories that require consent. Anything else ("essential", "uncategorized") is never blocked. */
+  function isBlockableCategory(category) {
+    return "analytics" === category || "marketing" === category || "behavioral" === category || "advertisement" === category || "functional" === category || "performance" === category
+  }
+
+  function isGoogleAnalyticsUrl(src) {
+    if (!src || "string" != typeof src) return false;
+    var lower = src.toLowerCase();
+    return -1 !== lower.indexOf("googletagmanager.com/gtag/js") || -1 !== lower.indexOf("googletagmanager.com/gtm.js") || -1 !== lower.indexOf("google-analytics.com")
+  }
+
+  /**
+   * Has the visitor allowed this category?
+   * Under CCPA (opt-out) everything is allowed until they choose "Do Not Sell".
+   * Under GDPR (opt-in) nothing beyond "essential" is allowed until they consent.
+   */
+  function isCategoryAllowed(category) {
+    var normalized = category;
+    "behavioral" === normalized && (normalized = "analytics");
+    if ("essential" === normalized) return true;
+    if ("ccpa" === bannerType) {
+      return !(consentState && consentState.accepted && consentState.ccpa && consentState.ccpa.doNotSell && isBlockableCategory(normalized))
     }
-    if (!A || !A.accepted) return !1;
-    var a = A.categories || {};
-    return "analytics" === t ? !!a.analytics : "marketing" === t || "advertisement" === t ? !!a.marketing : "preferences" !== t && "functional" !== t && "performance" !== t || !!a.preferences
+    if (!consentState || !consentState.accepted) return false;
+    var categories = consentState.categories || {};
+    return "analytics" === normalized ? !!categories.analytics : "marketing" === normalized || "advertisement" === normalized ? !!categories.marketing : "preferences" !== normalized && "functional" !== normalized && "performance" !== normalized || !!categories.preferences
   }
 
-  function ge(e) {
-    if (!e) return null;
-    var t = String(e).toLowerCase().trim();
-    if ("analytics" === t || "marketing" === t || "behavioral" === t || "preferences" === t || "essential" === t) return ["essential" === t ? "essential" : t];
-    var n = t;
-    return n.indexOf("necessary") >= 0 || n.indexOf("essential") >= 0 ? ["essential"] : n.indexOf("functional") >= 0 || n.indexOf("preference") >= 0 ? ["preferences"] : n.indexOf("analytics") >= 0 || n.indexOf("performance") >= 0 || n.indexOf("statistics") >= 0 ? ["analytics"] : n.indexOf("advertisement") >= 0 || n.indexOf("marketing") >= 0 || n.indexOf("ads") >= 0 || n.indexOf("social") >= 0 ? ["marketing"] : n.indexOf("other") >= 0 ? ["analytics"] : null
-  }
-
-  function ve(e, t) {
-    if (t && t.getAttribute) {
-      var n = ge(t.getAttribute("data-consentbit"));
-      if (n) return n;
-      var a = t.getAttribute("data-consentbit-category");
-      if (a) {
-        var r = String(a).toLowerCase().trim();
-        if ("analytics" === r || "marketing" === r || "behavioral" === r || "preferences" === r || "essential" === r) return [r]
-      }
-      var i = ge(t.getAttribute("data-cookieyes"));
-      if (i) return i
+  /** True only when EVERY category in a comma-separated list is allowed. */
+  function areCategoriesAllowed(categoryList) {
+    if (!categoryList) return false;
+    var parts = String(categoryList).split(",");
+    for (var i = 0; i < parts.length; i++) {
+      var category = String(parts[i] || "").toLowerCase().trim();
+      if (!category) continue;
+      if ("personalization" === category) category = "preferences";
+      if (!isCategoryAllowed(category)) return false
     }
-    if (e && j.length)
-      for (var o = 0; o < j.length; o++) {
-        var c = j[o];
-        if (c && c.pattern) try {
-          if (new RegExp(c.pattern, "i").test(e)) return c.categories && c.categories.length ? c.categories.slice() : ["analytics"]
-        } catch (e) {}
+    return true
+  }
+
+  /**
+   * Map a category name from any vendor's vocabulary (CookieYes, GTM, our own) onto
+   * one of our four buckets. Returns null when nothing matches.
+   */
+  function mapToKnownCategories(raw) {
+    if (!raw) return null;
+    var category = String(raw).toLowerCase().trim();
+    if ("analytics" === category || "marketing" === category || "behavioral" === category || "preferences" === category || "essential" === category) return ["essential" === category ? "essential" : category];
+    return category.indexOf("necessary") >= 0 || category.indexOf("essential") >= 0 ? ["essential"] : category.indexOf("functional") >= 0 || category.indexOf("preference") >= 0 ? ["preferences"] : category.indexOf("analytics") >= 0 || category.indexOf("performance") >= 0 || category.indexOf("statistics") >= 0 ? ["analytics"] : category.indexOf("advertisement") >= 0 || category.indexOf("marketing") >= 0 || category.indexOf("ads") >= 0 || category.indexOf("social") >= 0 ? ["marketing"] : category.indexOf("other") >= 0 ? ["analytics"] : null
+  }
+
+  /**
+   * Work out which consent categories a script belongs to. Explicit markup on the
+   * element wins (our own data-consentbit* attributes, then CookieYes'); otherwise we
+   * match the URL against the worker-supplied provider rules and then the site owner's
+   * custom rules. An empty array means "unknown" \u2014 and unknown scripts are never blocked.
+   */
+  function resolveScriptCategories(src, scriptEl) {
+    if (scriptEl && scriptEl.getAttribute) {
+      var tagged = mapToKnownCategories(scriptEl.getAttribute("data-consentbit"));
+      if (tagged) return tagged;
+
+      // In Webflow mode the data-category attribute belongs to Webflow, so we only read our own.
+      var categoryAttr = scriptEl.getAttribute("data-consentbit-category");
+      if (!categoryAttr && !window.__CB_WEBFLOW_MODE__) categoryAttr = scriptEl.getAttribute("data-category");
+      if (categoryAttr) {
+        var resolved = [];
+        var declared = String(categoryAttr).split(",");
+        for (var i = 0; i < declared.length; i++) {
+          var name = String(declared[i] || "").toLowerCase().trim();
+          if (!name) continue;
+          var mapped = mapToKnownCategories("personalization" === name ? "preferences" : name);
+          if (mapped)
+            for (var j = 0; j < mapped.length; j++)
+              if (resolved.indexOf(mapped[j]) === -1) resolved.push(mapped[j]);
+        }
+        if (resolved.length) return resolved
       }
-    if (e && P.length)
-      for (var s = 0; s < P.length; s++) {
-        var l = P[s];
-        if (l && l.scriptUrlPattern) try {
-          if (new RegExp(l.scriptUrlPattern, "i").test(e)) return [l.category || "uncategorized"]
-        } catch (e) {}
+
+      var cookieYes = mapToKnownCategories(scriptEl.getAttribute("data-cookieyes"));
+      if (cookieYes) return cookieYes
+    }
+
+    if (src && scriptBlockProviders.length)
+      for (var p = 0; p < scriptBlockProviders.length; p++) {
+        var provider = scriptBlockProviders[p];
+        if (provider && provider.pattern) try {
+          if (new RegExp(provider.pattern, "i").test(src)) return provider.categories && provider.categories.length ? provider.categories.slice() : ["analytics"]
+        } catch (err) {}
       }
+
+    if (src && customCookieRules.length)
+      for (var c = 0; c < customCookieRules.length; c++) {
+        var rule = customCookieRules[c];
+        if (rule && rule.scriptUrlPattern) try {
+          if (new RegExp(rule.scriptUrlPattern, "i").test(src)) return [rule.category || "uncategorized"]
+        } catch (err) {}
+      }
+
     return []
   }
 
-  function ye(e, t) {
-    if (z) return !1;
-    if (!e || "string" != typeof e) return !1;
-    var n = e.toLowerCase();
-    if (-1 !== n.indexOf("consentbit") || -1 !== n.indexOf("client_data")) return !1;
-    var a = ve(e, t);
-    if (!a || 0 === a.length) return !1;
-    if ("ccpa" === i) return !!(A && A.accepted && A.ccpa && A.ccpa.doNotSell);
-    for (var r = 0; r < a.length; r++) {
-      var o = a[r];
-      if (fe(o) && !("analytics" === o && me(e) || ue(o))) return !0
+  /**
+   * Should this script be prevented from running right now?
+   * Note the GA/GTM exemption: Google tags are allowed to load and are gated by
+   * Google Consent Mode instead of being hard-blocked.
+   */
+  function shouldBlockScript(src, scriptEl) {
+    if (isInjectingScript) return false;
+    if (!src || "string" != typeof src) return false;
+    var lower = src.toLowerCase();
+    if (-1 !== lower.indexOf("consentbit") || -1 !== lower.indexOf("client_data")) return false;
+    var categories = resolveScriptCategories(src, scriptEl);
+    if (!categories || 0 === categories.length) return false;
+    if ("ccpa" === bannerType) return !!(consentState && consentState.accepted && consentState.ccpa && consentState.ccpa.doNotSell);
+    for (var i = 0; i < categories.length; i++) {
+      var category = categories[i];
+      if (isBlockableCategory(category) && !("analytics" === category && isGoogleAnalyticsUrl(src) || isCategoryAllowed(category))) return true
     }
-    return !1
+    return false
   }
 
-  function Di(content) {
+  /** Sniff an untagged inline script for a known tracking pixel's call signature. */
+  function detectInlineScriptCategory(content) {
     if (!content || typeof content !== "string") return null;
     if (content.indexOf("fbq(") >= 0 || content.indexOf("fbq (") >= 0 || content.indexOf("connect.facebook.net") >= 0) return "marketing";
     if (content.indexOf("ttq(") >= 0 || content.indexOf("ttq (") >= 0 || content.indexOf("analytics.tiktok.com") >= 0) return "marketing";
@@ -9004,431 +9570,454 @@ ${inlineConfig}
     return null;
   }
 
-  function he(e) {
-    if (e && "SCRIPT" === e.nodeName && (!e.getAttribute || "javascript/blocked" !== e.getAttribute("type"))) {
-      var t = e.getAttribute && e.getAttribute("src") || e.src || "";
-      if (t) {
-        var n = ve(t, e);
-        var a = n.length > 0 ? n[0] : "uncategorized";
-        if (ye(t, e)) try {
-          e.setAttribute("data-cb-blocked-src", t);
-          e.setAttribute("type", "javascript/blocked");
-          e.removeAttribute("src")
-        } catch (e) {}
+  /**
+   * Neutralise a script element in place.
+   * External: stash the src in data-cb-blocked-src and set an unknown type, so the
+   * browser never fetches it. Inline: stash the source on the element and blank the
+   * body. Both are restored later by unblockAllowedScripts().
+   */
+  function blockScriptElement(scriptEl) {
+    if (scriptEl && "SCRIPT" === scriptEl.nodeName && (!scriptEl.getAttribute || "javascript/blocked" !== scriptEl.getAttribute("type"))) {
+      var src = scriptEl.getAttribute && scriptEl.getAttribute("src") || scriptEl.src || "";
+      if (src) {
+        if (shouldBlockScript(src, scriptEl)) try {
+          scriptEl.setAttribute("data-cb-blocked-src", src);
+          scriptEl.setAttribute("type", "javascript/blocked");
+          scriptEl.removeAttribute("src")
+        } catch (err) {}
       } else {
-        var ic = (e.getAttribute && e.getAttribute("data-consentbit-category")) || Di(e.textContent || "");
-        if (ic && !ue(ic)) try {
-          e.__ci = e.textContent || "";
-          var tc = Object.getOwnPropertyDescriptor(Node.prototype, "textContent");
-          tc && tc.set ? tc.set.call(e, "") : (e.textContent = "");
-          e.setAttribute("type", "javascript/blocked");
-          e.setAttribute("data-cb-inline", "1");
-        } catch(ex) {}
+        var inlineCategory = (scriptEl.getAttribute && (scriptEl.getAttribute("data-consentbit-category") || (!window.__CB_WEBFLOW_MODE__ && scriptEl.getAttribute("data-category")))) || detectInlineScriptCategory(scriptEl.textContent || "");
+        if (inlineCategory && !isCategoryAllowed(inlineCategory)) try {
+          scriptEl.__ci = scriptEl.textContent || "";
+          // Go through the native setter: our own patched one would re-block instead of clearing.
+          var textContentDescriptor = Object.getOwnPropertyDescriptor(Node.prototype, "textContent");
+          textContentDescriptor && textContentDescriptor.set ? textContentDescriptor.set.call(scriptEl, "") : (scriptEl.textContent = "");
+          scriptEl.setAttribute("type", "javascript/blocked");
+          scriptEl.setAttribute("data-cb-inline", "1");
+        } catch(err) {}
       }
     }
   }
 
-  function xe(e) {
-    if (e && !e.__cp) {
-      e.__cp = !0;
+  /**
+   * Intercept a freshly created <script> before anything is assigned to it, so a
+   * blocked src/textContent never reaches the DOM in the first place. Assigning
+   * assigning type on a blocked script cannot un-block it either.
+   */
+  function patchScriptElement(scriptEl) {
+    if (scriptEl && !scriptEl.__cp) {
+      scriptEl.__cp = true;
       try {
-        Object.defineProperty(e, "src", {
-          configurable: !0,
-          enumerable: !0,
+        Object.defineProperty(scriptEl, "src", {
+          configurable: true,
+          enumerable: true,
           get: function () {
-            return e.getAttribute("src") || ""
+            return scriptEl.getAttribute("src") || ""
           },
-          set: function (t) {
-            var n = ve(t, e);
-            var a = n.length > 0 ? n[0] : "uncategorized";
-            if (ye(t, e)) {
-              e.setAttribute("data-cb-blocked-src", t);
-              e.setAttribute("type", "javascript/blocked");
-              e.removeAttribute("src")
-            } else e.setAttribute("src", t)
+          set: function (value) {
+            if (shouldBlockScript(value, scriptEl)) {
+              scriptEl.setAttribute("data-cb-blocked-src", value);
+              scriptEl.setAttribute("type", "javascript/blocked");
+              scriptEl.removeAttribute("src")
+            } else scriptEl.setAttribute("src", value)
           }
         })
-      } catch (e) {}
+      } catch (err) {}
       try {
-        Object.defineProperty(e, "type", {
-          configurable: !0,
-          enumerable: !0,
+        Object.defineProperty(scriptEl, "type", {
+          configurable: true,
+          enumerable: true,
           get: function () {
-            return e.getAttribute("type") || ""
+            return scriptEl.getAttribute("type") || ""
           },
-          set: function (t) {
-            var n = t;
-            ye(e.getAttribute("src") || e.src || "", e) && (n = "javascript/blocked");
-            e.setAttribute("type", n)
+          set: function (value) {
+            var type = value;
+            shouldBlockScript(scriptEl.getAttribute("src") || scriptEl.src || "", scriptEl) && (type = "javascript/blocked");
+            scriptEl.setAttribute("type", type)
           }
         })
-      } catch (e) {}
+      } catch (err) {}
       try {
-        var tc = Object.getOwnPropertyDescriptor(Node.prototype, "textContent");
-        if (tc && tc.set) {
-          var ts = tc.set;
-          Object.defineProperty(e, "textContent", {
-            configurable: !0,
-            get: function() { return tc.get ? tc.get.call(e) : ""; },
-            set: function(val) {
-              var cat = (e.getAttribute && e.getAttribute("data-consentbit-category")) || Di(val);
-              if (cat && !ue(cat)) {
-                e.__ci = val;
-                e.setAttribute("type", "javascript/blocked");
-                e.setAttribute("data-cb-inline", "1");
+        var textContentDescriptor = Object.getOwnPropertyDescriptor(Node.prototype, "textContent");
+        if (textContentDescriptor && textContentDescriptor.set) {
+          var nativeTextContentSetter = textContentDescriptor.set;
+          Object.defineProperty(scriptEl, "textContent", {
+            configurable: true,
+            get: function() { return textContentDescriptor.get ? textContentDescriptor.get.call(scriptEl) : ""; },
+            set: function(value) {
+              var category = (scriptEl.getAttribute && (scriptEl.getAttribute("data-consentbit-category") || (!window.__CB_WEBFLOW_MODE__ && scriptEl.getAttribute("data-category")))) || detectInlineScriptCategory(value);
+              if (category && !isCategoryAllowed(category)) {
+                scriptEl.__ci = value;
+                scriptEl.setAttribute("type", "javascript/blocked");
+                scriptEl.setAttribute("data-cb-inline", "1");
               } else {
-                ts.call(e, val);
+                nativeTextContentSetter.call(scriptEl, value);
               }
             }
           });
         }
-      } catch (_xe) {}
+      } catch (err) {}
     }
   }
 
-  function we(e) {
-    if (e && 1 === e.nodeType)
-      if ("SCRIPT" !== e.nodeName) {
-        if (e.querySelectorAll) {
-          var t = e.querySelectorAll("script[src]");
-          for (var n = 0; n < t.length; n++) he(t[n])
+  /** Block a newly inserted node \u2014 the script itself, or any scripts inside a subtree. */
+  function scanNodeForScripts(node) {
+    if (node && 1 === node.nodeType)
+      if ("SCRIPT" !== node.nodeName) {
+        if (node.querySelectorAll) {
+          var scripts = node.querySelectorAll("script[src]");
+          for (var i = 0; i < scripts.length; i++) blockScriptElement(scripts[i])
         }
-      } else he(e)
+      } else blockScriptElement(node)
   }
 
-  function ke(e) {
-    if (window.__CB_WEBFLOW_MODE__) Ie(e || (A && A.categories) || {
-      analytics: !0,
-      marketing: !0,
-      preferences: !0,
-      essential: !0
+  /**
+   * Re-run every blocked script that the current consent now allows.
+   * Three kinds are restored: external scripts we neutralised (data-cb-blocked-src),
+   * scripts the site author parked as type="text/plain" with a category attribute, and
+   * inline scripts whose source we stashed on the element.
+   *
+   * A blocked script cannot simply be re-enabled in place \u2014 the browser will not
+   * re-evaluate an existing element \u2014 so each one is rebuilt as a fresh <script> and
+   * swapped in. isInjectingScript suppresses the blocker while we do that.
+   *
+   * In Webflow mode script blocking is owned by the Webflow setup script, so we just
+   * broadcast the new consent and let it react.
+   */
+  function unblockAllowedScripts(categoriesOverride) {
+    if (window.__CB_WEBFLOW_MODE__) dispatchWebflowConsent(categoriesOverride || (consentState && consentState.categories) || {
+      analytics: true,
+      marketing: true,
+      preferences: true,
+      essential: true
     });
     else {
-      var t = document.querySelectorAll('script[type="javascript/blocked"][data-cb-blocked-src]');
-      var n = 0;
-      var a = 0;
-      var r = [];
-      var i = [];
-      for (var o = 0; o < t.length; o++) {
-        var c = t[o];
-        var s = c.getAttribute("data-cb-blocked-src");
-        if (s)
-          if (ye(s, c)) {
-            a++;
-            r.push(s)
-          } else {
-            z = !0;
+      // 1. External scripts we blocked earlier.
+      var blockedScripts = document.querySelectorAll('script[type="javascript/blocked"][data-cb-blocked-src]');
+      for (var i = 0; i < blockedScripts.length; i++) {
+        var blocked = blockedScripts[i];
+        var blockedSrc = blocked.getAttribute("data-cb-blocked-src");
+        if (blockedSrc)
+          if (!shouldBlockScript(blockedSrc, blocked)) {
+            isInjectingScript = true;
             try {
-              var l = document.createElement("script");
-              l.async = c.hasAttribute("async");
-              l.defer = c.hasAttribute("defer");
-              l.crossOrigin = c.crossOrigin || "";
-              l.integrity = c.integrity || "";
-              l.referrerPolicy = c.referrerPolicy || "";
-              c.id && (l.id = c.id);
-              l.src = s;
-              var d = c.attributes;
-              for (var p = 0; p < d.length; p++) {
-                var b = d[p].name;
-                "src" !== b && "type" !== b && "data-cb-blocked-src" !== b && l.setAttribute(b, d[p].value)
+              var revived = document.createElement("script");
+              revived.async = blocked.hasAttribute("async");
+              revived.defer = blocked.hasAttribute("defer");
+              revived.crossOrigin = blocked.crossOrigin || "";
+              revived.integrity = blocked.integrity || "";
+              revived.referrerPolicy = blocked.referrerPolicy || "";
+              blocked.id && (revived.id = blocked.id);
+              revived.src = blockedSrc;
+              var attrs = blocked.attributes;
+              for (var a = 0; a < attrs.length; a++) {
+                var attrName = attrs[a].name;
+                "src" !== attrName && "type" !== attrName && "data-cb-blocked-src" !== attrName && revived.setAttribute(attrName, attrs[a].value)
               }
-              c.parentNode ? c.parentNode.replaceChild(l, c) : document.head.appendChild(l);
-              n++;
-              i.push(s)
-            } catch (e) {
+              blocked.parentNode ? blocked.parentNode.replaceChild(revived, blocked) : document.head.appendChild(revived);
+            } catch (err) {
             } finally {
-              z = !1
+              isInjectingScript = false
             }
           }
       }
-      var fq = document.querySelectorAll('script[type="text/plain"][data-consentbit-category]');
-      for (var gi = 0; gi < fq.length; gi++) {
-        var hs = fq[gi];
-        var ja = hs.getAttribute("data-consentbit-category");
-        if (ja && ue(ja)) {
-          z = !0;
+
+      // 2. Scripts the site author parked as type="text/plain" with a category attribute.
+      var parkedScripts = document.querySelectorAll('script[type="text/plain"][data-consentbit-category],script[type="text/plain"][data-category]');
+      for (var p = 0; p < parkedScripts.length; p++) {
+        var parked = parkedScripts[p];
+        var parkedCategories = parked.getAttribute("data-consentbit-category") || parked.getAttribute("data-category");
+        if (parkedCategories && areCategoriesAllowed(parkedCategories)) {
+          isInjectingScript = true;
           try {
-            var kq = document.createElement("script");
-            kq.async = hs.hasAttribute("async");
-            kq.defer = hs.hasAttribute("defer");
-            var ma = hs.getAttribute("src") || "";
-            if (ma) kq.src = ma;
-            else kq.textContent = hs.textContent;
-            var qa = hs.attributes;
-            for (var ua = 0; ua < qa.length; ua++) {
-              var va = qa[ua].name;
-              if (va !== "type" && va !== "src" && va !== "data-consentbit-category") kq.setAttribute(va, qa[ua].value);
+            var activated = document.createElement("script");
+            activated.async = parked.hasAttribute("async");
+            activated.defer = parked.hasAttribute("defer");
+            var parkedSrc = parked.getAttribute("src") || "";
+            if (parkedSrc) activated.src = parkedSrc;
+            else activated.textContent = parked.textContent;
+            var parkedAttrs = parked.attributes;
+            for (var pa = 0; pa < parkedAttrs.length; pa++) {
+              var parkedAttrName = parkedAttrs[pa].name;
+              if (parkedAttrName !== "type" && parkedAttrName !== "src" && parkedAttrName !== "data-consentbit-category" && parkedAttrName !== "data-category") activated.setAttribute(parkedAttrName, parkedAttrs[pa].value);
             }
-            hs.parentNode ? hs.parentNode.replaceChild(kq, hs) : document.head.appendChild(kq);
-          } catch(e) {
+            parked.parentNode ? parked.parentNode.replaceChild(activated, parked) : document.head.appendChild(activated);
+          } catch(err) {
           } finally {
-            z = !1;
+            isInjectingScript = false;
           }
         }
       }
-      var wq = document.querySelectorAll('script[type="javascript/blocked"][data-cb-inline="1"]');
-      for (var xi = 0; xi < wq.length; xi++) {
-        var ys = wq[xi];
-        var zq = ys.__ci || "";
-        var iq = (ys.getAttribute && ys.getAttribute("data-consentbit-category")) || Di(zq);
-        if (iq && ue(iq)) {
-          z = !0;
+
+      // 3. Inline scripts we emptied \u2014 their source is stashed on the element as __ci.
+      var blockedInline = document.querySelectorAll('script[type="javascript/blocked"][data-cb-inline="1"]');
+      for (var b = 0; b < blockedInline.length; b++) {
+        var inlineEl = blockedInline[b];
+        var inlineSource = inlineEl.__ci || "";
+        var inlineCategories = (inlineEl.getAttribute && (inlineEl.getAttribute("data-consentbit-category") || inlineEl.getAttribute("data-category"))) || detectInlineScriptCategory(inlineSource);
+        if (inlineCategories && areCategoriesAllowed(inlineCategories)) {
+          isInjectingScript = true;
           try {
-            var _il = document.createElement("script");
-            if (zq) _il.textContent = zq;
-            ys.parentNode ? ys.parentNode.replaceChild(_il, ys) : document.head.appendChild(_il);
-          } catch(e) {
+            var revivedInline = document.createElement("script");
+            if (inlineSource) revivedInline.textContent = inlineSource;
+            inlineEl.parentNode ? inlineEl.parentNode.replaceChild(revivedInline, inlineEl) : document.head.appendChild(revivedInline);
+          } catch(err) {
           } finally {
-            z = !1;
+            isInjectingScript = false;
           }
         }
       }
     }
   }
 
-  function Dc(n) {
-    var h = window.location.hostname;
-    var b = h.indexOf("www.") === 0 ? h.slice(4) : h;
-    var ds = [null, h, "." + h, b, "." + b, "www." + b, ".www." + b];
-    var ps = ["/", window.location.pathname];
-    var ex = "Thu, 01 Jan 1970 00:00:00 GMT";
-    for (var di = 0; di < ds.length; di++)
-      for (var pi = 0; pi < ps.length; pi++) {
-        var cv = n + "=; expires=" + ex + "; path=" + ps[pi];
-        if (ds[di]) cv += "; domain=" + ds[di];
-        try { document.cookie = cv; } catch(e) {}
+  /**
+   * Expire a cookie. We cannot know which domain/path it was set on, so we blanket-expire
+   * it across every plausible combination (bare host, dot-prefixed, www, root path, current path).
+   */
+  function deleteCookie(name) {
+    var host = window.location.hostname;
+    var bareHost = host.indexOf("www.") === 0 ? host.slice(4) : host;
+    var domains = [null, host, "." + host, bareHost, "." + bareHost, "www." + bareHost, ".www." + bareHost];
+    var paths = ["/", window.location.pathname];
+    var expiredDate = "Thu, 01 Jan 1970 00:00:00 GMT";
+    for (var d = 0; d < domains.length; d++)
+      for (var p = 0; p < paths.length; p++) {
+        var cookieValue = name + "=; expires=" + expiredDate + "; path=" + paths[p];
+        if (domains[d]) cookieValue += "; domain=" + domains[d];
+        try { document.cookie = cookieValue; } catch(err) {}
       }
   }
 
-  function Mc(pat) {
-    var si = pat.indexOf("*");
-    var pfx = si >= 0 ? pat.slice(0, si) : null;
-    var all = document.cookie.split(";").map(function(c) { return c.trim().split("=")[0]; });
-    return pfx ? all.filter(function(c) { return c.startsWith(pfx); }) : (all.indexOf(pat) >= 0 ? [pat] : []);
+  /** Resolve a cookie-name pattern (exact, or a "_ga_*" prefix wildcard) against the cookies actually set. */
+  function matchCookieNames(pattern) {
+    var starIndex = pattern.indexOf("*");
+    var prefix = starIndex >= 0 ? pattern.slice(0, starIndex) : null;
+    var allNames = document.cookie.split(";").map(function(cookie) { return cookie.trim().split("=")[0]; });
+    return prefix ? allNames.filter(function(cookieName) { return cookieName.startsWith(prefix); }) : (allNames.indexOf(pattern) >= 0 ? [pattern] : []);
   }
 
-  var Kc = {
+  /** Cookies known to be dropped by the trackers in each category. */
+  var COOKIE_PATTERNS_BY_CATEGORY = {
     analytics: ["_ga", "_ga_*", "_gid", "_gat", "_gat_*", "_gac_*", "_hjid", "_hjSessionUser_*", "_hjSession_*", "_hjAbsoluteSessionInProgress", "_clck", "_clsk"],
     marketing: ["_fbp", "_fbc", "_gcl_au", "_gcl_ls", "_gcl_aw", "_ttp", "tt_webid_v2", "_pin_unauth", "_pinterest_ct_ua", "li_sugr", "bcookie", "bscookie", "lidc", "_uetsid", "_uetvid", "IDE", "test_cookie", "fr"],
     preferences: []
   };
 
-  function Db(denied) {
-    for (var cat in Kc) {
-      if (denied.indexOf(cat) >= 0) {
-        var pats = Kc[cat];
-        for (var pi = 0; pi < pats.length; pi++) {
-          var names = Mc(pats[pi]);
-          for (var ni = 0; ni < names.length; ni++) Dc(names[ni]);
+  /**
+   * Clear cookies already dropped by categories the visitor just declined \u2014 blocking the
+   * script only stops future writes, so anything set before the decision must be removed.
+   */
+  function deleteCookiesForCategories(deniedCategories) {
+    for (var category in COOKIE_PATTERNS_BY_CATEGORY) {
+      if (deniedCategories.indexOf(category) >= 0) {
+        var patterns = COOKIE_PATTERNS_BY_CATEGORY[category];
+        for (var p = 0; p < patterns.length; p++) {
+          var names = matchCookieNames(patterns[p]);
+          for (var n = 0; n < names.length; n++) deleteCookie(names[n]);
         }
       }
     }
-    for (var ri = 0; ri < P.length; ri++) {
-      var rule = P[ri];
-      if (!rule || !rule.category || denied.indexOf(rule.category) < 0) continue;
-      if (rule.name) Dc(rule.name);
+    // Plus any cookie the site owner declared in the dashboard.
+    for (var r = 0; r < customCookieRules.length; r++) {
+      var rule = customCookieRules[r];
+      if (!rule || !rule.category || deniedCategories.indexOf(rule.category) < 0) continue;
+      if (rule.name) deleteCookie(rule.name);
     }
   }
 
-  function Ce(e) {
-    if (!e || "string" != typeof e) return null;
-    var t = e.toLowerCase();
-    if (0 !== t.indexOf("http")) return null;
-    for (var n = 0; n < F.length; n++)
-      if (-1 !== t.indexOf(F[n].domain)) return F[n].category;
-    for (var a = 0; a < P.length; a++) {
-      var r = P[a];
-      if (r && r.scriptUrlPattern) try {
-        if (new RegExp(r.scriptUrlPattern, "i").test(e)) return r.category || "marketing"
-      } catch (e) {}
+  /** Category for an iframe URL, by known tracker domain and then by the owner's custom rules. */
+  function categoryForIframeUrl(src) {
+    if (!src || "string" != typeof src) return null;
+    var lower = src.toLowerCase();
+    if (0 !== lower.indexOf("http")) return null;
+    for (var i = 0; i < KNOWN_TRACKER_DOMAINS.length; i++)
+      if (-1 !== lower.indexOf(KNOWN_TRACKER_DOMAINS[i].domain)) return KNOWN_TRACKER_DOMAINS[i].category;
+    for (var r = 0; r < customCookieRules.length; r++) {
+      var rule = customCookieRules[r];
+      if (rule && rule.scriptUrlPattern) try {
+        if (new RegExp(rule.scriptUrlPattern, "i").test(src)) return rule.category || "marketing"
+      } catch (err) {}
     }
     return null
   }
 
-  function Ee(e) {
-    if (!e || "string" != typeof e) return !1;
-    var n = e.toLowerCase();
-    if (-1 !== n.indexOf("consentbit") || -1 !== n.indexOf("client_data")) return !1;
-    var t = Ce(e);
-    return !(!t || !fe(t) || ("ccpa" === i ? !(A && A.accepted && A.ccpa && A.ccpa.doNotSell) : A && A.accepted && ue(t)))
+  /** Unlike scripts, tracking iframes get no GA/GTM exemption \u2014 they are blocked outright. */
+  function shouldBlockIframe(src) {
+    if (!src || "string" != typeof src) return false;
+    var lower = src.toLowerCase();
+    if (-1 !== lower.indexOf("consentbit") || -1 !== lower.indexOf("client_data")) return false;
+    var category = categoryForIframeUrl(src);
+    return !(!category || !isBlockableCategory(category) || ("ccpa" === bannerType ? !(consentState && consentState.accepted && consentState.ccpa && consentState.ccpa.doNotSell) : consentState && consentState.accepted && isCategoryAllowed(category)))
   }
 
-  function Se(e) {
-    if (e && !e.__ip) {
-      e.__ip = !0;
+  /** Intercept src assignment on a freshly created iframe, same idea as patchScriptElement. */
+  function patchIframeElement(iframeEl) {
+    if (iframeEl && !iframeEl.__ip) {
+      iframeEl.__ip = true;
       try {
-        Object.defineProperty(e, "src", {
-          configurable: !0,
-          enumerable: !0,
+        Object.defineProperty(iframeEl, "src", {
+          configurable: true,
+          enumerable: true,
           get: function () {
-            return e.getAttribute("src") || ""
+            return iframeEl.getAttribute("src") || ""
           },
-          set: function (t) {
-            if (Ee(t)) {
-              e.setAttribute("data-cb-blocked-src", t);
-              e.removeAttribute("src")
-            } else e.setAttribute("src", t)
+          set: function (value) {
+            if (shouldBlockIframe(value)) {
+              iframeEl.setAttribute("data-cb-blocked-src", value);
+              iframeEl.removeAttribute("src")
+            } else iframeEl.setAttribute("src", value)
           }
         })
-      } catch (e) {}
+      } catch (err) {}
     }
   }
 
-  function Ie(e) {
+  /** Publish consent to the Webflow setup script, which owns script gating in Webflow mode. */
+  function dispatchWebflowConsent(categories) {
     if (window.__CB_WEBFLOW_MODE__) {
-      var t = e || {};
-      window.userConsent = t;
+      var detail = categories || {};
+      window.userConsent = detail;
       try {
         document.dispatchEvent(new CustomEvent("consentUpdated", {
-          detail: t,
-          bubbles: !0
+          detail: detail,
+          bubbles: true
         }))
-      } catch (e) {}
+      } catch (err) {}
     }
   }
 
-  function Oe() {
+  /**
+   * Install the script blocker: patch document.createElement so new script/iframe
+   * elements are intercepted at birth, and watch the DOM for scripts inserted by
+   * other means (parsed markup, innerHTML, a late src assignment).
+   * Skipped in Webflow mode, where the Webflow setup script does this instead.
+   */
+  function installScriptBlocker() {
     if (!window.__CB_WEBFLOW_MODE__ && !window.__ce) {
-      window.__ce = !0;
+      window.__ce = true;
       try {
-        N = document.createElement.bind(document)
-      } catch (e) {
-        N = document.createElement
+        nativeCreateElement = document.createElement.bind(document)
+      } catch (err) {
+        nativeCreateElement = document.createElement
       }
-      document.createElement = function (e) {
-        var t = N(e);
-        var n = String(e || "").toLowerCase();
-        "script" === n ? xe(t) : n === "iframe" && Se(t);
-        return t
+      document.createElement = function (tagName) {
+        var element = nativeCreateElement(tagName);
+        var tag = String(tagName || "").toLowerCase();
+        "script" === tag ? patchScriptElement(element) : tag === "iframe" && patchIframeElement(element);
+        return element
       };
-      var t = new MutationObserver(function (e) {
-        for (var t = 0; t < e.length; t++) {
-          var n = e[t];
-          if ("childList" === n.type) {
-            var a = n.addedNodes;
-            for (var r = 0; r < a.length; r++) we(a[r])
-          } else "attributes" === n.type && "src" === n.attributeName && n.target && "SCRIPT" === n.target.nodeName && he(n.target)
+
+      var observer = new MutationObserver(function (mutations) {
+        for (var m = 0; m < mutations.length; m++) {
+          var mutation = mutations[m];
+          if ("childList" === mutation.type) {
+            var added = mutation.addedNodes;
+            for (var n = 0; n < added.length; n++) scanNodeForScripts(added[n])
+          } else "attributes" === mutation.type && "src" === mutation.attributeName && mutation.target && "SCRIPT" === mutation.target.nodeName && blockScriptElement(mutation.target)
         }
       });
       try {
-        t.observe(document.documentElement, {
-          childList: !0,
-          subtree: !0,
-          attributes: !0,
+        observer.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          attributes: true,
           attributeFilter: ["src"]
         })
-      } catch (e) {
-        t.observe(document.documentElement, {
-          childList: !0,
-          subtree: !0
+      } catch (err) {
+        // Older browsers reject attributeFilter without attributes \u2014 fall back to childList only.
+        observer.observe(document.documentElement, {
+          childList: true,
+          subtree: true
         })
       }
-      window.__cm = t
+      window.__cm = observer
     }
   }
 
-  function Ae() {
+  /**
+   * One-off sweep over the scripts already in the document at boot, blocking any that
+   * consent does not currently allow. Google tags are left alone (Consent Mode gates
+   * them instead), as is anything already blocked or in a non-blockable category.
+   */
+  function blockExistingScripts() {
     if (window.__CB_WEBFLOW_MODE__) try {
       document.dispatchEvent(new CustomEvent("cbBlockScripts", {
         detail: {},
-        bubbles: !0
+        bubbles: true
       }))
-    } catch (e) {} else {
-      var e = pe();
-      var t = 0;
-      var n = 0;
-      var a = 0;
-      var r = [];
-      var i = [];
-      for (var o = 0; o < e.length; o++) {
-        var c = e[o];
-        var l = c.src;
-        if ("javascript/blocked" !== c.getAttribute("type")) {
-          var d = ve(l, c);
-          var p = d.length > 0 ? d[0] : "uncategorized";
-          if (fe(p))
-            if ("analytics" === p && s && me(l)) {
-              n++;
-              i.push({
-                src: l,
-                category: p,
-                reason: "ga-cookieless"
-              })
-            } else if (ue(p)) {
-            n++;
-            i.push({
-              src: l,
-              category: p,
-              reason: "consent-granted"
-            })
-          } else try {
-            c.setAttribute("data-cb-blocked-src", l);
-            c.setAttribute("type", "javascript/blocked");
-            c.removeAttribute("src");
-            t++;
-            r.push({
-              src: l,
-              category: p
-            })
-          } catch (e) {
-          } else {
-            n++;
-            i.push({
-              src: l,
-              category: p,
-              reason: "essential"
-            })
-          }
-        } else a++
+    } catch (err) {} else {
+      var scripts = getUniqueScriptElements();
+      for (var i = 0; i < scripts.length; i++) {
+        var script = scripts[i];
+        var src = script.src;
+        if ("javascript/blocked" !== script.getAttribute("type")) {
+          var categories = resolveScriptCategories(src, script);
+          var category = categories.length > 0 ? categories[0] : "uncategorized";
+          if (isBlockableCategory(category))
+            if ("analytics" === category && gaMeasurementId && isGoogleAnalyticsUrl(src)) {
+              // We manage this GA tag through Consent Mode \u2014 leave it loading.
+            } else if (isCategoryAllowed(category)) {
+              // Consent already granted for this category.
+            } else try {
+              script.setAttribute("data-cb-blocked-src", src);
+              script.setAttribute("type", "javascript/blocked");
+              script.removeAttribute("src");
+            } catch (err) {
+            }
+        }
       }
     }
   }
 
-  function Be() {
-    if (T.length) {
-      var e = [];
-      z = !0;
+  /** Replay scripts held in the queue whose categories are now allowed; keep the rest queued. */
+  function flushQueuedScripts() {
+    if (queuedScripts.length) {
+      var stillBlocked = [];
+      isInjectingScript = true;
       try {
-        for (var t = 0; t < T.length; t++) {
-          var n = T[t];
-          var a = n.cats || (n.category ? [n.category] : []);
-          var r;
-          if (0 === a.length || a.every(function (e) {
-              return !fe(e) || ue(e)
+        for (var i = 0; i < queuedScripts.length; i++) {
+          var queued = queuedScripts[i];
+          var categories = queued.cats || (queued.category ? [queued.category] : []);
+          if (0 === categories.length || categories.every(function (category) {
+              return !isBlockableCategory(category) || isCategoryAllowed(category)
             })) {
-            var i = document.createElement("script");
-            i.src = n.src;
-            var o = n.attrs;
-            for (var c in o) Object.prototype.hasOwnProperty.call(o, c) && "src" !== c && i.setAttribute(c, o[c]);
-            document.head.appendChild(i)
-          } else e.push(n)
+            var script = document.createElement("script");
+            script.src = queued.src;
+            var attrs = queued.attrs;
+            for (var attrName in attrs) Object.prototype.hasOwnProperty.call(attrs, attrName) && "src" !== attrName && script.setAttribute(attrName, attrs[attrName]);
+            document.head.appendChild(script)
+          } else stillBlocked.push(queued)
         }
       } finally {
-        z = !1
+        isInjectingScript = false
       }
-      T = e
+      queuedScripts = stillBlocked
     }
   }
 
-  function Le() {
-    if (s) {
-      z = !0;
+  /**
+   * Load the site's GA tag ourselves (when the dashboard supplied a measurement ID and
+   * the page does not already carry one) and push an all-denied Consent Mode default.
+   * The actual consent state is applied right after, by updateGoogleConsentMode().
+   */
+  function bootstrapGoogleAnalytics() {
+    if (gaMeasurementId) {
+      isInjectingScript = true;
       try {
-        var e = !1;
-        var t = document.scripts;
-        for (var n = 0; n < t.length; n++) {
-          var a;
-          var r = t[n].src || "";
-          if (-1 !== r.indexOf("googletagmanager.com/gtag/js") || -1 !== r.indexOf("googletagmanager.com/gtm.js") || -1 !== r.indexOf("google-analytics.com")) {
-            e = !0;
+        var alreadyPresent = false;
+        var scripts = document.scripts;
+        for (var i = 0; i < scripts.length; i++) {
+          var src = scripts[i].src || "";
+          if (-1 !== src.indexOf("googletagmanager.com/gtag/js") || -1 !== src.indexOf("googletagmanager.com/gtm.js") || -1 !== src.indexOf("google-analytics.com")) {
+            alreadyPresent = true;
             break
           }
         }
-        if (!e) {
-          var i = document.createElement("script");
-          i.async = !0;
-          i.src = "https://www.googletagmanager.com/gtag/js?id=" + s;
-          document.head.appendChild(i)
+        if (!alreadyPresent) {
+          var gaScript = document.createElement("script");
+          gaScript.async = true;
+          gaScript.src = "https://www.googletagmanager.com/gtag/js?id=" + gaMeasurementId;
+          document.head.appendChild(gaScript)
         }
         window.dataLayer = window.dataLayer || [];
 
@@ -9436,6 +10025,7 @@ ${inlineConfig}
           dataLayer.push(arguments)
         }
         window.gtag = gtag;
+        setConsentModeFlags();
         gtag("consent", "default", {
           analytics_storage: "denied",
           ad_storage: "denied",
@@ -9447,323 +10037,382 @@ ${inlineConfig}
           wait_for_update: 500
         });
         gtag("js", new Date);
-        gtag("config", s, {
-          anonymize_ip: !0
+        gtag("config", gaMeasurementId, {
+          anonymize_ip: true
         });
         gtag("event", "page_view", {
           page_path: window.location.pathname,
           page_title: document.title || ""
         })
       } finally {
-        z = !1
+        isInjectingScript = false
       }
     }
   }
 
-  function Te(e, t) {
-    if (s || be()) {
-      var n = {
-        analytics_storage: e.analytics ? "granted" : "denied",
-        ad_storage: e.marketing ? "granted" : "denied",
-        ad_user_data: e.marketing ? "granted" : "denied",
-        ad_personalization: e.marketing ? "granted" : "denied",
-        functionality_storage: e.preferences ? "granted" : "denied",
-        personalization_storage: e.preferences ? "granted" : "denied"
-      };
-      if (window.gtag) window.gtag("consent", "update", n);
-      else {
-        var a = 0;
-        var r = setInterval(function () {
-          a++;
-          if (window.gtag) {
-            clearInterval(r);
-            window.gtag("consent", "update", n)
-          } else if (a >= 20) {
-            clearInterval(r);
-
-          }
-        }, 100)
-      }
-    }
+  /**
+   * Push the visitor's category choices to Google Consent Mode.
+   * gtag may not exist yet (the tag is still loading), so poll for up to 2s.
+   */
+  function updateGoogleConsentMode(categories, source) {
+    var consentUpdate = {
+      analytics_storage: categories.analytics ? "granted" : "denied",
+      ad_storage: categories.marketing ? "granted" : "denied",
+      ad_user_data: categories.marketing ? "granted" : "denied",
+      ad_personalization: categories.marketing ? "granted" : "denied",
+      functionality_storage: categories.preferences ? "granted" : "denied",
+      personalization_storage: categories.preferences ? "granted" : "denied"
+    };
+    // Always signal \u2014 never gate on tag detection. A tag that loads later replays the
+    // queued dataLayer commands, so an early push is correct and a skipped push is not.
+    ensureGtag()("consent", "update", consentUpdate);
+    pushConsentDataLayerEvent(categories, source)
   }
 
   // CCPA consent mode: opt-out model \u2014 storage is granted unless the user opted out
-  // ("Do Not Sell/Share"). Mirrors the GDPR Te() update but keyed off a single doNotSell flag.
-  function Tc(dns) {
-    if (s || be()) {
-      var n = {
-        analytics_storage: dns ? "denied" : "granted",
-        ad_storage: dns ? "denied" : "granted",
-        ad_user_data: dns ? "denied" : "granted",
-        ad_personalization: dns ? "denied" : "granted"
-      };
-      if (window.gtag) window.gtag("consent", "update", n);
-      else {
-        var a = 0;
-        var r = setInterval(function () {
-          a++;
-          if (window.gtag) {
-            clearInterval(r);
-            window.gtag("consent", "update", n)
-          } else if (a >= 20) {
-            clearInterval(r);
-          }
-        }, 100)
-      }
-    }
+  // ("Do Not Sell/Share"). Mirrors updateGoogleConsentMode() but keyed off a single
+  // doNotSell flag rather than per-category toggles.
+  function updateGoogleConsentModeCcpa(doNotSell) {
+    // Every signal is declared explicitly. An omitted signal is treated by Google as
+    // unset (i.e. unconstrained), so functionality_storage / personalization_storage
+    // must be sent even under an opt-out regime \u2014 they track doNotSell for consistency
+    // with analytics_storage, which this codebase already denies on opt-out.
+    var consentUpdate = {
+      analytics_storage: doNotSell ? "denied" : "granted",
+      ad_storage: doNotSell ? "denied" : "granted",
+      ad_user_data: doNotSell ? "denied" : "granted",
+      ad_personalization: doNotSell ? "denied" : "granted",
+      functionality_storage: doNotSell ? "denied" : "granted",
+      personalization_storage: doNotSell ? "denied" : "granted"
+    };
+    ensureGtag()("consent", "update", consentUpdate);
+    // CCPA has no per-category model \u2014 project the single opt-out onto the same
+    // category keys so one GTM trigger works for both regulations, and expose the
+    // raw flag as well for containers that need to branch on it.
+    var ccpaCats = {
+      analytics: !doNotSell,
+      marketing: !doNotSell,
+      preferences: !doNotSell
+    };
+    pushConsentDataLayerEvent(ccpaCats, "ccpa");
+    try {
+      window.dataLayer.push({
+        consentbit_do_not_sell: !!doNotSell
+      })
+    } catch (err) {}
   }
 
-  function ze() {
+  /**
+   * Pick a legible foreground (near-black or white) for the given background colour,
+   * using the ITU-R BT.601 luma formula. Accepts 3- or 6-digit hex.
+   */
+  function contrastingTextColor(backgroundColor) {
+    var hex = String(backgroundColor).replace("#", "");
+    if (3 === hex.length) hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
+    var red = parseInt(hex.substr(0, 2), 16) || 0;
+    var green = parseInt(hex.substr(2, 2), 16) || 0;
+    var blue = parseInt(hex.substr(4, 2), 16) || 0;
+    return (0.299 * red + 0.587 * green + 0.114 * blue) > 128 ? "#0f172a" : "#ffffff";
+  }
+
+  /**
+   * Build the stylesheet: BASE_CSS first, then the dashboard's colour/typography
+   * overrides layered on top. Runs once \u2014 a #cb-styles element means we already did.
+   */
+  function injectStyles() {
     if (!document.getElementById("cb-styles")) {
-      var e;
-      var t;
-      var n = "#cb-preferences-banner .cb-banner-footer button#cb-save-prefs-btn{background-color:" + (l && l.saveButtonBg ? String(l.saveButtonBg) : "#ffffff") + " !important;color:" + (l && l.saveButtonText ? String(l.saveButtonText) : "#334155") + " !important;border-color:#e2e8f0 !important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{background-color:" + (l && l.acceptButtonBg ? String(l.acceptButtonBg) : "#ffffff") + " !important;color:" + (l && l.acceptButtonText ? String(l.acceptButtonText) : "#334155") + " !important;border-color:" + (l && l.acceptButtonBg ? String(l.acceptButtonBg) : "#e2e8f0") + " !important;}";
-      var a = "";
-      if (l && l.backgroundColor) {
-        var r = String(l.backgroundColor);
-        a = "#cb-initial-banner.cb-banner,#cb-preferences-banner.cb-banner{background-color:" + r + " !important;}.cb-gdpr-accordion{background-color:" + r + " !important;}"
+      var saveAndCancelButtonCss = "#cb-preferences-banner .cb-banner-footer button#cb-save-prefs-btn{background-color:" + (customization && customization.saveButtonBg ? String(customization.saveButtonBg) : "#ffffff") + " !important;color:" + (customization && customization.saveButtonText ? String(customization.saveButtonText) : "#334155") + " !important;border-color:#e2e8f0 !important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{background-color:" + (customization && customization.acceptButtonBg ? String(customization.acceptButtonBg) : "#ffffff") + " !important;color:" + (customization && customization.acceptButtonText ? String(customization.acceptButtonText) : "#334155") + " !important;border-color:" + (customization && customization.acceptButtonBg ? String(customization.acceptButtonBg) : "#e2e8f0") + " !important;}";
+
+      var backgroundCss = "";
+      if (customization && customization.backgroundColor) {
+        var backgroundColor = String(customization.backgroundColor);
+        backgroundCss = "#cb-initial-banner.cb-banner,#cb-preferences-banner.cb-banner{background-color:" + backgroundColor + " !important;}.cb-gdpr-accordion{background-color:" + backgroundColor + " !important;}"
       }
-      var i = "";
-      if (l && l.headingColor) {
-        var o = String(l.headingColor);
-        i = "#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{color:" + o + " !important;}.cb-gdpr-cat-label{color:" + o + " !important;}"
+
+      var headingCss = "";
+      if (customization && customization.headingColor) {
+        var headingColor = String(customization.headingColor);
+        headingCss = "#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{color:" + headingColor + " !important;}.cb-gdpr-cat-label{color:" + headingColor + " !important;}"
       }
-      var c = "";
-      if (l && l.textColor) {
-        var s;
-        c = "#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-gdpr-cat-desc{color:" + String(l.textColor) + " !important;}"
+
+      var textCss = "";
+      if (customization && customization.textColor) {
+        textCss = "#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-gdpr-cat-desc{color:" + String(customization.textColor) + " !important;}"
       }
-      var d = "";
-      if (l && l.bannerFontWeight) {
-        var p = String(l.bannerFontWeight);
-        d = "#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-weight:" + p + " !important;}.cb-gdpr-cat-label{font-weight:" + p + " !important;}.cb-gdpr-cat-desc{font-weight:" + p + " !important;}.cb-banner p{font-weight:" + p + " !important;}"
+
+      var fontWeightCss = "";
+      if (customization && customization.bannerFontWeight) {
+        var fontWeight = String(customization.bannerFontWeight);
+        fontWeightCss = "#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-weight:" + fontWeight + " !important;}.cb-gdpr-cat-label{font-weight:" + fontWeight + " !important;}.cb-gdpr-cat-desc{font-weight:" + fontWeight + " !important;}.cb-banner p{font-weight:" + fontWeight + " !important;}"
       }
-      var b = "#cb-preferences-banner.cb-banner h3{padding-right:36px !important;}#cb-preferences-banner.cb-banner.cb-ccpa-prefs h3{padding-right:0 !important;padding-top:16px !important;margin-bottom:14px !important;}#cb-preferences-banner.cb-banner.cb-ccpa-prefs .cb-banner-body>p{margin-bottom:16px !important;}";
-      var f = "#cb-preferences-banner.cb-banner .cb-banner-body{padding-right:4px;}#cb-preferences-banner.cb-banner .cb-gdpr-accordion > div{margin-right:2px;}";
+
+      // Leave room for the close button in the preferences heading (CCPA has no such offset).
+      var prefsHeadingCss = "#cb-preferences-banner.cb-banner h3{padding-right:36px !important;}#cb-preferences-banner.cb-banner.cb-ccpa-prefs h3{padding-right:0 !important;padding-top:16px !important;margin-bottom:14px !important;}#cb-preferences-banner.cb-banner.cb-ccpa-prefs .cb-banner-body>p{margin-bottom:16px !important;}";
+      var prefsScrollbarCss = "#cb-preferences-banner.cb-banner .cb-banner-body{padding-right:4px;}#cb-preferences-banner.cb-banner .cb-gdpr-accordion > div{margin-right:2px;}";
+
       if (!document.getElementById("cb-font-montserrat")) {
-        var m = document.createElement("link");
-        m.id = "cb-font-montserrat";
-        m.rel = "stylesheet";
-        m.href = "https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap";
-        document.head.appendChild(m)
+        var fontLink = document.createElement("link");
+        fontLink.id = "cb-font-montserrat";
+        fontLink.rel = "stylesheet";
+        fontLink.href = "https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap";
+        document.head.appendChild(fontLink)
       }
-      var ag = "";
-      if (l && l.acceptButtonBg) {
-        var ah = String(l.acceptButtonBg);
-        var aj = l.acceptButtonText ? String(l.acceptButtonText) : "#ffffff";
-        ag = ".cb-banner button#cb-accept-all-btn{background-color:" + ah + " !important;color:" + aj + " !important;}#cb-initial-banner.cb-banner #cb-accept-all-btn{background:" + ah + " !important;color:" + aj + " !important;}"
+
+      var acceptButtonCss = "";
+      if (customization && customization.acceptButtonBg) {
+        var acceptBg = String(customization.acceptButtonBg);
+        var acceptText = customization.acceptButtonText ? String(customization.acceptButtonText) : "#ffffff";
+        acceptButtonCss = ".cb-banner button#cb-accept-all-btn{background-color:" + acceptBg + " !important;color:" + acceptText + " !important;}#cb-initial-banner.cb-banner #cb-accept-all-btn{background:" + acceptBg + " !important;color:" + acceptText + " !important;}"
       }
-      var rg = "";
-      if (l && l.acceptButtonBg) {
-        var rh = String(l.acceptButtonBg);
-        var rj = l.acceptButtonText ? String(l.acceptButtonText) : "#ffffff";
-        rg = ".cb-banner button#cb-reject-all-btn{background-color:" + rh + " !important;color:" + rj + " !important;}#cb-initial-banner.cb-banner #cb-reject-all-btn{background:" + rh + " !important;color:" + rj + " !important;}.cb-banner button#cb-prefs-reject-btn{background-color:" + rh + " !important;color:" + rj + " !important;}"
+
+      // Reject deliberately reuses the accept colours \u2014 the two buttons are styled identically.
+      var rejectButtonCss = "";
+      if (customization && customization.acceptButtonBg) {
+        var rejectBg = String(customization.acceptButtonBg);
+        var rejectText = customization.acceptButtonText ? String(customization.acceptButtonText) : "#ffffff";
+        rejectButtonCss = ".cb-banner button#cb-reject-all-btn{background-color:" + rejectBg + " !important;color:" + rejectText + " !important;}#cb-initial-banner.cb-banner #cb-reject-all-btn{background:" + rejectBg + " !important;color:" + rejectText + " !important;}.cb-banner button#cb-prefs-reject-btn{background-color:" + rejectBg + " !important;color:" + rejectText + " !important;}"
       }
-      var u = document.createElement("style");
-      u.id = "cb-styles";
-      u.type = "text/css";
-      var cg = "";
-      if (l && l.backgroundColor) {
-        var ch = String(l.backgroundColor).replace("#", "");
-        if (3 === ch.length) ch = ch[0] + ch[0] + ch[1] + ch[1] + ch[2] + ch[2];
-        var ri = parseInt(ch.substr(0, 2), 16) || 0;
-        var gi = parseInt(ch.substr(2, 2), 16) || 0;
-        var bi = parseInt(ch.substr(4, 2), 16) || 0;
-        var cc = (0.299 * ri + 0.587 * gi + 0.114 * bi) > 128 ? "#0f172a" : "#ffffff";
-        cg = "#cb-close-initial-btn,#cb-close-prefs-btn{color:" + cc + " !important;}"
+
+      var styleEl = document.createElement("style");
+      styleEl.id = "cb-styles";
+      styleEl.type = "text/css";
+
+      var closeButtonCss = "";
+      if (customization && customization.backgroundColor) {
+        closeButtonCss = "#cb-close-initial-btn,#cb-close-prefs-btn{color:" + contrastingTextColor(customization.backgroundColor) + " !important;}"
       }
-      u.appendChild(document.createTextNode(D + "\\n" + n + "\\n" + a + "\\n" + i + "\\n" + c + "\\n" + d + "\\n" + b + "\\n" + f + "\\n" + ag + "\\n" + rg + "\\n" + cg));
-      document.head.appendChild(u)
+
+      styleEl.appendChild(document.createTextNode(BASE_CSS + "\\n" + saveAndCancelButtonCss + "\\n" + backgroundCss + "\\n" + headingCss + "\\n" + textCss + "\\n" + fontWeightCss + "\\n" + prefsHeadingCss + "\\n" + prefsScrollbarCss + "\\n" + acceptButtonCss + "\\n" + rejectButtonCss + "\\n" + closeButtonCss));
+      document.head.appendChild(styleEl)
     }
   }
 
-  function Ne(e, t) {
-    if (q()) {
-      var n = document.createElement("button");
-      n.type = "button";
-      n.id = t;
-      n.setAttribute("aria-label", "Close");
-      n.textContent = "\xD7";
-      var nq = "#0f172a";
-      if (l && l.backgroundColor) {
-        var nh = String(l.backgroundColor).replace("#", "");
-        if (3 === nh.length) nh = nh[0] + nh[0] + nh[1] + nh[1] + nh[2] + nh[2];
-        var nr2 = parseInt(nh.substr(0, 2), 16) || 0;
-        var ng2 = parseInt(nh.substr(2, 2), 16) || 0;
-        var nb2 = parseInt(nh.substr(4, 2), 16) || 0;
-        nq = (0.299 * nr2 + 0.587 * ng2 + 0.114 * nb2) > 128 ? "#0f172a" : "#ffffff";
+  /** Close (\xD7) button for the initial banner. */
+  function appendCloseButton(container, buttonId) {
+    if (isCloseButtonEnabled()) {
+      var closeBtn = document.createElement("button");
+      closeBtn.type = "button";
+      closeBtn.id = buttonId;
+      closeBtn.setAttribute("aria-label", "Close");
+      closeBtn.textContent = "\xD7";
+      var color = "#0f172a";
+      if (customization && customization.backgroundColor) {
+        color = contrastingTextColor(customization.backgroundColor);
       }
-      n.style.cssText = "position:absolute;top:8px;right:24px;width:32px;height:32px;margin:0;padding:0;border:0;border-radius:6px;background:transparent;cursor:pointer;z-index:10;line-height:1;font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-size:22px;font-weight:400;color:" + nq + ";opacity:0.75;";
-      e.appendChild(n)
+      closeBtn.style.cssText = "position:absolute;top:8px;right:24px;width:32px;height:32px;margin:0;padding:0;border:0;border-radius:6px;background:transparent;cursor:pointer;z-index:10;line-height:1;font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-size:22px;font-weight:400;color:" + color + ";opacity:0.75;";
+      container.appendChild(closeBtn)
     }
   }
 
-  function je(e) {
-    if (q()) {
-      var t = document.createElement("button");
-      t.type = "button";
-      t.id = "cb-close-prefs-btn";
-      t.setAttribute("aria-label", "Close");
-      t.textContent = "\xD7";
-      var jq = "#0f172a";
-      if (l && l.backgroundColor) {
-        var jh = String(l.backgroundColor).replace("#", "");
-        if (3 === jh.length) jh = jh[0] + jh[0] + jh[1] + jh[1] + jh[2] + jh[2];
-        var jr2 = parseInt(jh.substr(0, 2), 16) || 0;
-        var jg2 = parseInt(jh.substr(2, 2), 16) || 0;
-        var jb2 = parseInt(jh.substr(4, 2), 16) || 0;
-        jq = (0.299 * jr2 + 0.587 * jg2 + 0.114 * jb2) > 128 ? "#0f172a" : "#ffffff";
+  /** Close (\xD7) button for the preferences panel \u2014 same as above, nudged 6px further in. */
+  function appendPrefsCloseButton(container) {
+    if (isCloseButtonEnabled()) {
+      var closeBtn = document.createElement("button");
+      closeBtn.type = "button";
+      closeBtn.id = "cb-close-prefs-btn";
+      closeBtn.setAttribute("aria-label", "Close");
+      closeBtn.textContent = "\xD7";
+      var color = "#0f172a";
+      if (customization && customization.backgroundColor) {
+        color = contrastingTextColor(customization.backgroundColor);
       }
-      t.style.cssText = "position:absolute;top:8px;right:30px;width:32px;height:32px;margin:0;padding:0;border:0;border-radius:6px;background:transparent;cursor:pointer;z-index:10;line-height:1;font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-size:22px;font-weight:400;color:" + jq + ";opacity:0.75;";
-      e.appendChild(t)
+      closeBtn.style.cssText = "position:absolute;top:8px;right:30px;width:32px;height:32px;margin:0;padding:0;border:0;border-radius:6px;background:transparent;cursor:pointer;z-index:10;line-height:1;font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-size:22px;font-weight:400;color:" + color + ";opacity:0.75;";
+      container.appendChild(closeBtn)
     }
   }
 
-  function Pe() {
+  /** Entrance-animation class for the initial banner, given whether it sits centered. */
+  function getInitialBannerAnimationClass(isCentered) {
+    return isCentered
+      ? "slide-up" === entranceAnimation ? "cb-banner-animate-initial-center-bottom" : "slide-down" === entranceAnimation ? "cb-banner-animate-initial-center-top" : "zoom-in" === entranceAnimation ? "cb-banner-animate-initial-center-zoom" : "cb-banner-animate-fade"
+      : "slide-up" === entranceAnimation ? "cb-banner-animate-bottom" : "slide-down" === entranceAnimation ? "cb-banner-animate-top" : "zoom-in" === entranceAnimation ? "cb-banner-animate-zoom-in" : "cb-banner-animate-fade";
+  }
+
+  /**
+   * Build both banners (initial + preferences) and attach them to the page.
+   * The CCPA variant is a single "Do Not Sell" opt-out; the GDPR variant is the
+   * accept/reject/customise flow with a per-category accordion. Handlers are wired
+   * up separately, in initBannerUi().
+   */
+  function buildBanners() {
     if (!document.getElementById("cb-initial-banner"))
       if (document.body) {
-        var e = "ccpa" === i;
-        var t = document.createElement("div");
-        if (e) {
-          var n;
-          (n = document.createElement("div")).className = "cb-banner";
-          n.id = "cb-initial-banner";
-          n.style.display = "none";
-          var a;
-          (a = document.createElement("div")).className = "cb-banner-body";
-          var r;
-          (r = document.createElement("h3")).textContent = Y("title", w);
-          a.appendChild(r);
-          var o = document.createElement("p");
-          var c = J(U("description"), k);
-          if (b && X()) {
-            o.appendChild(document.createTextNode(c + " "));
-            var s;
-            (s = document.createElement("a")).textContent = Y("privacyPolicy", E);
-            s.style.cssText = "color:#007aff;text-decoration:underline;cursor:pointer;";
-            Q(s, b);
-            o.appendChild(s);
-            o.appendChild(document.createTextNode("."))
-          } else o.textContent = c;
-          a.appendChild(o);
-          var l = document.createElement("p");
-          l.style.marginTop = "20px";
-          l.style.marginBottom = "0";
-          var d = document.createElement("button");
-          d.id = "cb-ccpa-donotsell-link";
-          d.type = "button";
-          d.textContent = U("doNotSell");
-          d.style.cssText = "background:none;border:none;padding:0;margin:0;color:#007aff;text-decoration:underline;cursor:pointer;font:inherit;text-align:left;display:inline;";
-          l.appendChild(d);
-          a.appendChild(l);
-          n.appendChild(a);
-          Ne(n, "cb-close-initial-btn");
-          t.appendChild(n);
-          var p;
-          (p = document.createElement("div")).className = "cb-banner cb-ccpa-prefs";
-          p.id = "cb-preferences-banner";
-          p.style.display = "none";
-          "left" === g ? p.classList.add("prefs-left") : "right" === g ? p.classList.add("prefs-right") : p.classList.add("prefs-center");
-          var v;
-          (v = document.createElement("div")).className = "cb-banner-body";
-          var y;
-          (y = document.createElement("h3")).textContent = U("optOutPreference");
-          v.appendChild(y);
-          var h = document.createElement("p");
-          var x = (U("ccpaOptOutPreferenceIntro") || U("ccpaOptOut") || "").replace(/s*More info.?s*$/i, "").trim();
-          if (b && X()) {
-            h.appendChild(document.createTextNode(x + " "));
-            var S = document.createElement("a");
-            S.textContent = U("privacyPolicy");
-            S.style.cssText = "color:#007aff;text-decoration:underline;cursor:pointer;";
-            Q(S, b);
-            h.appendChild(S);
-            h.appendChild(document.createTextNode("."))
-          } else h.textContent = x;
-          h.style.lineHeight = "1.45";
-          v.appendChild(h);
-          var _ = document.createElement("label");
-          _.style.cssText = "display:flex;align-items:flex-start;gap:12px;margin-top:20px;cursor:pointer;";
-          var I = document.createElement("span");
-          I.style.cssText = "flex:1;line-height:1.45;";
-          I.textContent = U("doNotSell");
-          var O = document.createElement("input");
-          O.type = "checkbox";
-          O.id = "cb-ccpa-optout";
-          O.style.cssText = "flex-shrink:0;margin-top:2px;";
-          O.checked = !!(A && A.accepted && A.ccpa && A.ccpa.doNotSell);
-          _.appendChild(O);
-          _.appendChild(I);
-          v.appendChild(_);
-          p.appendChild(v);
-          var B;
-          (B = document.createElement("div")).className = "cb-banner-footer";
-          var L = document.createElement("button");
-          L.id = "cb-cancel-prefs-btn";
-          L.textContent = W("cancel");
-          B.appendChild(L);
-          var T;
-          (T = document.createElement("button")).id = "cb-save-prefs-btn";
-          var z = U("saveMyPreferences") || U("save");
-          T.textContent = z;
-          B.appendChild(T);
-          p.appendChild(B);
-          je(p);
-          t.appendChild(p)
+        var isCcpa = "ccpa" === bannerType;
+        var wrapper = document.createElement("div");
+
+        if (isCcpa) {
+          // ---- CCPA initial banner ------------------------------------------------
+          var initialBanner = document.createElement("div");
+          initialBanner.className = "cb-banner";
+          initialBanner.id = "cb-initial-banner";
+          initialBanner.style.display = "none";
+
+          var initialBody = document.createElement("div");
+          initialBody.className = "cb-banner-body";
+
+          var initialHeading = document.createElement("h3");
+          initialHeading.textContent = translateTruncated("title", MAX_TITLE_LEN);
+          initialBody.appendChild(initialHeading);
+
+          var initialText = document.createElement("p");
+          var descriptionText = truncate(translate("description"), MAX_DESCRIPTION_LEN);
+          if (privacyPolicyUrl && isCookiePolicyLinkEnabled()) {
+            initialText.appendChild(document.createTextNode(descriptionText + " "));
+            var policyLink = document.createElement("a");
+            policyLink.textContent = translateTruncated("privacyPolicy", MAX_LINK_LEN);
+            policyLink.style.cssText = "color:#007aff;text-decoration:underline;cursor:pointer;";
+            bindExternalLink(policyLink, privacyPolicyUrl);
+            initialText.appendChild(policyLink);
+            initialText.appendChild(document.createTextNode("."))
+          } else initialText.textContent = descriptionText;
+          initialBody.appendChild(initialText);
+
+          // "Do Not Sell My Personal Information" \u2014 opens the preferences panel.
+          var doNotSellRow = document.createElement("p");
+          doNotSellRow.style.marginTop = "20px";
+          doNotSellRow.style.marginBottom = "0";
+          var doNotSellLink = document.createElement("button");
+          doNotSellLink.id = "cb-ccpa-donotsell-link";
+          doNotSellLink.type = "button";
+          doNotSellLink.textContent = translate("doNotSell");
+          doNotSellLink.style.cssText = "background:none;border:none;padding:0;margin:0;color:#007aff;text-decoration:underline;cursor:pointer;font:inherit;text-align:left;display:inline;";
+          doNotSellRow.appendChild(doNotSellLink);
+          initialBody.appendChild(doNotSellRow);
+
+          initialBanner.appendChild(initialBody);
+          appendCloseButton(initialBanner, "cb-close-initial-btn");
+          wrapper.appendChild(initialBanner);
+
+          // ---- CCPA preferences panel ---------------------------------------------
+          var prefsBanner = document.createElement("div");
+          prefsBanner.className = "cb-banner cb-ccpa-prefs";
+          prefsBanner.id = "cb-preferences-banner";
+          prefsBanner.style.display = "none";
+          "left" === preferencePosition ? prefsBanner.classList.add("prefs-left") : "right" === preferencePosition ? prefsBanner.classList.add("prefs-right") : prefsBanner.classList.add("prefs-center");
+
+          var prefsBody = document.createElement("div");
+          prefsBody.className = "cb-banner-body";
+
+          var prefsHeading = document.createElement("h3");
+          prefsHeading.textContent = translate("optOutPreference");
+          prefsBody.appendChild(prefsHeading);
+
+          var prefsText = document.createElement("p");
+          // Strip any trailing "More info." \u2014 we render our own policy link instead.
+          var optOutIntro = (translate("ccpaOptOutPreferenceIntro") || translate("ccpaOptOut") || "").replace(/s*More info.?s*$/i, "").trim();
+          if (privacyPolicyUrl && isCookiePolicyLinkEnabled()) {
+            prefsText.appendChild(document.createTextNode(optOutIntro + " "));
+            var prefsPolicyLink = document.createElement("a");
+            prefsPolicyLink.textContent = translate("privacyPolicy");
+            prefsPolicyLink.style.cssText = "color:#007aff;text-decoration:underline;cursor:pointer;";
+            bindExternalLink(prefsPolicyLink, privacyPolicyUrl);
+            prefsText.appendChild(prefsPolicyLink);
+            prefsText.appendChild(document.createTextNode("."))
+          } else prefsText.textContent = optOutIntro;
+          prefsText.style.lineHeight = "1.45";
+          prefsBody.appendChild(prefsText);
+
+          var optOutLabel = document.createElement("label");
+          optOutLabel.style.cssText = "display:flex;align-items:flex-start;gap:12px;margin-top:20px;cursor:pointer;";
+          var optOutText = document.createElement("span");
+          optOutText.style.cssText = "flex:1;line-height:1.45;";
+          optOutText.textContent = translate("doNotSell");
+          var optOutCheckbox = document.createElement("input");
+          optOutCheckbox.type = "checkbox";
+          optOutCheckbox.id = "cb-ccpa-optout";
+          optOutCheckbox.style.cssText = "flex-shrink:0;margin-top:2px;";
+          optOutCheckbox.checked = !!(consentState && consentState.accepted && consentState.ccpa && consentState.ccpa.doNotSell);
+          optOutLabel.appendChild(optOutCheckbox);
+          optOutLabel.appendChild(optOutText);
+          prefsBody.appendChild(optOutLabel);
+          prefsBanner.appendChild(prefsBody);
+
+          var prefsFooter = document.createElement("div");
+          prefsFooter.className = "cb-banner-footer";
+          var cancelBtn = document.createElement("button");
+          cancelBtn.id = "cb-cancel-prefs-btn";
+          cancelBtn.textContent = translateButton("cancel");
+          prefsFooter.appendChild(cancelBtn);
+          var saveBtn = document.createElement("button");
+          saveBtn.id = "cb-save-prefs-btn";
+          saveBtn.textContent = translate("saveMyPreferences") || translate("save");
+          prefsFooter.appendChild(saveBtn);
+          prefsBanner.appendChild(prefsFooter);
+
+          appendPrefsCloseButton(prefsBanner);
+          wrapper.appendChild(prefsBanner)
         } else {
-          var N = function (e) {
-            var t = document.createElement("div");
-            t.style.borderBottom = "1px solid #e5e7eb";
-            var n = document.createElement("div");
-            n.style.cssText = "display:flex;align-items:center;gap:14px;padding:12px 14px;min-height:44px;";
-            var a = document.createElement("button");
-            a.type = "button";
-            a.setAttribute("aria-expanded", "false");
-            a.textContent = "+";
-            a.style.cssText = "flex-shrink:0;width:22px;height:22px;padding:0;border:1px solid #e5e7eb;border-radius:4px;background:#f3f4f6;color:#111827;font-size:14px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;";
-            var r = document.createElement("span");
-            r.className = "cb-gdpr-cat-label";
-            r.style.cssText = "flex:1;font-size:11px;font-weight:600;";
-            r.textContent = e.labelText;
-            n.appendChild(a);
-            n.appendChild(r);
-            var i = document.createElement("div");
-            i.style.flexShrink = "0";
-            if (e.alwaysActive) {
-              var o = document.createElement("span");
-              o.style.cssText = "font-size:11px;font-weight:600;color:#374151;";
-              o.textContent = Y("alwaysActive", 20);
-              i.appendChild(o)
+          /**
+           * One collapsible category row: expand/collapse chevron, label, on/off toggle
+           * (or an "Always Active" badge for essential) and a description. Expanding a row
+           * collapses its siblings, so only one is ever open.
+           *
+           * The visible toggle is a <button role="switch"> mirroring a hidden checkbox \u2014
+           * the checkbox is what the save handler reads, the button is what gets styled.
+           */
+          var buildCategoryRow = function (options) {
+            var row = document.createElement("div");
+            row.style.borderBottom = "1px solid #e5e7eb";
+
+            var header = document.createElement("div");
+            header.style.cssText = "display:flex;align-items:center;gap:14px;padding:12px 14px;min-height:44px;";
+
+            var expandBtn = document.createElement("button");
+            expandBtn.type = "button";
+            expandBtn.setAttribute("aria-expanded", "false");
+            expandBtn.textContent = "+";
+            expandBtn.style.cssText = "flex-shrink:0;width:22px;height:22px;padding:0;border:1px solid #e5e7eb;border-radius:4px;background:#f3f4f6;color:#111827;font-size:14px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;";
+
+            var label = document.createElement("span");
+            label.className = "cb-gdpr-cat-label";
+            label.style.cssText = "flex:1;font-size:11px;font-weight:600;";
+            label.textContent = options.labelText;
+
+            header.appendChild(expandBtn);
+            header.appendChild(label);
+
+            var control = document.createElement("div");
+            control.style.flexShrink = "0";
+            if (options.alwaysActive) {
+              var alwaysActiveBadge = document.createElement("span");
+              alwaysActiveBadge.style.cssText = "font-size:11px;font-weight:600;color:#374151;";
+              alwaysActiveBadge.textContent = translateTruncated("alwaysActive", 20);
+              control.appendChild(alwaysActiveBadge)
             } else {
-              var c = document.createElement("input");
-              c.type = "checkbox";
-              c.id = e.checkboxId;
-              e.defaultChecked && (c.checked = !0);
-              c.style.cssText = "position:absolute;opacity:0;width:0;height:0;margin:0;pointer-events:none;";
-              var s = document.createElement("button");
-              s.type = "button";
-              s.className = "cb-pref-toggle-track";
-              s.setAttribute("role", "switch");
-              s.setAttribute("aria-label", e.labelText);
-              var l = function () {
-                s.setAttribute("aria-checked", c.checked ? "true" : "false")
+              var checkbox = document.createElement("input");
+              checkbox.type = "checkbox";
+              checkbox.id = options.checkboxId;
+              options.defaultChecked && (checkbox.checked = true);
+              checkbox.style.cssText = "position:absolute;opacity:0;width:0;height:0;margin:0;pointer-events:none;";
+
+              var toggle = document.createElement("button");
+              toggle.type = "button";
+              toggle.className = "cb-pref-toggle-track";
+              toggle.setAttribute("role", "switch");
+              toggle.setAttribute("aria-label", options.labelText);
+              var syncToggleState = function () {
+                toggle.setAttribute("aria-checked", checkbox.checked ? "true" : "false")
               };
-              s.addEventListener("click", function () {
-                c.checked = !c.checked;
-                l()
+              toggle.addEventListener("click", function () {
+                checkbox.checked = !checkbox.checked;
+                syncToggleState()
               });
-              l();
-              i.appendChild(c);
-              i.appendChild(s)
+              syncToggleState();
+
+              control.appendChild(checkbox);
+              control.appendChild(toggle)
             }
-            n.appendChild(i);
-            var d = document.createElement("div");
-            d.className = "cb-gdpr-cat-desc";
-            d.style.cssText = "display:grid;grid-template-rows:0fr;opacity:0;font-size:13px;line-height:1.5;transition:grid-template-rows .3s ease,opacity .25s ease;";
-            var dInner = document.createElement("div");
-            dInner.style.cssText = "overflow:hidden;min-height:0;padding:0 12px 12px 44px;";
-            dInner.textContent = e.descText;
-            d.appendChild(dInner);
+            header.appendChild(control);
+
+            // Description: animated open/closed via a 0fr \u2192 1fr grid row.
+            var description = document.createElement("div");
+            description.className = "cb-gdpr-cat-desc";
+            description.style.cssText = "display:grid;grid-template-rows:0fr;opacity:0;font-size:13px;line-height:1.5;transition:grid-template-rows .3s ease,opacity .25s ease;";
+            var descriptionInner = document.createElement("div");
+            descriptionInner.style.cssText = "overflow:hidden;min-height:0;padding:0 12px 12px 44px;";
+            descriptionInner.textContent = options.descText;
+            description.appendChild(descriptionInner);
+
             var expand = function (el) {
               el.style.gridTemplateRows = "1fr";
               el.style.opacity = ""
@@ -9772,211 +10421,267 @@ ${inlineConfig}
               el.style.gridTemplateRows = "0fr";
               el.style.opacity = "0"
             };
-            a.addEventListener("click", function () {
-              var io = "true" !== a.getAttribute("aria-expanded");
-              var container = t.parentNode;
-              if (container) {
-                var items = container.children;
-                for (var _i = 0; _i < items.length; _i++) {
-                  var _desc = items[_i].querySelector(".cb-gdpr-cat-desc");
-                  var _btn = items[_i].querySelector("button[aria-expanded]");
-                  if (_desc && _desc !== d) {
-                    collapse(_desc);
-                    if (_btn) {
-                      _btn.textContent = "+";
-                      _btn.setAttribute("aria-expanded", "false")
+
+            expandBtn.addEventListener("click", function () {
+              var shouldExpand = "true" !== expandBtn.getAttribute("aria-expanded");
+
+              // Accordion behaviour: close every other row first.
+              var accordion = row.parentNode;
+              if (accordion) {
+                var rows = accordion.children;
+                for (var i = 0; i < rows.length; i++) {
+                  var otherDescription = rows[i].querySelector(".cb-gdpr-cat-desc");
+                  var otherButton = rows[i].querySelector("button[aria-expanded]");
+                  if (otherDescription && otherDescription !== description) {
+                    collapse(otherDescription);
+                    if (otherButton) {
+                      otherButton.textContent = "+";
+                      otherButton.setAttribute("aria-expanded", "false")
                     }
                   }
                 }
               }
-              io ? expand(d) : collapse(d);
-              a.textContent = io ? "\u2212" : "+";
-              a.setAttribute("aria-expanded", io ? "true" : "false")
+
+              shouldExpand ? expand(description) : collapse(description);
+              expandBtn.textContent = shouldExpand ? "\u2212" : "+";
+              expandBtn.setAttribute("aria-expanded", shouldExpand ? "true" : "false")
             });
-            t.appendChild(n);
-            t.appendChild(d);
-            return t
+
+            row.appendChild(header);
+            row.appendChild(description);
+            return row
           };
-          var n;
-          (n = document.createElement("div")).className = "cb-banner";
-          n.id = "cb-initial-banner";
-          n.style.display = "none";
-          var a;
-          (a = document.createElement("div")).className = "cb-banner-body";
-          var r;
-          (r = document.createElement("h3")).textContent = U("title");
-          a.appendChild(r);
-          var o = document.createElement("p");
-          var c = U("description");
-          if (b && X()) {
-            o.appendChild(document.createTextNode(c + " "));
-            var s;
-            (s = document.createElement("a")).textContent = U("privacyPolicy");
-            s.style.cssText = "color:#007aff;text-decoration:underline;cursor:pointer;";
-            Q(s, b);
-            o.appendChild(s);
-            o.appendChild(document.createTextNode("."))
-          } else o.textContent = c;
-          a.appendChild(o);
-          n.appendChild(a);
-          var j = document.createElement("div");
-          j.className = "cb-banner-footer";
-          var P = document.createElement("button");
-          P.id = "cb-preferences-btn";
-          P.textContent = J(W("customise"), C);
-          qC() && j.appendChild(P);
-          var F = document.createElement("button");
-          F.id = "cb-reject-all-btn";
-          F.textContent = J(W("rejectAll"), C);
-          qR() && j.appendChild(F);
-          var D = document.createElement("button");
-          D.id = "cb-accept-all-btn";
-          D.textContent = J(W("acceptAll"), C);
-          j.appendChild(D);
-          n.appendChild(j);
-          Ne(n, "cb-close-initial-btn");
-          t.appendChild(n);
-          var p;
-          (p = document.createElement("div")).className = "cb-banner";
-          p.id = "cb-preferences-banner";
-          p.style.display = "none";
-          "left" === g ? p.classList.add("prefs-left") : "right" === g ? p.classList.add("prefs-right") : p.classList.add("prefs-center");
-          var v;
-          (v = document.createElement("div")).className = "cb-banner-body";
-          var y;
-          (y = document.createElement("h3")).textContent = Y("cookiePreferences", w);
-          v.appendChild(y);
-          var h = document.createElement("p");
-          var M = (J(U("managePreferences"), k) || "").replace(/s*More info.?s*$/i, "").trim();
-          if (b && X()) {
-            h.appendChild(document.createTextNode(M + " "));
-            var R = document.createElement("a");
-            R.textContent = Y("privacyPolicy", E);
-            R.style.cssText = "color:#007aff;text-decoration:underline;cursor:pointer;";
-            Q(R, b);
-            h.appendChild(R);
-            h.appendChild(document.createTextNode("."))
-          } else h.textContent = M;
-          v.appendChild(h);
-          var q = document.createElement("div");
-          q.className = "cb-gdpr-accordion";
-          q.style.cssText = "border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin-bottom:4px;";
-          var H = Y("strictlyNecessary", 20) || Y("essential", 20);
-          q.appendChild(N({
-            labelText: H,
-            alwaysActive: !0,
-            descText: Y("essentialDescription", 300)
+
+          // ---- GDPR initial banner ------------------------------------------------
+          var gdprInitialBanner = document.createElement("div");
+          gdprInitialBanner.className = "cb-banner";
+          gdprInitialBanner.id = "cb-initial-banner";
+          gdprInitialBanner.style.display = "none";
+
+          var gdprInitialBody = document.createElement("div");
+          gdprInitialBody.className = "cb-banner-body";
+
+          var gdprHeading = document.createElement("h3");
+          gdprHeading.textContent = translate("title");
+          gdprInitialBody.appendChild(gdprHeading);
+
+          var gdprText = document.createElement("p");
+          var gdprDescription = translate("description");
+          if (privacyPolicyUrl && isCookiePolicyLinkEnabled()) {
+            gdprText.appendChild(document.createTextNode(gdprDescription + " "));
+            var gdprPolicyLink = document.createElement("a");
+            gdprPolicyLink.textContent = translate("privacyPolicy");
+            gdprPolicyLink.style.cssText = "color:#007aff;text-decoration:underline;cursor:pointer;";
+            bindExternalLink(gdprPolicyLink, privacyPolicyUrl);
+            gdprText.appendChild(gdprPolicyLink);
+            gdprText.appendChild(document.createTextNode("."))
+          } else gdprText.textContent = gdprDescription;
+          gdprInitialBody.appendChild(gdprText);
+          gdprInitialBanner.appendChild(gdprInitialBody);
+
+          // Reject and Customise are individually switchable from the dashboard; Accept always shows.
+          var initialFooter = document.createElement("div");
+          initialFooter.className = "cb-banner-footer";
+
+          var customiseBtn = document.createElement("button");
+          customiseBtn.id = "cb-preferences-btn";
+          customiseBtn.textContent = truncate(translateButton("customise"), MAX_BUTTON_LEN);
+          isCustomizeButtonEnabled() && initialFooter.appendChild(customiseBtn);
+
+          var rejectAllBtn = document.createElement("button");
+          rejectAllBtn.id = "cb-reject-all-btn";
+          rejectAllBtn.textContent = truncate(translateButton("rejectAll"), MAX_BUTTON_LEN);
+          isRejectButtonEnabled() && initialFooter.appendChild(rejectAllBtn);
+
+          var acceptAllBtn = document.createElement("button");
+          acceptAllBtn.id = "cb-accept-all-btn";
+          acceptAllBtn.textContent = truncate(translateButton("acceptAll"), MAX_BUTTON_LEN);
+          initialFooter.appendChild(acceptAllBtn);
+
+          gdprInitialBanner.appendChild(initialFooter);
+          appendCloseButton(gdprInitialBanner, "cb-close-initial-btn");
+          wrapper.appendChild(gdprInitialBanner);
+
+          // ---- GDPR preferences panel ---------------------------------------------
+          var gdprPrefsBanner = document.createElement("div");
+          gdprPrefsBanner.className = "cb-banner";
+          gdprPrefsBanner.id = "cb-preferences-banner";
+          gdprPrefsBanner.style.display = "none";
+          "left" === preferencePosition ? gdprPrefsBanner.classList.add("prefs-left") : "right" === preferencePosition ? gdprPrefsBanner.classList.add("prefs-right") : gdprPrefsBanner.classList.add("prefs-center");
+
+          var gdprPrefsBody = document.createElement("div");
+          gdprPrefsBody.className = "cb-banner-body";
+
+          var gdprPrefsHeading = document.createElement("h3");
+          gdprPrefsHeading.textContent = translateTruncated("cookiePreferences", MAX_TITLE_LEN);
+          gdprPrefsBody.appendChild(gdprPrefsHeading);
+
+          var gdprPrefsText = document.createElement("p");
+          var managePreferencesText = (truncate(translate("managePreferences"), MAX_DESCRIPTION_LEN) || "").replace(/s*More info.?s*$/i, "").trim();
+          if (privacyPolicyUrl && isCookiePolicyLinkEnabled()) {
+            gdprPrefsText.appendChild(document.createTextNode(managePreferencesText + " "));
+            var gdprPrefsPolicyLink = document.createElement("a");
+            gdprPrefsPolicyLink.textContent = translateTruncated("privacyPolicy", MAX_LINK_LEN);
+            gdprPrefsPolicyLink.style.cssText = "color:#007aff;text-decoration:underline;cursor:pointer;";
+            bindExternalLink(gdprPrefsPolicyLink, privacyPolicyUrl);
+            gdprPrefsText.appendChild(gdprPrefsPolicyLink);
+            gdprPrefsText.appendChild(document.createTextNode("."))
+          } else gdprPrefsText.textContent = managePreferencesText;
+          gdprPrefsBody.appendChild(gdprPrefsText);
+
+          var accordion = document.createElement("div");
+          accordion.className = "cb-gdpr-accordion";
+          accordion.style.cssText = "border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin-bottom:4px;";
+
+          var essentialLabel = translateTruncated("strictlyNecessary", 20) || translateTruncated("essential", 20);
+          accordion.appendChild(buildCategoryRow({
+            labelText: essentialLabel,
+            alwaysActive: true,
+            descText: translateTruncated("essentialDescription", 300)
           }));
-          var V;
-          var $ = ae() || A && A.accepted && A.categories || {};
-          q.appendChild(N({
-            labelText: Y("marketing", 20),
+
+          // Pre-fill the toggles from the last saved choice.
+          var savedCategories = loadPreferenceCategories() || consentState && consentState.accepted && consentState.categories || {};
+          accordion.appendChild(buildCategoryRow({
+            labelText: translateTruncated("marketing", 20),
             checkboxId: "cb-pref-marketing",
-            defaultChecked: !!$.marketing,
-            descText: Y("marketingDescription", 300)
+            defaultChecked: !!savedCategories.marketing,
+            descText: translateTruncated("marketingDescription", 300)
           }));
-          q.appendChild(N({
-            labelText: Y("analytics", 20),
+          accordion.appendChild(buildCategoryRow({
+            labelText: translateTruncated("analytics", 20),
             checkboxId: "cb-pref-analytics",
-            defaultChecked: !!$.analytics,
-            descText: Y("analyticsDescription", 300)
+            defaultChecked: !!savedCategories.analytics,
+            descText: translateTruncated("analyticsDescription", 300)
           }));
-          q.appendChild(N({
-            labelText: Y("preferences", 20),
+          accordion.appendChild(buildCategoryRow({
+            labelText: translateTruncated("preferences", 20),
             checkboxId: "cb-pref-preferences",
-            defaultChecked: !!$.preferences,
-            descText: Y("preferencesDescription", 300)
+            defaultChecked: !!savedCategories.preferences,
+            descText: translateTruncated("preferencesDescription", 300)
           }));
-          q.lastChild && (q.lastChild.style.borderBottom = "none");
-          v.appendChild(q);
-          p.appendChild(v);
-          var B;
-          (B = document.createElement("div")).className = "cb-banner-footer";
-          var G = document.createElement("button");
-          G.id = "cb-prefs-reject-btn";
-          G.textContent = J(W("rejectAll"), C);
-          B.appendChild(G);
-          var T;
-          (T = document.createElement("button")).id = "cb-save-prefs-btn";
-          T.textContent = J(W("saveMyPreferences") || W("save"), C);
-          B.appendChild(T);
-          p.appendChild(B);
-          je(p);
-          t.appendChild(p)
+          accordion.lastChild && (accordion.lastChild.style.borderBottom = "none");
+
+          gdprPrefsBody.appendChild(accordion);
+          gdprPrefsBanner.appendChild(gdprPrefsBody);
+
+          var gdprPrefsFooter = document.createElement("div");
+          gdprPrefsFooter.className = "cb-banner-footer";
+          var prefsRejectBtn = document.createElement("button");
+          prefsRejectBtn.id = "cb-prefs-reject-btn";
+          prefsRejectBtn.textContent = truncate(translateButton("rejectAll"), MAX_BUTTON_LEN);
+          gdprPrefsFooter.appendChild(prefsRejectBtn);
+          var prefsSaveBtn = document.createElement("button");
+          prefsSaveBtn.id = "cb-save-prefs-btn";
+          prefsSaveBtn.textContent = truncate(translateButton("saveMyPreferences") || translateButton("save"), MAX_BUTTON_LEN);
+          gdprPrefsFooter.appendChild(prefsSaveBtn);
+          gdprPrefsBanner.appendChild(gdprPrefsFooter);
+
+          appendPrefsCloseButton(gdprPrefsBanner);
+          wrapper.appendChild(gdprPrefsBanner)
         }
-        document.body.appendChild(t);
-        f && (document.body.style.overflow = "hidden");
+
+        document.body.appendChild(wrapper);
+        stopScroll && (document.body.style.overflow = "hidden");
+
+        // Re-position the banner on resize (desktop corner \u2194 mobile full-width).
         if (!window.__cbResizeInit) {
           window.__cbResizeInit = true;
           window.addEventListener("resize", function() {
-            var rb = document.getElementById("cb-initial-banner");
-            if (rb && rb.style.display !== "none" && rb.style.visibility !== "hidden") Z(rb);
+            var visibleBanner = document.getElementById("cb-initial-banner");
+            if (visibleBanner && visibleBanner.style.display !== "none" && visibleBanner.style.visibility !== "hidden") positionInitialBanner(visibleBanner);
           });
         }
-        var K = document.getElementById("cb-initial-banner");
-        if (K) {
-          var ee = Z(K);
-          K.style.display = "flex";
-          K.style.visibility = "visible";
-          K.style.opacity = "1";
-          if (m) {
-            var te = "";
-            var ne = u;
-            te = ee ? "slide-up" === u ? "cb-banner-animate-initial-center-bottom" : "slide-down" === u ? "cb-banner-animate-initial-center-top" : "zoom-in" === u ? "cb-banner-animate-initial-center-zoom" : "cb-banner-animate-fade" : "slide-up" === u ? "cb-banner-animate-bottom" : "slide-down" === u ? "cb-banner-animate-top" : "zoom-in" === u ? "cb-banner-animate-zoom-in" : "cb-banner-animate-fade";
-            K.classList.add(te)
+
+        var builtBanner = document.getElementById("cb-initial-banner");
+        if (builtBanner) {
+          var isCentered = positionInitialBanner(builtBanner);
+          builtBanner.style.display = "flex";
+          builtBanner.style.visibility = "visible";
+          builtBanner.style.opacity = "1";
+          if (animationEnabled) {
+            builtBanner.classList.add(getInitialBannerAnimationClass(isCentered))
           }
         }
       } else {
-        setTimeout(Pe, 100)
+        // document.body does not exist yet \u2014 try again shortly.
+        setTimeout(buildBanners, 100)
       }
   }
 
-  function Fe() {
-    f && (document.body.style.overflow = "")
+  /** Undo the scroll lock applied while the banner was open. */
+  function restoreBodyScroll() {
+    stopScroll && (document.body.style.overflow = "")
   }
 
-  function De() {
+  /** The floating logo is off when the dashboard hides it, and on by default otherwise. */
+  function isFloatingLogoEnabled() {
     try {
-      if (l && !1 === l.showBannerLogo) return !1;
-      if (l && 0 === l.showBannerLogo) return !1;
-      var e = R();
-      var cf = TRANSLATIONS.config || {};
-      var n = cf.floatingButtonEnabled != null ? cf.floatingButtonEnabled : (TRANSLATIONS[e] || TRANSLATIONS.en || {}).floatingButtonEnabled;
-      return !1 !== n && "0" !== n && "false" !== String(n).toLowerCase()
-    } catch (e) {
-      return !0
+      if (customization && false === customization.showBannerLogo) return false;
+      if (customization && 0 === customization.showBannerLogo) return false;
+      var lang = getActiveLanguage();
+      var config = TRANSLATIONS.config || {};
+      var value = config.floatingButtonEnabled != null ? config.floatingButtonEnabled : (TRANSLATIONS[lang] || TRANSLATIONS.en || {}).floatingButtonEnabled;
+      return false !== value && "0" !== value && "false" !== String(value).toLowerCase()
+    } catch (err) {
+      return true
     }
   }
 
-  function Me() {
+  // Should the banner stay closed (suppressed) on this page load? The user dismissed it
+  // via the close (X) button WITHOUT consenting (consentState.accepted stays false, so
+  // non-essential scripts remain blocked the whole time).
+  //   - Floating logo ENABLED: stay closed indefinitely \u2014 the logo is the reopen path,
+  //     so the banner never auto-returns.
+  //   - Floating logo DISABLED: stay closed for 24h, then re-show so the visitor still
+  //     has a way to consent (no dead-end when there's no logo to reopen with).
+  function wasBannerDismissed() {
     try {
-      if (l && l.bannerLogoPosition) return "right" === l.bannerLogoPosition ? "right" : "left";
-      var e = R();
-      var cf = TRANSLATIONS.config || {};
-      var fp = cf.floatingButtonPosition != null ? cf.floatingButtonPosition : (TRANSLATIONS[e] || TRANSLATIONS.en || {}).floatingButtonPosition;
-      return "right" === fp ? "right" : "left"
-    } catch (e) {
+      var dismissedAt = parseInt(localStorage.getItem(STORAGE_KEY + "_closed") || "0", 10);
+      if (!dismissedAt) return false;
+      if (isFloatingLogoEnabled()) return true;
+      if (Date.now() - dismissedAt < 86400000) return true;
+      localStorage.removeItem(STORAGE_KEY + "_closed");
+      return false
+    } catch (err) {
+      return false
+    }
+  }
+
+  /** Which side the floating logo sits on. Defaults to left. */
+  function getFloatingLogoPosition() {
+    try {
+      if (customization && customization.bannerLogoPosition) return "right" === customization.bannerLogoPosition ? "right" : "left";
+      var lang = getActiveLanguage();
+      var config = TRANSLATIONS.config || {};
+      var value = config.floatingButtonPosition != null ? config.floatingButtonPosition : (TRANSLATIONS[lang] || TRANSLATIONS.en || {}).floatingButtonPosition;
+      return "right" === value ? "right" : "left"
+    } catch (err) {
       return "left"
     }
   }
 
-  function Re() {
-    var e = "http://www.w3.org/2000/svg";
-    var t = document.createElementNS(e, "svg");
-    t.setAttribute("xmlns", e);
-    t.setAttribute("viewBox", "0 0 40 40");
-    t.setAttribute("width", "44");
-    t.setAttribute("height", "44");
-    t.setAttribute("aria-hidden", "true");
-    t.setAttribute("focusable", "false");
-    t.style.cssText = "display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;";
-    var n = document.createElementNS(e, "circle");
-    n.setAttribute("cx", "20");
-    n.setAttribute("cy", "20");
-    n.setAttribute("r", "18");
-    n.setAttribute("fill", "#007aff");
-    t.appendChild(n);
-    var a = [{
+  /** Inline SVG cookie icon \u2014 used when the hosted logo image cannot be loaded. */
+  function createFallbackLogoSvg() {
+    var SVG_NS = "http://www.w3.org/2000/svg";
+    var svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("xmlns", SVG_NS);
+    svg.setAttribute("viewBox", "0 0 40 40");
+    svg.setAttribute("width", "44");
+    svg.setAttribute("height", "44");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    svg.style.cssText = "display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;";
+
+    var background = document.createElementNS(SVG_NS, "circle");
+    background.setAttribute("cx", "20");
+    background.setAttribute("cy", "20");
+    background.setAttribute("r", "18");
+    background.setAttribute("fill", "#007aff");
+    svg.appendChild(background);
+
+    // The three "chocolate chips".
+    var chips = [{
       cx: "14",
       cy: "14",
       r: "2.2"
@@ -9989,346 +10694,391 @@ ${inlineConfig}
       cy: "25",
       r: "2"
     }];
-    for (var r = 0; r < a.length; r++) {
-      var i = document.createElementNS(e, "circle");
-      i.setAttribute("cx", a[r].cx);
-      i.setAttribute("cy", a[r].cy);
-      i.setAttribute("r", a[r].r);
-      i.setAttribute("fill", "#ffffff");
-      t.appendChild(i)
+    for (var i = 0; i < chips.length; i++) {
+      var chip = document.createElementNS(SVG_NS, "circle");
+      chip.setAttribute("cx", chips[i].cx);
+      chip.setAttribute("cy", chips[i].cy);
+      chip.setAttribute("r", chips[i].r);
+      chip.setAttribute("fill", "#ffffff");
+      svg.appendChild(chip)
     }
-    return t
+    return svg
   }
 
-  function Ue() {
+  /** Recover our own origin from this script's own <script src>, when the config omitted it. */
+  function detectScriptOrigin() {
     try {
-      var e = document.getElementsByTagName("script");
-      for (var t = e.length - 1; t >= 0; t--) {
-        var n = e[t].src || "";
-        if (-1 !== n.indexOf("/consentbit/") || -1 !== n.indexOf("/client_data/")) return new URL(n).origin
+      var scripts = document.getElementsByTagName("script");
+      for (var i = scripts.length - 1; i >= 0; i--) {
+        var src = scripts[i].src || "";
+        if (-1 !== src.indexOf("/consentbit/") || -1 !== src.indexOf("/client_data/")) return new URL(src).origin
       }
-    } catch (e) {}
+    } catch (err) {}
     return ""
   }
 
-  function We() {
-    if (!document.getElementById("cb-floating-trigger") && De()) {
-      var e = Me();
-      var t = n || "";
-      var r = a || "";
-      if (!t) {
-        var i = Ue();
-        if (i) {
-          t = i + "/embed/floating-logo.svg";
-          r || (r = t)
+  /**
+   * The persistent floating button that reopens the banner.
+   * Image loading degrades in two steps: primary URL \u2192 fallback URL \u2192 inline SVG.
+   */
+  function createFloatingTrigger() {
+    if (!document.getElementById("cb-floating-trigger") && isFloatingLogoEnabled()) {
+      var side = getFloatingLogoPosition();
+      var primaryUrl = floatingLogoUrl || "";
+      var fallbackUrl = floatingLogoFallbackUrl || "";
+      if (!primaryUrl) {
+        var origin = detectScriptOrigin();
+        if (origin) {
+          primaryUrl = origin + "/embed/floating-logo.svg";
+          fallbackUrl || (fallbackUrl = primaryUrl)
         }
       }
-      var o = document.createElement("button");
-      o.id = "cb-floating-trigger";
-      o.type = "button";
-      o.setAttribute("aria-label", U("cookiePreferences"));
-      o.style.cssText = "position:fixed;bottom:28px;" + ("right" === e ? "right:16px;" : "left:16px;") + "z-index:2147483646;width:56px;height:56px;border:none;border-radius:9999px;background:transparent;cursor:pointer;padding:0;box-shadow:none;";
-      if (t) {
-        var c = document.createElement("img");
-        c.alt = "";
-        c.src = t;
-        c.setAttribute("width", "44");
-        c.setAttribute("height", "44");
-        c.draggable = !1;
-        c.style.cssText = "display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;";
-        var s = !1;
-        c.addEventListener("error", function e() {
-          if (s || !r || t === r) {
-            c.removeEventListener("error", e);
-            c.parentNode && c.parentNode.replaceChild(Re(), c)
+
+      var trigger = document.createElement("button");
+      trigger.id = "cb-floating-trigger";
+      trigger.type = "button";
+      trigger.setAttribute("aria-label", translate("cookiePreferences"));
+      trigger.style.cssText = "position:fixed;bottom:28px;" + ("right" === side ? "right:16px;" : "left:16px;") + "z-index:2147483646;width:56px;height:56px;border:none;border-radius:9999px;background:transparent;cursor:pointer;padding:0;box-shadow:none;";
+
+      if (primaryUrl) {
+        var logoImg = document.createElement("img");
+        logoImg.alt = "";
+        logoImg.src = primaryUrl;
+        logoImg.setAttribute("width", "44");
+        logoImg.setAttribute("height", "44");
+        logoImg.draggable = false;
+        logoImg.style.cssText = "display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;";
+
+        var triedFallback = false;
+        logoImg.addEventListener("error", function onLogoError() {
+          if (triedFallback || !fallbackUrl || primaryUrl === fallbackUrl) {
+            logoImg.removeEventListener("error", onLogoError);
+            logoImg.parentNode && logoImg.parentNode.replaceChild(createFallbackLogoSvg(), logoImg)
           } else {
-            s = !0;
-            c.src = r
+            triedFallback = true;
+            logoImg.src = fallbackUrl
           }
         });
-        o.appendChild(c)
-      } else o.appendChild(Re());
-      document.body.appendChild(o)
+        trigger.appendChild(logoImg)
+      } else trigger.appendChild(createFallbackLogoSvg());
+
+      document.body.appendChild(trigger)
     }
   }
 
-  function Je() {
-    if (!m) return "";
-    var e = u;
-    return "left" === g ? "zoom-in" === u ? "cb-banner-animate-prefs-zoom-in" : "cb-banner-animate-prefs-left" : "right" === g ? "zoom-in" === u ? "cb-banner-animate-prefs-zoom-in" : "cb-banner-animate-prefs-right" : "slide-up" === u ? "cb-banner-animate-center-bottom" : "slide-down" === u ? "cb-banner-animate-center-top" : "zoom-in" === u ? "cb-banner-animate-prefs-zoom-in" : "cb-banner-animate-fade"
+  /** Entrance-animation class for the preferences panel, given where it is anchored. */
+  function getPreferencesAnimationClass() {
+    if (!animationEnabled) return "";
+    return "left" === preferencePosition ? "zoom-in" === entranceAnimation ? "cb-banner-animate-prefs-zoom-in" : "cb-banner-animate-prefs-left" : "right" === preferencePosition ? "zoom-in" === entranceAnimation ? "cb-banner-animate-prefs-zoom-in" : "cb-banner-animate-prefs-right" : "slide-up" === entranceAnimation ? "cb-banner-animate-center-bottom" : "slide-down" === entranceAnimation ? "cb-banner-animate-center-top" : "zoom-in" === entranceAnimation ? "cb-banner-animate-prefs-zoom-in" : "cb-banner-animate-fade"
   }
 
-  function Ye(e) {
-    if (e) {
-      var t = M.split(" ");
-      for (var n = 0; n < t.length; n++) t[n] && e.classList.remove(t[n])
+  /** Strip every entrance-animation class, so the next show can re-trigger one. */
+  function removeAnimationClasses(el) {
+    if (el) {
+      var classes = ANIMATION_CLASSES.split(" ");
+      for (var i = 0; i < classes.length; i++) classes[i] && el.classList.remove(classes[i])
     }
   }
 
-  function Xe() {
-    ze();
-    Pe();
-    We();
-    var e = document.getElementById("cb-initial-banner");
-    var t = document.getElementById("cb-preferences-banner");
-    var n = document.getElementById("cb-preferences-btn");
-    var a = document.getElementById("cb-accept-all-btn");
-    var r = document.getElementById("cb-reject-all-btn");
-    var o = document.getElementById("cb-prefs-reject-btn");
-    var c = document.getElementById("cb-cancel-prefs-btn");
-    var s = document.getElementById("cb-save-prefs-btn");
-    var l = document.getElementById("cb-ccpa-donotsell-link");
-    var d = "ccpa" === i;
+  /**
+   * Render the banners and wire up every control.
+   * Once a choice is made the flow is always the same: record it, delete cookies for
+   * the declined categories, unblock the scripts now allowed, push the state to Google
+   * Consent Mode, broadcast to Webflow, then dismiss the UI.
+   */
+  function initBannerUi() {
+    injectStyles();
+    buildBanners();
+    createFloatingTrigger();
 
-    function p() {
-      if (e) {
-        e.style.setProperty("display", "none", "important");
-        e.classList.remove("cb-banner-animate-left", "cb-banner-animate-right", "cb-banner-animate-top", "cb-banner-animate-bottom", "cb-banner-animate-fade")
+    var initialBanner = document.getElementById("cb-initial-banner");
+    var prefsBanner = document.getElementById("cb-preferences-banner");
+    var customiseBtn = document.getElementById("cb-preferences-btn");
+    var acceptAllBtn = document.getElementById("cb-accept-all-btn");
+    var rejectAllBtn = document.getElementById("cb-reject-all-btn");
+    var prefsRejectBtn = document.getElementById("cb-prefs-reject-btn");
+    var cancelPrefsBtn = document.getElementById("cb-cancel-prefs-btn");
+    var savePrefsBtn = document.getElementById("cb-save-prefs-btn");
+    var doNotSellLink = document.getElementById("cb-ccpa-donotsell-link");
+    var isCcpa = "ccpa" === bannerType;
+
+    /** Hide both banners and bring the floating trigger back. */
+    function dismissBanners() {
+      if (initialBanner) {
+        initialBanner.style.setProperty("display", "none", "important");
+        initialBanner.classList.remove("cb-banner-animate-left", "cb-banner-animate-right", "cb-banner-animate-top", "cb-banner-animate-bottom", "cb-banner-animate-fade")
       }
-      if (t) {
-        t.style.display = "none";
-        Ye(t)
+      if (prefsBanner) {
+        prefsBanner.style.display = "none";
+        removeAnimationClasses(prefsBanner)
       }
-      var n = document.getElementById("cb-floating-trigger");
-      n && (n.style.display = "flex");
-      Fe()
+      var trigger = document.getElementById("cb-floating-trigger");
+      trigger && (trigger.style.display = "flex");
+      restoreBodyScroll()
     }
 
-    function b() {
-      if (e) {
-        if (t) {
-          t.style.display = "none";
-          Ye(t)
+    /** Show the initial banner (from the floating trigger, or from Cancel in the CCPA panel). */
+    function showInitialBanner() {
+      if (initialBanner) {
+        if (prefsBanner) {
+          prefsBanner.style.display = "none";
+          removeAnimationClasses(prefsBanner)
         }
-        var n = Z(e);
-        e.style.setProperty("display", "flex", "important");
-        e.style.setProperty("visibility", "visible", "important");
-        e.style.setProperty("opacity", "1", "important");
-        e.classList.remove("cb-banner-animate-left", "cb-banner-animate-right", "cb-banner-animate-top", "cb-banner-animate-bottom", "cb-banner-animate-fade", "cb-banner-animate-zoom-in");
-        if (m) {
-          var a = "";
-          var r = u;
-          a = n ? "slide-up" === u ? "cb-banner-animate-initial-center-bottom" : "slide-down" === u ? "cb-banner-animate-initial-center-top" : "zoom-in" === u ? "cb-banner-animate-initial-center-zoom" : "cb-banner-animate-fade" : "slide-up" === u ? "cb-banner-animate-bottom" : "slide-down" === u ? "cb-banner-animate-top" : "zoom-in" === u ? "cb-banner-animate-zoom-in" : "cb-banner-animate-fade";
-          e.classList.add(a)
+        var isCentered = positionInitialBanner(initialBanner);
+        initialBanner.style.setProperty("display", "flex", "important");
+        initialBanner.style.setProperty("visibility", "visible", "important");
+        initialBanner.style.setProperty("opacity", "1", "important");
+        initialBanner.classList.remove("cb-banner-animate-left", "cb-banner-animate-right", "cb-banner-animate-top", "cb-banner-animate-bottom", "cb-banner-animate-fade", "cb-banner-animate-zoom-in");
+        if (animationEnabled) {
+          initialBanner.classList.add(getInitialBannerAnimationClass(isCentered))
         }
-        f && (document.body.style.overflow = "hidden")
+        stopScroll && (document.body.style.overflow = "hidden")
       }
     }
-    var g = document.getElementById("cb-floating-trigger");
-    g && g.addEventListener("click", function (e) {
-      e && e.preventDefault && e.preventDefault();
-      e && e.stopPropagation && e.stopPropagation();
-      b()
+
+    /** Open the preferences panel and hide the initial banner + trigger. */
+    function showPreferencesBanner() {
+      initialBanner.style.display = "none";
+      var trigger = document.getElementById("cb-floating-trigger");
+      trigger && (trigger.style.display = "none");
+      prefsBanner.style.display = "flex";
+      prefsBanner.style.visibility = "visible";
+      prefsBanner.style.opacity = "1";
+      removeAnimationClasses(prefsBanner);
+      var animationClass = getPreferencesAnimationClass();
+      animationClass && prefsBanner.classList.add(animationClass)
+    }
+
+    var floatingTrigger = document.getElementById("cb-floating-trigger");
+    floatingTrigger && floatingTrigger.addEventListener("click", function (event) {
+      event && event.preventDefault && event.preventDefault();
+      event && event.stopPropagation && event.stopPropagation();
+      showInitialBanner()
     });
-    n && n.addEventListener("click", function () {
-      if (e && t) {
-        if (!d) {
-          var n = ae() || A && A.categories || {};
-          var a = function (e, t) {
-            var n = document.getElementById(e);
-            if (n) {
-              n.checked = !!t;
-              var a = n.parentNode && n.parentNode.querySelector("button.cb-pref-toggle-track");
-              a && a.setAttribute("aria-checked", n.checked ? "true" : "false")
+
+    // Customise \u2192 open the preferences panel, toggles pre-filled from the saved choice.
+    customiseBtn && customiseBtn.addEventListener("click", function () {
+      if (initialBanner && prefsBanner) {
+        if (!isCcpa) {
+          var savedCategories = loadPreferenceCategories() || consentState && consentState.categories || {};
+          var setToggle = function (checkboxId, checked) {
+            var checkbox = document.getElementById(checkboxId);
+            if (checkbox) {
+              checkbox.checked = !!checked;
+              var toggle = checkbox.parentNode && checkbox.parentNode.querySelector("button.cb-pref-toggle-track");
+              toggle && toggle.setAttribute("aria-checked", checkbox.checked ? "true" : "false")
             }
           };
-          a("cb-pref-analytics", n.analytics);
-          a("cb-pref-preferences", n.preferences);
-          a("cb-pref-marketing", n.marketing)
+          setToggle("cb-pref-analytics", savedCategories.analytics);
+          setToggle("cb-pref-preferences", savedCategories.preferences);
+          setToggle("cb-pref-marketing", savedCategories.marketing)
         }
-        e.style.display = "none";
-        e.classList.remove("cb-banner-animate-left", "cb-banner-animate-right", "cb-banner-animate-top", "cb-banner-animate-bottom", "cb-banner-animate-fade");
-        var ft1 = document.getElementById("cb-floating-trigger");
-        ft1 && (ft1.style.display = "none");
-        t.style.display = "flex";
-        t.style.visibility = "visible";
-        t.style.opacity = "1";
-        Ye(t);
-        var r = Je();
-        r && t.classList.add(r)
+        initialBanner.classList.remove("cb-banner-animate-left", "cb-banner-animate-right", "cb-banner-animate-top", "cb-banner-animate-bottom", "cb-banner-animate-fade");
+        showPreferencesBanner()
       }
     });
-    o && o.addEventListener("click", function () {
-      var e = {
-        accepted: !0,
+
+    // Reject All, from inside the preferences panel.
+    prefsRejectBtn && prefsRejectBtn.addEventListener("click", function () {
+      var state = {
+        accepted: true,
         timestamp: (new Date).toISOString(),
         categories: {
-          essential: !0,
-          analytics: !1,
-          preferences: !1,
-          marketing: !1
+          essential: true,
+          analytics: false,
+          preferences: false,
+          marketing: false
         }
       };
-      Db(["analytics", "marketing", "preferences"]);
-      te(e);
-      re(e, {
+      deleteCookiesForCategories(["analytics", "marketing", "preferences"]);
+      saveConsentState(state);
+      postConsentToApi(state, {
         status: "rejected"
       });
-      ne(e.categories);
-      Te(e.categories, "[PrefsReject]");
-      Ie(e.categories);
-      p()
+      savePreferenceCategories(state.categories);
+      updateGoogleConsentMode(state.categories, "[PrefsReject]");
+      dispatchWebflowConsent(state.categories);
+      dismissBanners()
     });
-    var v = document.getElementById("cb-close-initial-btn");
-    var y = document.getElementById("cb-close-prefs-btn");
-    v && v.addEventListener("click", function () {
-      p()
+
+    // Close (\xD7) on either banner: dismiss WITHOUT consenting. Scripts stay blocked and
+    // the timestamp lets wasBannerDismissed() keep it closed on the next page load.
+    var closeInitialBtn = document.getElementById("cb-close-initial-btn");
+    var closePrefsBtn = document.getElementById("cb-close-prefs-btn");
+    closeInitialBtn && closeInitialBtn.addEventListener("click", function () {
+      try { localStorage.setItem(STORAGE_KEY + "_closed", String(Date.now())) } catch (err) {}
+      dismissBanners()
     });
-    y && y.addEventListener("click", function () {
-      p()
+    closePrefsBtn && closePrefsBtn.addEventListener("click", function () {
+      try { localStorage.setItem(STORAGE_KEY + "_closed", String(Date.now())) } catch (err) {}
+      dismissBanners()
     });
-    d && l && l.addEventListener("click", function () {
-      if (e && t) {
-        e.style.display = "none";
-        var ft2 = document.getElementById("cb-floating-trigger");
-        ft2 && (ft2.style.display = "none");
-        t.style.display = "flex";
-        t.style.visibility = "visible";
-        t.style.opacity = "1";
-        Ye(t);
-        var n = Je();
-        n && t.classList.add(n)
+
+    // CCPA: the "Do Not Sell" link opens the opt-out panel.
+    isCcpa && doNotSellLink && doNotSellLink.addEventListener("click", function () {
+      if (initialBanner && prefsBanner) {
+        showPreferencesBanner()
       }
     });
-    c && c.addEventListener("click", function () {
-      b()
+
+    // CCPA: Cancel returns to the initial banner.
+    cancelPrefsBtn && cancelPrefsBtn.addEventListener("click", function () {
+      showInitialBanner()
     });
-    r && r.addEventListener("click", function () {
-      if (!d) {
-        var e = {
-          accepted: !0,
+
+    // Reject All, from the initial banner. Under CCPA this button is not a consent
+    // action (that regime is opt-out), so it only dismisses.
+    rejectAllBtn && rejectAllBtn.addEventListener("click", function () {
+      if (!isCcpa) {
+        var state = {
+          accepted: true,
           timestamp: (new Date).toISOString(),
           categories: {
-            essential: !0,
-            analytics: !1,
-            preferences: !1,
-            marketing: !1
+            essential: true,
+            analytics: false,
+            preferences: false,
+            marketing: false
           }
         };
-        Db(["analytics", "marketing", "preferences"]);
-        te(e);
-        re(e, {
+        deleteCookiesForCategories(["analytics", "marketing", "preferences"]);
+        saveConsentState(state);
+        postConsentToApi(state, {
           status: "rejected"
         });
-        ne(e.categories);
-        Te(e.categories, "[Reject]");
-        Ie(e.categories)
+        savePreferenceCategories(state.categories);
+        updateGoogleConsentMode(state.categories, "[Reject]");
+        dispatchWebflowConsent(state.categories)
       }
-      p()
+      dismissBanners()
     });
-    a && a.addEventListener("click", function () {
-      if (d) {
-        var e = {
-          accepted: !0,
+
+    // Accept All. Under CCPA that means "do not opt out"; under GDPR it grants every category.
+    acceptAllBtn && acceptAllBtn.addEventListener("click", function () {
+      if (isCcpa) {
+        var ccpaState = {
+          accepted: true,
           timestamp: (new Date).toISOString(),
           ccpa: {
-            doNotSell: !1
+            doNotSell: false
           }
         };
-        te(e);
-        re(e, {
+        saveConsentState(ccpaState);
+        postConsentToApi(ccpaState, {
           status: "given"
         });
-        ke({
-          analytics: !0,
-          marketing: !0,
-          preferences: !0,
-          essential: !0
+        unblockAllowedScripts({
+          analytics: true,
+          marketing: true,
+          preferences: true,
+          essential: true
         });
-        Tc(!1)
+        updateGoogleConsentModeCcpa(false)
       } else {
-        var t = {
-          accepted: !0,
+        var gdprState = {
+          accepted: true,
           timestamp: (new Date).toISOString(),
           categories: {
-            essential: !0,
-            analytics: !0,
-            preferences: !0,
-            marketing: !0
+            essential: true,
+            analytics: true,
+            preferences: true,
+            marketing: true
           }
         };
-        te(t);
-        re(t, {
+        saveConsentState(gdprState);
+        postConsentToApi(gdprState, {
           status: "given"
         });
-        ne(t.categories);
-        ke(t.categories);
-        Te(t.categories, "[Accept]")
+        savePreferenceCategories(gdprState.categories);
+        unblockAllowedScripts(gdprState.categories);
+        updateGoogleConsentMode(gdprState.categories, "[Accept]")
       }
-      p()
+      dismissBanners()
     });
-    s && s.addEventListener("click", function () {
-      if (d) {
-        var e = document.getElementById("cb-ccpa-optout");
-        var t = !(!e || !e.checked);
-        var n = {
-          accepted: !0,
+
+    // Save: CCPA reads the single opt-out checkbox; GDPR reads the three category toggles.
+    savePrefsBtn && savePrefsBtn.addEventListener("click", function () {
+      if (isCcpa) {
+        var optOutCheckbox = document.getElementById("cb-ccpa-optout");
+        var doNotSell = !(!optOutCheckbox || !optOutCheckbox.checked);
+        var ccpaState = {
+          accepted: true,
           timestamp: (new Date).toISOString(),
           ccpa: {
-            doNotSell: t
+            doNotSell: doNotSell
           }
         };
-        te(n);
-        re(n, {
-          status: t ? "rejected" : "given"
+        saveConsentState(ccpaState);
+        postConsentToApi(ccpaState, {
+          status: doNotSell ? "rejected" : "given"
         });
-        t || ke({
-          analytics: !0,
-          marketing: !0,
-          preferences: !0,
-          essential: !0
+        doNotSell || unblockAllowedScripts({
+          analytics: true,
+          marketing: true,
+          preferences: true,
+          essential: true
         });
-        Tc(t)
+        updateGoogleConsentModeCcpa(doNotSell)
       } else {
-        var a = document.getElementById("cb-pref-analytics");
-        var r = document.getElementById("cb-pref-preferences");
-        var i = document.getElementById("cb-pref-marketing");
-        var o = {
-          accepted: !0,
+        var analyticsCheckbox = document.getElementById("cb-pref-analytics");
+        var preferencesCheckbox = document.getElementById("cb-pref-preferences");
+        var marketingCheckbox = document.getElementById("cb-pref-marketing");
+        var gdprState = {
+          accepted: true,
           timestamp: (new Date).toISOString(),
           categories: {
-            essential: !0,
-            analytics: !(!a || !a.checked),
-            preferences: !(!r || !r.checked),
-            marketing: !(!i || !i.checked)
+            essential: true,
+            analytics: !(!analyticsCheckbox || !analyticsCheckbox.checked),
+            preferences: !(!preferencesCheckbox || !preferencesCheckbox.checked),
+            marketing: !(!marketingCheckbox || !marketingCheckbox.checked)
           }
         };
-        var fd = [];
-        if (!o.categories.analytics) fd.push("analytics");
-        if (!o.categories.marketing) fd.push("marketing");
-        if (!o.categories.preferences) fd.push("preferences");
-        if (fd.length) Db(fd);
-        te(o);
-        re(o, {
+
+        var deniedCategories = [];
+        if (!gdprState.categories.analytics) deniedCategories.push("analytics");
+        if (!gdprState.categories.marketing) deniedCategories.push("marketing");
+        if (!gdprState.categories.preferences) deniedCategories.push("preferences");
+        if (deniedCategories.length) deleteCookiesForCategories(deniedCategories);
+
+        saveConsentState(gdprState);
+        postConsentToApi(gdprState, {
           status: "partial"
         });
-        ne(o.categories);
-        ke(o.categories);
-        Te(o.categories, "[Save]");
-        Ie(o.categories)
+        savePreferenceCategories(gdprState.categories);
+        unblockAllowedScripts(gdprState.categories);
+        updateGoogleConsentMode(gdprState.categories, "[Save]");
+        dispatchWebflowConsent(gdprState.categories)
       }
-      p()
+      dismissBanners()
     })
   }
 
-  function qe() {
-    Xe();
-    var e = document.getElementById("cb-initial-banner");
-    if (e) {
-      e.style.display = "flex";
-      e.style.visibility = "visible";
-      e.style.opacity = "1";
+  /** Render the UI and show the initial banner straight away (no floating trigger). */
+  function showBannerNow() {
+    initBannerUi();
+    var initialBanner = document.getElementById("cb-initial-banner");
+    if (initialBanner) {
+      initialBanner.style.display = "flex";
+      initialBanner.style.visibility = "visible";
+      initialBanner.style.opacity = "1";
     }
-    var ft = document.getElementById("cb-floating-trigger");
-    if (ft) ft.style.display = "none";
+    var trigger = document.getElementById("cb-floating-trigger");
+    if (trigger) trigger.style.display = "none";
   }
 
-  function He() {
-    var e = be();
-    if ("gdpr" === i) {
-      Ae();
-      if (s || e) {
-        window.gtag && window.gtag("consent", "default", {
+  /**
+   * Entry point, once the DOM is ready.
+   * 1. Apply the stored consent to Google Consent Mode (and block scripts under GDPR).
+   * 2. Decide what UI to show: nothing, the floating trigger only, or the banner.
+   * 3. Report the pageview and start listening for the site's own "open banner" triggers.
+   */
+  function boot() {
+    if ("gdpr" === bannerType) {
+      blockExistingScripts();
+      // consentModeBootstrap (served ahead of this script on the standard path) may
+      // already have pushed the default \u2014 do not overwrite it with a stale one.
+      if (!window.__cbConsentDefaultSet) {
+        setConsentModeFlags();
+        ensureGtag()("consent", "default", {
           analytics_storage: "denied",
           ad_storage: "denied",
           ad_user_data: "denied",
@@ -10338,14 +11088,16 @@ ${inlineConfig}
           security_storage: "granted",
           wait_for_update: 500
         });
-        A.accepted ? Te(A.categories || {}, "[Reload]") : s && Le()
+        window.__cbConsentDefaultSet = true
       }
-    } else if ("ccpa" === i) {
+      consentState.accepted ? updateGoogleConsentMode(consentState.categories || {}, "[Reload]") : gaMeasurementId && bootstrapGoogleAnalytics()
+    } else if ("ccpa" === bannerType) {
       // CCPA is an opt-out regime: storage defaults to granted unless the user opted
       // out. We still push an all-denied default first (consent-mode best practice),
       // load GA when we manage it, then immediately update to the actual opt-out state.
-      if (s || e) {
-        window.gtag && window.gtag("consent", "default", {
+      if (!window.__cbConsentDefaultSet) {
+        setConsentModeFlags();
+        ensureGtag()("consent", "default", {
           analytics_storage: "denied",
           ad_storage: "denied",
           ad_user_data: "denied",
@@ -10355,115 +11107,128 @@ ${inlineConfig}
           security_storage: "granted",
           wait_for_update: 500
         });
-        s && Le();
-        Tc(!!(A && A.accepted && A.ccpa && A.ccpa.doNotSell))
+        window.__cbConsentDefaultSet = true
       }
+      gaMeasurementId && bootstrapGoogleAnalytics();
+      updateGoogleConsentModeCcpa(!!(consentState && consentState.accepted && consentState.ccpa && consentState.ccpa.doNotSell))
     }
+
     if (!window.__CB_WEBFLOW_MODE__) {
-      if (o)
-        if (A.accepted) {
-          Xe();
-          var t = document.getElementById("cb-floating-trigger");
-          t && (t.style.display = "flex");
-          var Ha = document.getElementById("cb-initial-banner");
-          if (Ha) {
-            Ha.style.setProperty("display", "none", "important");
-            Ha.style.setProperty("visibility", "hidden", "important");
+      if (bannerEnabled)
+        if (consentState.accepted || wasBannerDismissed()) {
+          // Already decided (or dismissed): build the UI but keep it hidden behind the trigger.
+          initBannerUi();
+          var trigger = document.getElementById("cb-floating-trigger");
+          trigger && (trigger.style.display = "flex");
+          var hiddenBanner = document.getElementById("cb-initial-banner");
+          if (hiddenBanner) {
+            hiddenBanner.style.setProperty("display", "none", "important");
+            hiddenBanner.style.setProperty("visibility", "hidden", "important");
           }
-        } else qe();
+        } else showBannerNow();
     } else {
-      Xe();
-      if (A.accepted) {
-        var Hb = document.getElementById("cb-initial-banner");
-        if (Hb) {
-          Hb.style.setProperty("display", "none", "important");
-          Hb.style.setProperty("visibility", "hidden", "important");
+      // Webflow mode: the UI is always built, then shown or hidden explicitly.
+      initBannerUi();
+      if (consentState.accepted || wasBannerDismissed()) {
+        var wfInitialBanner = document.getElementById("cb-initial-banner");
+        if (wfInitialBanner) {
+          wfInitialBanner.style.setProperty("display", "none", "important");
+          wfInitialBanner.style.setProperty("visibility", "hidden", "important");
         }
-        var Hc = document.getElementById("cb-preferences-banner");
-        if (Hc) {
-          Hc.style.setProperty("display", "none", "important");
+        var wfPrefsBanner = document.getElementById("cb-preferences-banner");
+        if (wfPrefsBanner) {
+          wfPrefsBanner.style.setProperty("display", "none", "important");
         }
-        var Hd = document.getElementById("cb-floating-trigger");
-        if (Hd) Hd.style.display = "flex";
-      } else if (o) {
-        var Hf = document.getElementById("cb-initial-banner");
-        if (Hf) {
-          Hf.style.display = "flex";
-          Hf.style.setProperty("visibility", "visible", "important");
-          Hf.style.setProperty("opacity", "1", "important");
+        var wfTrigger = document.getElementById("cb-floating-trigger");
+        if (wfTrigger) wfTrigger.style.display = "flex";
+      } else if (bannerEnabled) {
+        var wfBannerToShow = document.getElementById("cb-initial-banner");
+        if (wfBannerToShow) {
+          wfBannerToShow.style.display = "flex";
+          wfBannerToShow.style.setProperty("visibility", "visible", "important");
+          wfBannerToShow.style.setProperty("opacity", "1", "important");
         }
-        var Hft = document.getElementById("cb-floating-trigger");
-        if (Hft) Hft.style.display = "none";
+        var wfTriggerToHide = document.getElementById("cb-floating-trigger");
+        if (wfTriggerToHide) wfTriggerToHide.style.display = "none";
       } else {
         // bannerEnabled === false (region-suppressed, e.g. CCPA banner for a non-US
         // visitor): show NO consent UI at all \u2014 hide both the banner AND the floating
         // trigger. CCPA does not apply outside the US, so no surface is presented.
-        var Hf2 = document.getElementById("cb-initial-banner");
-        if (Hf2) {
-          Hf2.style.setProperty("display", "none", "important");
-          Hf2.style.setProperty("visibility", "hidden", "important");
+        var wfSuppressedBanner = document.getElementById("cb-initial-banner");
+        if (wfSuppressedBanner) {
+          wfSuppressedBanner.style.setProperty("display", "none", "important");
+          wfSuppressedBanner.style.setProperty("visibility", "hidden", "important");
         }
-        var Hft2 = document.getElementById("cb-floating-trigger");
-        if (Hft2) Hft2.style.setProperty("display", "none", "important");
+        var wfSuppressedTrigger = document.getElementById("cb-floating-trigger");
+        if (wfSuppressedTrigger) wfSuppressedTrigger.style.setProperty("display", "none", "important");
       }
     }
+
     try {
-      ce()
-    } catch (e) {
+      recordPageview()
+    } catch (err) {
     }
 
-    function n() {
-      document.addEventListener("click", function (e) {
-        var t = e.target;
-        for (; t && t !== document.body;) {
-          var isReset = t.hasAttribute && t.hasAttribute("data-consentbit-trigger");
-          var isShowOnly = t.hasAttribute && t.hasAttribute("data-consentbit-banner");
+    /**
+     * Let the site re-open the banner from its own markup, via a capture-phase click
+     * listener so it works no matter what the host page does with the event:
+     *   data-consentbit-trigger \u2014 clear the stored consent, then show the banner
+     *   data-consentbit-banner  \u2014 just show the banner, keeping the stored consent
+     */
+    function bindConsentTriggers() {
+      document.addEventListener("click", function (event) {
+        var element = event.target;
+        for (; element && element !== document.body;) {
+          var isReset = element.hasAttribute && element.hasAttribute("data-consentbit-trigger");
+          var isShowOnly = element.hasAttribute && element.hasAttribute("data-consentbit-banner");
           if (isReset || isShowOnly) {
-            e.preventDefault();
-            e.stopPropagation();
+            event.preventDefault();
+            event.stopPropagation();
             if (isReset) {
               try {
-                localStorage.removeItem(I);
-                A = {
-                  accepted: !1,
+                localStorage.removeItem(STORAGE_KEY);
+                localStorage.removeItem(STORAGE_KEY + "_closed");
+                consentState = {
+                  accepted: false,
                   timestamp: null
                 }
-              } catch (e) {
+              } catch (err) {
               }
             }
-            var n = document.getElementById("cb-initial-banner");
-            if (n) {
-              n.style.display = "flex";
-              n.style.visibility = "visible";
-              n.style.opacity = "1";
-              f && (document.body.style.overflow = "hidden");
-              var nft = document.getElementById("cb-floating-trigger");
-              if (nft) nft.style.display = "none";
-              n.scrollIntoView({
+            var banner = document.getElementById("cb-initial-banner");
+            if (banner) {
+              banner.style.display = "flex";
+              banner.style.visibility = "visible";
+              banner.style.opacity = "1";
+              stopScroll && (document.body.style.overflow = "hidden");
+              var trigger = document.getElementById("cb-floating-trigger");
+              if (trigger) trigger.style.display = "none";
+              banner.scrollIntoView({
                 behavior: "smooth",
                 block: "start"
               })
             } else {
-              qe();
+              // Banner was never built (e.g. bannerEnabled false) \u2014 build it now.
+              showBannerNow();
               setTimeout(function () {
-                var e = document.getElementById("cb-initial-banner");
-                e && e.scrollIntoView({
+                var builtBanner = document.getElementById("cb-initial-banner");
+                builtBanner && builtBanner.scrollIntoView({
                   behavior: "smooth",
                   block: "start"
                 })
               }, 100)
             }
-            return !1
+            return false
           }
-          t = t.parentElement
+          element = element.parentElement
         }
-      }, !0)
+      }, true)
     }
-    "loading" === document.readyState ? document.addEventListener("DOMContentLoaded", n) : n()
+    "loading" === document.readyState ? document.addEventListener("DOMContentLoaded", bindConsentTriggers) : bindConsentTriggers()
   }
 }();
 `;
-  const SCRIPT_VERSION = "2026-06-11-gpc-ccpa-optout-nonus-hidefloat";
+  const SCRIPT_VERSION = "2026-07-21-consentmode-v2-gtm-event";
   const customizationUpdatedAt = customization?.updatedAt || customization?.updated_at || "";
   const translationsSig = await (async () => {
     try {
@@ -10500,12 +11265,16 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || "bottom
 ` + loaderIabCore;
   const iabAllowed = effectivePlanId === "growth" || effectivePlanId === "essential";
   const wantsIab = String(resolvedSite.banner_type || "").toLowerCase() === "iab";
-  const isWebflow = String(resolvedSite.platform || "").toLowerCase() === "webflow";
+  const rawIsWebflow = String(resolvedSite.platform || "").toLowerCase() === "webflow";
+  const isWebflowV2 = rawIsWebflow && String(resolvedSite.version || "").toLowerCase() === "v2";
+  const isWebflow = rawIsWebflow && !isWebflowV2;
   const serveKind = wantsIab && iabAllowed && isWebflow ? "iabwebflow" : wantsIab && iabAllowed ? "iab" : isWebflow ? "webflow" : "standard";
   const why = {
     wantsIab,
     iabAllowed,
     isWebflow,
+    isWebflowV2,
+    version: resolvedSite.version || null,
     plan: effectivePlanId,
     orgId: orgIdForDebug,
     subscriptionStatus: subStatusForDebug,
@@ -10516,14 +11285,16 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || "bottom
     platform: resolvedSite.platform,
     bannerEnabled
   };
-  const scriptToServe = serveKind === "iab" ? loaderIab : serveKind === "iabwebflow" ? loaderIabWebflow : serveKind === "webflow" ? loaderWebflow : loader;
+  const bannerIsCcpa = String(effectiveBannerType || "").toLowerCase() === "ccpa";
+  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? "true" : "false"};var d=null,e=false,hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);if(!c){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else{window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}window.__cbConsentDefaultSet=true;}catch(_){}})();
+`;
+  const scriptToServe = serveKind === "iab" ? loaderIab : serveKind === "iabwebflow" ? loaderIabWebflow : serveKind === "webflow" ? loaderWebflow : consentModeBootstrap + loader;
   return new Response(scriptToServe, {
     status: 200,
     headers: {
       "Content-Type": "application/javascript; charset=utf-8",
       "Cache-Control": "no-store",
       "ETag": etag,
-      // Debug headers (safe, non-sensitive): helps confirm which loader was served and why.
       "X-ConsentBit-Loader": serveKind,
       "X-ConsentBit-Plan": String(effectivePlanId || "free"),
       "X-ConsentBit-IabAllowed": iabAllowed ? "1" : "0",
@@ -10807,6 +11578,25 @@ async function handleConsent(request, env2, ctx) {
   const tcf_publisher_restr = tcf.publisherRestrictions ? JSON.stringify(tcf.publisherRestrictions) : null;
   const tcf_core_string = null;
   const tcf_publisher_string = null;
+  if (body.deviceId) {
+    try {
+      const dupSince = new Date(Date.now() - 1e4).toISOString();
+      const existing = await db.prepare(
+        `SELECT id FROM Consent
+           WHERE siteId = ?1 AND deviceId = ?2 AND status = ?3 AND regulation IS ?4 AND createdAt >= ?5
+           ORDER BY createdAt DESC LIMIT 1`
+      ).bind(siteId, body.deviceId, status, regulation ?? null, dupSince).first().catch(() => null);
+      if (existing?.id) {
+        console.log("[Consent] duplicate suppressed \u2014 existing id:", existing.id, "| siteId:", siteId, "| status:", status);
+        return new Response(
+          JSON.stringify({ success: true, id: existing.id, deduped: true }),
+          { headers: { "Content-Type": "application/json" } }
+        );
+      }
+    } catch (e) {
+      console.warn("[Consent] dedup check failed (inserting anyway):", e?.message);
+    }
+  }
   const id = crypto.randomUUID();
   console.log("[Consent] inserting row \u2014 id:", id, "| siteId:", siteId, "| status:", status, "| regulation:", regulation);
   try {
@@ -11805,7 +12595,7 @@ async function handleScanCookies(request, env2) {
         ...inferredDomain ? [inferredDomain] : []
       ])
     ];
-    const newScanHistoryId = `client-${siteId}-${Date.now()}`;
+    const newScanHistoryId = `client-${siteId}-${crypto.randomUUID()}`;
     let currentScanHistoryId;
     if (createNewScan) {
       const pendingScan = await db.prepare(`SELECT id FROM ScanHistory WHERE siteId = ?1 AND scanStatus = 'pending' ORDER BY createdAt DESC LIMIT 1`).bind(siteId).first();
@@ -11834,7 +12624,8 @@ async function handleScanCookies(request, env2) {
         currentScanHistoryId = pendingScan.id;
       } else {
         const oneHourAgo = new Date(Date.now() - 60 * 60 * 1e3).toISOString();
-        const existingScan = await db.prepare("SELECT id FROM ScanHistory WHERE siteId = ?1 AND scanUrl LIKE ?2 AND createdAt > ?3 ORDER BY createdAt DESC LIMIT 1").bind(siteId, "%client-detection%", oneHourAgo).first();
+        const thirtySecAgo = new Date(Date.now() - 30 * 1e3).toISOString();
+        const existingScan = await db.prepare("SELECT id FROM ScanHistory WHERE siteId = ?1 AND ((createdAt > ?2 AND scanUrl NOT LIKE '%client-detection%') OR (scanUrl LIKE '%client-detection%' AND createdAt > ?3)) ORDER BY createdAt DESC LIMIT 1").bind(siteId, thirtySecAgo, oneHourAgo).first();
         if (!existingScan) {
           await createScanHistory(db, {
             id: newScanHistoryId,
@@ -11987,6 +12778,162 @@ __name(handleScanCookies, "handleScanCookies");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
+
+// src/services/posthog.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+
+// src/services/ga4.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+var GA4_ENDPOINT = "https://www.google-analytics.com/mp/collect";
+async function sha256Hex(input) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(sha256Hex, "sha256Hex");
+async function ga4IdentityForEmail(email) {
+  const hash = await sha256Hex(String(email).trim().toLowerCase());
+  const a = parseInt(hash.slice(0, 9), 16);
+  const b = parseInt(hash.slice(9, 18), 16);
+  return { clientId: `${a}.${b}`, userId: hash };
+}
+__name(ga4IdentityForEmail, "ga4IdentityForEmail");
+function cleanParams(params) {
+  const out = {};
+  for (const [key, value] of Object.entries(params || {})) {
+    if (value === null || value === void 0 || value === "") continue;
+    if (typeof value === "object") continue;
+    out[key] = typeof value === "string" ? value.slice(0, 100) : value;
+  }
+  return out;
+}
+__name(cleanParams, "cleanParams");
+async function captureGa4Event(env2, email, eventName, params = {}, opts = {}) {
+  const measurementId = env2.GA4_MEASUREMENT_ID;
+  const apiSecret = env2.GA4_API_SECRET;
+  if (!measurementId || !apiSecret || !email) return;
+  try {
+    const identity2 = await ga4IdentityForEmail(email);
+    const body = {
+      client_id: opts.clientId || identity2.clientId,
+      user_id: identity2.userId,
+      events: [
+        {
+          name: eventName,
+          params: {
+            ...cleanParams(params),
+            // Without this GA4 counts the event but reports 0 engaged sessions.
+            engagement_time_msec: 1,
+            ...opts.sessionId ? { session_id: String(opts.sessionId) } : {}
+          }
+        }
+      ]
+    };
+    const url = `${GA4_ENDPOINT}?measurement_id=${encodeURIComponent(measurementId)}&api_secret=${encodeURIComponent(apiSecret)}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (res.status !== 204 && res.status !== 200) {
+      console.warn(`[GA4] "${eventName}" unexpected status ${res.status}`);
+    }
+  } catch (e) {
+    console.warn(`[GA4] capture failed for "${eventName}":`, e?.message);
+  }
+}
+__name(captureGa4Event, "captureGa4Event");
+
+// src/services/posthog.js
+async function capturePostHogEvent(env2, distinctId, eventName, properties = {}) {
+  const apiKey = env2.POSTHOG_API_KEY;
+  if (!apiKey) {
+    console.warn(`[PostHog DEBUG] SKIP "${eventName}" \u2014 POSTHOG_API_KEY is NOT set on this env`);
+    return;
+  }
+  if (!distinctId) {
+    console.warn(`[PostHog DEBUG] SKIP "${eventName}" \u2014 no distinct_id (owner email did not resolve)`);
+    return;
+  }
+  try {
+    console.log(`[PostHog DEBUG] \u2192 sending "${eventName}" distinct_id=${distinctId} props=${JSON.stringify(properties)}`);
+    const res = await fetch("https://us.i.posthog.com/capture/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: apiKey,
+        event: eventName,
+        distinct_id: String(distinctId),
+        properties,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      })
+    });
+    const bodyText = await res.text().catch(() => "");
+    console.log(`[PostHog DEBUG] \u2190 "${eventName}" HTTP ${res.status} ${bodyText}`);
+  } catch (e) {
+    console.warn(`[PostHog DEBUG] capture FAILED for "${eventName}":`, e?.message);
+  }
+}
+__name(capturePostHogEvent, "capturePostHogEvent");
+async function identifyPostHogPerson(env2, distinctId, properties = {}) {
+  return capturePostHogEvent(env2, distinctId, "$identify", { $set: properties });
+}
+__name(identifyPostHogPerson, "identifyPostHogPerson");
+async function captureInstallationVerified(env2, db, siteId, domain2) {
+  if (!env2.POSTHOG_API_KEY && !env2.GA4_API_SECRET || !siteId || !db) return;
+  try {
+    const row = await db.prepare(
+      `SELECT u.email AS email FROM User u
+         JOIN OrganizationMember om ON om.userId = u.id
+         JOIN Site s ON s.organizationId = om.organizationId
+        WHERE s.id = ?1 LIMIT 1`
+    ).bind(siteId).first();
+    const email = row?.email || null;
+    if (!email) return;
+    await capturePostHogEvent(env2, email, "installation_verified", {
+      site_id: String(siteId),
+      domain: domain2 || null,
+      source: "backend_detect",
+      $groups: { site: String(siteId) }
+    });
+    await captureGa4Event(env2, email, "installation_verified", {
+      site_id: String(siteId),
+      domain: domain2 || null,
+      source: "backend_detect",
+      platform: "webapp"
+    });
+  } catch (e) {
+    console.warn("[PostHog] installation_verified failed:", e?.message);
+  }
+}
+__name(captureInstallationVerified, "captureInstallationVerified");
+async function identifyPostHogSite(env2, distinctId, siteId, groupProperties = {}) {
+  const apiKey = env2.POSTHOG_API_KEY;
+  if (!apiKey || !siteId) return;
+  try {
+    await fetch("https://us.i.posthog.com/capture/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: apiKey,
+        event: "$groupidentify",
+        distinct_id: String(distinctId),
+        properties: {
+          $group_type: "site",
+          $group_key: String(siteId),
+          $group_set: groupProperties
+        },
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      })
+    });
+  } catch (e) {
+    console.warn("[PostHog] group identify failed:", e?.message);
+  }
+}
+__name(identifyPostHogSite, "identifyPostHogSite");
+
+// src/handlers/verifyScript.js
 var VERIFY_PAGE_FETCH_TIMEOUT_MS = 12e3;
 function extractSiteIdFromPathOrUrl(input) {
   const s = String(input || "").trim();
@@ -12106,10 +13053,22 @@ async function handleVerifyScript(request, env2) {
     const timeoutId = setTimeout(() => controller.abort(), VERIFY_PAGE_FETCH_TIMEOUT_MS);
     let resp;
     try {
-      resp = await fetch(publicUrl, {
+      const bustUrl = new URL(publicUrl);
+      bustUrl.searchParams.set("_cbverify", Date.now().toString(36));
+      resp = await fetch(bustUrl.toString(), {
         redirect: "follow",
         signal: controller.signal,
-        headers: { "User-Agent": "ConsentBit-Verifier/1.0" }
+        // `cache: 'no-store'` already bypasses the cache. Do NOT also pass
+        // `cf: { cacheTtl: 0 }` — Workers rejects that combo ("CacheTtl: 0 is not
+        // compatible with cache: no-store header"), which made fetch() throw and every
+        // verify fail even when the script was present. The `_cbverify` param also keeps
+        // the edge cache key unique.
+        cache: "no-store",
+        headers: {
+          "User-Agent": "ConsentBit-Verifier/1.0",
+          "Cache-Control": "no-cache, no-store, max-age=0",
+          Pragma: "no-cache"
+        }
       });
     } finally {
       clearTimeout(timeoutId);
@@ -12205,7 +13164,45 @@ async function handleVerifyScript(request, env2) {
       });
     }
     if (found && siteId) {
+      let wasVerified = false;
+      try {
+        const prev = await db.prepare("SELECT verified FROM Site WHERE id = ?1 LIMIT 1").bind(siteId).first();
+        wasVerified = prev?.verified === 1 || prev?.verified === true;
+      } catch {
+      }
       await markSiteVerified(db, siteId, scriptUrl);
+      if (!wasVerified) {
+        try {
+          await captureInstallationVerified(env2, db, siteId, publicUrl);
+        } catch {
+        }
+      }
+      try {
+        await db.prepare("UPDATE Site SET version = 'v2', updatedAt = ?1 WHERE id = ?2").bind((/* @__PURE__ */ new Date()).toISOString(), siteId).run();
+      } catch (versionErr) {
+        console.warn("[VerifyScript] Failed to set version=v2:", versionErr?.message);
+      }
+    }
+    if (siteId) {
+      try {
+        const ownerRow = await db.prepare(
+          `SELECT u.email AS email, s.platform AS platform
+             FROM Site s
+             JOIN OrganizationMember om ON om.organizationId = s.organizationId
+             JOIN User u ON u.id = om.userId
+            WHERE s.id = ?1 LIMIT 1`
+        ).bind(siteId).first();
+        console.log(`[PostHog DEBUG] banner_verified guard: siteId=${siteId} email=${ownerRow?.email || "NONE"} platform=${ownerRow?.platform || "NONE"} found=${found}`);
+        if (ownerRow?.email && String(ownerRow.platform || "").toLowerCase() === "webflow") {
+          await capturePostHogEvent(env2, ownerRow.email, "banner_verified", {
+            status: found ? "verified" : "failed",
+            domain_url: publicUrl || null,
+            platform: "webflow",
+            site_id: siteId
+          });
+        }
+      } catch {
+      }
     }
     return Response.json({
       success: true,
@@ -16143,22 +17140,22 @@ var __addDisposableResource = function(env2, value, async2) {
 };
 var __disposeResources = /* @__PURE__ */ (function(SuppressedError2) {
   return function(env2) {
-    function fail2(e) {
+    function fail5(e) {
       env2.error = env2.hasError ? new SuppressedError2(e, env2.error, "An error was suppressed during disposal.") : e;
       env2.hasError = true;
     }
-    __name(fail2, "fail");
+    __name(fail5, "fail");
     function next() {
       while (env2.stack.length) {
         var rec = env2.stack.pop();
         try {
           var result = rec.dispose && rec.dispose.call(rec.value);
           if (rec.async) return Promise.resolve(result).then(next, function(e) {
-            fail2(e);
+            fail5(e);
             return next();
           });
         } catch (e) {
-          fail2(e);
+          fail5(e);
         }
       }
       if (env2.hasError) throw env2.error;
@@ -16606,22 +17603,22 @@ var __addDisposableResource2 = function(env2, value, async2) {
 };
 var __disposeResources2 = /* @__PURE__ */ (function(SuppressedError2) {
   return function(env2) {
-    function fail2(e) {
+    function fail5(e) {
       env2.error = env2.hasError ? new SuppressedError2(e, env2.error, "An error was suppressed during disposal.") : e;
       env2.hasError = true;
     }
-    __name(fail2, "fail");
+    __name(fail5, "fail");
     function next() {
       while (env2.stack.length) {
         var rec = env2.stack.pop();
         try {
           var result = rec.dispose && rec.dispose.call(rec.value);
           if (rec.async) return Promise.resolve(result).then(next, function(e) {
-            fail2(e);
+            fail5(e);
             return next();
           });
         } catch (e) {
-          fail2(e);
+          fail5(e);
         }
       }
       if (env2.hasError) throw env2.error;
@@ -16761,22 +17758,22 @@ var __addDisposableResource3 = function(env2, value, async2) {
 };
 var __disposeResources3 = /* @__PURE__ */ (function(SuppressedError2) {
   return function(env2) {
-    function fail2(e) {
+    function fail5(e) {
       env2.error = env2.hasError ? new SuppressedError2(e, env2.error, "An error was suppressed during disposal.") : e;
       env2.hasError = true;
     }
-    __name(fail2, "fail");
+    __name(fail5, "fail");
     function next() {
       while (env2.stack.length) {
         var rec = env2.stack.pop();
         try {
           var result = rec.dispose && rec.dispose.call(rec.value);
           if (rec.async) return Promise.resolve(result).then(next, function(e) {
-            fail2(e);
+            fail5(e);
             return next();
           });
         } catch (e) {
-          fail2(e);
+          fail5(e);
         }
       }
       if (env2.hasError) throw env2.error;
@@ -17483,22 +18480,22 @@ var __addDisposableResource4 = function(env2, value, async2) {
 };
 var __disposeResources4 = /* @__PURE__ */ (function(SuppressedError2) {
   return function(env2) {
-    function fail2(e) {
+    function fail5(e) {
       env2.error = env2.hasError ? new SuppressedError2(e, env2.error, "An error was suppressed during disposal.") : e;
       env2.hasError = true;
     }
-    __name(fail2, "fail");
+    __name(fail5, "fail");
     function next() {
       while (env2.stack.length) {
         var rec = env2.stack.pop();
         try {
           var result = rec.dispose && rec.dispose.call(rec.value);
           if (rec.async) return Promise.resolve(result).then(next, function(e) {
-            fail2(e);
+            fail5(e);
             return next();
           });
         } catch (e) {
-          fail2(e);
+          fail5(e);
         }
       }
       if (env2.hasError) throw env2.error;
@@ -18946,22 +19943,22 @@ var __addDisposableResource5 = function(env2, value, async2) {
 };
 var __disposeResources5 = /* @__PURE__ */ (function(SuppressedError2) {
   return function(env2) {
-    function fail2(e) {
+    function fail5(e) {
       env2.error = env2.hasError ? new SuppressedError2(e, env2.error, "An error was suppressed during disposal.") : e;
       env2.hasError = true;
     }
-    __name(fail2, "fail");
+    __name(fail5, "fail");
     function next() {
       while (env2.stack.length) {
         var rec = env2.stack.pop();
         try {
           var result = rec.dispose && rec.dispose.call(rec.value);
           if (rec.async) return Promise.resolve(result).then(next, function(e) {
-            fail2(e);
+            fail5(e);
             return next();
           });
         } catch (e) {
-          fail2(e);
+          fail5(e);
         }
       }
       if (env2.hasError) throw env2.error;
@@ -19109,22 +20106,22 @@ var __addDisposableResource6 = function(env2, value, async2) {
 };
 var __disposeResources6 = /* @__PURE__ */ (function(SuppressedError2) {
   return function(env2) {
-    function fail2(e) {
+    function fail5(e) {
       env2.error = env2.hasError ? new SuppressedError2(e, env2.error, "An error was suppressed during disposal.") : e;
       env2.hasError = true;
     }
-    __name(fail2, "fail");
+    __name(fail5, "fail");
     function next() {
       while (env2.stack.length) {
         var rec = env2.stack.pop();
         try {
           var result = rec.dispose && rec.dispose.call(rec.value);
           if (rec.async) return Promise.resolve(result).then(next, function(e) {
-            fail2(e);
+            fail5(e);
             return next();
           });
         } catch (e) {
-          fail2(e);
+          fail5(e);
         }
       }
       if (env2.hasError) throw env2.error;
@@ -20487,22 +21484,22 @@ var __addDisposableResource7 = function(env2, value, async2) {
 };
 var __disposeResources7 = /* @__PURE__ */ (function(SuppressedError2) {
   return function(env2) {
-    function fail2(e) {
+    function fail5(e) {
       env2.error = env2.hasError ? new SuppressedError2(e, env2.error, "An error was suppressed during disposal.") : e;
       env2.hasError = true;
     }
-    __name(fail2, "fail");
+    __name(fail5, "fail");
     function next() {
       while (env2.stack.length) {
         var rec = env2.stack.pop();
         try {
           var result = rec.dispose && rec.dispose.call(rec.value);
           if (rec.async) return Promise.resolve(result).then(next, function(e) {
-            fail2(e);
+            fail5(e);
             return next();
           });
         } catch (e) {
-          fail2(e);
+          fail5(e);
         }
       }
       if (env2.hasError) throw env2.error;
@@ -20622,22 +21619,22 @@ var __addDisposableResource8 = function(env2, value, async2) {
 };
 var __disposeResources8 = /* @__PURE__ */ (function(SuppressedError2) {
   return function(env2) {
-    function fail2(e) {
+    function fail5(e) {
       env2.error = env2.hasError ? new SuppressedError2(e, env2.error, "An error was suppressed during disposal.") : e;
       env2.hasError = true;
     }
-    __name(fail2, "fail");
+    __name(fail5, "fail");
     function next() {
       while (env2.stack.length) {
         var rec = env2.stack.pop();
         try {
           var result = rec.dispose && rec.dispose.call(rec.value);
           if (rec.async) return Promise.resolve(result).then(next, function(e) {
-            fail2(e);
+            fail5(e);
             return next();
           });
         } catch (e) {
-          fail2(e);
+          fail5(e);
         }
       }
       if (env2.hasError) throw env2.error;
@@ -21491,22 +22488,22 @@ var __addDisposableResource9 = function(env2, value, async2) {
 };
 var __disposeResources9 = /* @__PURE__ */ (function(SuppressedError2) {
   return function(env2) {
-    function fail2(e) {
+    function fail5(e) {
       env2.error = env2.hasError ? new SuppressedError2(e, env2.error, "An error was suppressed during disposal.") : e;
       env2.hasError = true;
     }
-    __name(fail2, "fail");
+    __name(fail5, "fail");
     function next() {
       while (env2.stack.length) {
         var rec = env2.stack.pop();
         try {
           var result = rec.dispose && rec.dispose.call(rec.value);
           if (rec.async) return Promise.resolve(result).then(next, function(e) {
-            fail2(e);
+            fail5(e);
             return next();
           });
         } catch (e) {
-          fail2(e);
+          fail5(e);
         }
       }
       if (env2.hasError) throw env2.error;
@@ -22515,22 +23512,22 @@ var __addDisposableResource10 = function(env2, value, async2) {
 };
 var __disposeResources10 = /* @__PURE__ */ (function(SuppressedError2) {
   return function(env2) {
-    function fail2(e) {
+    function fail5(e) {
       env2.error = env2.hasError ? new SuppressedError2(e, env2.error, "An error was suppressed during disposal.") : e;
       env2.hasError = true;
     }
-    __name(fail2, "fail");
+    __name(fail5, "fail");
     function next() {
       while (env2.stack.length) {
         var rec = env2.stack.pop();
         try {
           var result = rec.dispose && rec.dispose.call(rec.value);
           if (rec.async) return Promise.resolve(result).then(next, function(e) {
-            fail2(e);
+            fail5(e);
             return next();
           });
         } catch (e) {
-          fail2(e);
+          fail5(e);
         }
       }
       if (env2.hasError) throw env2.error;
@@ -24151,22 +25148,22 @@ var __addDisposableResource11 = function(env2, value, async2) {
 };
 var __disposeResources11 = /* @__PURE__ */ (function(SuppressedError2) {
   return function(env2) {
-    function fail2(e) {
+    function fail5(e) {
       env2.error = env2.hasError ? new SuppressedError2(e, env2.error, "An error was suppressed during disposal.") : e;
       env2.hasError = true;
     }
-    __name(fail2, "fail");
+    __name(fail5, "fail");
     function next() {
       while (env2.stack.length) {
         var rec = env2.stack.pop();
         try {
           var result = rec.dispose && rec.dispose.call(rec.value);
           if (rec.async) return Promise.resolve(result).then(next, function(e) {
-            fail2(e);
+            fail5(e);
             return next();
           });
         } catch (e) {
-          fail2(e);
+          fail5(e);
         }
       }
       if (env2.hasError) throw env2.error;
@@ -28689,22 +29686,22 @@ var __addDisposableResource12 = function(env2, value, async2) {
 };
 var __disposeResources12 = /* @__PURE__ */ (function(SuppressedError2) {
   return function(env2) {
-    function fail2(e) {
+    function fail5(e) {
       env2.error = env2.hasError ? new SuppressedError2(e, env2.error, "An error was suppressed during disposal.") : e;
       env2.hasError = true;
     }
-    __name(fail2, "fail");
+    __name(fail5, "fail");
     function next() {
       while (env2.stack.length) {
         var rec = env2.stack.pop();
         try {
           var result = rec.dispose && rec.dispose.call(rec.value);
           if (rec.async) return Promise.resolve(result).then(next, function(e) {
-            fail2(e);
+            fail5(e);
             return next();
           });
         } catch (e) {
-          fail2(e);
+          fail5(e);
         }
       }
       if (env2.hasError) throw env2.error;
@@ -32363,7 +33360,55 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 15e3) {
   }
 }
 __name(fetchWithTimeout, "fetchWithTimeout");
-async function scanWithBrowser(browserBinding, scanUrl) {
+async function tryAcceptConsent(page, cssSelectors) {
+  try {
+    return await page.evaluate((selectors) => {
+      const allElements = /* @__PURE__ */ __name(() => {
+        const out = [];
+        const walk = /* @__PURE__ */ __name((root) => {
+          let nodes;
+          try {
+            nodes = root.querySelectorAll("*");
+          } catch (_) {
+            return;
+          }
+          for (const n of nodes) {
+            out.push(n);
+            if (n.shadowRoot) walk(n.shadowRoot);
+          }
+        }, "walk");
+        walk(document);
+        return out;
+      }, "allElements");
+      const els = allElements();
+      const clickIfVisible = /* @__PURE__ */ __name((el) => {
+        if (!el) return false;
+        try {
+          el.click();
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }, "clickIfVisible");
+      for (const sel of selectors) {
+        for (const el of els) {
+          let m = false;
+          try {
+            m = el.matches(sel);
+          } catch (_) {
+            m = false;
+          }
+          if (m && clickIfVisible(el)) return `selector:${sel}`;
+        }
+      }
+      return null;
+    }, cssSelectors);
+  } catch (_) {
+    return null;
+  }
+}
+__name(tryAcceptConsent, "tryAcceptConsent");
+async function scanWithBrowser(browserBinding, scanUrl, options = {}) {
   const browser = await puppeteer_cloudflare_default.launch(browserBinding);
   try {
     const page = await browser.newPage();
@@ -32374,67 +33419,115 @@ async function scanWithBrowser(browserBinding, scanUrl) {
       Object.defineProperty(navigator, "languages", { get: /* @__PURE__ */ __name(() => ["en-US", "en"], "get") });
       window.chrome = { runtime: {} };
     });
+    const CONSENT_POST_RE = /\/api\/consent(?:[/?#]|$)|\/cmp\/consent/i;
+    if (options.acceptConsent) {
+      try {
+        await page.setRequestInterception(true);
+      } catch (_) {
+      }
+    }
     const scriptUrls = /* @__PURE__ */ new Set();
     page.on("request", (req) => {
       try {
-        if (req.resourceType() === "script" && req.url().indexOf("consentbit") === -1 && req.url().indexOf("client_data") === -1) {
-          scriptUrls.add(req.url());
+        const u = req.url();
+        if (req.resourceType() === "script" && u.indexOf("consentbit") === -1 && u.indexOf("client_data") === -1) {
+          scriptUrls.add(u);
+        }
+        if (options.acceptConsent) {
+          if (req.method() === "POST" && CONSENT_POST_RE.test(u)) {
+            req.abort().catch(() => {
+            });
+          } else {
+            req.continue().catch(() => {
+            });
+          }
         }
       } catch (_) {
+        try {
+          if (options.acceptConsent) req.continue();
+        } catch (_2) {
+        }
       }
     });
-    await page.goto(scanUrl, { waitUntil: "networkidle2", timeout: 3e4 });
+    await page.goto(scanUrl, { waitUntil: "domcontentloaded", timeout: 2e4 });
     try {
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     } catch (_) {
     }
-    await new Promise((r) => setTimeout(r, 8e3));
-    let rawCookies = [];
-    try {
-      const client = await page.createCDPSession();
-      const { cookies } = await client.send("Network.getAllCookies");
-      rawCookies = cookies;
-    } catch (cdpErr) {
-      console.warn("[ScanSite] CDP getAllCookies failed, falling back to page.cookies():", cdpErr.message);
+    await new Promise((r) => setTimeout(r, options.acceptConsent ? 3e3 : 8e3));
+    const readJar = /* @__PURE__ */ __name(async () => {
+      let raw = [];
       try {
-        rawCookies = await page.cookies();
-      } catch (e2) {
-        console.error("[ScanSite] page.cookies() also failed:", e2.message);
+        const client = await page.createCDPSession();
+        const { cookies } = await client.send("Network.getAllCookies");
+        raw = cookies;
+      } catch (cdpErr) {
+        console.warn("[ScanSite] CDP getAllCookies failed, falling back to page.cookies():", cdpErr.message);
+        try {
+          raw = await page.cookies();
+        } catch (e2) {
+          console.error("[ScanSite] page.cookies() also failed:", e2.message);
+        }
+      }
+      let docStrings = [];
+      try {
+        const rawDocCookie = await page.evaluate(() => {
+          try {
+            return typeof document !== "undefined" && document.cookie ? document.cookie : "";
+          } catch (_) {
+            return "";
+          }
+        });
+        if (rawDocCookie) docStrings = String(rawDocCookie).split(";").map((s) => s.trim()).filter(Boolean);
+      } catch (_) {
+      }
+      return {
+        rawCookies: raw.map((c) => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain ? c.domain.replace(/^\./, "") : null,
+          path: c.path || "/",
+          expires: c.expires && c.expires > 0 ? new Date(c.expires * 1e3).toISOString() : null,
+          httpOnly: Boolean(c.httpOnly),
+          secure: Boolean(c.secure),
+          sameSite: c.sameSite || null
+        })),
+        documentCookieStrings: docStrings
+      };
+    }, "readJar");
+    let preJar = null;
+    let consentClicked = null;
+    if (options.acceptConsent) {
+      preJar = await readJar();
+      consentClicked = await tryAcceptConsent(page, options.acceptSelectors || []);
+      console.log("[ScanSite] consent accept attempt:", consentClicked || "no button found");
+      if (consentClicked) {
+        await new Promise((r) => setTimeout(r, 2e3));
+        try {
+          await page.reload({ waitUntil: "domcontentloaded", timeout: 2e4 });
+        } catch (_) {
+        }
+        try {
+          await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        } catch (_) {
+        }
+        await new Promise((r) => setTimeout(r, 6e3));
       }
     }
+    const postJar = await readJar();
     let html = "";
-    let documentCookieStrings = [];
     try {
       html = await page.content();
     } catch (_) {
     }
-    try {
-      const rawDocCookie = await page.evaluate(() => {
-        try {
-          return typeof document !== "undefined" && document.cookie ? document.cookie : "";
-        } catch (_) {
-          return "";
-        }
-      });
-      if (rawDocCookie) {
-        documentCookieStrings = String(rawDocCookie).split(";").map((s) => s.trim()).filter(Boolean);
-      }
-    } catch (_) {
-    }
     return {
-      rawCookies: rawCookies.map((c) => ({
-        name: c.name,
-        value: c.value,
-        domain: c.domain ? c.domain.replace(/^\./, "") : null,
-        path: c.path || "/",
-        expires: c.expires && c.expires > 0 ? new Date(c.expires * 1e3).toISOString() : null,
-        httpOnly: Boolean(c.httpOnly),
-        secure: Boolean(c.secure),
-        sameSite: c.sameSite || null
-      })),
-      documentCookieStrings,
+      rawCookies: postJar.rawCookies,
+      documentCookieStrings: postJar.documentCookieStrings,
+      preRawCookies: preJar ? preJar.rawCookies : [],
+      preDocumentCookieStrings: preJar ? preJar.documentCookieStrings : [],
       scripts: [...scriptUrls],
-      html
+      html,
+      consentClicked
     };
   } finally {
     await browser.close().catch(() => {
@@ -32442,14 +33535,38 @@ async function scanWithBrowser(browserBinding, scanUrl) {
   }
 }
 __name(scanWithBrowser, "scanWithBrowser");
-async function performBrowserScan(db, env2, siteId, site, scanUrl, scanHistoryId, customRules) {
+function loadAcceptSelectors() {
+  return [
+    "#cb-accept-all-btn",
+    // GDPR "Accept all"
+    "#consebit-ccpa-prefrence-accept"
+    // CCPA preference accept
+  ];
+}
+__name(loadAcceptSelectors, "loadAcceptSelectors");
+async function performBrowserScan(db, env2, siteId, site, scanUrl, scanHistoryId, customRules, options = {}) {
   const scanStartTime = Date.now();
   const siteHints = hostHintsFromSiteDomain(site?.domain ?? site?.DOMAIN ?? "");
   try {
-    const browserResult = await scanWithBrowser(env2.BROWSER, scanUrl);
+    const scanOptions = { ...options };
+    if (options.acceptConsent) scanOptions.acceptSelectors = loadAcceptSelectors();
+    const browserResult = await scanWithBrowser(env2.BROWSER, scanUrl, scanOptions);
     const cookies = [];
     const scripts = [];
     for (const s of browserResult.scripts) scripts.push(s);
+    const keyOf = /* @__PURE__ */ __name((n, d) => `${String(n).toLowerCase()}|${String(d || "").replace(/^\./, "").toLowerCase()}`, "keyOf");
+    const preConsentKeys = /* @__PURE__ */ new Set();
+    if (options.acceptConsent) {
+      for (const c of browserResult.preRawCookies || []) if (c?.name) preConsentKeys.add(keyOf(c.name, c.domain));
+      for (const s of browserResult.preDocumentCookieStrings || []) {
+        try {
+          const p = parseCookieString(s);
+          if (p?.name) preConsentKeys.add(keyOf(p.name, p.domain));
+        } catch (_) {
+        }
+      }
+    }
+    const phaseSource = /* @__PURE__ */ __name((name, domain2, base) => options.acceptConsent ? `${base}:${preConsentKeys.has(keyOf(name, domain2)) ? "pre-consent" : "post-consent"}` : base, "phaseSource");
     for (const raw of browserResult.rawCookies) {
       if (!raw.name) continue;
       const autoProvider = getCookieProvider(raw.name, raw.domain);
@@ -32458,7 +33575,7 @@ async function performBrowserScan(db, env2, siteId, site, scanUrl, scanHistoryId
       const provider = String(rule?.provider || autoProvider || "").trim() || null;
       const category = String(rule?.category || autoCategory || "uncategorized").toLowerCase();
       const description = String(rule?.description || "").trim() || null;
-      const source2 = rule ? "user-rule:browser" : "browser";
+      const source2 = phaseSource(raw.name, raw.domain, rule ? "user-rule:browser" : "browser");
       if (!cookies.find((c) => c.name === raw.name && c.domain === raw.domain)) {
         cookies.push({ ...raw, provider, category, description, source: source2, isExpected: false });
       }
@@ -32476,7 +33593,7 @@ async function performBrowserScan(db, env2, siteId, site, scanUrl, scanHistoryId
         const merged = {
           ...parsed,
           domain: parsed.domain || inferredHost || null,
-          source: "browser:document.cookie"
+          source: phaseSource(parsed.name, parsed.domain || inferredHost, "browser:document.cookie")
         };
         const autoProvider = getCookieProvider(merged.name, merged.domain);
         const autoCategory = categorizeCookie(merged.name, merged.domain, autoProvider);
@@ -32508,7 +33625,11 @@ async function performBrowserScan(db, env2, siteId, site, scanUrl, scanHistoryId
   }
 }
 __name(performBrowserScan, "performBrowserScan");
-async function handleScanSite(request, env2, ctx) {
+async function handleScanSiteConsented(request, env2, ctx) {
+  return handleScanSite(request, env2, ctx, { acceptConsent: true, userInitiated: true });
+}
+__name(handleScanSiteConsented, "handleScanSiteConsented");
+async function handleScanSite(request, env2, ctx, options = {}) {
   const db = env2.CONSENT_WEBAPP;
   if (request.method !== "POST") {
     return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
@@ -32537,6 +33658,24 @@ async function handleScanSite(request, env2, ctx) {
         { status: 404 }
       );
     }
+    console.log(`[PostHog DEBUG] cookie_scan_started guard: siteId=${siteId} userInitiated=${!!options.userInitiated} platform=${site.platform ?? site.PLATFORM ?? "NONE"}`);
+    if (options.userInitiated && String(site.platform ?? site.PLATFORM ?? "").toLowerCase() === "webflow") {
+      try {
+        const ownerRow = await db.prepare(
+          `SELECT u.email AS email FROM Site s
+             JOIN OrganizationMember om ON om.organizationId = s.organizationId
+             JOIN User u ON u.id = om.userId WHERE s.id = ?1 LIMIT 1`
+        ).bind(siteId).first();
+        if (ownerRow?.email) {
+          await capturePostHogEvent(env2, ownerRow.email, "cookie_scan_started", {
+            domain_url: site.domain ?? site.DOMAIN ?? null,
+            platform: "webflow",
+            site_id: siteId
+          });
+        }
+      } catch {
+      }
+    }
     const isVerified = site.verified === 1 || site.verified === true || site.VERIFIED === 1;
     const isWebappMigrated = !!(site.platformSiteId ?? site.platformsiteid);
     if (!isVerified) {
@@ -32546,6 +33685,10 @@ async function handleScanSite(request, env2, ctx) {
         if (cdnScriptId) {
           try {
             await markSiteVerified(db, siteId);
+          } catch {
+          }
+          try {
+            await captureInstallationVerified(env2, db, siteId, domain2);
           } catch {
           }
         } else {
@@ -32564,6 +33707,10 @@ async function handleScanSite(request, env2, ctx) {
                 scriptFound = true;
                 try {
                   await markSiteVerified(db, siteId);
+                } catch {
+                }
+                try {
+                  await captureInstallationVerified(env2, db, siteId, domain2);
                 } catch {
                 }
               }
@@ -32625,7 +33772,7 @@ async function handleScanSite(request, env2, ctx) {
       });
       await incrementScanUsage(db, siteId);
       ctx.waitUntil(
-        performBrowserScan(db, env2, siteId, site, scanUrl, scanHistoryId2, customRules).catch((err) => console.error("[ScanSite] Background browser scan failed:", err))
+        performBrowserScan(db, env2, siteId, site, scanUrl, scanHistoryId2, customRules, options).catch((err) => console.error("[ScanSite] Background browser scan failed:", err))
       );
       return Response.json({ success: true, scanHistoryId: scanHistoryId2, scanning: true });
     }
@@ -32650,7 +33797,9 @@ async function handleScanSite(request, env2, ctx) {
     const scripts = [];
     let html = "";
     if (env2.BROWSER) {
-      const browserResult = await scanWithBrowser(env2.BROWSER, scanUrl);
+      const scanOptions = { ...options };
+      if (options.acceptConsent) scanOptions.acceptSelectors = loadAcceptSelectors();
+      const browserResult = await scanWithBrowser(env2.BROWSER, scanUrl, scanOptions);
       html = browserResult.html;
       for (const s of browserResult.scripts) scripts.push(s);
       for (const raw of browserResult.rawCookies) {
@@ -32797,62 +33946,43 @@ init_db();
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-
-// src/services/posthog.js
-init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
-init_performance2();
-async function capturePostHogEvent(env2, distinctId, eventName, properties = {}) {
-  const apiKey = env2.POSTHOG_API_KEY;
-  if (!apiKey) return;
-  if (!distinctId) return;
-  try {
-    await fetch("https://us.i.posthog.com/capture/", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        api_key: apiKey,
-        event: eventName,
-        distinct_id: String(distinctId),
-        properties,
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
-      })
-    });
-  } catch (e) {
-    console.warn("[PostHog] capture failed:", e?.message);
-  }
-}
-__name(capturePostHogEvent, "capturePostHogEvent");
-async function identifyPostHogPerson(env2, distinctId, properties = {}) {
-  return capturePostHogEvent(env2, distinctId, "$identify", { $set: properties });
-}
-__name(identifyPostHogPerson, "identifyPostHogPerson");
-async function identifyPostHogSite(env2, distinctId, siteId, groupProperties = {}) {
-  const apiKey = env2.POSTHOG_API_KEY;
-  if (!apiKey || !siteId) return;
-  try {
-    await fetch("https://us.i.posthog.com/capture/", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        api_key: apiKey,
-        event: "$groupidentify",
-        distinct_id: String(distinctId),
-        properties: {
-          $group_type: "site",
-          $group_key: String(siteId),
-          $group_set: groupProperties
-        },
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
-      })
-    });
-  } catch (e) {
-    console.warn("[PostHog] group identify failed:", e?.message);
-  }
-}
-__name(identifyPostHogSite, "identifyPostHogSite");
-
-// src/handlers/webflowFreeRegister.js
 var TAG = "[webflow-free-register][webapp]";
+async function resolveWebflowEmail(db, env2, wfSiteId) {
+  if (!wfSiteId) return null;
+  try {
+    const siteRow = await getWebflowOAuthTokenBySite(db, wfSiteId);
+    console.log(`${TAG} resolveWebflowEmail: D1 WebflowOAuthSite row ${siteRow ? `found (userKey=${siteRow.userKey || "none"})` : "MISSING"}`);
+    if (siteRow?.userKey) {
+      const tokenRow = await getWebflowOAuthTokenByUser(db, siteRow.userKey);
+      const email = tokenRow?.authorizedBy?.email || tokenRow?.authorizedBy?.user?.email;
+      if (email) {
+        console.log(`${TAG} resolveWebflowEmail: source=D1 email=${email}`);
+        return String(email).trim().toLowerCase();
+      }
+      console.log(`${TAG} resolveWebflowEmail: D1 token row had no authorizedBy email`);
+    }
+  } catch (e) {
+    console.warn(`${TAG} resolveWebflowEmail: D1 lookup failed (non-fatal):`, e?.message || e);
+  }
+  try {
+    const kvRaw = await env2.WEBFLOW_AUTHENTICATION?.get(wfSiteId);
+    if (kvRaw) {
+      const kvEntry = typeof kvRaw === "string" ? JSON.parse(kvRaw) : kvRaw;
+      if (kvEntry?.email) {
+        console.log(`${TAG} resolveWebflowEmail: source=KV email=${kvEntry.email}`);
+        return String(kvEntry.email).trim().toLowerCase();
+      }
+      console.log(`${TAG} resolveWebflowEmail: KV entry present but no .email field`);
+    } else {
+      console.log(`${TAG} resolveWebflowEmail: no KV entry for wfSiteId=${wfSiteId}`);
+    }
+  } catch (e) {
+    console.warn(`${TAG} resolveWebflowEmail: KV lookup failed (non-fatal):`, e?.message || e);
+  }
+  console.warn(`${TAG} resolveWebflowEmail: email NOT FOUND in D1 or KV for wfSiteId=${wfSiteId}`);
+  return null;
+}
+__name(resolveWebflowEmail, "resolveWebflowEmail");
 async function handleWebflowFreeRegister(request, env2) {
   const db = env2.CONSENT_WEBAPP;
   if (request.method !== "POST") {
@@ -32873,12 +34003,17 @@ async function handleWebflowFreeRegister(request, env2) {
     console.error(`${TAG} Failed to parse request body`);
     return Response.json({ success: false, error: "Invalid JSON body" }, { status: 400 });
   }
-  const email = (body.email || "").trim().toLowerCase();
+  let email = (body.email || "").trim().toLowerCase();
   const domain2 = (body.domain || "").trim();
   const wfSiteId = (body.wfSiteId || "").trim();
   const initialCustomization = body.initialCustomization ?? null;
+  const manualInstall = body.manualInstall === true;
+  if (!email) {
+    email = await resolveWebflowEmail(db, env2, wfSiteId);
+    console.log(`${TAG} email resolved server-side: ${email ? "FOUND" : "NOT FOUND"} (wfSiteId=${wfSiteId || "none"})`);
+  }
   if (!email || !domain2) {
-    console.warn(`${TAG} Rejected: missing email or domain`);
+    console.warn(`${TAG} Rejected: missing email or domain (email resolved=${!!email}, wfSiteId=${wfSiteId || "none"})`);
     return Response.json({ success: false, error: "email and domain are required" }, { status: 400 });
   }
   if (wfSiteId) {
@@ -33138,56 +34273,64 @@ async function handleWebflowFreeRegister(request, env2) {
         if (!accessToken) {
           console.warn(`${TAG} Step 7: No accessToken in KV \u2014 skipping injection`);
         } else {
-          let storedWebflowScriptId = null;
-          try {
-            const siteRow = await db.prepare("SELECT webflowScriptId FROM Site WHERE id = ?1").bind(site.id).first();
-            storedWebflowScriptId = siteRow?.webflowScriptId ?? null;
-          } catch (_) {
-          }
-          const result = await injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG, storedWebflowScriptId);
-          injectedIntoHead = result.success;
-          if (result.success) {
-            try {
-              await markSiteVerified(db, site.id, scriptUrl);
-            } catch {
-            }
-          }
-          if (result.webflowScriptId && result.webflowScriptId !== storedWebflowScriptId) {
-            await db.prepare("UPDATE Site SET webflowScriptId = ?1, updatedAt = ?2 WHERE id = ?3").bind(result.webflowScriptId, (/* @__PURE__ */ new Date()).toISOString(), site.id).run().catch(() => {
-            });
-          }
           const updatedKv = { ...kvEntry, webappSiteId: site.id, webappScriptUrl: scriptUrl, cdnScriptId: site.cdnScriptId, userId: user.id, email: user.email, registeredThroughApp: true, isWebappMigrated: true };
           await env2.WEBFLOW_AUTHENTICATION?.put(wfSiteId, JSON.stringify(updatedKv));
-          if (result.success && accessToken) {
+          if (manualInstall) {
+            console.log(`${TAG} Step 7: manualInstall=true \u2014 skipping head injection + publish for wfSiteId=${wfSiteId}`);
+          } else {
+            let storedWebflowScriptId = null;
             try {
-              const WEBFLOW_API = "https://api.webflow.com/v2";
-              const pubHeaders = {
-                "Authorization": `Bearer ${accessToken}`,
-                "Content-Type": "application/json",
-                "accept-version": "1.0.0"
-              };
-              let customDomains = [];
+              const siteRow = await db.prepare("SELECT webflowScriptId FROM Site WHERE id = ?1").bind(site.id).first();
+              storedWebflowScriptId = siteRow?.webflowScriptId ?? null;
+            } catch (_) {
+            }
+            const result = await injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG, storedWebflowScriptId);
+            injectedIntoHead = result.success;
+            if (result.success) {
               try {
-                const siteInfoRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}`, { headers: pubHeaders });
-                if (siteInfoRes.ok) {
-                  const siteInfo = await siteInfoRes.json();
-                  customDomains = (siteInfo.customDomains || []).map((d) => d.url || d.name).filter(Boolean);
-                }
-              } catch (_) {
+                await markSiteVerified(db, site.id, scriptUrl);
+              } catch {
               }
-              const publishRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/publish`, {
-                method: "POST",
-                headers: pubHeaders,
-                body: JSON.stringify({ publishToWebflowSubdomain: true, customDomains })
+              try {
+                await db.prepare("UPDATE Site SET version = 'v2', updatedAt = ?1 WHERE id = ?2").bind((/* @__PURE__ */ new Date()).toISOString(), site.id).run();
+              } catch {
+              }
+            }
+            if (result.webflowScriptId && result.webflowScriptId !== storedWebflowScriptId) {
+              await db.prepare("UPDATE Site SET webflowScriptId = ?1, updatedAt = ?2 WHERE id = ?3").bind(result.webflowScriptId, (/* @__PURE__ */ new Date()).toISOString(), site.id).run().catch(() => {
               });
-              if (!publishRes.ok) {
-                const err = await publishRes.text();
-                console.warn(`${TAG} Step 7: Webflow publish failed status=${publishRes.status} body=${err}`);
-              } else {
-                console.log(`${TAG} Step 7: Webflow site published successfully wfSiteId=${wfSiteId}`);
+            }
+            if (result.success && accessToken) {
+              try {
+                const WEBFLOW_API2 = "https://api.webflow.com/v2";
+                const pubHeaders = {
+                  "Authorization": `Bearer ${accessToken}`,
+                  "Content-Type": "application/json",
+                  "accept-version": "1.0.0"
+                };
+                let customDomains = [];
+                try {
+                  const siteInfoRes = await fetch(`${WEBFLOW_API2}/sites/${wfSiteId}`, { headers: pubHeaders });
+                  if (siteInfoRes.ok) {
+                    const siteInfo = await siteInfoRes.json();
+                    customDomains = (siteInfo.customDomains || []).map((d) => d.url || d.name).filter(Boolean);
+                  }
+                } catch (_) {
+                }
+                const publishRes = await fetch(`${WEBFLOW_API2}/sites/${wfSiteId}/publish`, {
+                  method: "POST",
+                  headers: pubHeaders,
+                  body: JSON.stringify({ publishToWebflowSubdomain: true, customDomains })
+                });
+                if (!publishRes.ok) {
+                  const err = await publishRes.text();
+                  console.warn(`${TAG} Step 7: Webflow publish failed status=${publishRes.status} body=${err}`);
+                } else {
+                  console.log(`${TAG} Step 7: Webflow site published successfully wfSiteId=${wfSiteId}`);
+                }
+              } catch (publishErr) {
+                console.warn(`${TAG} Step 7: Webflow publish error (non-fatal):`, publishErr?.message || publishErr);
               }
-            } catch (publishErr) {
-              console.warn(`${TAG} Step 7: Webflow publish error (non-fatal):`, publishErr?.message || publishErr);
             }
           }
         }
@@ -33198,6 +34341,13 @@ async function handleWebflowFreeRegister(request, env2) {
   }
   const isNewInstall = !existingSameDomain;
   try {
+    await capturePostHogEvent(env2, user.email, "plan_selected", {
+      plan_tier: "free",
+      billing_cycle: null,
+      plan_price: 0,
+      platform: "webflow",
+      site_id: site.id
+    });
     if (isNewInstall) {
       await capturePostHogEvent(env2, user.email, "app_installed", {
         platform: "webflow",
@@ -33242,8 +34392,8 @@ async function handleWebflowFreeRegister(request, env2) {
   });
 }
 __name(handleWebflowFreeRegister, "handleWebflowFreeRegister");
-async function injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG3, storedWebflowScriptId = null) {
-  const WEBFLOW_API = "https://api.webflow.com/v2";
+async function injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG14, storedWebflowScriptId = null) {
+  const WEBFLOW_API2 = "https://api.webflow.com/v2";
   const headers = {
     "Authorization": `Bearer ${accessToken}`,
     "Content-Type": "application/json",
@@ -33253,7 +34403,7 @@ async function injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG
   let existingScripts = [];
   let appliedConsentBitId = null;
   try {
-    const existingRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/custom_code`, { headers });
+    const existingRes = await fetch(`${WEBFLOW_API2}/sites/${wfSiteId}/custom_code`, { headers });
     if (existingRes.ok) {
       const existingData = await existingRes.json();
       const allScripts = existingData.scripts || [];
@@ -33266,14 +34416,14 @@ async function injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG
   const candidateId = storedWebflowScriptId || appliedConsentBitId;
   if (candidateId) {
     try {
-      const scriptRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/registered_scripts/${candidateId}`, { headers });
+      const scriptRes = await fetch(`${WEBFLOW_API2}/sites/${wfSiteId}/registered_scripts/${candidateId}`, { headers });
       if (scriptRes.ok) {
         const scriptData = await scriptRes.json();
         if (scriptData.sourceCode?.includes(scriptUrl)) {
           const alreadyApplied = appliedConsentBitId === candidateId;
           if (!alreadyApplied) {
             existingScripts.push({ id: candidateId, location: "header", version: "1.0.0" });
-            await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/custom_code`, {
+            await fetch(`${WEBFLOW_API2}/sites/${wfSiteId}/custom_code`, {
               method: "PUT",
               headers,
               body: JSON.stringify({ scripts: existingScripts })
@@ -33286,31 +34436,31 @@ async function injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG
     }
   }
   const displayName = `ConsentBitBanner${Date.now()}`;
-  const registerRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/registered_scripts/inline`, {
+  const registerRes = await fetch(`${WEBFLOW_API2}/sites/${wfSiteId}/registered_scripts/inline`, {
     method: "POST",
     headers,
     body: JSON.stringify({ sourceCode: inlineCode, displayName, version: "1.0.0" })
   });
   if (!registerRes.ok) {
     const err = await registerRes.text();
-    console.error(`${TAG3} Step 7: registerInline failed status=${registerRes.status} body=${err}`);
+    console.error(`${TAG14} Step 7: registerInline failed status=${registerRes.status} body=${err}`);
     return { success: false, webflowScriptId: null };
   }
   const registered = await registerRes.json();
   const scriptId = registered.id;
   if (!scriptId) {
-    console.error(`${TAG3} Step 7: No scriptId returned from registerInline`);
+    console.error(`${TAG14} Step 7: No scriptId returned from registerInline`);
     return { success: false, webflowScriptId: null };
   }
   existingScripts.push({ id: scriptId, location: "header", version: "1.0.0" });
-  const upsertRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/custom_code`, {
+  const upsertRes = await fetch(`${WEBFLOW_API2}/sites/${wfSiteId}/custom_code`, {
     method: "PUT",
     headers,
     body: JSON.stringify({ scripts: existingScripts })
   });
   if (!upsertRes.ok) {
     const err = await upsertRes.text();
-    console.error(`${TAG3} Step 7: upsertCustomCode failed status=${upsertRes.status} body=${err}`);
+    console.error(`${TAG14} Step 7: upsertCustomCode failed status=${upsertRes.status} body=${err}`);
     return { success: false, webflowScriptId: scriptId };
   }
   return { success: true, webflowScriptId: scriptId };
@@ -33390,6 +34540,7 @@ async function handleBannerCustomization(request, env2) {
     }
     try {
       const row = await getBannerCustomization(db, siteId);
+      console.log(`[banner-customization] GET siteId=${siteId} \u2192 row=${row ? "found" : "none"}${row ? " bg=" + (row.backgroundColor ?? "?") : ""}`);
       let translations = null;
       if (row?.translations) {
         try {
@@ -33476,6 +34627,7 @@ async function handleBannerCustomization(request, env2) {
     const customization = body?.customization;
     const wfSiteId = body?.wfSiteId || postUrl.searchParams.get("wfSiteId") || null;
     const skipScriptSwap = body?.skipScriptSwap === true;
+    const manualInstall = body?.manualInstall === true;
     const compliance = Array.isArray(body?.compliance) && body.compliance.length ? body.compliance : null;
     if (siteId) {
       try {
@@ -33524,6 +34676,11 @@ async function handleBannerCustomization(request, env2) {
     }
     try {
       await saveBannerCustomization(db, siteId, customization);
+      try {
+        await db.prepare("UPDATE Site SET version = 'v2', updatedAt = ?1 WHERE id = ?2").bind((/* @__PURE__ */ new Date()).toISOString(), siteId).run();
+      } catch (versionErr) {
+        console.warn("[BannerCustomization][POST] Failed to set version=v2:", versionErr?.message);
+      }
       if (compliance) {
         const hasUs = compliance.includes("us") || compliance.includes("ccpa");
         const hasGdpr = compliance.includes("gdpr");
@@ -33626,16 +34783,20 @@ async function handleBannerCustomization(request, env2) {
         const dataToStore = { appData, siteId: webflowSiteId, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
         await env2.WEBFLOW_AUTHENTICATION.put(kvKey, JSON.stringify(dataToStore));
         try {
-          const mainKvRaw = await env2.WEBFLOW_AUTHENTICATION.get(webflowSiteId);
-          if (mainKvRaw) {
-            const mainKvEntry = JSON.parse(mainKvRaw);
-            if (mainKvEntry.accessToken) {
-              await ensureScriptInjected(env2, db, siteId, webflowSiteId, mainKvEntry, siteRow, { skipPublish: skipScriptSwap });
-            } else {
-              console.warn("[BannerCustomization][POST] No accessToken in KV \u2014 script injection skipped");
-            }
+          if (manualInstall) {
+            console.log("[BannerCustomization][POST] manualInstall=true \u2014 skipping head injection for webflowSiteId:", webflowSiteId);
           } else {
-            console.warn("[BannerCustomization][POST] No KV entry found for webflowSiteId:", webflowSiteId);
+            const mainKvRaw = await env2.WEBFLOW_AUTHENTICATION.get(webflowSiteId);
+            if (mainKvRaw) {
+              const mainKvEntry = JSON.parse(mainKvRaw);
+              if (mainKvEntry.accessToken) {
+                await ensureScriptInjected(env2, db, siteId, webflowSiteId, mainKvEntry, siteRow, { skipPublish: skipScriptSwap });
+              } else {
+                console.warn("[BannerCustomization][POST] No accessToken in KV \u2014 script injection skipped");
+              }
+            } else {
+              console.warn("[BannerCustomization][POST] No KV entry found for webflowSiteId:", webflowSiteId);
+            }
           }
         } catch (swapErr) {
           console.error("[BannerCustomization] Script inject error (non-fatal):", swapErr?.message || swapErr);
@@ -33657,12 +34818,22 @@ async function handleBannerCustomization(request, env2) {
       }
       try {
         const userRow = await db.prepare(
-          "SELECT u.email FROM Site s JOIN OrganizationMember om ON om.organizationId = s.organizationId JOIN User u ON u.id = om.userId WHERE s.id = ?1 LIMIT 1"
+          "SELECT u.email AS email, s.platform AS platform FROM Site s JOIN OrganizationMember om ON om.organizationId = s.organizationId JOIN User u ON u.id = om.userId WHERE s.id = ?1 LIMIT 1"
         ).bind(siteId).first();
         const userEmail = userRow?.email;
+        const isWebflow = String(userRow?.platform || "").toLowerCase() === "webflow";
+        console.log(`[PostHog DEBUG] banner_settings_updated guard: siteId=${siteId} email=${userEmail || "NONE"} platform=${userRow?.platform || "NONE"} isWebflow=${isWebflow}`);
         if (userEmail) {
           await capturePostHogEvent(env2, userEmail, "banner_customized", { platform: "webflow", site_id: siteId, wf_site_id: wfSiteId || null });
           await capturePostHogEvent(env2, userEmail, "banner_published_staging", { platform: "webflow", site_id: siteId, wf_site_id: wfSiteId || null });
+          if (isWebflow) {
+            await capturePostHogEvent(env2, userEmail, "banner_settings_updated", {
+              tab: null,
+              platform: "webflow",
+              site_id: siteId,
+              wf_site_id: wfSiteId || null
+            });
+          }
           await identifyPostHogPerson(env2, userEmail, { platform: "webflow", did_customize_banner: true, did_publish_banner: true, lifecycle_stage: "published" });
         }
       } catch (_) {
@@ -33680,16 +34851,16 @@ async function handleBannerCustomization(request, env2) {
 }
 __name(handleBannerCustomization, "handleBannerCustomization");
 async function ensureScriptInjected(env2, db, siteId, wfSiteId, kvEntry, siteRow, { skipPublish = false } = {}) {
-  const TAG3 = "[BannerCustomization][ScriptInject]";
+  const TAG14 = "[BannerCustomization][ScriptInject]";
   const accessToken = kvEntry.accessToken;
   const cdnScriptId = siteRow?.cdnScriptId ?? null;
   const storedWebflowScriptId = siteRow?.webflowScriptId ?? null;
   if (!cdnScriptId) {
-    console.warn(`${TAG3} cdnScriptId missing for siteId=${siteId} \u2014 skipping`);
+    console.warn(`${TAG14} cdnScriptId missing for siteId=${siteId} \u2014 skipping`);
     return;
   }
   const scriptUrl = siteRow?.embedScriptUrl || `https://manager.consentbit.com/consentbit/${cdnScriptId}/script.js`;
-  const result = await injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG3, storedWebflowScriptId);
+  const result = await injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG14, storedWebflowScriptId);
   if (result.success) {
     let userId = null;
     let ownerRow = null;
@@ -33722,7 +34893,7 @@ async function ensureScriptInjected(env2, db, siteId, wfSiteId, kvEntry, siteRow
     }
     if (!skipPublish) {
       try {
-        const WEBFLOW_API = "https://api.webflow.com/v2";
+        const WEBFLOW_API2 = "https://api.webflow.com/v2";
         const headers = {
           "Authorization": `Bearer ${accessToken}`,
           "Content-Type": "application/json",
@@ -33730,24 +34901,24 @@ async function ensureScriptInjected(env2, db, siteId, wfSiteId, kvEntry, siteRow
         };
         let customDomains = [];
         try {
-          const siteInfoRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}`, { headers });
+          const siteInfoRes = await fetch(`${WEBFLOW_API2}/sites/${wfSiteId}`, { headers });
           if (siteInfoRes.ok) {
             const siteInfo = await siteInfoRes.json();
             customDomains = (siteInfo.customDomains || []).map((d) => d.url || d.name).filter(Boolean);
           }
         } catch (_) {
         }
-        const publishRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/publish`, {
+        const publishRes = await fetch(`${WEBFLOW_API2}/sites/${wfSiteId}/publish`, {
           method: "POST",
           headers,
           body: JSON.stringify({ publishToWebflowSubdomain: true, customDomains })
         });
         if (!publishRes.ok) {
           const err = await publishRes.text();
-          console.warn(`${TAG3} Webflow publish failed status=${publishRes.status} body=${err}`);
+          console.warn(`${TAG14} Webflow publish failed status=${publishRes.status} body=${err}`);
         }
       } catch (publishErr) {
-        console.warn(`${TAG3} Webflow publish error (non-fatal):`, publishErr?.message || publishErr);
+        console.warn(`${TAG14} Webflow publish error (non-fatal):`, publishErr?.message || publishErr);
       }
     }
   }
@@ -33884,6 +35055,23 @@ async function handleConsentLogs(request, env2) {
   }
   try {
     await ensureSchema(db);
+    if (offset === 0) {
+      try {
+        const ownerRow = await db.prepare(
+          `SELECT u.email AS email, s.platform AS platform FROM Site s
+             JOIN OrganizationMember om ON om.organizationId = s.organizationId
+             JOIN User u ON u.id = om.userId WHERE s.id = ?1 LIMIT 1`
+        ).bind(siteId).first();
+        if (ownerRow?.email && String(ownerRow.platform || "").toLowerCase() === "webflow") {
+          await capturePostHogEvent(env2, ownerRow.email, "consent_logs_viewed", {
+            action: "view",
+            platform: "webflow",
+            site_id: siteId
+          });
+        }
+      } catch {
+      }
+    }
     const hasDateFilter = year && month;
     const paddedMonth = hasDateFilter ? month.padStart(2, "0") : "";
     const { results: consents } = hasDateFilter ? await db.prepare(
@@ -34176,7 +35364,7 @@ async function handleCreateCheckoutSession(request, env2) {
   if (!organizationId) {
     return Response.json({ success: false, error: "organizationId required" }, { status: 400 });
   }
-  const tierPriceMap = {
+  const tierPriceMap3 = {
     basic: {
       monthly: trimEnv(env2.STRIPE_PRICE_BASIC_MONTHLY),
       yearly: trimEnv(env2.STRIPE_PRICE_BASIC_YEARLY)
@@ -34191,8 +35379,8 @@ async function handleCreateCheckoutSession(request, env2) {
     }
   };
   const tierEnvKey = /* @__PURE__ */ __name((p, inv) => `STRIPE_PRICE_${String(p).toUpperCase()}_${inv === "yearly" ? "YEARLY" : "MONTHLY"}`, "tierEnvKey");
-  const useTierPlan = planId && tierPriceMap[planId];
-  const tierPrice = useTierPlan ? tierPriceMap[planId][interval] || tierPriceMap[planId].monthly : null;
+  const useTierPlan = planId && tierPriceMap3[planId];
+  const tierPrice = useTierPlan ? tierPriceMap3[planId][interval] || tierPriceMap3[planId].monthly : null;
   if (useTierPlan) {
     if (!tierPrice) {
       return Response.json(
@@ -34519,9 +35707,245 @@ async function handleCheckoutToken(request, env2) {
 }
 __name(handleCheckoutToken, "handleCheckoutToken");
 
+// src/handlers/webflowCheckoutToken.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+init_db();
+var CORS_HEADERS2 = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type"
+};
+var STRING_KEYS = ["email", "domain", "platform", "platformId", "billingEmail", "version", "plan", "interval"];
+var TOKEN_TTL_SECONDS = 600;
+var PLAN_PRICE = {
+  basic: { monthly: 9, annual: 7 },
+  essential: { monthly: 20, annual: 16 },
+  growth: { monthly: 56, annual: 45 }
+};
+async function handleWebflowCheckoutToken(request, env2) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS_HEADERS2 });
+  }
+  if (request.method !== "POST") {
+    return Response.json({ error: "method not allowed" }, { status: 405, headers: CORS_HEADERS2 });
+  }
+  const kv = env2.CHECKOUT_TOKENS;
+  if (!kv) {
+    console.error("[webflow-checkout-token] CHECKOUT_TOKENS KV binding missing");
+    return Response.json({ error: "checkout unavailable" }, { status: 503, headers: CORS_HEADERS2 });
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ error: "invalid JSON" }, { status: 400, headers: CORS_HEADERS2 });
+  }
+  const payload = {};
+  for (const key of STRING_KEYS) {
+    if (body[key] && typeof body[key] === "string") payload[key] = body[key];
+  }
+  payload.platform = payload.platform || "webflow";
+  payload.version = payload.version || "v2";
+  if (payload.platformId && env2.CONSENT_WEBAPP) {
+    try {
+      const owner = await env2.CONSENT_WEBAPP.prepare(
+        `SELECT u.email AS email, u.billingEmail AS billingEmail
+             FROM Site s
+             JOIN OrganizationMember m ON m.organizationId = s.organizationId AND lower(m.role) = 'owner'
+             JOIN User u ON u.id = m.userId
+            WHERE s.platformSiteId = ?1
+            ORDER BY s.createdAt ASC LIMIT 1`
+      ).bind(payload.platformId).first();
+      if (owner?.email) {
+        payload.email = String(owner.email).trim().toLowerCase();
+        payload.billingEmail = String(owner.billingEmail || owner.email).trim().toLowerCase();
+        console.log("[webflow-checkout-token] resolved CURRENT owner email from D1 for", payload.platformId);
+      }
+    } catch (e) {
+      console.warn("[webflow-checkout-token] owner email resolve failed (non-fatal)", e?.message || e);
+    }
+  }
+  if (!payload.email && payload.platformId && env2.WEBFLOW_AUTHENTICATION) {
+    try {
+      const kvRaw = await env2.WEBFLOW_AUTHENTICATION.get(payload.platformId);
+      if (kvRaw) {
+        const kvEntry = typeof kvRaw === "string" ? JSON.parse(kvRaw) : kvRaw;
+        if (kvEntry?.email) {
+          payload.email = String(kvEntry.email).trim().toLowerCase();
+          console.log("[webflow-checkout-token] resolved email from KV for platformId", payload.platformId);
+        }
+      }
+    } catch (e) {
+      console.warn("[webflow-checkout-token] KV email resolve failed (non-fatal)", e?.message || e);
+    }
+  }
+  if (!payload.email && payload.platformId && env2.CONSENT_WEBAPP) {
+    try {
+      const siteRow = await getWebflowOAuthTokenBySite(env2.CONSENT_WEBAPP, payload.platformId);
+      if (siteRow?.userKey) {
+        const tokenRow = await getWebflowOAuthTokenByUser(env2.CONSENT_WEBAPP, siteRow.userKey);
+        const email = tokenRow?.authorizedBy?.email || tokenRow?.authorizedBy?.user?.email;
+        if (email) {
+          payload.email = String(email).trim().toLowerCase();
+          console.log("[webflow-checkout-token] resolved email from D1 for platformId", payload.platformId);
+        }
+      }
+    } catch (e) {
+      console.warn("[webflow-checkout-token] D1 email resolve failed (non-fatal)", e?.message || e);
+    }
+  }
+  if (!payload.email) {
+    console.warn("[webflow-checkout-token] email NOT resolved for platformId", payload.platformId || "none");
+  }
+  const token = crypto.randomUUID();
+  await kv.put(`checkout-token:${token}`, JSON.stringify(payload), { expirationTtl: TOKEN_TTL_SECONDS });
+  console.log("[webflow-checkout-token] stored token", token, "keys:", Object.keys(payload));
+  if (payload.email && payload.plan) {
+    const billingCycle = /^(year|annual)/i.test(payload.interval || "") ? "annual" : "monthly";
+    let currentPlan = null;
+    try {
+      if (payload.platformId && env2.CONSENT_WEBAPP) {
+        const site = await env2.CONSENT_WEBAPP.prepare("SELECT id, organizationId FROM Site WHERE platformSiteId = ?1 ORDER BY createdAt ASC LIMIT 1").bind(payload.platformId).first();
+        if (site?.organizationId) {
+          const sub = await env2.CONSENT_WEBAPP.prepare("SELECT status, planId, planid FROM Subscription WHERE organizationId = ?1 ORDER BY updatedAt DESC LIMIT 1").bind(site.organizationId).first();
+          const planId = String(sub?.planId || sub?.planid || "").toLowerCase();
+          const status = String(sub?.status || "").toLowerCase();
+          if (["basic", "essential", "growth"].includes(planId) && ["active", "trialing", "past_due"].includes(status)) {
+            currentPlan = planId;
+          }
+        }
+      }
+    } catch {
+    }
+    if (currentPlan) {
+      await capturePostHogEvent(env2, payload.email, "upgrade_initiated", {
+        current_plan: currentPlan,
+        target_plan: payload.plan,
+        billing_cycle: billingCycle,
+        platform: "webflow",
+        site_id: payload.platformId || null
+      });
+    } else {
+      await capturePostHogEvent(env2, payload.email, "plan_selected", {
+        plan_tier: payload.plan,
+        billing_cycle: billingCycle,
+        plan_price: PLAN_PRICE[payload.plan]?.[billingCycle] ?? null,
+        platform: "webflow",
+        site_id: payload.platformId || null
+      });
+    }
+  }
+  return Response.json({ token }, { headers: CORS_HEADERS2 });
+}
+__name(handleWebflowCheckoutToken, "handleWebflowCheckoutToken");
+
+// src/handlers/webflowTrack.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+async function resolveDistinctId(env2, webflowSiteId) {
+  if (!webflowSiteId) return { distinctId: null, source: "none" };
+  try {
+    if (env2.CONSENT_WEBAPP) {
+      const row = await env2.CONSENT_WEBAPP.prepare(
+        `SELECT u.email AS email, s.platform AS platform FROM Site s
+           JOIN OrganizationMember om ON om.organizationId = s.organizationId AND lower(om.role) = 'owner'
+           JOIN User u ON u.id = om.userId
+          WHERE s.platformSiteId = ?1 ORDER BY s.createdAt ASC LIMIT 1`
+      ).bind(webflowSiteId).first();
+      if (row?.email && String(row.platform || "").toLowerCase() === "webflow") {
+        return { distinctId: String(row.email).trim().toLowerCase(), source: "site_owner" };
+      }
+    }
+  } catch {
+  }
+  try {
+    const raw = await env2.WEBFLOW_AUTHENTICATION?.get(webflowSiteId);
+    if (raw) {
+      const entry = typeof raw === "string" ? JSON.parse(raw) : raw;
+      const kvEmail = entry?.billingEmail || entry?.email;
+      if (kvEmail) return { distinctId: String(kvEmail).trim().toLowerCase(), source: "oauth_kv" };
+    }
+  } catch {
+  }
+  try {
+    if (env2.CONSENT_WEBAPP) {
+      const row = await env2.CONSENT_WEBAPP.prepare(
+        `SELECT t.userKey AS userKey, t.authorizedBy AS authorizedBy
+           FROM WebflowOAuthSite s JOIN WebflowOAuthToken t ON t.userKey = s.userKey
+          WHERE s.siteId = ?1 LIMIT 1`
+      ).bind(webflowSiteId).first();
+      if (row) {
+        let oauthEmail = null;
+        try {
+          const authorizedBy = row.authorizedBy ? JSON.parse(row.authorizedBy) : null;
+          oauthEmail = authorizedBy?.email || authorizedBy?.user?.email || null;
+        } catch {
+        }
+        if (oauthEmail) return { distinctId: String(oauthEmail).trim().toLowerCase(), source: "oauth_d1" };
+        if (row.userKey) return { distinctId: String(row.userKey), source: "oauth_userkey" };
+      }
+    }
+  } catch {
+  }
+  return { distinctId: null, source: "none" };
+}
+__name(resolveDistinctId, "resolveDistinctId");
+var ALLOWED_EVENTS = /* @__PURE__ */ new Set([
+  "profile_settings_viewed",
+  "installation_code_copied",
+  // Only the "Skip for now" outcome of plan_selected is client-sent (it has no backend
+  // call). The free/paid plan choices fire server-side from their own handlers.
+  "plan_selected"
+]);
+async function handleWebflowTrack(request, env2, ctx, identity2) {
+  if (request.method !== "POST") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ success: false, error: "Invalid JSON" }, { status: 400 });
+  }
+  const event = typeof body?.event === "string" ? body.event : "";
+  const properties = body && typeof body.properties === "object" && body.properties || {};
+  if (!ALLOWED_EVENTS.has(event)) {
+    return Response.json({ success: false, error: "Event not allowed" }, { status: 400 });
+  }
+  const webflowSiteId = identity2?.webflowSiteId || request.headers.get("X-Webflow-Site-Id") || request.headers.get("x-webflow-site-id") || (typeof body?.wfSiteId === "string" ? body.wfSiteId : "");
+  const { distinctId, source: source2 } = await resolveDistinctId(env2, webflowSiteId);
+  const safeProps = {};
+  for (const [k, v] of Object.entries(properties)) {
+    if (v === null || ["string", "number", "boolean"].includes(typeof v)) safeProps[k] = v;
+  }
+  if (distinctId) {
+    await capturePostHogEvent(env2, distinctId, event, {
+      ...safeProps,
+      platform: "webflow",
+      wf_site_id: webflowSiteId
+    });
+  } else {
+    console.warn(`[wf/track] no distinct_id for site ${webflowSiteId || "(none)"} \u2014 dropped ${event}`);
+  }
+  console.log(`[wf/track] ${event} site=${webflowSiteId || "(none)"} identity=${source2}`);
+  return Response.json({ success: true });
+}
+__name(handleWebflowTrack, "handleWebflowTrack");
+
 // src/handlers/checkoutSuccessRedirect.js
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
+function isAllowedRedirect(url, env2) {
+  const host = url.hostname.toLowerCase();
+  const isLocal = host === "localhost" || host === "127.0.0.1";
+  if (url.protocol !== "https:" && !isLocal) return false;
+  if (isLocal) return true;
+  if (host === "consentbit.com" || host.endsWith(".consentbit.com")) return true;
+  const extra = (env2 && env2.REDIRECT_ALLOWED_HOSTS ? String(env2.REDIRECT_ALLOWED_HOSTS) : "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean);
+  return extra.includes(host);
+}
+__name(isAllowedRedirect, "isAllowedRedirect");
 async function handleCheckoutSuccessRedirect(request, env2) {
   if (request.method !== "GET") {
     return new Response("Method Not Allowed", { status: 405 });
@@ -34536,14 +35960,17 @@ async function handleCheckoutSuccessRedirect(request, env2) {
   if (!redirectTo) {
     return new Response("Bad Request: missing redirect param", { status: 400 });
   }
-  if (!sessionId.startsWith("cs_")) {
-    return Response.redirect(redirectTo, 302);
-  }
   let dest;
   try {
     dest = new URL(redirectTo);
   } catch {
     return new Response("Bad Request: invalid redirect URL", { status: 400 });
+  }
+  if (!isAllowedRedirect(dest, env2)) {
+    return new Response("Bad Request: redirect not allowed", { status: 400 });
+  }
+  if (!sessionId.startsWith("cs_")) {
+    return Response.redirect(dest.toString(), 302);
   }
   try {
     const res = await fetch(
@@ -34676,7 +36103,7 @@ var BTN = "display:inline-block;background:#007AFF;color:#ffffff;text-decoration
 var HR = '<div style="border:none;border-top:1px solid #e5e7eb;margin:28px 0;"></div>';
 function sendWelcomeEmail(env2, ctx, { to, name }) {
   const displayName = name || "there";
-  const dashboardUrl = (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "") + "/dashboard";
+  const dashboardUrl2 = (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "") + "/dashboard";
   const subject = `Welcome to ConsentBit, ${name || "there"}!`;
   const html = layout(
     `Welcome to ConsentBit. Your account is ready \u2014 let's get you set up.`,
@@ -34703,7 +36130,7 @@ function sendWelcomeEmail(env2, ctx, { to, name }) {
       That's it \u2014 your cookie consent banner can be live within minutes.
     </p>
 
-    <a href="${dashboardUrl}" style="${BTN}">Go to Your Dashboard \u2192</a>
+    <a href="${dashboardUrl2}" style="${BTN}">Go to Your Dashboard \u2192</a>
 
     ${HR}
 
@@ -34725,7 +36152,7 @@ Getting started is simple:
 
 That's it \u2014 your cookie consent banner can be live within minutes.
 
-Go to Your Dashboard: ${dashboardUrl}
+Go to Your Dashboard: ${dashboardUrl2}
 
 If you have any questions or need assistance along the way, feel free to reply to this email. We're here to help.
 
@@ -34739,7 +36166,7 @@ __name(sendWelcomeEmail, "sendWelcomeEmail");
 function sendFreePlanEmail(env2, ctx, { to, name, domain: domain2, scriptUrl }) {
   const displayName = name || "there";
   const displayDomain = domain2 || "your website";
-  const dashboardUrl = (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "") + "/dashboard";
+  const dashboardUrl2 = (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "") + "/dashboard";
   const noAutoLink = /* @__PURE__ */ __name((url) => String(url).replace("://", ":<span></span>//").replace(/\.(?=[a-z]{2,})/gi, "<span></span>."), "noAutoLink");
   const snippet = scriptUrl ? `&lt;script id="consentbit" src="${noAutoLink(scriptUrl)}" async&gt;&lt;/script&gt;` : '&lt;script id="consentbit" src="YOUR_SCRIPT_URL" async&gt;&lt;/script&gt;';
   const subject = `Your site is ready: ${displayDomain}`;
@@ -34779,7 +36206,7 @@ function sendFreePlanEmail(env2, ctx, { to, name, domain: domain2, scriptUrl }) 
       As your website grows, you can upgrade your plan anytime to unlock additional features and higher limits.
     </p>
 
-    <a href="${dashboardUrl}" style="${BTN}">Go to Dashboard \u2192</a>
+    <a href="${dashboardUrl2}" style="${BTN}">Go to Dashboard \u2192</a>
 
     ${HR}
 
@@ -34806,7 +36233,7 @@ Your Free Plan includes:
 
 As your website grows, you can upgrade your plan anytime to unlock additional features and higher limits.
 
-Go to Dashboard: ${dashboardUrl}
+Go to Dashboard: ${dashboardUrl2}
 
 If you need any help with setup or installation, simply reply to this email and our team will be happy to assist.
 
@@ -34821,7 +36248,7 @@ function sendPaidPlanEmail(env2, ctx, { to, name, domain: domain2, planName, inv
   const displayName = name || "there";
   const displayDomain = domain2 || "your website";
   const displayPlan = planName || "Basic";
-  const dashboardUrl = (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "") + "/dashboard";
+  const dashboardUrl2 = (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "") + "/dashboard";
   const loginEmail = to || "your email";
   const isTcf = variant === "tcf";
   const invoiceHtml = invoice ? `
@@ -34884,7 +36311,7 @@ ${invoice.invoiceUrl ? `View Invoice Online: ${invoice.invoiceUrl}` : ""}
         <li>In the <strong>General</strong> tab, find the <strong>"Support IAB TCF v2.3"</strong> card and turn on <strong>"Enable IAB TCF Support"</strong>.</li>
       </ol>
 
-      <a href="${dashboardUrl}" style="${BTN}">Open Dashboard \u2192</a>
+      <a href="${dashboardUrl2}" style="${BTN}">Open Dashboard \u2192</a>
 
       ${invoiceHtml}
 
@@ -34909,7 +36336,7 @@ Enable it from your dashboard (not from the Webflow/Framer app):
 2. Open your site, ${displayDomain}, and go to Cookie Banner.
 3. In the General tab, find the "Support IAB TCF v2.3" card and turn on "Enable IAB TCF Support".
 
-Open your dashboard: ${dashboardUrl}
+Open your dashboard: ${dashboardUrl2}
 ${invoiceText}
 If you need a hand setting up the TCF banner or choosing vendors, just reply to this email and our team will help.
 
@@ -35005,7 +36432,7 @@ Team ConsentBit
 __name(sendCancellationEmail, "sendCancellationEmail");
 function sendPaymentFailureEmail(env2, ctx, { to, name, updatePaymentUrl, reminderNumber = 1 }) {
   const displayName = name || "there";
-  const billingUrl = updatePaymentUrl || (env2.WEBAPP_PUBLIC_URL || "https://app.consentbit.com").replace(/\/$/, "") + "/billing";
+  const billingUrl = updatePaymentUrl || (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "");
   const configs = {
     1: {
       subject: `Action required: Payment failed for your ConsentBit subscription`,
@@ -35077,7 +36504,7 @@ __name(sendPaymentFailureEmail, "sendPaymentFailureEmail");
 function sendScanLimitEmail(env2, ctx, { to, name, domain: domain2, scansLimit, upgradeUrl }) {
   const displayName = name || "there";
   const displayDomain = domain2 || "your website";
-  const billingUrl = upgradeUrl || (env2.WEBAPP_PUBLIC_URL || "https://app.consentbit.com").replace(/\/$/, "") + "/billing";
+  const billingUrl = upgradeUrl || (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "");
   const subject = `Your scheduled scan was paused; scan limit reached`;
   const html = layout(
     `Your scheduled cookie scan for ${displayDomain} was paused because you've reached your monthly scan limit.`,
@@ -35523,15 +36950,15 @@ async function addCustomerToClickUp(env2, {
   const apiKey = env2.CLICKUP_API_KEY;
   if (!apiKey) {
     console.warn("[ClickUp] CLICKUP_API_KEY not set \u2014 skipping");
-    return;
+    return false;
   }
   const listId = resolveListId(env2, platform2);
   if (!listId) {
     console.warn("[ClickUp] No list ID configured for platform:", platform2, "\u2014 skipping");
-    return;
+    return false;
   }
   const platformLabel = platform2 ? platform2.charAt(0).toUpperCase() + platform2.slice(1) : "Website";
-  const taskName = `${email || "Unknown"} \u2014 ${plan || "Paid"} (${platformLabel})`;
+  const taskName = email || "Unknown";
   const descLines = [
     `**Email:** ${email || "\u2014"}`,
     `**Name:** ${name || "\u2014"}`,
@@ -35563,16 +36990,43 @@ async function addCustomerToClickUp(env2, {
     const data = await res.json();
     if (!res.ok) {
       console.error("[ClickUp] task creation failed \u2014 status:", res.status, "| error:", data?.err || JSON.stringify(data));
-    } else {
-      console.log("[ClickUp] task created \u2014 id:", data.id, "| list:", listId, "| platform:", platformLabel);
+      return false;
     }
+    console.log("[ClickUp] task created \u2014 id:", data.id, "| list:", listId, "| platform:", platformLabel);
+    return true;
   } catch (e) {
     console.error("[ClickUp] task creation exception:", e?.message);
+    return false;
   }
 }
 __name(addCustomerToClickUp, "addCustomerToClickUp");
+var CLICKUP_DEDUP_PREFIX = "clickup-added:";
+async function wasClickUpTaskCreated(env2, subscriptionId) {
+  if (!subscriptionId || !env2?.CHECKOUT_TOKENS) return false;
+  try {
+    return await env2.CHECKOUT_TOKENS.get(CLICKUP_DEDUP_PREFIX + subscriptionId) != null;
+  } catch (e) {
+    console.warn("[ClickUp] dedup read failed (treating as not-added):", e?.message);
+    return false;
+  }
+}
+__name(wasClickUpTaskCreated, "wasClickUpTaskCreated");
+async function markClickUpTaskCreated(env2, subscriptionId) {
+  if (!subscriptionId || !env2?.CHECKOUT_TOKENS) return;
+  try {
+    await env2.CHECKOUT_TOKENS.put(CLICKUP_DEDUP_PREFIX + subscriptionId, (/* @__PURE__ */ new Date()).toISOString());
+  } catch (e) {
+    console.warn("[ClickUp] dedup write failed:", e?.message);
+  }
+}
+__name(markClickUpTaskCreated, "markClickUpTaskCreated");
 
 // src/handlers/stripeWebhook.js
+function isPaidForClickUp({ rawSubStatus, paymentStatus }) {
+  if (rawSubStatus) return rawSubStatus === "active" || rawSubStatus === "trialing";
+  return paymentStatus === "paid" || paymentStatus === "no_payment_required";
+}
+__name(isPaidForClickUp, "isPaidForClickUp");
 async function findOrCreateStripeCustomerByEmail(env2, email) {
   const secret = env2.STRIPE_SECRET_KEY;
   if (!secret || !email || !email.includes("@")) return null;
@@ -35904,6 +37358,7 @@ async function handleStripeWebhook(request, env2, ctx) {
       let subMeta = {};
       let stripePriceFromSub = null;
       let subscriptionStatus = "active";
+      let rawSubStatus = null;
       if (subId && env2.STRIPE_SECRET_KEY) {
         try {
           const subRes = await fetch(`https://api.stripe.com/v1/subscriptions/${subId}`, {
@@ -35911,6 +37366,7 @@ async function handleStripeWebhook(request, env2, ctx) {
           });
           const subData = await subRes.json();
           subMeta = subData.metadata || {};
+          rawSubStatus = subData.status || null;
           if (subData.status === "trialing" || subData.status === "active") {
             subscriptionStatus = subData.status;
           }
@@ -35981,6 +37437,25 @@ async function handleStripeWebhook(request, env2, ctx) {
               regionMode: "gdpr"
             });
             siteId = createdSite.id;
+            if (createdSite._created) {
+              try {
+                const _sgEmail = (session.customer_email || session.customer_details?.email || "").trim().toLowerCase();
+                if (_sgEmail) {
+                  await capturePostHogEvent2(env2, _sgEmail, "script_generated", {
+                    site_id: createdSite.id,
+                    domain: createdSite.domain,
+                    platform: platform2 || "webapp",
+                    ...createdSite.id ? { $groups: { site: String(createdSite.id) } } : {}
+                  });
+                  await captureGa4Event(env2, _sgEmail, "script_generated", {
+                    site_id: createdSite.id,
+                    domain: createdSite.domain,
+                    platform: platform2 || "webapp"
+                  });
+                }
+              } catch (phErr) {
+              }
+            }
           } catch (e) {
           }
         }
@@ -36030,17 +37505,38 @@ async function handleStripeWebhook(request, env2, ctx) {
         });
         if (orgId) {
           const _phEmail = (session.customer_email || session.customer_details?.email || "").trim().toLowerCase() || null;
-          const _phPlatform = platform2 || null;
+          let _phPlatform = platform2 || null;
+          if (!_phPlatform && siteId && db) {
+            try {
+              const _phSiteRow = await db.prepare("SELECT platform FROM Site WHERE id = ?1 LIMIT 1").bind(siteId).first();
+              _phPlatform = _phSiteRow?.platform || null;
+            } catch (e) {
+            }
+          }
+          _phPlatform = _phPlatform || "webapp";
           if (_phEmail) {
-            await capturePostHogEvent2(env2, _phEmail, "paid_plan_activated", {
+            await capturePostHogEvent2(env2, _phEmail, "subscription_activated", {
               status: subscriptionStatus,
               plan: resolvedPlanId,
+              plan_tier: resolvedPlanId,
               interval,
+              billing_cycle: /^(year|annual)/i.test(String(interval)) ? "annual" : "monthly",
+              ...typeof session.amount_total === "number" ? { price: session.amount_total / 100 } : {},
+              currency: (session.currency || "usd").toUpperCase(),
               site_id: siteId || null,
               org_id: orgId,
               is_first_purchase: isFirstPurchase,
               ...siteId ? { $groups: { site: siteId } } : {},
               $set: { email: _phEmail, plan: resolvedPlanId, subscription_status: subscriptionStatus, plan_tier: resolvedPlanId, ..._phPlatform ? { platform: _phPlatform } : {}, did_start_trial: subscriptionStatus === "trialing", ...subscriptionStatus === "trialing" ? { trial_started_at: (/* @__PURE__ */ new Date()).toISOString() } : { did_convert_to_paid: true, converted_at: (/* @__PURE__ */ new Date()).toISOString() } }
+            });
+            await captureGa4Event(env2, _phEmail, "subscription_activated", {
+              plan_tier: resolvedPlanId,
+              billing_cycle: /^(year|annual)/i.test(String(interval)) ? "annual" : "monthly",
+              ...typeof session.amount_total === "number" ? { value: session.amount_total / 100 } : {},
+              currency: (session.currency || "usd").toUpperCase(),
+              status: subscriptionStatus,
+              site_id: siteId || null,
+              platform: _phPlatform || "webapp"
             });
             if (siteId) {
               await identifyPostHogSite2(env2, _phEmail, siteId, {
@@ -36171,6 +37667,18 @@ async function handleStripeWebhook(request, env2, ctx) {
           });
         }
         ctx.waitUntil((async () => {
+          if (!isPaidForClickUp({ rawSubStatus, paymentStatus: session.payment_status })) {
+            console.log(
+              "[ClickUp] skipped \u2014 payment not settled. subId:",
+              subId,
+              "| subStatus:",
+              rawSubStatus,
+              "| payment_status:",
+              session.payment_status
+            );
+            return;
+          }
+          if (subId && await wasClickUpTaskCreated(env2, subId)) return;
           let resolvedPlatform = platform2 || null;
           if (!resolvedPlatform && siteId && db) {
             try {
@@ -36179,7 +37687,7 @@ async function handleStripeWebhook(request, env2, ctx) {
             } catch (_) {
             }
           }
-          await addCustomerToClickUp(env2, {
+          const added = await addCustomerToClickUp(env2, {
             email: session.customer_email || session.customer_details?.email || null,
             name: session.customer_details?.name || "",
             platform: resolvedPlatform,
@@ -36191,8 +37699,8 @@ async function handleStripeWebhook(request, env2, ctx) {
             subscriptionId: subId || null,
             customerId: session.customer || null,
             isFirstPurchase
-          }).catch(() => {
-          });
+          }).catch(() => false);
+          if (added && subId) await markClickUpTaskCreated(env2, subId);
         })());
         if (resolvedPlanId && env2.WEBFLOW_AUTHENTICATION) {
           ctx.waitUntil((async () => {
@@ -36238,18 +37746,109 @@ async function handleStripeWebhook(request, env2, ctx) {
       }
       return Response.json({ received: true });
     }
+    if (type === "customer.subscription.created") {
+      const sub = event.data.object;
+      ctx.waitUntil((async () => {
+        try {
+          if (sub.status !== "trialing" && sub.status !== "active") {
+            console.log("[ClickUp] skipped \u2014 subscription.created status not paid:", sub.status, "| subId:", sub.id);
+            return;
+          }
+          if (await wasClickUpTaskCreated(env2, sub.id)) return;
+          const existing = await getSubscriptionByStripeId(db, sub.id).catch(() => null);
+          const cuSiteId = existing?.siteId ?? existing?.siteid ?? sub.metadata?.siteId ?? null;
+          const orgIdForEmail = existing?.organizationId ?? existing?.organizationid ?? sub.metadata?.organizationId ?? null;
+          let cuEmail = null;
+          let cuName = "";
+          let cuPlatform = sub.metadata?.platform || null;
+          let cuDomain = sub.metadata?.siteDomain || null;
+          if (cuSiteId && db) {
+            try {
+              const siteRow = await db.prepare("SELECT platform, domain FROM Site WHERE id = ?1 LIMIT 1").bind(cuSiteId).first();
+              cuPlatform = cuPlatform || siteRow?.platform || null;
+              cuDomain = cuDomain || siteRow?.domain || null;
+            } catch (_) {
+            }
+          }
+          if (sub.customer && env2.STRIPE_SECRET_KEY) {
+            try {
+              const custRes = await fetch(`https://api.stripe.com/v1/customers/${typeof sub.customer === "string" ? sub.customer : sub.customer?.id}`, {
+                headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` }
+              });
+              const cust = await custRes.json();
+              if (!cust.error) {
+                cuEmail = cust.email || null;
+                cuName = cust.name || "";
+              }
+            } catch (_) {
+            }
+          }
+          if (!cuEmail && orgIdForEmail) {
+            try {
+              const u = await db.prepare(
+                "SELECT u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1"
+              ).bind(orgIdForEmail).first();
+              cuEmail = u?.email || null;
+            } catch (_) {
+            }
+          }
+          let cuPlan = sub.metadata?.planId || existing?.planId || existing?.planid || null;
+          const cuPriceId = sub.items?.data?.[0]?.price?.id ?? null;
+          if (!cuPlan || !["basic", "essential", "growth"].includes(String(cuPlan))) {
+            const inferred = inferTierPlanIdFromStripePriceId(env2, cuPriceId);
+            if (inferred) cuPlan = inferred;
+          }
+          const cuInterval = sub.items?.data?.[0]?.plan?.interval === "year" ? "yearly" : "monthly";
+          const added = await addCustomerToClickUp(env2, {
+            email: cuEmail,
+            name: cuName,
+            platform: cuPlatform,
+            plan: cuPlan,
+            interval: cuInterval,
+            domain: cuDomain,
+            amountCents: sub.items?.data?.[0]?.price?.unit_amount ?? sub.plan?.amount ?? null,
+            currency: sub.currency || "usd",
+            subscriptionId: sub.id,
+            customerId: typeof sub.customer === "string" ? sub.customer : sub.customer?.id || null,
+            isFirstPurchase: false
+          }).catch(() => false);
+          if (added) await markClickUpTaskCreated(env2, sub.id);
+        } catch (e) {
+          console.warn("[StripeWebhook] subscription.created ClickUp add failed:", e?.message);
+        }
+      })());
+      return Response.json({ received: true });
+    }
     if (type === "customer.subscription.updated" || type === "customer.subscription.deleted") {
       const sub = event.data.object;
       let existing = await getSubscriptionByStripeId(db, sub.id);
       if (!existing && sub.customer) {
         existing = await db.prepare(
-          `SELECT * FROM Subscription WHERE stripeCustomerId = ?1 ORDER BY updatedAt DESC LIMIT 1`
+          `SELECT * FROM Subscription WHERE stripeCustomerId = ?1 AND stripeSubscriptionId IS NULL ORDER BY updatedAt DESC LIMIT 1`
         ).bind(sub.customer).first() ?? null;
         if (existing && sub.id) {
           db.prepare(
             `UPDATE Subscription SET stripeSubscriptionId = ?1, updatedAt = ?2 WHERE id = ?3`
           ).bind(sub.id, (/* @__PURE__ */ new Date()).toISOString(), existing.id).run().catch(() => {
           });
+        }
+      }
+      {
+        const rowSubId = existing?.stripeSubscriptionId ?? existing?.stripesubscriptionid ?? null;
+        if (existing && rowSubId && rowSubId !== sub.id) {
+          console.warn("[StripeWebhook] skipping sub update/delete \u2014 matched row belongs to a different subscription", {
+            eventSubId: sub.id,
+            rowSubId,
+            rowId: existing.id
+          });
+          await savePaymentEvent(db, {
+            eventType: type,
+            stripeEventId: eventId,
+            subscriptionId: existing.id,
+            organizationId: existing.organizationId ?? existing.organizationid ?? null,
+            rawPayload: { status: sub.status, cancel_at_period_end: sub.cancel_at_period_end }
+          });
+          return Response.json({ received: true });
         }
       }
       const orgIdFromEvent = sub.metadata?.organizationId;
@@ -36315,20 +37914,44 @@ async function handleStripeWebhook(request, env2, ctx) {
           ).bind(orgIdFinal).first();
           _phEmail = _phUser?.email || null;
           const _phSite = existing?.siteId ?? existing?.siteid ? await db.prepare("SELECT platform FROM Site WHERE id = ?1 LIMIT 1").bind(existing.siteId ?? existing.siteid).first() : null;
-          _phPlatform = _phSite?.platform || null;
+          _phPlatform = _phSite?.platform || sub.metadata?.platform || "webapp";
         } catch (e) {
         }
         if (_phEmail) {
           if (type === "customer.subscription.updated") {
             const prevStatus = event.data.previous_attributes?.status;
             if (prevStatus === "trialing" && sub.status === "active") {
-              await capturePostHogEvent2(env2, _phEmail, "paid_plan_activated", {
+              const _subPrice = sub.items?.data?.[0]?.price ?? null;
+              await capturePostHogEvent2(env2, _phEmail, "subscription_activated", {
                 status: "active",
+                plan: planIdFromMeta,
+                plan_tier: planIdFromMeta,
+                interval: intervalFromSub,
+                billing_cycle: /^(year|annual)/i.test(String(intervalFromSub)) ? "annual" : "monthly",
+                ...typeof _subPrice?.unit_amount === "number" ? { price: _subPrice.unit_amount / 100 } : {},
+                currency: (_subPrice?.currency || "usd").toUpperCase(),
+                site_id: existing?.siteId ?? existing?.siteid ?? null,
+                org_id: orgIdFinal,
+                $set: { plan: planIdFromMeta, subscription_status: "active", plan_tier: planIdFromMeta, did_convert_to_paid: true, converted_at: (/* @__PURE__ */ new Date()).toISOString(), ..._phPlatform ? { platform: _phPlatform } : {} }
+              });
+              await captureGa4Event(env2, _phEmail, "subscription_activated", {
+                plan_tier: planIdFromMeta,
+                billing_cycle: /^(year|annual)/i.test(String(intervalFromSub)) ? "annual" : "monthly",
+                ...typeof _subPrice?.unit_amount === "number" ? { value: _subPrice.unit_amount / 100 } : {},
+                currency: (_subPrice?.currency || "usd").toUpperCase(),
+                status: "active",
+                site_id: existing?.siteId ?? existing?.siteid ?? null,
+                platform: _phPlatform || "webapp"
+              });
+            }
+            if (sub.status === "trialing" && sub.cancel_at_period_end === true && (event.data.previous_attributes || {}).cancel_at_period_end === false) {
+              await capturePostHogEvent2(env2, _phEmail, "trial_cancelled", {
                 plan: planIdFromMeta,
                 interval: intervalFromSub,
                 site_id: existing?.siteId ?? existing?.siteid ?? null,
                 org_id: orgIdFinal,
-                $set: { plan: planIdFromMeta, subscription_status: "active", plan_tier: planIdFromMeta, did_convert_to_paid: true, converted_at: (/* @__PURE__ */ new Date()).toISOString(), ..._phPlatform ? { platform: _phPlatform } : {} }
+                platform: _phPlatform,
+                $set: { did_cancel_in_trial: true, trial_cancelled_at: (/* @__PURE__ */ new Date()).toISOString() }
               });
             }
             const previousPlanId = existing?.planId ?? existing?.planid ?? null;
@@ -36361,6 +37984,64 @@ async function handleStripeWebhook(request, env2, ctx) {
             });
           }
         }
+      }
+      if (type === "customer.subscription.updated" && (sub.status === "active" || sub.status === "trialing")) {
+        ctx.waitUntil((async () => {
+          try {
+            if (await wasClickUpTaskCreated(env2, sub.id)) return;
+            const cuSiteId = existing?.siteId ?? existing?.siteid ?? sub.metadata?.siteId ?? null;
+            let cuEmail = null;
+            let cuName = "";
+            let cuPlatform = sub.metadata?.platform || null;
+            let cuDomain = sub.metadata?.siteDomain || null;
+            if (cuSiteId && db) {
+              try {
+                const siteRow = await db.prepare("SELECT platform, domain FROM Site WHERE id = ?1 LIMIT 1").bind(cuSiteId).first();
+                cuPlatform = cuPlatform || siteRow?.platform || null;
+                cuDomain = cuDomain || siteRow?.domain || null;
+              } catch (_) {
+              }
+            }
+            if (sub.customer && env2.STRIPE_SECRET_KEY) {
+              try {
+                const custRes = await fetch(`https://api.stripe.com/v1/customers/${typeof sub.customer === "string" ? sub.customer : sub.customer?.id}`, {
+                  headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` }
+                });
+                const cust = await custRes.json();
+                if (!cust.error) {
+                  cuEmail = cust.email || null;
+                  cuName = cust.name || "";
+                }
+              } catch (_) {
+              }
+            }
+            if (!cuEmail && orgIdFinal) {
+              try {
+                const u = await db.prepare(
+                  "SELECT u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1"
+                ).bind(orgIdFinal).first();
+                cuEmail = u?.email || null;
+              } catch (_) {
+              }
+            }
+            const added = await addCustomerToClickUp(env2, {
+              email: cuEmail,
+              name: cuName,
+              platform: cuPlatform,
+              plan: planIdFromMeta || null,
+              interval: intervalFromSub,
+              domain: cuDomain,
+              amountCents: sub.items?.data?.[0]?.price?.unit_amount ?? sub.plan?.amount ?? null,
+              currency: sub.currency || "usd",
+              subscriptionId: sub.id,
+              customerId: typeof sub.customer === "string" ? sub.customer : sub.customer?.id || null,
+              isFirstPurchase: false
+            }).catch(() => false);
+            if (added) await markClickUpTaskCreated(env2, sub.id);
+          } catch (e) {
+            console.warn("[StripeWebhook] subscription.updated ClickUp add failed:", e?.message);
+          }
+        })());
       }
       {
         const siteId = existing?.siteId ?? existing?.siteid ?? null;
@@ -36410,19 +38091,29 @@ async function handleStripeWebhook(request, env2, ctx) {
       const orgId = existing?.organizationId ?? existing?.organizationid;
       if (orgId) {
         try {
+          const attempt = invoice.attempt_count || 1;
+          const reminderNumber = attempt >= 2 ? 2 : 1;
           const userRow = await db.prepare(
             "SELECT u.email, u.name FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1"
           ).bind(orgId).first();
           if (userRow?.email) {
-            const attempt = invoice.attempt_count || 1;
-            const reminderNumber = attempt >= 3 ? 3 : attempt;
-            const billingUrl = (env2.WEBAPP_PUBLIC_URL || "https://app.consentbit.com").replace(/\/$/, "") + "/billing";
-            sendPaymentFailureEmail(env2, ctx, {
-              to: userRow.email,
-              name: userRow.name || "",
-              updatePaymentUrl: billingUrl,
-              reminderNumber
+            const claimed = await claimPaymentFailureEmail(db, {
+              invoiceId: invoice.id,
+              reminderNumber,
+              recipientEmail: userRow.email,
+              recipientName: userRow.name || ""
             });
+            if (claimed) {
+              const billingUrl = (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "");
+              sendPaymentFailureEmail(env2, ctx, {
+                to: userRow.email,
+                name: userRow.name || "",
+                updatePaymentUrl: billingUrl,
+                reminderNumber
+              });
+            } else {
+              console.log("[StripeWebhook] dunning reminder", reminderNumber, "already sent for invoice", invoice.id, "\u2014 skipping");
+            }
           }
         } catch (e) {
           console.warn("[StripeWebhook] payment failure email lookup failed:", e?.message);
@@ -37428,12 +39119,12 @@ async function handleUpgradeSubscription(request, env2) {
     console.error("[UPGRADE] Invalid planId:", body.planId);
     return Response.json({ success: false, error: "planId must be basic, essential, or growth" }, { status: 400 });
   }
-  const tierPriceMap = {
+  const tierPriceMap3 = {
     basic: { monthly: trimEnv2(env2.STRIPE_PRICE_BASIC_MONTHLY), yearly: trimEnv2(env2.STRIPE_PRICE_BASIC_YEARLY) },
     essential: { monthly: trimEnv2(env2.STRIPE_PRICE_ESSENTIAL_MONTHLY), yearly: trimEnv2(env2.STRIPE_PRICE_ESSENTIAL_YEARLY) },
     growth: { monthly: trimEnv2(env2.STRIPE_PRICE_GROWTH_MONTHLY), yearly: trimEnv2(env2.STRIPE_PRICE_GROWTH_YEARLY) }
   };
-  const newPriceId = tierPriceMap[planId][interval] || tierPriceMap[planId].monthly;
+  const newPriceId = tierPriceMap3[planId][interval] || tierPriceMap3[planId].monthly;
   console.log("[UPGRADE] resolved priceId:", newPriceId, "for plan:", planId, "interval:", interval);
   if (!newPriceId) {
     console.error("[UPGRADE] Missing price env var for", planId, interval);
@@ -37750,6 +39441,18 @@ function trimEnv3(v) {
 }
 __name(trimEnv3, "trimEnv");
 var fail = /* @__PURE__ */ __name((error, status) => Response.json({ success: false, error }, { status }), "fail");
+function sumProrationCents(invoiceBody) {
+  let total = 0;
+  let sawProration = false;
+  for (const line of invoiceBody?.lines?.data || []) {
+    if (line.proration === true) {
+      total += line.amount || 0;
+      sawProration = true;
+    }
+  }
+  return sawProration ? total : invoiceBody?.amount_due ?? invoiceBody?.total ?? null;
+}
+__name(sumProrationCents, "sumProrationCents");
 async function prepareSwitch(request, env2) {
   if (request.method !== "POST") return { error: fail("Method not allowed", 405) };
   const db = env2.CONSENT_WEBAPP;
@@ -37769,12 +39472,13 @@ async function prepareSwitch(request, env2) {
     return { error: fail("Invalid JSON", 400) };
   }
   const organizationId = (body.organizationId || "").trim();
+  const siteId = (body.siteId || "").trim() || null;
   const targetInterval = body.targetInterval === "yearly" ? "yearly" : body.targetInterval === "monthly" ? "monthly" : null;
   if (!organizationId) return { error: fail("organizationId required", 400) };
   if (!targetInterval) return { error: fail("targetInterval must be monthly or yearly", 400) };
   const member = await getOrganizationMember(db, userId, organizationId);
   if (!member) return { error: fail("Not allowed for this organization", 403) };
-  const sub = await getSubscriptionByOrganization(db, organizationId);
+  const sub = (siteId ? await getSubscriptionBySiteId(db, siteId) : null) || await getSubscriptionByOrganization(db, organizationId);
   if (!sub) return { error: fail("No active subscription found", 404) };
   const stripeSubId = sub.stripeSubscriptionId ?? sub.stripesubscriptionid;
   const currentInterval = (sub.interval ?? "monthly").toLowerCase();
@@ -37784,12 +39488,12 @@ async function prepareSwitch(request, env2) {
   if (!["basic", "essential", "growth"].includes(planId)) {
     return { error: fail("Cannot switch interval for this plan type", 400) };
   }
-  const tierPriceMap = {
+  const tierPriceMap3 = {
     basic: { monthly: trimEnv3(env2.STRIPE_PRICE_BASIC_MONTHLY), yearly: trimEnv3(env2.STRIPE_PRICE_BASIC_YEARLY) },
     essential: { monthly: trimEnv3(env2.STRIPE_PRICE_ESSENTIAL_MONTHLY), yearly: trimEnv3(env2.STRIPE_PRICE_ESSENTIAL_YEARLY) },
     growth: { monthly: trimEnv3(env2.STRIPE_PRICE_GROWTH_MONTHLY), yearly: trimEnv3(env2.STRIPE_PRICE_GROWTH_YEARLY) }
   };
-  const newPriceId = tierPriceMap[planId]?.[targetInterval];
+  const newPriceId = tierPriceMap3[planId]?.[targetInterval];
   if (!newPriceId) {
     console.error("[SwitchInterval] Missing price env var for", planId, targetInterval);
     return { error: fail(`Price not configured for ${planId} ${targetInterval}`, 503) };
@@ -37856,9 +39560,6 @@ async function handleSwitchIntervalPreview(request, env2) {
       "subscription_items[0][price]": newPriceId,
       subscription_proration_behavior: "create_prorations"
     });
-    if (targetInterval === "yearly") {
-      params.set("subscription_billing_cycle_anchor", "now");
-    }
     try {
       const res = await fetch(`https://api.stripe.com/v1/invoices/upcoming?${params.toString()}`, {
         headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` }
@@ -37868,7 +39569,7 @@ async function handleSwitchIntervalPreview(request, env2) {
         console.warn("[SwitchInterval] preview upcoming-invoice error:", inv.error.message);
         return fail(inv.error.message || "Could not preview the charge", 400);
       }
-      amountDueCents = inv.amount_due ?? inv.total ?? null;
+      amountDueCents = sumProrationCents(inv);
       currency = inv.currency || "usd";
     } catch (e) {
       console.warn("[SwitchInterval] preview fetch failed:", e?.message);
@@ -37906,11 +39607,9 @@ async function handleSwitchBillingInterval(request, env2) {
   const updateParams = new URLSearchParams({
     "items[0][id]": subItemId,
     "items[0][price]": newPriceId,
-    proration_behavior: "create_prorations"
+    proration_behavior: isTrialing ? "none" : "always_invoice",
+    payment_behavior: "error_if_incomplete"
   });
-  if (targetInterval === "yearly" && !isTrialing) {
-    updateParams.set("billing_cycle_anchor", "now");
-  }
   const updateRes = await fetch(`https://api.stripe.com/v1/subscriptions/${stripeSubId}`, {
     method: "POST",
     headers: {
@@ -37965,6 +39664,424 @@ async function handleSwitchBillingInterval(request, env2) {
   });
 }
 __name(handleSwitchBillingInterval, "handleSwitchBillingInterval");
+
+// src/handlers/changeTier.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+init_db();
+var PLAN_ORDER = { basic: 1, essential: 2, growth: 3 };
+function getSessionIdFromCookie10(request) {
+  const cookie = request.headers.get("Cookie") || "";
+  const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
+  return match ? match[1].trim() : null;
+}
+__name(getSessionIdFromCookie10, "getSessionIdFromCookie");
+function trimEnv4(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s || null;
+}
+__name(trimEnv4, "trimEnv");
+var fail2 = /* @__PURE__ */ __name((error, status) => Response.json({ success: false, error }, { status }), "fail");
+async function stripeGet(env2, path) {
+  const res = await fetch(`https://api.stripe.com/v1${path}`, {
+    headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` }
+  });
+  return { status: res.status, body: await res.json() };
+}
+__name(stripeGet, "stripeGet");
+async function stripePost(env2, path, formObj) {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(formObj)) {
+    if (v != null) params.set(k, String(v));
+  }
+  const res = await fetch(`https://api.stripe.com/v1${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}`,
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: params.toString()
+  });
+  return { status: res.status, body: await res.json() };
+}
+__name(stripePost, "stripePost");
+async function prepareChange(request, env2) {
+  if (request.method !== "POST") return { error: fail2("Method not allowed", 405) };
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) return { error: fail2("Database not available", 503) };
+  if (!env2.STRIPE_SECRET_KEY) return { error: fail2("Stripe not configured", 503) };
+  const sid = getSessionIdFromCookie10(request);
+  if (!sid) return { error: fail2("Login required", 401) };
+  const session = await getSessionById(db, sid);
+  if (!session) return { error: fail2("Login required", 401) };
+  const userId = session.userId ?? session.user_id;
+  const user = await getUserById(db, userId);
+  if (!user) return { error: fail2("Login required", 401) };
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return { error: fail2("Invalid JSON", 400) };
+  }
+  const organizationId = (body.organizationId || "").trim();
+  const siteId = (body.siteId || "").trim() || null;
+  const planId = ["basic", "essential", "growth"].includes(body.planId) ? body.planId : null;
+  const interval = body.interval === "yearly" ? "yearly" : "monthly";
+  const promotionCodeId = body.promotionCodeId && String(body.promotionCodeId).trim() ? String(body.promotionCodeId).trim() : null;
+  const paymentMethodId = body.paymentMethodId && String(body.paymentMethodId).trim() ? String(body.paymentMethodId).trim() : null;
+  if (!organizationId) return { error: fail2("organizationId required", 400) };
+  if (!planId) return { error: fail2("planId must be basic, essential, or growth", 400) };
+  const member = await getOrganizationMember(db, userId, organizationId);
+  if (!member) return { error: fail2("Not allowed for this organization", 403) };
+  const sub = (siteId ? await getSubscriptionBySiteId(db, siteId) : null) || await getSubscriptionByOrganization(db, organizationId);
+  if (!sub) return { error: fail2("No active subscription found", 404) };
+  const stripeSubId = sub.stripeSubscriptionId ?? sub.stripesubscriptionid;
+  const currentPlanId = String(sub.planId ?? sub.planid ?? "").toLowerCase();
+  const currentInterval = String(sub.interval ?? "monthly").toLowerCase();
+  if (!stripeSubId) return { error: fail2("Subscription has no Stripe ID", 400) };
+  if (!PLAN_ORDER[currentPlanId]) {
+    return { error: fail2("Current plan is not a tier plan; cannot change here", 400) };
+  }
+  if (currentPlanId === planId && currentInterval === interval) {
+    return { error: fail2("Already on this plan", 400) };
+  }
+  const tierPriceMap3 = {
+    basic: { monthly: trimEnv4(env2.STRIPE_PRICE_BASIC_MONTHLY), yearly: trimEnv4(env2.STRIPE_PRICE_BASIC_YEARLY) },
+    essential: { monthly: trimEnv4(env2.STRIPE_PRICE_ESSENTIAL_MONTHLY), yearly: trimEnv4(env2.STRIPE_PRICE_ESSENTIAL_YEARLY) },
+    growth: { monthly: trimEnv4(env2.STRIPE_PRICE_GROWTH_MONTHLY), yearly: trimEnv4(env2.STRIPE_PRICE_GROWTH_YEARLY) }
+  };
+  const newPriceId = tierPriceMap3[planId]?.[interval];
+  if (!newPriceId) {
+    console.error("[ChangeTier] Missing price env var for", planId, interval);
+    return { error: fail2(`Price not configured for ${planId} ${interval}`, 503) };
+  }
+  const isDowngrade = PLAN_ORDER[planId] < PLAN_ORDER[currentPlanId];
+  const subRes = await stripeGet(env2, `/subscriptions/${stripeSubId}`);
+  if (subRes.body.error) {
+    console.error("[ChangeTier] Stripe fetch sub failed:", subRes.body.error.message);
+    return { error: fail2(subRes.body.error.message || "Failed to read subscription", 400) };
+  }
+  const stripeSub = subRes.body;
+  const subItemId = stripeSub.items?.data?.[0]?.id;
+  if (!subItemId) return { error: fail2("Could not read subscription item ID", 500) };
+  const nowSec = Math.floor(Date.now() / 1e3);
+  const isTrialing = stripeSub.status === "trialing" || stripeSub.trial_end && stripeSub.trial_end > nowSec;
+  const trialEndISO = stripeSub.trial_end ? new Date(stripeSub.trial_end * 1e3).toISOString() : null;
+  const periodEndISO = stripeSub.current_period_end ? new Date(stripeSub.current_period_end * 1e3).toISOString() : null;
+  return {
+    ctx: {
+      db,
+      user,
+      env: env2,
+      organizationId,
+      siteId,
+      planId,
+      interval,
+      promotionCodeId,
+      paymentMethodId,
+      sub,
+      stripeSubId,
+      stripeSub,
+      subItemId,
+      newPriceId,
+      currentPlanId,
+      currentInterval,
+      isDowngrade,
+      isTrialing,
+      trialEndISO,
+      periodEndISO
+    }
+  };
+}
+__name(prepareChange, "prepareChange");
+function sumProrationCents2(invoiceBody) {
+  let total = 0;
+  let sawProration = false;
+  for (const line of invoiceBody?.lines?.data || []) {
+    if (line.proration === true) {
+      total += line.amount || 0;
+      sawProration = true;
+    }
+  }
+  return sawProration ? total : invoiceBody?.amount_due ?? invoiceBody?.total ?? null;
+}
+__name(sumProrationCents2, "sumProrationCents");
+async function previewImmediateAmount(env2, ctx) {
+  const { stripeSubId, subItemId, newPriceId, promotionCodeId, stripeSub } = ctx;
+  const base = {
+    subscription: stripeSubId,
+    "subscription_items[0][id]": subItemId,
+    "subscription_items[0][price]": newPriceId,
+    subscription_proration_behavior: "create_prorations"
+  };
+  if (promotionCodeId) base["discounts[0][promotion_code]"] = promotionCodeId;
+  const qs = new URLSearchParams(base).toString();
+  const up = await stripeGet(env2, `/invoices/upcoming?${qs}`);
+  if (!up.body.error) {
+    return { amountDueCents: sumProrationCents2(up.body), currency: up.body.currency || "usd" };
+  }
+  const flexible = up.status === 400 && /billing_mode = flexible/i.test(up.body.error?.message || "");
+  if (!flexible) {
+    if (promotionCodeId) {
+      const retry2 = { ...base };
+      delete retry2["discounts[0][promotion_code]"];
+      const up2 = await stripeGet(env2, `/invoices/upcoming?${new URLSearchParams(retry2).toString()}`);
+      if (!up2.body.error) {
+        return { amountDueCents: sumProrationCents2(up2.body), currency: up2.body.currency || "usd", couponPreviewSkipped: true };
+      }
+    }
+    return { error: up.body.error.message || "Could not preview the charge" };
+  }
+  const customerId = stripeSub.customer;
+  const items = stripeSub.items?.data || [];
+  const form = {
+    customer: customerId,
+    subscription: stripeSubId,
+    "subscription_details[proration_behavior]": "create_prorations"
+  };
+  items.forEach((item, i) => {
+    form[`subscription_details[items][${i}][id]`] = item.id;
+    form[`subscription_details[items][${i}][price]`] = i === 0 ? newPriceId : item.price?.id;
+  });
+  if (promotionCodeId) form["discounts[0][promotion_code]"] = promotionCodeId;
+  const prev = await stripePost(env2, "/invoices/create_preview", form);
+  if (prev.body.error) {
+    return { error: prev.body.error.message || "Could not preview the charge" };
+  }
+  return { amountDueCents: sumProrationCents2(prev.body), currency: prev.body.currency || "usd" };
+}
+__name(previewImmediateAmount, "previewImmediateAmount");
+async function handleChangeTierPreview(request, env2) {
+  console.log("[ChangeTier] POST /preview");
+  const prep = await prepareChange(request, env2);
+  if (prep.error) return prep.error;
+  const ctx = prep.ctx;
+  const { currentPlanId, currentInterval, planId, interval, isDowngrade, isTrialing, trialEndISO, periodEndISO, newPriceId, env: _e } = ctx;
+  if (isTrialing) {
+    const priceRes = await stripeGet(env2, `/prices/${newPriceId}`);
+    if (priceRes.body.error) return fail2(priceRes.body.error.message || "Could not read the plan price", 400);
+    return Response.json({
+      success: true,
+      direction: isDowngrade ? "downgrade" : "upgrade",
+      currentPlanId,
+      currentInterval,
+      planId,
+      interval,
+      isTrialing: true,
+      amountDueCents: priceRes.body.unit_amount ?? null,
+      currency: priceRes.body.currency || "usd",
+      trialEnd: trialEndISO,
+      effectiveAt: null
+    });
+  }
+  if (isDowngrade) {
+    const priceRes = await stripeGet(env2, `/prices/${newPriceId}`);
+    const newAmount = priceRes.body?.error ? null : priceRes.body.unit_amount ?? null;
+    return Response.json({
+      success: true,
+      direction: "downgrade",
+      currentPlanId,
+      currentInterval,
+      planId,
+      interval,
+      isTrialing: false,
+      amountDueCents: 0,
+      // nothing charged now
+      newPlanAmountCents: newAmount,
+      // what they'll pay from the next period
+      currency: priceRes.body?.currency || "usd",
+      trialEnd: null,
+      effectiveAt: periodEndISO
+    });
+  }
+  const res = await previewImmediateAmount(env2, ctx);
+  if (res.error) return fail2(res.error, 400);
+  return Response.json({
+    success: true,
+    direction: "upgrade",
+    currentPlanId,
+    currentInterval,
+    planId,
+    interval,
+    isTrialing: false,
+    amountDueCents: res.amountDueCents,
+    currency: res.currency,
+    couponPreviewSkipped: !!res.couponPreviewSkipped,
+    trialEnd: null,
+    effectiveAt: null
+  });
+}
+__name(handleChangeTierPreview, "handleChangeTierPreview");
+async function handleChangeTier(request, env2) {
+  console.log("[ChangeTier] POST /api/subscriptions/change-tier");
+  const prep = await prepareChange(request, env2);
+  if (prep.error) return prep.error;
+  const {
+    db,
+    user,
+    organizationId,
+    siteId,
+    planId,
+    interval,
+    promotionCodeId,
+    paymentMethodId,
+    sub,
+    stripeSubId,
+    stripeSub,
+    subItemId,
+    newPriceId,
+    isDowngrade,
+    isTrialing,
+    periodEndISO
+  } = prep.ctx;
+  if (isDowngrade && !isTrialing) {
+    const currentPriceId = stripeSub.items?.data?.[0]?.price?.id;
+    const startDate = stripeSub.current_period_start;
+    const changeDate = stripeSub.current_period_end;
+    if (stripeSub.schedule) {
+      await stripePost(env2, `/subscription_schedules/${stripeSub.schedule}/release`, {}).catch(() => {
+      });
+    }
+    const created = await stripePost(env2, "/subscription_schedules", { from_subscription: stripeSubId });
+    if (created.body.error) {
+      console.error("[ChangeTier] schedule create failed:", created.body.error.message);
+      return fail2(created.body.error.message || "Could not schedule the downgrade", 400);
+    }
+    const schedId = created.body.id;
+    const updateForm2 = {
+      end_behavior: "release",
+      "phases[0][items][0][price]": currentPriceId,
+      "phases[0][items][0][quantity]": "1",
+      "phases[0][start_date]": startDate,
+      "phases[0][end_date]": changeDate,
+      "phases[0][proration_behavior]": "none",
+      "phases[1][items][0][price]": newPriceId,
+      "phases[1][items][0][quantity]": "1",
+      "phases[1][proration_behavior]": "none",
+      "metadata[planId]": planId,
+      "metadata[interval]": interval,
+      "metadata[siteId]": siteId || (sub.siteId ?? sub.siteid ?? ""),
+      "metadata[organizationId]": organizationId
+    };
+    const updated = await stripePost(env2, `/subscription_schedules/${schedId}`, updateForm2);
+    if (updated.body.error) {
+      console.error("[ChangeTier] schedule update failed:", updated.body.error.message);
+      return fail2(updated.body.error.message || "Could not schedule the downgrade", 400);
+    }
+    return Response.json({
+      success: true,
+      direction: "downgrade",
+      scheduled: true,
+      effectiveAt: periodEndISO,
+      planId,
+      interval
+    });
+  }
+  if (stripeSub.schedule) {
+    await stripePost(env2, `/subscription_schedules/${stripeSub.schedule}/release`, {}).catch(() => {
+    });
+  }
+  const customerId = stripeSub.customer;
+  if (paymentMethodId) {
+    const attach = await stripePost(env2, `/payment_methods/${paymentMethodId}/attach`, { customer: customerId });
+    if (attach.body.error) {
+      console.error("[ChangeTier] card attach failed:", attach.body.error.message);
+      return fail2(attach.body.error.message || "Could not use that card. Please try another.", 400);
+    }
+  }
+  const updateForm = {
+    "items[0][id]": subItemId,
+    "items[0][price]": newPriceId,
+    // always_invoice → invoice the prorated difference immediately.
+    proration_behavior: isTrialing ? "none" : "always_invoice",
+    // New card: collect on the client (supports 3D Secure) via default_incomplete.
+    // Card on file: charge now and surface failure synchronously.
+    payment_behavior: paymentMethodId ? "default_incomplete" : "error_if_incomplete",
+    "metadata[planId]": planId,
+    "metadata[interval]": interval,
+    "expand[0]": "latest_invoice.payment_intent"
+  };
+  if (paymentMethodId) updateForm["default_payment_method"] = paymentMethodId;
+  if (promotionCodeId) updateForm["discounts[0][promotion_code]"] = promotionCodeId;
+  const updateRes = await stripePost(env2, `/subscriptions/${stripeSubId}`, updateForm);
+  if (updateRes.body.error) {
+    console.error("[ChangeTier] Stripe update failed:", updateRes.body.error.message);
+    return fail2(updateRes.body.error.message || "Payment could not be completed", 400);
+  }
+  const updatedSub = updateRes.body;
+  const latestInv = updatedSub.latest_invoice && typeof updatedSub.latest_invoice === "object" ? updatedSub.latest_invoice : null;
+  const pi = latestInv && typeof latestInv.payment_intent === "object" ? latestInv.payment_intent : null;
+  if (paymentMethodId && pi) {
+    if (pi.status === "requires_action" || pi.status === "requires_confirmation") {
+      return Response.json({
+        success: true,
+        direction: "upgrade",
+        scheduled: false,
+        requiresAction: true,
+        clientSecret: pi.client_secret,
+        subscriptionId: stripeSubId,
+        invoiceId: latestInv.id,
+        planId,
+        interval
+      });
+    }
+    if (pi.status === "requires_payment_method") {
+      return fail2("Your card was declined. Please try another card.", 402);
+    }
+  }
+  let amountPaidCents = null;
+  let currency = "usd";
+  let invoiceId = latestInv ? latestInv.id : updatedSub.latest_invoice || null;
+  let invoiceUrl = null;
+  let paymentStatus = "paid";
+  if (invoiceId) {
+    const inv = await stripeGet(env2, `/invoices/${invoiceId}`);
+    if (!inv.body.error) {
+      amountPaidCents = inv.body.amount_paid ?? inv.body.amount_due ?? null;
+      currency = inv.body.currency || "usd";
+      invoiceUrl = inv.body.hosted_invoice_url || null;
+      paymentStatus = inv.body.status || paymentStatus;
+    }
+  }
+  const newPeriodEndISO = updatedSub.current_period_end ? new Date(updatedSub.current_period_end * 1e3).toISOString() : periodEndISO;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  await db.prepare(
+    `UPDATE Subscription SET planId = ?, planType = 'tier', interval = ?, stripePriceId = ?, currentPeriodEnd = ?, updatedAt = ?
+     WHERE stripeSubscriptionId = ?`
+  ).bind(planId, interval, newPriceId, newPeriodEndISO, now, stripeSubId).run();
+  try {
+    const sId = siteId ?? sub.siteId ?? sub.siteid;
+    const siteRow = sId ? await db.prepare("SELECT domain, legacySource FROM Site WHERE id = ?1 LIMIT 1").bind(sId).first() : null;
+    await syncSubscriptionUpdateToLegacy(env2, {
+      email: user.email || null,
+      domain: siteRow?.domain || null,
+      subscriptionId: stripeSubId,
+      customerId: sub.stripeCustomerId ?? sub.stripecustomerid,
+      status: "active",
+      cancelAtPeriodEnd: !!(sub.cancelAtPeriodEnd ?? sub.cancelatperiodend),
+      platform: siteRow?.legacySource || null,
+      interval
+    });
+  } catch (syncErr) {
+    console.warn("[ChangeTier] Legacy sync failed (non-critical):", syncErr?.message);
+  }
+  console.log("[ChangeTier] upgraded to", planId, interval, "for org:", organizationId);
+  return Response.json({
+    success: true,
+    direction: "upgrade",
+    scheduled: false,
+    planId,
+    interval,
+    amountPaidCents,
+    currency,
+    invoiceId,
+    invoiceUrl,
+    paymentStatus,
+    nextBillingDate: newPeriodEndISO
+  });
+}
+__name(handleChangeTier, "handleChangeTier");
 
 // src/handlers/debugSchema.js
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
@@ -39450,7 +41567,7 @@ async function handleAdminMigrateSingleSite(request, env2) {
   const authKv = env2.WEBFLOW_AUTHENTICATION;
   if (!activeKv) return Response.json({ success: false, error: "ACTIVE_SITES_CONSENTBIT KV not configured" }, { status: 503 });
   const logs = [];
-  const log = /* @__PURE__ */ __name((msg) => {
+  const log2 = /* @__PURE__ */ __name((msg) => {
     logs.push(msg);
   }, "log");
   let domain2 = inputDomain;
@@ -39458,45 +41575,45 @@ async function handleAdminMigrateSingleSite(request, env2) {
   if (body.rawEntry) {
     activeEntry = body.rawEntry;
     if (!domain2) domain2 = normalizeDomain4(activeEntry.domain || activeEntry.siteDomain || "");
-    log(`Using rawEntry \u2014 domain resolved to "${domain2}"`);
+    log2(`Using rawEntry \u2014 domain resolved to "${domain2}"`);
   }
   if (!activeEntry && domain2) {
-    log(`Looking up ACTIVE_SITES_CONSENTBIT key "${domain2}"...`);
+    log2(`Looking up ACTIVE_SITES_CONSENTBIT key "${domain2}"...`);
     activeEntry = await activeKv.get(domain2, { type: "json" });
-    log(activeEntry ? `Found KV entry for "${domain2}"` : `No KV entry for "${domain2}"`);
+    log2(activeEntry ? `Found KV entry for "${domain2}"` : `No KV entry for "${domain2}"`);
   }
   if (!activeEntry && inputWfSiteId && authKv) {
-    log(`Looking up WEBFLOW_AUTHENTICATION key "${inputWfSiteId}" to resolve domain...`);
+    log2(`Looking up WEBFLOW_AUTHENTICATION key "${inputWfSiteId}" to resolve domain...`);
     try {
       const raw = await authKv.get(inputWfSiteId);
       if (raw) {
         const wfData = typeof raw === "string" ? JSON.parse(raw) : raw;
         const candidateDomain = normalizeDomain4(wfData.customDomain || wfData.stagingUrl || "");
-        log(`WEBFLOW_AUTHENTICATION resolved candidate domain "${candidateDomain}"`);
+        log2(`WEBFLOW_AUTHENTICATION resolved candidate domain "${candidateDomain}"`);
         if (candidateDomain) {
           activeEntry = await activeKv.get(candidateDomain, { type: "json" });
           if (activeEntry) {
             domain2 = candidateDomain;
-            log(`Found KV entry via wfSiteId \u2192 domain "${domain2}"`);
-          } else log(`No KV entry for candidate domain "${candidateDomain}"`);
+            log2(`Found KV entry via wfSiteId \u2192 domain "${domain2}"`);
+          } else log2(`No KV entry for candidate domain "${candidateDomain}"`);
         }
       } else {
-        log(`No WEBFLOW_AUTHENTICATION entry for wfSiteId="${inputWfSiteId}"`);
+        log2(`No WEBFLOW_AUTHENTICATION entry for wfSiteId="${inputWfSiteId}"`);
       }
     } catch (e) {
-      log(`WEBFLOW_AUTHENTICATION lookup error: ${e?.message}`);
+      log2(`WEBFLOW_AUTHENTICATION lookup error: ${e?.message}`);
     }
   }
   if (!activeEntry) {
-    log(`FAILED: no active KV entry found`);
+    log2(`FAILED: no active KV entry found`);
     return Response.json({ success: false, error: `No KV entry found for domain="${inputDomain}" or wfSiteId="${inputWfSiteId}". Try passing rawEntry directly.`, logs }, { status: 404 });
   }
   const email = activeEntry.email;
   if (!email) {
-    log(`FAILED: KV entry has no email field`);
+    log2(`FAILED: KV entry has no email field`);
     return Response.json({ success: false, error: "KV entry has no email field", logs }, { status: 422 });
   }
-  log(`email="${email}"`);
+  log2(`email="${email}"`);
   const wfSiteId = inputWfSiteId || activeEntry.wfSiteId || null;
   let siteName = domain2;
   let stagingUrl = null;
@@ -39509,12 +41626,12 @@ async function handleAdminMigrateSingleSite(request, env2) {
       if (bannerRaw) {
         const bannerStored = typeof bannerRaw === "string" ? JSON.parse(bannerRaw) : bannerRaw;
         appData = bannerStored.appData || null;
-        log(appData ? `Banner-Settings found \u2014 appData will be used for BannerCustomization` : `Banner-Settings entry exists but has no appData`);
+        log2(appData ? `Banner-Settings found \u2014 appData will be used for BannerCustomization` : `Banner-Settings entry exists but has no appData`);
       } else {
-        log(`No Banner-Settings:${wfSiteId} entry`);
+        log2(`No Banner-Settings:${wfSiteId} entry`);
       }
     } catch (e) {
-      log(`Banner-Settings lookup error: ${e?.message}`);
+      log2(`Banner-Settings lookup error: ${e?.message}`);
     }
     try {
       const raw = await authKv.get(wfSiteId);
@@ -39525,19 +41642,19 @@ async function handleAdminMigrateSingleSite(request, env2) {
         customDomain = wfData.customDomain || null;
         if (!appData) {
           configJson = wfData.config || wfData.configJson || null;
-          log(`Auth KV \u2014 siteName="${siteName}", no appData \u2014 configJson fallback: ${!!configJson}`);
+          log2(`Auth KV \u2014 siteName="${siteName}", no appData \u2014 configJson fallback: ${!!configJson}`);
         } else {
-          log(`Auth KV \u2014 siteName="${siteName}", appData already loaded`);
+          log2(`Auth KV \u2014 siteName="${siteName}", appData already loaded`);
         }
       } else {
-        log(`No WEBFLOW_AUTHENTICATION entry for wfSiteId="${wfSiteId}" \u2014 using domain as siteName`);
+        log2(`No WEBFLOW_AUTHENTICATION entry for wfSiteId="${wfSiteId}" \u2014 using domain as siteName`);
       }
     } catch (e) {
-      log(`Auth KV lookup error: ${e?.message}`);
+      log2(`Auth KV lookup error: ${e?.message}`);
     }
   }
   if (dryRun) {
-    log("Dry run complete");
+    log2("Dry run complete");
     return Response.json({
       success: true,
       dryRun: true,
@@ -39558,13 +41675,13 @@ async function handleAdminMigrateSingleSite(request, env2) {
     });
   }
   const now = nowIso2();
-  log(`Upserting User email="${email}"...`);
+  log2(`Upserting User email="${email}"...`);
   const userId = await upsertUser2(db, email, now);
-  log(`userId="${userId}"`);
-  log(`Upserting Organization for userId="${userId}"...`);
+  log2(`userId="${userId}"`);
+  log2(`Upserting Organization for userId="${userId}"...`);
   const orgId = await upsertOrganization2(db, userId, siteName, now);
-  log(`orgId="${orgId}"`);
-  log(`Upserting Site domain="${domain2}" platform="webflow"...`);
+  log2(`orgId="${orgId}"`);
+  log2(`Upserting Site domain="${domain2}" platform="webflow"...`);
   const { siteId, cdnScriptId } = await upsertSite2(db, {
     organizationId: orgId,
     domain: domain2,
@@ -39575,10 +41692,10 @@ async function handleAdminMigrateSingleSite(request, env2) {
     platform: "webflow",
     now
   });
-  log(`siteId="${siteId}" cdnScriptId="${cdnScriptId}"`);
+  log2(`siteId="${siteId}" cdnScriptId="${cdnScriptId}"`);
   const siteRow = await db.prepare("SELECT cdnScriptId, apiKey FROM Site WHERE id = ?1").bind(siteId).first();
   const licenseKey = siteRow?.apiKey || null;
-  log(`Upserting Subscription subscriptionId="${activeEntry.subscriptionId || "none"}" plan="${activeEntry.plan || "basic"}"...`);
+  log2(`Upserting Subscription subscriptionId="${activeEntry.subscriptionId || "none"}" plan="${activeEntry.plan || "basic"}"...`);
   await upsertSubscription2(db, {
     organizationId: orgId,
     siteId,
@@ -39591,25 +41708,25 @@ async function handleAdminMigrateSingleSite(request, env2) {
     planId: activeEntry.plan || "basic",
     now
   });
-  log("Subscription upserted");
+  log2("Subscription upserted");
   if (appData) {
-    log("Upserting BannerCustomization from Banner-Settings appData (primary)...");
+    log2("Upserting BannerCustomization from Banner-Settings appData (primary)...");
     await upsertBannerCustomizationFromAppData(db, siteId, appData, now);
-    log("BannerCustomization upserted from appData");
+    log2("BannerCustomization upserted from appData");
   } else if (configJson) {
-    log("Upserting BannerCustomization from configJson (fallback)...");
+    log2("Upserting BannerCustomization from configJson (fallback)...");
     await upsertBannerCustomization(db, siteId, configJson, now);
-    log("BannerCustomization upserted from configJson");
+    log2("BannerCustomization upserted from configJson");
   } else {
-    log("No appData or configJson \u2014 BannerCustomization skipped");
+    log2("No appData or configJson \u2014 BannerCustomization skipped");
   }
   const newIds = { cdnScriptId, webappSiteId: siteId, orgId, licenseKey };
-  log(`Updating ACTIVE_SITES_CONSENTBIT key "${domain2}" with new IDs...`);
+  log2(`Updating ACTIVE_SITES_CONSENTBIT key "${domain2}" with new IDs...`);
   const updatedActive = { ...activeEntry, ...newIds, plan: "basic" };
   await activeKv.put(domain2, JSON.stringify(updatedActive));
-  log("ACTIVE_SITES_CONSENTBIT updated");
+  log2("ACTIVE_SITES_CONSENTBIT updated");
   if (authKv && wfSiteId) {
-    log(`Updating WEBFLOW_AUTHENTICATION key "${wfSiteId}" with new IDs...`);
+    log2(`Updating WEBFLOW_AUTHENTICATION key "${wfSiteId}" with new IDs...`);
     try {
       const raw = await authKv.get(wfSiteId);
       const existing = raw ? typeof raw === "string" ? JSON.parse(raw) : raw : {};
@@ -39619,12 +41736,12 @@ async function handleAdminMigrateSingleSite(request, env2) {
         plan: "basic",
         ...email ? { email } : {}
       }));
-      log("WEBFLOW_AUTHENTICATION updated");
+      log2("WEBFLOW_AUTHENTICATION updated");
     } catch (e) {
-      log(`WEBFLOW_AUTHENTICATION update error: ${e?.message}`);
+      log2(`WEBFLOW_AUTHENTICATION update error: ${e?.message}`);
     }
   }
-  log("Migration complete");
+  log2("Migration complete");
   return Response.json({
     success: true,
     logs,
@@ -41024,7 +43141,7 @@ async function handleAdminBackfillPosthog(request, env2) {
       const planId = sub?.planId || sub?.planid || null;
       const interval = sub?.interval || null;
       const distinctId = isWebapp ? row.email : row.orgId;
-      const eventName = isWebapp ? "account_created" : "app_installed";
+      const eventName = isWebapp ? "user_account_created" : "app_installed";
       await capturePostHogEvent(env2, distinctId, eventName, {
         platform: platform2,
         domain: row.domain,
@@ -41033,10 +43150,12 @@ async function handleAdminBackfillPosthog(request, env2) {
         backfilled: true
       });
       if (sub && ["active", "trialing", "past_due"].includes(subStatus)) {
-        await capturePostHogEvent(env2, distinctId, "paid_plan_activated", {
+        await capturePostHogEvent(env2, distinctId, "subscription_activated", {
           status: subStatus,
           plan: planId,
+          plan_tier: planId,
           interval,
+          billing_cycle: /^(year|annual)/i.test(String(interval)) ? "annual" : "monthly",
           platform: platform2,
           site_id: row.siteId,
           backfilled: true
@@ -41071,6 +43190,92 @@ async function handleAdminBackfillPosthog(request, env2) {
   });
 }
 __name(handleAdminBackfillPosthog, "handleAdminBackfillPosthog");
+
+// src/handlers/adminGa4Test.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+async function handleAdminGa4Test(request, env2) {
+  if (request.method !== "POST") {
+    return Response.json({ error: "Method not allowed" }, { status: 405 });
+  }
+  const adminKey = request.headers.get("X-Admin-Key");
+  if (!adminKey || adminKey !== (env2.ADMIN_SECRET || env2.ADMIN_KEY)) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  const body = await request.json().catch(() => ({}));
+  const email = body.email || "ga4-test@consentbit.com";
+  const eventName = body.event || "ga4_connection_test";
+  const measurementId = env2.GA4_MEASUREMENT_ID;
+  const apiSecret = env2.GA4_API_SECRET;
+  const config3 = {
+    measurement_id: measurementId || null,
+    measurement_id_set: Boolean(measurementId),
+    api_secret_set: Boolean(apiSecret),
+    api_secret_length: apiSecret ? String(apiSecret).length : 0
+  };
+  if (!measurementId || !apiSecret) {
+    return Response.json({
+      ok: false,
+      reason: "GA4_MEASUREMENT_ID or GA4_API_SECRET is not set on this worker env",
+      config: config3
+    }, { status: 200 });
+  }
+  const identity2 = await ga4IdentityForEmail(email);
+  const payload = {
+    client_id: identity2.clientId,
+    user_id: identity2.userId,
+    events: [
+      {
+        name: eventName,
+        params: {
+          platform: "webapp",
+          source: "admin_ga4_test",
+          engagement_time_msec: 1,
+          // Makes this specific event visible in GA4 DebugView, unlike the
+          // normal server-side events which do not set it.
+          debug_mode: true
+        }
+      }
+    ]
+  };
+  const qs = `measurement_id=${encodeURIComponent(measurementId)}&api_secret=${encodeURIComponent(apiSecret)}`;
+  let validation = null;
+  let debugStatus = null;
+  try {
+    const debugRes = await fetch(`https://www.google-analytics.com/debug/mp/collect?${qs}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    debugStatus = debugRes.status;
+    validation = await debugRes.json().catch(() => null);
+  } catch (e) {
+    validation = { error: e?.message };
+  }
+  let liveStatus = null;
+  try {
+    const liveRes = await fetch(`https://www.google-analytics.com/mp/collect?${qs}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    liveStatus = liveRes.status;
+  } catch (e) {
+    liveStatus = `error: ${e?.message}`;
+  }
+  const messages = validation?.validationMessages ?? [];
+  const valid = Array.isArray(messages) && messages.length === 0;
+  return Response.json({
+    ok: valid && liveStatus === 204,
+    config: config3,
+    event_name: eventName,
+    identity: { client_id: identity2.clientId, user_id_prefix: identity2.userId.slice(0, 12) },
+    debug_endpoint: { status: debugStatus, validationMessages: messages },
+    live_endpoint: { status: liveStatus, expected: 204 },
+    hint: valid ? "Payload is valid. Check GA4 Realtime and DebugView for the event within ~30s." : "GA4 rejected the payload \u2014 see validationMessages above."
+  });
+}
+__name(handleAdminGa4Test, "handleAdminGa4Test");
 
 // src/handlers/adminBackfillClickup.js
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
@@ -41387,6 +43592,2119 @@ async function handleAdminMicheleClickup(request, env2) {
 }
 __name(handleAdminMicheleClickup, "handleAdminMicheleClickup");
 
+// src/handlers/adminTestScanReport.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+
+// src/services/scanReport.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+function esc(v) {
+  return String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+__name(esc, "esc");
+var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+function formatDate(iso) {
+  const d = iso ? new Date(iso) : /* @__PURE__ */ new Date();
+  if (isNaN(d.getTime())) return "";
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+__name(formatDate, "formatDate");
+function buildScanReportHtml(data, meta) {
+  const c = data.counts || {};
+  const dom = data.domSignal || {};
+  const cookies = Array.isArray(data.cookies) ? data.cookies : [];
+  const trackers = Array.isArray(data.trackers) ? data.trackers : [];
+  const domain2 = data.scannedDomain || data.scannedUrl || meta.scanned_url || "-";
+  const vendorsDetected = trackers.length + (Number(data.totalUnknown) || 0);
+  const dateStr = formatDate(meta.scan_date);
+  const bannerFound = dom.cookieBanner === true;
+  const cmpList = Array.isArray(dom.cmp) ? dom.cmp : [];
+  const cmpText = cmpList.length ? `Detected CMP: ${cmpList.map((x4) => x4.name).join(", ")}` : "No CMP detected";
+  const attention = cookies.filter((ck) => !String(ck.category || "").toLowerCase().includes("necessary"));
+  const attentionRows = (attention.length ? attention : cookies).slice(0, 200).map((ck) => `
+    <tr>
+      <td><b>${esc(ck.name)}</b></td>
+      <td>${esc((ck.domain || "").replace(/^\./, "") || "-")}</td>
+      <td><span class="cat">${esc(ck.category || "other")}</span></td>
+      <td>${esc(String(ck.provider || "").trim().replace(/^-+$/, "") || "Not Available")}</td>
+    </tr>`).join("");
+  const chip = /* @__PURE__ */ __name((label, n, color) => `<span class="chip"><span class="d" style="background:${color}"></span>${label} \xB7 ${esc(n || 0)}</span>`, "chip");
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"/>
+  <style>
+    * { font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    body { color:#0b1324; margin:32px; }
+    h1 { font-size:30px; font-weight:800; margin:0 0 8px; }
+    .sub { color:#6b7280; font-size:13px; margin:0 0 26px; }
+    .sub b { color:#0b1324; }
+    .cards { display:flex; gap:14px; margin-bottom:30px; }
+    .card { flex:1; border:1px solid #e6e8ec; border-radius:14px; padding:16px 18px; }
+    .card .lbl { font-size:10px; letter-spacing:.06em; text-transform:uppercase; color:#6b7280; font-weight:700; margin-bottom:12px; }
+    .card .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:7px; vertical-align:middle; }
+    .card .big { font-size:30px; font-weight:800; line-height:1; }
+    .card .meta { font-size:12px; color:#6b7280; margin-top:8px; }
+    .red { color:#ef4444; } .amber { color:#f59e0b; }
+    h2 { font-size:18px; font-weight:800; margin:24px 0 12px; }
+    .chips { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:6px; }
+    .chip { background:#eef2f8; border-radius:999px; padding:8px 16px; font-size:13px; font-weight:600; color:#0b1324; }
+    .chip .d { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:7px; vertical-align:middle; }
+    .desc { color:#6b7280; font-size:13px; margin:0 0 12px; }
+    table { width:100%; border-collapse:collapse; font-size:12px; margin-top:6px; }
+    th { text-align:left; padding:9px 10px; background:#f8f9fc; color:#6b7280; text-transform:uppercase; font-size:10px; letter-spacing:.05em; border-bottom:1px solid #eef0f3; }
+    td { text-align:left; padding:9px 10px; border-bottom:1px solid #eef0f3; vertical-align:top; }
+    .cat { background:#eef2f8; border-radius:999px; padding:2px 10px; font-size:11px; text-transform:capitalize; }
+  </style></head><body>
+    <h1>Cookie compliance report</h1>
+    <p class="sub"><b>${esc(domain2)}</b> &nbsp;\xB7&nbsp; ${esc(vendorsDetected)} vendors detected &nbsp;\xB7&nbsp; ${esc(dateStr)}</p>
+
+    <div class="cards">
+      <div class="card">
+        <div class="lbl"><span class="dot" style="background:${bannerFound ? "#22c55e" : "#ef4444"}"></span>Cookie Banner</div>
+        <div class="big ${bannerFound ? "" : "red"}">${bannerFound ? "Found" : "Not found"}</div>
+        <div class="meta">${esc(cmpText)}</div>
+      </div>
+      <div class="card">
+        <div class="lbl"><span class="dot" style="background:#0b1324"></span>Vendors</div>
+        <div class="big">${esc(vendorsDetected)}</div>
+        <div class="meta">across all pages</div>
+      </div>
+      <div class="card">
+        <div class="lbl"><span class="dot" style="background:#ef4444"></span>Cookies</div>
+        <div class="big red">${esc(data.totalCookies ?? cookies.length)}</div>
+        <div class="meta">across all pages</div>
+      </div>
+      <div class="card">
+        <div class="lbl"><span class="dot" style="background:#f59e0b"></span>Compliance Score</div>
+        <div class="big amber">${esc(data.grade || "-")}</div>
+        <div class="meta">grade</div>
+      </div>
+    </div>
+
+    <h2>Identified cookies by category</h2>
+    <div class="chips">
+      ${chip("Necessary", c.necessary, "#3b82f6")}
+      ${chip("Functional", c.functional, "#3b82f6")}
+      ${chip("Analytics", c.analytics, "#3b82f6")}
+      ${chip("Advertisement", c.advertisement, "#3b82f6")}
+      ${chip("Other", c.other, "#3b82f6")}
+    </div>
+
+    <h2>Cookie Details</h2>
+    <table>
+      <thead><tr><th>Cookie Name</th><th>Domain</th><th>Category</th><th>Provider</th></tr></thead>
+      <tbody>${attentionRows || '<tr><td colspan="4">None detected</td></tr>'}</tbody>
+    </table>
+  </body></html>`;
+}
+__name(buildScanReportHtml, "buildScanReportHtml");
+function bytesToBase64(bytes) {
+  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let binary = "";
+  const chunk = 32768;
+  for (let i = 0; i < arr.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, arr.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+__name(bytesToBase64, "bytesToBase64");
+async function sendScanReportForId(env2, { to, name, scanId, force = false }) {
+  if (!scanId) return;
+  console.log("[ScanReport] start \u2014 scanId:", scanId, "| to:", to);
+  const db = env2.COOKIE_SCANNER_DB;
+  if (!db) {
+    console.warn("[ScanReport] COOKIE_SCANNER_DB not bound \u2014 skipping");
+    return;
+  }
+  if (!env2.BROWSER) {
+    console.warn("[ScanReport] BROWSER not bound \u2014 skipping");
+    return;
+  }
+  let row;
+  try {
+    row = await db.prepare(`SELECT id, scanned_url, scan_date, report_data, emailed_at FROM scan_reports WHERE id = ?1`).bind(scanId).first();
+  } catch (e) {
+    console.error("[ScanReport] lookup failed:", e?.message);
+    return;
+  }
+  if (!row) {
+    console.warn("[ScanReport] no scan_reports row for id", scanId);
+    return;
+  }
+  if (row.emailed_at && !force) {
+    console.log("[ScanReport] already emailed at", row.emailed_at, "\u2014 skipping scanId", scanId);
+    return;
+  }
+  let data;
+  try {
+    data = JSON.parse(row.report_data);
+  } catch {
+    data = {};
+  }
+  const domain2 = data.scannedDomain || data.scannedUrl || row.scanned_url || "";
+  const html = buildScanReportHtml(data, row);
+  let browser;
+  let pdfBase64;
+  try {
+    browser = await puppeteer_cloudflare_default.launch(env2.BROWSER);
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: "networkidle0" });
+    const pdf = await page.pdf({ format: "A4", printBackground: true, margin: { top: "20px", bottom: "20px" } });
+    pdfBase64 = bytesToBase64(pdf);
+  } catch (e) {
+    console.error("[ScanReport] PDF render failed:", e?.message);
+    if (browser) await browser.close().catch(() => {
+    });
+    return;
+  }
+  if (browser) await browser.close().catch(() => {
+  });
+  const displayName = name || "there";
+  const displayDomain = domain2 || "your website";
+  const subject = `Your cookie scan report${domain2 ? ` for ${displayDomain}` : ""}`;
+  const html_email = `
+    <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi ${esc(displayName)},</p>
+    <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
+      Thanks for scanning <strong style="color:#111827;">${esc(displayDomain)}</strong> with ConsentBit.
+      Your full cookie compliance report is attached to this email as a PDF.
+    </p>
+    <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
+      It lists every cookie and tracker we detected, grouped by category, along with your compliance grade.
+      Log in any time to set up a consent banner that brings your site into compliance.
+    </p>
+    <p style="margin:18px 0 0;color:#6b7280;font-size:14px;line-height:1.6;">Best regards,<br/>ConsentBit Team</p>`;
+  const text = `Hi ${displayName},
+
+Thanks for scanning ${displayDomain} with ConsentBit. Your full cookie compliance report is attached to this email as a PDF.
+
+It lists every cookie and tracker we detected, grouped by category, along with your compliance grade.
+
+Best regards,
+ConsentBit Team
+`;
+  await sendBrevoEmail(env2, {
+    to,
+    name,
+    subject,
+    html: html_email,
+    text,
+    attachment: [{ content: pdfBase64, name: "cookie-scan-report.pdf" }]
+  });
+  if (force) {
+    console.log("[ScanReport] forced test send \u2014 not marking emailed for", scanId);
+    return;
+  }
+  try {
+    await db.prepare(`UPDATE scan_reports SET emailed_at = ?1 WHERE id = ?2`).bind((/* @__PURE__ */ new Date()).toISOString(), scanId).run();
+    console.log("[ScanReport] sent + marked emailed \u2014 scanId", scanId);
+  } catch (e) {
+    console.error("[ScanReport] failed to mark emailed:", e?.message);
+  }
+}
+__name(sendScanReportForId, "sendScanReportForId");
+
+// src/handlers/adminTestScanReport.js
+async function handleAdminTestScanReport(request, env2, ctx) {
+  if (request.method !== "POST") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const authError = checkAdminAuth(request, env2);
+  if (authError) return authError;
+  const db = env2.COOKIE_SCANNER_DB;
+  if (!db) return Response.json({ success: false, error: "COOKIE_SCANNER_DB not bound" }, { status: 503 });
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    body = {};
+  }
+  const to = String(body?.to || "").trim();
+  const name = String(body?.name || "").trim();
+  let scanId = String(body?.scanId || "").trim();
+  if (!to) return Response.json({ success: false, error: "to (email) is required" }, { status: 400 });
+  if (!scanId) {
+    try {
+      const row = await db.prepare(`SELECT id FROM scan_reports ORDER BY scan_date DESC LIMIT 1`).first();
+      scanId = row?.id ? String(row.id) : "";
+    } catch (e) {
+      return Response.json({ success: false, error: `lookup failed: ${e?.message}` }, { status: 500 });
+    }
+  }
+  if (!scanId) return Response.json({ success: false, error: "no scan_reports rows found" }, { status: 404 });
+  if (ctx?.waitUntil) {
+    ctx.waitUntil(sendScanReportForId(env2, { to, name, scanId, force: true }));
+  } else {
+    await sendScanReportForId(env2, { to, name, scanId, force: true });
+  }
+  return Response.json({ success: true, to, scanId, note: "render + send dispatched" });
+}
+__name(handleAdminTestScanReport, "handleAdminTestScanReport");
+
+// src/handlers/adminDashboard/index.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+
+// src/handlers/adminDashboard/auth.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+
+// src/handlers/adminDashboard/accounts.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+
+// src/handlers/adminDashboard/crypto.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+var enc = new TextEncoder();
+var PBKDF2_ITERATIONS2 = 1e5;
+function bytesToHex(bytes) {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+__name(bytesToHex, "bytesToHex");
+function hexToBytes(hex) {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+__name(hexToBytes, "hexToBytes");
+function ctEq(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+__name(ctEq, "ctEq");
+async function pbkdf2(secret, salt, iterations) {
+  const key = await crypto.subtle.importKey("raw", enc.encode(secret), "PBKDF2", false, [
+    "deriveBits"
+  ]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
+    key,
+    256
+  );
+  return new Uint8Array(bits);
+}
+__name(pbkdf2, "pbkdf2");
+async function hashSecret(secret) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const hash = await pbkdf2(String(secret), salt, PBKDF2_ITERATIONS2);
+  return `pbkdf2$${PBKDF2_ITERATIONS2}$${bytesToHex(salt)}$${bytesToHex(hash)}`;
+}
+__name(hashSecret, "hashSecret");
+async function verifySecret(stored, supplied) {
+  if (typeof stored !== "string" || !stored || !supplied) return false;
+  const parts = stored.split("$");
+  if (parts.length !== 4 || parts[0] !== "pbkdf2") return false;
+  const iterations = Number(parts[1]);
+  if (!Number.isFinite(iterations) || iterations < 1e3) return false;
+  try {
+    const hash = await pbkdf2(String(supplied), hexToBytes(parts[2]), iterations);
+    return ctEq(bytesToHex(hash), parts[3]);
+  } catch (_) {
+    return false;
+  }
+}
+__name(verifySecret, "verifySecret");
+function isHashed(stored) {
+  return typeof stored === "string" && stored.startsWith("pbkdf2$");
+}
+__name(isHashed, "isHashed");
+async function createToken() {
+  const raw = crypto.getRandomValues(new Uint8Array(32));
+  const token = bytesToHex(raw);
+  return { token, tokenHash: await sha256Hex2(token) };
+}
+__name(createToken, "createToken");
+async function sha256Hex2(value) {
+  const buf = await crypto.subtle.digest("SHA-256", enc.encode(String(value)));
+  return bytesToHex(new Uint8Array(buf));
+}
+__name(sha256Hex2, "sha256Hex");
+
+// src/handlers/adminDashboard/accounts.js
+var SEED = {
+  admin: "snm-admin-_R24Azbzk4I0r6nqC8H3IFc_005az3TX",
+  viewer: "snm-123"
+};
+var USERNAME_RULE = "Username must be a valid email address.";
+var SECRET_RULE = "Password must be at least 8 characters.";
+var INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
+var RESET_TTL_MS = 60 * 60 * 1e3;
+function normalizeUsername(raw) {
+  return String(raw ?? "").trim().toLowerCase();
+}
+__name(normalizeUsername, "normalizeUsername");
+function isValidUsername(name) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(name) && name.length <= 254;
+}
+__name(isValidUsername, "isValidUsername");
+async function ensureAccountTable(db) {
+  await db.prepare(
+    `CREATE TABLE IF NOT EXISTS AdminDashboardAccount (
+        username TEXT PRIMARY KEY,
+        role TEXT NOT NULL,
+        secret TEXT,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`
+  ).run();
+  for (const ddl of [
+    `ALTER TABLE AdminDashboardAccount ADD COLUMN email TEXT`,
+    `ALTER TABLE AdminDashboardAccount ADD COLUMN secretHash TEXT`,
+    `ALTER TABLE AdminDashboardAccount ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`,
+    `ALTER TABLE AdminDashboardAccount ADD COLUMN invitedBy TEXT`,
+    `ALTER TABLE AdminDashboardAccount ADD COLUMN tokenHash TEXT`,
+    `ALTER TABLE AdminDashboardAccount ADD COLUMN tokenPurpose TEXT`,
+    `ALTER TABLE AdminDashboardAccount ADD COLUMN tokenExpiresAt DATETIME`,
+    `ALTER TABLE AdminDashboardAccount ADD COLUMN lastLoginAt DATETIME`
+  ]) {
+    try {
+      await db.prepare(ddl).run();
+    } catch (_) {
+    }
+  }
+  const countRow = await db.prepare(`SELECT COUNT(*) AS c FROM AdminDashboardAccount`).first();
+  if ((Number(countRow?.c) || 0) === 0) {
+    let migrated = [];
+    try {
+      const { results = [] } = await db.prepare(`SELECT role, secret FROM AdminDashboardCredential`).all();
+      migrated = results.filter((r) => r?.role && r?.secret);
+    } catch (_) {
+    }
+    const rows = migrated.length ? migrated.map((r) => ({ username: String(r.role), role: String(r.role), secret: r.secret })) : [
+      { username: "admin", role: "admin", secret: SEED.admin },
+      { username: "viewer", role: "viewer", secret: SEED.viewer }
+    ];
+    for (const row of rows) {
+      await db.prepare(
+        `INSERT OR IGNORE INTO AdminDashboardAccount
+             (username, role, secretHash, status, createdAt, updatedAt)
+           VALUES (?, ?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+      ).bind(row.username, row.role === "admin" ? "admin" : "viewer", await hashSecret(row.secret)).run();
+    }
+  }
+  try {
+    await db.prepare(
+      `UPDATE AdminDashboardAccount
+            SET email = username
+          WHERE (email IS NULL OR email = '') AND username LIKE '%_@_%._%'`
+    ).run();
+  } catch (_) {
+  }
+  await upgradePlaintextSecrets(db);
+}
+__name(ensureAccountTable, "ensureAccountTable");
+async function upgradePlaintextSecrets(db) {
+  let rows = [];
+  try {
+    const { results = [] } = await db.prepare(
+      `SELECT username, secret FROM AdminDashboardAccount
+          WHERE secret IS NOT NULL AND secret != ''`
+    ).all();
+    rows = results;
+  } catch (_) {
+    return;
+  }
+  for (const row of rows) {
+    const hash = isHashed(row.secret) ? row.secret : await hashSecret(row.secret);
+    try {
+      await db.prepare(
+        `UPDATE AdminDashboardAccount
+              SET secretHash = COALESCE(secretHash, ?), secret = ''
+            WHERE username = ?`
+      ).bind(hash, row.username).run();
+    } catch (err) {
+      console.error("[adminAccounts] secret upgrade failed for", row.username, err?.message);
+    }
+  }
+}
+__name(upgradePlaintextSecrets, "upgradePlaintextSecrets");
+async function findAccount(db, username) {
+  await ensureAccountTable(db);
+  return await db.prepare(
+    `SELECT username, email, role, secretHash, status, invitedBy, tokenHash, tokenPurpose,
+              tokenExpiresAt, createdAt, updatedAt, lastLoginAt
+         FROM AdminDashboardAccount WHERE username = ?`
+  ).bind(username).first();
+}
+__name(findAccount, "findAccount");
+async function resolveAccount(db, username, secret) {
+  const name = normalizeUsername(username);
+  if (!name || !secret) return null;
+  const row = await findAccount(db, name);
+  if (!row || row.status === "invited" || !row.secretHash) return null;
+  if (!await verifySecret(row.secretHash, String(secret))) return null;
+  return { username: row.username, role: row.role === "admin" ? "admin" : "viewer" };
+}
+__name(resolveAccount, "resolveAccount");
+async function touchLogin(db, username) {
+  try {
+    await db.prepare(`UPDATE AdminDashboardAccount SET lastLoginAt = CURRENT_TIMESTAMP WHERE username = ?`).bind(normalizeUsername(username)).run();
+  } catch (_) {
+  }
+}
+__name(touchLogin, "touchLogin");
+async function listAccounts(db) {
+  await ensureAccountTable(db);
+  const { results = [] } = await db.prepare(
+    `SELECT username, email, role, status, invitedBy, createdAt, updatedAt, lastLoginAt,
+              CASE WHEN tokenPurpose = 'invite' AND tokenHash IS NOT NULL THEN 1 ELSE 0 END
+                AS invitePending
+         FROM AdminDashboardAccount
+        ORDER BY CASE role WHEN 'admin' THEN 0 ELSE 1 END, username`
+  ).all();
+  return results;
+}
+__name(listAccounts, "listAccounts");
+async function getAccount(db, username) {
+  const row = await findAccount(db, normalizeUsername(username));
+  if (!row) return null;
+  return {
+    username: row.username,
+    role: row.role,
+    status: row.status,
+    invitedBy: row.invitedBy,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    lastLoginAt: row.lastLoginAt,
+    invitePending: row.tokenPurpose === "invite" && !!row.tokenHash ? 1 : 0
+  };
+}
+__name(getAccount, "getAccount");
+async function inviteViewer(db, email, invitedBy) {
+  const name = normalizeUsername(email);
+  if (!isValidUsername(name)) return { ok: false, error: USERNAME_RULE };
+  await ensureAccountTable(db);
+  const existing = await findAccount(db, name);
+  if (existing) return { ok: false, error: `"${name}" already has an account.` };
+  const { token, tokenHash } = await createToken();
+  await db.prepare(
+    `INSERT INTO AdminDashboardAccount
+         (username, role, secretHash, status, invitedBy, tokenHash, tokenPurpose,
+          tokenExpiresAt, createdAt, updatedAt)
+       VALUES (?, 'viewer', NULL, 'invited', ?, ?, 'invite', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+  ).bind(name, invitedBy || null, tokenHash, new Date(Date.now() + INVITE_TTL_MS).toISOString()).run();
+  return { ok: true, username: name, token };
+}
+__name(inviteViewer, "inviteViewer");
+async function reissueInvite(db, username, invitedBy) {
+  const name = normalizeUsername(username);
+  await ensureAccountTable(db);
+  const existing = await findAccount(db, name);
+  if (!existing) return { ok: false, error: "Account not found" };
+  if (existing.status !== "invited") {
+    return { ok: false, error: "That account has already been activated." };
+  }
+  const { token, tokenHash } = await createToken();
+  await db.prepare(
+    `UPDATE AdminDashboardAccount
+          SET tokenHash = ?, tokenPurpose = 'invite', tokenExpiresAt = ?, invitedBy = ?,
+              updatedAt = CURRENT_TIMESTAMP
+        WHERE username = ?`
+  ).bind(tokenHash, new Date(Date.now() + INVITE_TTL_MS).toISOString(), invitedBy || existing.invitedBy, name).run();
+  return { ok: true, username: name, token };
+}
+__name(reissueInvite, "reissueInvite");
+async function startPasswordReset(db, email) {
+  const name = normalizeUsername(email);
+  await ensureAccountTable(db);
+  const existing = await findAccount(db, name);
+  if (!existing || existing.status === "invited") return { ok: true, token: null };
+  const { token, tokenHash } = await createToken();
+  await db.prepare(
+    `UPDATE AdminDashboardAccount
+          SET tokenHash = ?, tokenPurpose = 'reset', tokenExpiresAt = ?, updatedAt = CURRENT_TIMESTAMP
+        WHERE username = ?`
+  ).bind(tokenHash, new Date(Date.now() + RESET_TTL_MS).toISOString(), name).run();
+  return { ok: true, token, username: name };
+}
+__name(startPasswordReset, "startPasswordReset");
+async function resolveToken(db, token) {
+  if (!token) return null;
+  await ensureAccountTable(db);
+  const tokenHash = await sha256Hex2(token);
+  const row = await db.prepare(
+    `SELECT username, role, status, tokenPurpose, tokenExpiresAt
+         FROM AdminDashboardAccount WHERE tokenHash = ?`
+  ).bind(tokenHash).first();
+  if (!row) return null;
+  if (row.tokenExpiresAt && Date.parse(row.tokenExpiresAt) < Date.now()) return null;
+  return {
+    username: row.username,
+    role: row.role,
+    status: row.status,
+    purpose: row.tokenPurpose
+  };
+}
+__name(resolveToken, "resolveToken");
+async function completeWithToken(db, token, newSecret) {
+  const found = await resolveToken(db, token);
+  if (!found) return { ok: false, error: "That link is invalid or has expired." };
+  const value = String(newSecret ?? "").trim();
+  if (value.length < 8) return { ok: false, error: SECRET_RULE };
+  await db.prepare(
+    `UPDATE AdminDashboardAccount
+          SET secretHash = ?, status = 'active', tokenHash = NULL, tokenPurpose = NULL,
+              tokenExpiresAt = NULL, secret = NULL, updatedAt = CURRENT_TIMESTAMP
+        WHERE username = ?`
+  ).bind(await hashSecret(value), found.username).run();
+  return { ok: true, username: found.username, purpose: found.purpose, role: found.role };
+}
+__name(completeWithToken, "completeWithToken");
+async function changeAccountSecret(db, username, currentSecret, nextSecret) {
+  const name = normalizeUsername(username);
+  const value = String(nextSecret ?? "").trim();
+  await ensureAccountTable(db);
+  const existing = await findAccount(db, name);
+  if (!existing) return { ok: false, error: "Account not found" };
+  if (!await verifySecret(existing.secretHash, String(currentSecret ?? ""))) {
+    return { ok: false, error: "Current password is incorrect." };
+  }
+  if (value.length < 8) return { ok: false, error: SECRET_RULE };
+  if (await verifySecret(existing.secretHash, value)) {
+    return { ok: false, error: "New password must be different from the current one." };
+  }
+  await db.prepare(
+    `UPDATE AdminDashboardAccount
+          SET secretHash = ?, secret = NULL, updatedAt = CURRENT_TIMESTAMP
+        WHERE username = ?`
+  ).bind(await hashSecret(value), name).run();
+  return { ok: true, username: name };
+}
+__name(changeAccountSecret, "changeAccountSecret");
+async function renameAccount(db, username, newUsername) {
+  const from2 = normalizeUsername(username);
+  const to = normalizeUsername(newUsername);
+  if (!isValidUsername(to)) return { ok: false, error: USERNAME_RULE };
+  await ensureAccountTable(db);
+  const existing = await findAccount(db, from2);
+  if (!existing) return { ok: false, error: "Account not found" };
+  if (from2 === to) return { ok: false, error: "That is already the username." };
+  const taken = await findAccount(db, to);
+  if (taken) return { ok: false, error: `"${to}" is already taken.` };
+  const previousEmail = normalizeUsername(existing.email) || null;
+  const nextEmail = !previousEmail || previousEmail === from2 ? to : existing.email;
+  await db.prepare(
+    `UPDATE AdminDashboardAccount
+          SET username = ?, email = ?, updatedAt = CURRENT_TIMESTAMP
+        WHERE username = ?`
+  ).bind(to, nextEmail, from2).run();
+  return { ok: true, username: to, previousUsername: from2, email: nextEmail, role: existing.role };
+}
+__name(renameAccount, "renameAccount");
+async function deleteAccount(db, username) {
+  const name = normalizeUsername(username);
+  await ensureAccountTable(db);
+  const existing = await findAccount(db, name);
+  if (!existing) return { ok: false, error: "Account not found" };
+  if (existing.role === "admin") return { ok: false, error: "Admin accounts cannot be deleted." };
+  await db.prepare(`DELETE FROM AdminDashboardAccount WHERE username = ?`).bind(name).run();
+  return { ok: true, username: name };
+}
+__name(deleteAccount, "deleteAccount");
+
+// src/handlers/adminDashboard/auth.js
+async function resolveCaller(request, env2, db) {
+  const key = request.headers.get("X-Admin-Key") || "";
+  if (!key) return null;
+  if (env2?.ADMIN_SECRET && ctEq(key, env2.ADMIN_SECRET)) {
+    return { username: request.headers.get("X-Admin-User") || "env", role: "admin" };
+  }
+  const username = request.headers.get("X-Admin-User") || "";
+  if (!username || !db) return null;
+  return await resolveAccount(db, username, key);
+}
+__name(resolveCaller, "resolveCaller");
+function unauthorized() {
+  return Response.json({ success: false, error: "Unauthorized" }, { status: 401 });
+}
+__name(unauthorized, "unauthorized");
+function forbidden(message) {
+  return Response.json(
+    { success: false, error: message || "Forbidden \u2014 admin role required" },
+    { status: 403 }
+  );
+}
+__name(forbidden, "forbidden");
+
+// src/handlers/adminDashboard/queries.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+
+// src/handlers/adminDashboard/schema.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+var SITE_CHILD_TABLES2 = [
+  "Consent",
+  "Cookie",
+  "Script",
+  "ScanHistory",
+  "ScanUsage",
+  "ScheduledScan",
+  "ScanTopupRequest",
+  "PageviewUsage",
+  "BannerCustomization",
+  "CustomCookieRule",
+  "LicenseActivation"
+];
+var ORG_CHILD_TABLES = [
+  "Subscription",
+  "SubscriptionQueue",
+  "PaymentEvent",
+  "OrganizationMember"
+];
+var USER_CHILD_TABLES = ["Session", "Feedback", "OwnershipTransfer"];
+var EMAIL_KEYED_ROWS = [
+  { table: "EmailVerificationCode", columns: ["email"] },
+  { table: "OwnershipTransfer", columns: ["currentEmail", "newEmail"] }
+];
+function normalizePlatform(raw) {
+  const v = (raw || "").toLowerCase();
+  if (v === "webflow") return "webflow";
+  if (v === "framer") return "framer";
+  return "webapp";
+}
+__name(normalizePlatform, "normalizePlatform");
+
+// src/handlers/adminDashboard/scans.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+var claimsTableReady = false;
+async function ensureScanClaimsTable(db) {
+  if (claimsTableReady) return;
+  await db.prepare(
+    `CREATE TABLE IF NOT EXISTS scan_claims (
+        id           TEXT PRIMARY KEY,
+        scan_id      TEXT,
+        site_url     TEXT,
+        scanned_url  TEXT,
+        email        TEXT NOT NULL,
+        user_id      TEXT,
+        purpose      TEXT,
+        claimed_at   TEXT NOT NULL
+      )`
+  ).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_scan_claims_site ON scan_claims (site_url, claimed_at)`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_scan_claims_email ON scan_claims (email, claimed_at)`).run();
+  claimsTableReady = true;
+}
+__name(ensureScanClaimsTable, "ensureScanClaimsTable");
+async function recordScanClaim(db, { scanId, email, userId, purpose } = {}) {
+  if (!db || !scanId || !email) return;
+  try {
+    await ensureScanClaimsTable(db);
+    const report2 = await db.prepare(`SELECT site_url, scanned_url FROM scan_reports WHERE id = ?1`).bind(scanId).first();
+    await db.prepare(
+      `INSERT INTO scan_claims
+           (id, scan_id, site_url, scanned_url, email, user_id, purpose, claimed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`
+    ).bind(
+      crypto.randomUUID(),
+      scanId,
+      report2?.site_url ?? null,
+      report2?.scanned_url ?? null,
+      String(email).trim().toLowerCase(),
+      userId || null,
+      purpose || null,
+      (/* @__PURE__ */ new Date()).toISOString()
+    ).run();
+  } catch (err) {
+    console.error("[scanClaims] write failed:", err?.message || err);
+  }
+}
+__name(recordScanClaim, "recordScanClaim");
+function cutoffIso(days) {
+  const n = Number(days);
+  if (!n || n <= 0) return null;
+  return new Date(Date.now() - n * 24 * 60 * 60 * 1e3).toISOString();
+}
+__name(cutoffIso, "cutoffIso");
+async function listScanEvents(db, { search, days, year, month, claimed, limit } = {}) {
+  await ensureScanClaimsTable(db);
+  const where = [];
+  const binds = [];
+  if (search) {
+    where.push("(e.submitted_url LIKE ? OR e.site_url LIKE ?)");
+    binds.push(`%${search}%`, `%${search}%`);
+  }
+  const cutoff = cutoffIso(days);
+  if (cutoff) {
+    where.push("e.submitted_at >= ?");
+    binds.push(cutoff);
+  }
+  if (year) {
+    where.push("substr(e.submitted_at, 1, 4) = ?");
+    binds.push(String(year));
+  }
+  if (month) {
+    where.push("substr(e.submitted_at, 6, 2) = ?");
+    binds.push(String(month).padStart(2, "0"));
+  }
+  if (claimed === "claimed") {
+    where.push("EXISTS (SELECT 1 FROM scan_claims c WHERE c.site_url = e.site_url)");
+  } else if (claimed === "anonymous") {
+    where.push("NOT EXISTS (SELECT 1 FROM scan_claims c WHERE c.site_url = e.site_url)");
+  }
+  const cap = Math.min(Math.max(Number(limit) || 200, 1), 1e3);
+  const sql = `SELECT e.id, e.submitted_url, e.site_url, e.submitted_at, e.country, e.referer,
+            r.id AS report_id, r.scan_date, r.timing_ms, r.emailed_at,
+            json_extract(r.report_data, '$.grade')        AS grade,
+            json_extract(r.report_data, '$.totalCookies') AS total_cookies,
+            (SELECT COUNT(*) FROM scan_claims c WHERE c.site_url = e.site_url) AS claim_count,
+            (SELECT c2.email FROM scan_claims c2 WHERE c2.site_url = e.site_url
+              ORDER BY c2.claimed_at DESC LIMIT 1)                             AS claimed_by
+       FROM scan_events e
+       LEFT JOIN scan_reports r ON r.site_url = e.site_url` + (where.length ? ` WHERE ${where.join(" AND ")}` : "") + ` ORDER BY e.submitted_at DESC, e.rowid DESC LIMIT ${cap}`;
+  const { results = [] } = await db.prepare(sql).bind(...binds).all();
+  return results.map((r) => ({
+    id: r.id,
+    submittedUrl: r.submitted_url,
+    siteUrl: r.site_url,
+    submittedAt: r.submitted_at,
+    country: r.country,
+    referer: r.referer,
+    reportId: r.report_id ?? null,
+    scanDate: r.scan_date ?? null,
+    timingMs: r.timing_ms ?? null,
+    emailedAt: r.emailed_at ?? null,
+    grade: r.grade ?? null,
+    totalCookies: r.total_cookies ?? null,
+    claimCount: Number(r.claim_count) || 0,
+    claimedBy: r.claimed_by ?? null
+  }));
+}
+__name(listScanEvents, "listScanEvents");
+async function getScanStats(db) {
+  await ensureScanClaimsTable(db);
+  const week = new Date(Date.now() - 7 * 24 * 60 * 60 * 1e3).toISOString();
+  const [total, domains, recent, claims, claimants, years] = await Promise.all([
+    db.prepare(`SELECT COUNT(*) AS c FROM scan_events`).first(),
+    db.prepare(`SELECT COUNT(DISTINCT site_url) AS c FROM scan_events WHERE site_url IS NOT NULL`).first(),
+    db.prepare(`SELECT COUNT(*) AS c FROM scan_events WHERE submitted_at >= ?1`).bind(week).first(),
+    db.prepare(`SELECT COUNT(*) AS c FROM scan_claims`).first(),
+    db.prepare(`SELECT COUNT(DISTINCT email) AS c FROM scan_claims`).first(),
+    db.prepare(
+      `SELECT DISTINCT substr(submitted_at, 1, 4) AS y
+           FROM scan_events
+          WHERE submitted_at IS NOT NULL AND length(submitted_at) >= 4
+          ORDER BY y DESC`
+    ).all()
+  ]);
+  return {
+    totalScans: Number(total?.c) || 0,
+    uniqueDomains: Number(domains?.c) || 0,
+    scansLast7Days: Number(recent?.c) || 0,
+    totalClaims: Number(claims?.c) || 0,
+    uniqueClaimants: Number(claimants?.c) || 0,
+    years: (years?.results ?? []).map((r) => String(r.y)).filter((y) => /^\d{4}$/.test(y))
+  };
+}
+__name(getScanStats, "getScanStats");
+async function listScansForEmail(db, email) {
+  const address = String(email || "").trim().toLowerCase();
+  if (!db || !address) return [];
+  try {
+    await ensureScanClaimsTable(db);
+    const { results = [] } = await db.prepare(
+      `SELECT c.id, c.scan_id, c.site_url, c.scanned_url, c.purpose, c.claimed_at,
+                r.scan_date, r.emailed_at,
+                json_extract(r.report_data, '$.grade')        AS grade,
+                json_extract(r.report_data, '$.totalCookies') AS total_cookies
+           FROM scan_claims c
+           LEFT JOIN scan_reports r ON r.id = c.scan_id
+          WHERE c.email = ?1
+          ORDER BY c.claimed_at DESC
+          LIMIT 100`
+    ).bind(address).all();
+    return results.map((r) => ({
+      id: r.id,
+      scanId: r.scan_id,
+      siteUrl: r.site_url,
+      scannedUrl: r.scanned_url,
+      purpose: r.purpose,
+      claimedAt: r.claimed_at,
+      // Null once that domain has been re-scanned: the upsert mints a fresh
+      // scan_reports id, so this claim's scan_id no longer resolves.
+      scanDate: r.scan_date ?? null,
+      emailedAt: r.emailed_at ?? null,
+      grade: r.grade ?? null,
+      totalCookies: r.total_cookies ?? null
+    }));
+  } catch (err) {
+    console.error("[scanClaims] lookup failed:", err?.message || err);
+    return [];
+  }
+}
+__name(listScansForEmail, "listScansForEmail");
+
+// src/handlers/adminDashboard/queries.js
+function placeholders(arr) {
+  return arr.map(() => "?").join(",");
+}
+__name(placeholders, "placeholders");
+function derivePlatforms(concat2) {
+  if (!concat2) return [];
+  const set = /* @__PURE__ */ new Set();
+  for (const part of String(concat2).split(",")) set.add(normalizePlatform(part.trim()));
+  return [...set];
+}
+__name(derivePlatforms, "derivePlatforms");
+var KNOWN_TIERS = /* @__PURE__ */ new Set(["free", "basic", "essential", "growth"]);
+function derivePlans(concat2) {
+  const set = /* @__PURE__ */ new Set();
+  if (concat2) {
+    for (const raw of String(concat2).split(",")) {
+      const v = raw.trim().toLowerCase();
+      if (KNOWN_TIERS.has(v)) set.add(v);
+    }
+  }
+  if (!set.size) set.add("free");
+  return [...set];
+}
+__name(derivePlans, "derivePlans");
+function deriveStatuses(concat2) {
+  const set = /* @__PURE__ */ new Set();
+  if (concat2) {
+    for (const raw of String(concat2).split(",")) {
+      let v = raw.trim().toLowerCase();
+      if (!v) continue;
+      if (v === "cancelled") v = "canceled";
+      set.add(v);
+    }
+  }
+  return [...set];
+}
+__name(deriveStatuses, "deriveStatuses");
+function yearOf(dt) {
+  return dt ? String(dt).slice(0, 4) : "";
+}
+__name(yearOf, "yearOf");
+function monthOf(dt) {
+  return dt ? String(dt).slice(5, 7) : "";
+}
+__name(monthOf, "monthOf");
+var INTERNAL_DOMAINS = ["seattlenewmedia.com"];
+function isInternalOrTest(email) {
+  const e = String(email || "").toLowerCase().trim();
+  if (!e || !e.includes("@")) return false;
+  const [local, domain2] = e.split("@");
+  if (INTERNAL_DOMAINS.includes(domain2)) return true;
+  if (local === "test" || /^test[._+-]?/.test(local)) return true;
+  if (local.includes("+test")) return true;
+  return false;
+}
+__name(isInternalOrTest, "isInternalOrTest");
+async function listUsers(db, { platform: platform2 = "all", search = "", plan = "all", status = "all", year = "", month = "", audience = "all", billing = "all" } = {}) {
+  const where = [];
+  const params = [];
+  if (search) {
+    where.push(`(
+      u.email LIKE ? OR u.name LIKE ? OR u.id = ?
+      OR EXISTS (
+        SELECT 1 FROM Site s
+          JOIN Organization o ON s.organizationId = o.id
+         WHERE o.ownerUserId = u.id
+           AND (s.domain LIKE ? OR s.customDomain LIKE ? OR s.stagingUrl LIKE ? OR s.name LIKE ?)
+      )
+    )`);
+    const like = `%${search}%`;
+    params.push(like, like, search, like, like, like, like);
+  }
+  const sql = `
+    SELECT
+      u.id, u.email, u.name, u.createdAt, u.updatedAt,
+      (SELECT COUNT(*) FROM Organization o WHERE o.ownerUserId = u.id) AS orgCount,
+      (SELECT COUNT(*) FROM Site s
+         JOIN Organization o ON s.organizationId = o.id
+        WHERE o.ownerUserId = u.id) AS siteCount,
+      (SELECT GROUP_CONCAT(DISTINCT COALESCE(NULLIF(s.platform,''),'webapp'))
+         FROM Site s JOIN Organization o ON s.organizationId = o.id
+        WHERE o.ownerUserId = u.id) AS platforms,
+      (SELECT GROUP_CONCAT(DISTINCT sub.planId)
+         FROM Subscription sub JOIN Organization o ON sub.organizationId = o.id
+        WHERE o.ownerUserId = u.id) AS plans,
+      (SELECT GROUP_CONCAT(DISTINCT sub.status)
+         FROM Subscription sub JOIN Organization o ON sub.organizationId = o.id
+        WHERE o.ownerUserId = u.id) AS statuses
+    FROM User u
+    ${where.length ? "WHERE " + where.join(" AND ") : ""}
+    ORDER BY u.createdAt DESC
+    LIMIT 2000
+  `;
+  const { results = [] } = await db.prepare(sql).bind(...params).all();
+  let mapped = results.map((r) => ({
+    id: r.id,
+    email: r.email,
+    name: r.name,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+    orgCount: Number(r.orgCount) || 0,
+    siteCount: Number(r.siteCount) || 0,
+    platforms: derivePlatforms(r.platforms),
+    plans: derivePlans(r.plans),
+    statuses: deriveStatuses(r.statuses),
+    internal: isInternalOrTest(r.email)
+  }));
+  if (audience === "external") {
+    mapped = mapped.filter((u) => !u.internal);
+  } else if (audience === "internal") {
+    mapped = mapped.filter((u) => u.internal);
+  }
+  if (platform2 && platform2 !== "all") {
+    if (platform2 === "webapp") {
+      mapped = mapped.filter((u) => u.platforms.includes("webapp") || u.platforms.length === 0);
+    } else {
+      mapped = mapped.filter((u) => u.platforms.includes(platform2));
+    }
+  }
+  if (billing === "free") {
+    mapped = mapped.filter((u) => !u.plans.some((p) => p !== "free"));
+  } else if (billing === "paid") {
+    mapped = mapped.filter((u) => u.plans.some((p) => p !== "free"));
+  }
+  if (plan && plan !== "all") {
+    mapped = mapped.filter((u) => u.plans.includes(plan));
+  }
+  if (status && status !== "all") {
+    const s = status === "cancelled" ? "canceled" : status;
+    mapped = mapped.filter((u) => u.statuses.includes(s));
+  }
+  if (year) {
+    mapped = mapped.filter((u) => yearOf(u.createdAt) === String(year));
+  }
+  if (month) {
+    const mm = String(month).padStart(2, "0");
+    mapped = mapped.filter((u) => monthOf(u.createdAt) === mm);
+  }
+  return mapped;
+}
+__name(listUsers, "listUsers");
+function deriveRegulation(bannerType, regionMode) {
+  const bt = String(bannerType || "gdpr").toLowerCase();
+  const rm = String(regionMode || "gdpr").toLowerCase();
+  if (bt === "iab") return "iab";
+  if (rm === "both") return "both";
+  if (rm === "ccpa" || bt === "ccpa") return "ccpa";
+  return "gdpr";
+}
+__name(deriveRegulation, "deriveRegulation");
+var REGULATION_SQL = {
+  iab: `lower(COALESCE(s.banner_type,'gdpr')) = 'iab'`,
+  both: `lower(COALESCE(s.banner_type,'gdpr')) != 'iab'
+         AND lower(COALESCE(s.region_mode,'gdpr')) = 'both'`,
+  ccpa: `lower(COALESCE(s.banner_type,'gdpr')) != 'iab'
+         AND lower(COALESCE(s.region_mode,'gdpr')) != 'both'
+         AND (lower(COALESCE(s.region_mode,'gdpr')) = 'ccpa'
+              OR lower(COALESCE(s.banner_type,'gdpr')) = 'ccpa')`,
+  gdpr: `lower(COALESCE(s.banner_type,'gdpr')) NOT IN ('iab','ccpa')
+         AND lower(COALESCE(s.region_mode,'gdpr')) NOT IN ('both','ccpa')`
+};
+async function listSites2(db, {
+  search = "",
+  platform: platform2 = "all",
+  banner = "all",
+  regulation = "all",
+  year = "",
+  month = "",
+  audience = "all",
+  limit
+} = {}) {
+  const where = [];
+  const params = [];
+  if (regulation && regulation !== "all" && REGULATION_SQL[regulation]) {
+    where.push(`(${REGULATION_SQL[regulation]})`);
+  }
+  if (search) {
+    where.push(`(s.domain LIKE ? OR s.name LIKE ? OR s.id = ? OR u.email LIKE ? OR o.name LIKE ?)`);
+    const like = `%${search}%`;
+    params.push(like, like, search, like, like);
+  }
+  if (banner === "live") {
+    where.push("COALESCE(s.verified, 0) = 1");
+  } else if (banner === "not-live") {
+    where.push("COALESCE(s.verified, 0) = 0");
+  }
+  if (year) {
+    where.push("substr(s.createdAt, 1, 4) = ?");
+    params.push(String(year));
+  }
+  if (month) {
+    where.push("substr(s.createdAt, 6, 2) = ?");
+    params.push(String(month).padStart(2, "0"));
+  }
+  const cap = Math.min(Math.max(Number(limit) || 500, 1), 2e3);
+  const sql = `
+    SELECT
+      s.id, s.name, s.domain, s.platform, s.verified, s.verified_at, s.createdAt,
+      s.banner_type, s.region_mode,
+      s.isLegacy, s.legacySource, s.organizationId,
+      o.name AS orgName,
+      u.id AS ownerId, u.email AS ownerEmail,
+      EXISTS (SELECT 1 FROM BannerCustomization b WHERE b.siteId = s.id) AS hasCustomization
+    FROM Site s
+    LEFT JOIN Organization o ON s.organizationId = o.id
+    LEFT JOIN User u ON o.ownerUserId = u.id
+    ${where.length ? "WHERE " + where.join(" AND ") : ""}
+    ORDER BY s.createdAt DESC
+    LIMIT ${cap}
+  `;
+  const { results = [] } = await db.prepare(sql).bind(...params).all();
+  let mapped = results.map((r) => ({
+    id: r.id,
+    name: r.name,
+    domain: r.domain,
+    platform: normalizePlatform(r.platform),
+    rawPlatform: r.platform ?? null,
+    verified: Number(r.verified) || 0,
+    verifiedAt: r.verified_at ?? null,
+    createdAt: r.createdAt,
+    bannerType: r.banner_type ?? null,
+    regionMode: r.region_mode ?? null,
+    regulation: deriveRegulation(r.banner_type, r.region_mode),
+    isLegacy: Number(r.isLegacy) || 0,
+    legacySource: r.legacySource ?? null,
+    organizationId: r.organizationId,
+    orgName: r.orgName ?? null,
+    ownerId: r.ownerId ?? null,
+    ownerEmail: r.ownerEmail ?? null,
+    hasCustomization: Number(r.hasCustomization) === 1,
+    internal: isInternalOrTest(r.ownerEmail)
+  }));
+  if (platform2 && platform2 !== "all") {
+    mapped = mapped.filter((s) => s.platform === platform2);
+  }
+  if (audience === "external") {
+    mapped = mapped.filter((s) => !s.internal);
+  } else if (audience === "internal") {
+    mapped = mapped.filter((s) => s.internal);
+  }
+  return mapped;
+}
+__name(listSites2, "listSites");
+async function getSiteStats(db) {
+  const [total, live, customized, years] = await Promise.all([
+    db.prepare(`SELECT COUNT(*) AS c FROM Site`).first(),
+    db.prepare(`SELECT COUNT(*) AS c FROM Site WHERE COALESCE(verified, 0) = 1`).first(),
+    db.prepare(`SELECT COUNT(DISTINCT siteId) AS c FROM BannerCustomization`).first(),
+    db.prepare(
+      `SELECT DISTINCT substr(createdAt, 1, 4) AS y
+           FROM Site
+          WHERE createdAt IS NOT NULL AND length(createdAt) >= 4
+          ORDER BY y DESC`
+    ).all()
+  ]);
+  return {
+    totalSites: Number(total?.c) || 0,
+    bannerLive: Number(live?.c) || 0,
+    bannerConfigured: Number(customized?.c) || 0,
+    years: (years?.results ?? []).map((r) => String(r.y)).filter((y) => /^\d{4}$/.test(y))
+  };
+}
+__name(getSiteStats, "getSiteStats");
+async function getStats(db) {
+  const users = await listUsers(db, { platform: "all" });
+  const { results: siteAgg = [] } = await db.prepare(`SELECT COALESCE(NULLIF(platform,''),'webapp') AS p, COUNT(*) AS c FROM Site GROUP BY p`).all();
+  const usersByPlatform = { webflow: 0, framer: 0, webapp: 0 };
+  for (const u of users) {
+    if (u.platforms.includes("webflow")) usersByPlatform.webflow++;
+    if (u.platforms.includes("framer")) usersByPlatform.framer++;
+    if (u.platforms.includes("webapp") || u.platforms.length === 0) usersByPlatform.webapp++;
+  }
+  const sitesByPlatform = { webflow: 0, framer: 0, webapp: 0 };
+  let totalSites = 0;
+  for (const row of siteAgg) {
+    const p = normalizePlatform(row.p);
+    sitesByPlatform[p] = (sitesByPlatform[p] || 0) + Number(row.c);
+    totalSites += Number(row.c);
+  }
+  return {
+    totalUsers: users.length,
+    totalSites,
+    usersByPlatform,
+    sitesByPlatform
+  };
+}
+__name(getStats, "getStats");
+async function selectUserRow(db, userId) {
+  try {
+    return await db.prepare(`SELECT id, email, name, billingEmail, createdAt, updatedAt FROM User WHERE id = ?`).bind(userId).first();
+  } catch (_) {
+    return await db.prepare(`SELECT id, email, name, createdAt, updatedAt FROM User WHERE id = ?`).bind(userId).first();
+  }
+}
+__name(selectUserRow, "selectUserRow");
+async function getUserDetail(db, userId, scannerDb = null) {
+  const user = await selectUserRow(db, userId);
+  if (!user) return null;
+  const { results: orgs = [] } = await db.prepare(`SELECT id, name, createdAt FROM Organization WHERE ownerUserId = ? ORDER BY createdAt DESC`).bind(userId).all();
+  const organizations = [];
+  const allPlatforms = /* @__PURE__ */ new Set();
+  let siteCount = 0;
+  for (const org of orgs) {
+    const { results: sites = [] } = await db.prepare(
+      `SELECT id, name, domain, platform, verified, isLegacy, legacySource, createdAt,
+                banner_type, region_mode
+           FROM Site WHERE organizationId = ? ORDER BY createdAt DESC`
+    ).bind(org.id).all();
+    const siteRows = sites.map((s) => {
+      const p = normalizePlatform(s.platform);
+      allPlatforms.add(p);
+      return {
+        id: s.id,
+        name: s.name,
+        domain: s.domain,
+        platform: p,
+        rawPlatform: s.platform ?? null,
+        verified: Number(s.verified) || 0,
+        isLegacy: Number(s.isLegacy) || 0,
+        legacySource: s.legacySource ?? null,
+        createdAt: s.createdAt,
+        bannerType: s.banner_type ?? null,
+        regionMode: s.region_mode ?? null,
+        regulation: deriveRegulation(s.banner_type, s.region_mode)
+      };
+    });
+    siteCount += siteRows.length;
+    const { results: subscriptions = [] } = await db.prepare(
+      `SELECT id, stripeSubscriptionId, planType, interval, status,
+                currentPeriodEnd, cancelAtPeriodEnd, amountCents, licenseKey, createdAt
+           FROM Subscription WHERE organizationId = ? ORDER BY createdAt DESC`
+    ).bind(org.id).all();
+    organizations.push({
+      id: org.id,
+      name: org.name,
+      createdAt: org.createdAt,
+      sites: siteRows,
+      subscriptions
+    });
+  }
+  const { results: memberOf = [] } = await db.prepare(`SELECT organizationId, role, joinedAt FROM OrganizationMember WHERE userId = ?`).bind(userId).all();
+  const sessionRow = await db.prepare(`SELECT COUNT(*) AS c FROM Session WHERE userId = ?`).bind(userId).first();
+  let feedback = [];
+  try {
+    const r = await db.prepare(`SELECT id, message, createdAt FROM Feedback WHERE userId = ? ORDER BY createdAt DESC LIMIT 50`).bind(userId).all();
+    feedback = r.results ?? [];
+  } catch (_) {
+    feedback = [];
+  }
+  const scans = scannerDb ? await listScansForEmail(scannerDb, user.email) : [];
+  return {
+    id: user.id,
+    email: user.email,
+    // Null when the customer never set one — Stripe then bills the account email.
+    billingEmail: user.billingEmail ?? null,
+    scans,
+    name: user.name,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
+    orgCount: orgs.length,
+    siteCount,
+    platforms: [...allPlatforms],
+    organizations,
+    memberOf,
+    sessionCount: Number(sessionRow?.c) || 0,
+    feedback
+  };
+}
+__name(getUserDetail, "getUserDetail");
+async function updateUser(db, userId, fields) {
+  const existing = await db.prepare(`SELECT id FROM User WHERE id = ?`).bind(userId).first();
+  if (!existing) return { ok: false, error: "User not found" };
+  if (fields.email !== void 0) {
+    const email = String(fields.email).trim().toLowerCase();
+    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      return { ok: false, error: "Invalid email address" };
+    }
+    const clash = await db.prepare(`SELECT id FROM User WHERE email = ? AND id != ?`).bind(email, userId).first();
+    if (clash) return { ok: false, error: "Another user already uses that email" };
+  }
+  const sets = [];
+  const params = [];
+  if (fields.name !== void 0) {
+    sets.push("name = ?");
+    params.push(fields.name);
+  }
+  if (fields.email !== void 0) {
+    sets.push("email = ?");
+    params.push(String(fields.email).trim().toLowerCase());
+  }
+  if (!sets.length) return { ok: true };
+  sets.push("updatedAt = CURRENT_TIMESTAMP");
+  params.push(userId);
+  await db.prepare(`UPDATE User SET ${sets.join(", ")} WHERE id = ?`).bind(...params).run();
+  return { ok: true };
+}
+__name(updateUser, "updateUser");
+async function deleteUserEverywhere(db, userId) {
+  const deleted = {};
+  const errors = [];
+  const bump = /* @__PURE__ */ __name((t, n) => deleted[t] = (deleted[t] || 0) + n, "bump");
+  const fail5 = /* @__PURE__ */ __name((m) => errors.push(m), "fail");
+  const user = await db.prepare(`SELECT id, email FROM User WHERE id = ?`).bind(userId).first();
+  if (!user) return { ok: false, deleted, error: "User not found" };
+  const { results: orgs = [] } = await db.prepare(`SELECT id FROM Organization WHERE ownerUserId = ?`).bind(userId).all();
+  const orgIds = orgs.map((o) => o.id);
+  let siteIds = [];
+  if (orgIds.length) {
+    const { results: sites = [] } = await db.prepare(`SELECT id FROM Site WHERE organizationId IN (${placeholders(orgIds)})`).bind(...orgIds).all();
+    siteIds = sites.map((s) => s.id);
+  }
+  if (siteIds.length) {
+    for (const table of SITE_CHILD_TABLES2) {
+      bump(table, await delIn(db, table, "siteId", siteIds, fail5));
+    }
+    await deleteWebflowOAuthForSites(db, siteIds, bump, fail5);
+    bump("Site", await delIn(db, "Site", "id", siteIds, fail5));
+  }
+  if (orgIds.length) {
+    for (const table of ORG_CHILD_TABLES) {
+      bump(table, await delIn(db, table, "organizationId", orgIds, fail5));
+    }
+    bump("Organization", await delIn(db, "Organization", "id", orgIds, fail5));
+  }
+  bump("OrganizationMember", await delEq(db, "OrganizationMember", "userId", userId, fail5));
+  for (const table of USER_CHILD_TABLES) {
+    bump(table, await delEq(db, table, "userId", userId, fail5));
+  }
+  if (user.email) {
+    for (const { table, columns } of EMAIL_KEYED_ROWS) {
+      for (const column of columns) {
+        bump(table, await delEq(db, table, column, user.email, fail5));
+      }
+    }
+  }
+  bump("User", await delEq(db, "User", "id", userId, fail5));
+  const survivor = await db.prepare(`SELECT id FROM User WHERE id = ?`).bind(userId).first();
+  if (survivor) {
+    return {
+      ok: false,
+      deleted,
+      errors,
+      error: `Related data was removed, but the user record could not be deleted` + (errors.length ? `: ${errors[0]}` : ". Another table still references this user.")
+    };
+  }
+  return { ok: true, deleted, errors };
+}
+__name(deleteUserEverywhere, "deleteUserEverywhere");
+async function deleteWebflowOAuthForSites(db, siteIds, bump, onError) {
+  if (!siteIds.length) return;
+  let userKeys = [];
+  try {
+    const { results = [] } = await db.prepare(
+      `SELECT DISTINCT userKey FROM WebflowOAuthSite
+          WHERE siteId IN (${placeholders(siteIds)}) AND userKey IS NOT NULL`
+    ).bind(...siteIds).all();
+    userKeys = results.map((r) => r.userKey).filter(Boolean);
+  } catch (_) {
+    return;
+  }
+  bump("WebflowOAuthSite", await delIn(db, "WebflowOAuthSite", "siteId", siteIds, onError));
+  for (const key of userKeys) {
+    try {
+      const stillUsed = await db.prepare(`SELECT COUNT(*) AS c FROM WebflowOAuthSite WHERE userKey = ?`).bind(key).first();
+      if ((Number(stillUsed?.c) || 0) > 0) continue;
+      bump("WebflowOAuthToken", await delEq(db, "WebflowOAuthToken", "userKey", key, onError));
+    } catch (_) {
+    }
+  }
+}
+__name(deleteWebflowOAuthForSites, "deleteWebflowOAuthForSites");
+async function deleteSites(db, siteIds) {
+  const deleted = {};
+  const errors = [];
+  const bump = /* @__PURE__ */ __name((t, n) => deleted[t] = (deleted[t] || 0) + n, "bump");
+  const fail5 = /* @__PURE__ */ __name((m) => errors.push(m), "fail");
+  const ids = (siteIds || []).map((s) => String(s).trim()).filter(Boolean);
+  if (!ids.length) return { ok: false, deleted, error: "No site ids provided" };
+  const { results = [] } = await db.prepare(`SELECT id, domain, name FROM Site WHERE id IN (${placeholders(ids)})`).bind(...ids).all();
+  const validIds = results.map((r) => r.id);
+  if (!validIds.length) return { ok: false, deleted, error: "No matching sites found" };
+  for (const table of SITE_CHILD_TABLES2) {
+    bump(table, await delIn(db, table, "siteId", validIds, fail5));
+  }
+  await deleteWebflowOAuthForSites(db, validIds, bump, fail5);
+  bump("Site", await delIn(db, "Site", "id", validIds, fail5));
+  const survivors = await db.prepare(`SELECT COUNT(*) AS c FROM Site WHERE id IN (${placeholders(validIds)})`).bind(...validIds).first();
+  if ((Number(survivors?.c) || 0) > 0) {
+    return {
+      ok: false,
+      deleted,
+      errors,
+      sites: results,
+      error: `Child data was removed, but ${survivors.c} site row(s) could not be deleted` + (errors.length ? `: ${errors[0]}` : ".")
+    };
+  }
+  return { ok: true, deleted, errors, sites: results };
+}
+__name(deleteSites, "deleteSites");
+function isMissingTable(err) {
+  return /no such table/i.test(String(err?.message || err));
+}
+__name(isMissingTable, "isMissingTable");
+async function delIn(db, table, col, ids, onError) {
+  if (!ids.length) return 0;
+  try {
+    const res = await db.prepare(`DELETE FROM ${table} WHERE ${col} IN (${placeholders(ids)})`).bind(...ids).run();
+    return Number(res?.meta?.changes) || 0;
+  } catch (err) {
+    if (!isMissingTable(err)) onError?.(`${table}.${col}: ${err?.message || err}`);
+    return 0;
+  }
+}
+__name(delIn, "delIn");
+async function delEq(db, table, col, val, onError) {
+  try {
+    const res = await db.prepare(`DELETE FROM ${table} WHERE ${col} = ?`).bind(val).run();
+    return Number(res?.meta?.changes) || 0;
+  } catch (err) {
+    if (!isMissingTable(err)) onError?.(`${table}.${col}: ${err?.message || err}`);
+    return 0;
+  }
+}
+__name(delEq, "delEq");
+
+// src/handlers/adminDashboard/emails.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+function dashboardUrl(env2) {
+  const raw = env2?.ADMIN_DASHBOARD_URL || "https://admin.consentbit.com";
+  return String(raw).replace(/\/+$/, "");
+}
+__name(dashboardUrl, "dashboardUrl");
+var BTN2 = "display:inline-block;background:#007AFF;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:14px 32px;border-radius:8px;";
+function shell(title2, bodyHtml) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>${title2}</title></head>
+<body style="margin:0;padding:0;background:#f0f4f8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f0f4f8;padding:40px 16px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" style="max-width:560px;" cellpadding="0" cellspacing="0">
+        <tr><td style="background:#ffffff;border-radius:16px;padding:40px 40px 32px;box-shadow:0 2px 12px rgba(0,0,0,0.06);">
+          ${bodyHtml}
+        </td></tr>
+        <tr><td align="center" style="padding:24px 0 8px;">
+          <p style="margin:0;color:#9ca3af;font-size:12px;line-height:1.6;">
+            ConsentBit Admin \xB7 internal tool<br/>
+            If you weren't expecting this email you can safely ignore it.
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+__name(shell, "shell");
+function sendAdminInviteEmail(env2, ctx, { to, token, invitedBy, role = "viewer" }) {
+  const link = `${dashboardUrl(env2)}/accept-invite?token=${encodeURIComponent(token)}`;
+  const from2 = invitedBy && invitedBy !== "-" ? invitedBy : "a ConsentBit admin";
+  const html = shell(
+    "Your ConsentBit Admin invitation",
+    `<h1 style="margin:0 0 16px;font-size:22px;color:#111827;">You've been invited to ConsentBit Admin</h1>
+     <p style="margin:0 0 12px;color:#374151;font-size:15px;line-height:1.6;">
+       ${escapeHtml(from2)} has given you <b>${escapeHtml(role)}</b> access to the ConsentBit
+       admin dashboard.
+     </p>
+     <p style="margin:0 0 24px;color:#374151;font-size:15px;line-height:1.6;">
+       Choose your password to activate the account. This link works once and expires in 7 days.
+     </p>
+     <p style="margin:0 0 24px;"><a href="${link}" style="${BTN2}">Set my password</a></p>
+     <p style="margin:0;color:#6b7280;font-size:13px;line-height:1.6;word-break:break-all;">
+       Or paste this into your browser:<br/>${link}
+     </p>`
+  );
+  const text = `You've been invited to ConsentBit Admin by ${from2} with ${role} access.
+
+Set your password (link works once, expires in 7 days):
+${link}
+`;
+  return dispatch(env2, ctx, {
+    to,
+    subject: "Your ConsentBit Admin invitation",
+    html,
+    text
+  });
+}
+__name(sendAdminInviteEmail, "sendAdminInviteEmail");
+function sendAdminResetEmail(env2, ctx, { to, token }) {
+  const link = `${dashboardUrl(env2)}/reset-password?token=${encodeURIComponent(token)}`;
+  const html = shell(
+    "Reset your ConsentBit Admin password",
+    `<h1 style="margin:0 0 16px;font-size:22px;color:#111827;">Reset your password</h1>
+     <p style="margin:0 0 24px;color:#374151;font-size:15px;line-height:1.6;">
+       Someone asked to reset the password for this ConsentBit Admin account. This link
+       works once and expires in 1 hour. If it wasn't you, ignore this email \u2014 your
+       current password keeps working.
+     </p>
+     <p style="margin:0 0 24px;"><a href="${link}" style="${BTN2}">Choose a new password</a></p>
+     <p style="margin:0;color:#6b7280;font-size:13px;line-height:1.6;word-break:break-all;">
+       Or paste this into your browser:<br/>${link}
+     </p>`
+  );
+  const text = `Reset your ConsentBit Admin password (link works once, expires in 1 hour):
+${link}
+
+If you didn't ask for this, ignore this email.
+`;
+  return dispatch(env2, ctx, {
+    to,
+    subject: "Reset your ConsentBit Admin password",
+    html,
+    text
+  });
+}
+__name(sendAdminResetEmail, "sendAdminResetEmail");
+function dispatch(env2, ctx, opts) {
+  const p = sendBrevoEmail(env2, opts).catch(
+    (err) => console.error("[adminDashboard/email] send failed", err?.message || err)
+  );
+  if (ctx?.waitUntil) {
+    ctx.waitUntil(p);
+    return Promise.resolve();
+  }
+  return p;
+}
+__name(dispatch, "dispatch");
+function escapeHtml(s) {
+  return String(s ?? "").replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+  );
+}
+__name(escapeHtml, "escapeHtml");
+
+// src/handlers/adminDashboard/audit.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+var ensured = false;
+async function ensureAuditTable(db) {
+  if (ensured) return;
+  await db.prepare(
+    `CREATE TABLE IF NOT EXISTS AdminDashboardAuditLog (
+        id TEXT PRIMARY KEY,
+        actor TEXT,
+        actorRole TEXT,
+        action TEXT NOT NULL,
+        target TEXT,
+        detail TEXT,
+        outcome TEXT NOT NULL DEFAULT 'ok',
+        ip TEXT,
+        userAgent TEXT,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`
+  ).run();
+  await db.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_admin_audit_createdAt
+         ON AdminDashboardAuditLog (createdAt DESC)`
+  ).run();
+  ensured = true;
+}
+__name(ensureAuditTable, "ensureAuditTable");
+async function logAudit(db, request, entry) {
+  if (!db || !entry?.action) return;
+  try {
+    await ensureAuditTable(db);
+    await db.prepare(
+      `INSERT INTO AdminDashboardAuditLog
+           (id, actor, actorRole, action, target, detail, outcome, ip, userAgent, createdAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+    ).bind(
+      crypto.randomUUID(),
+      entry.actor || "-",
+      entry.actorRole || null,
+      entry.action,
+      entry.target || null,
+      entry.detail ? JSON.stringify(entry.detail).slice(0, 4e3) : null,
+      entry.outcome || "ok",
+      request?.headers?.get("CF-Connecting-IP") || null,
+      (request?.headers?.get("User-Agent") || "").slice(0, 300) || null
+    ).run();
+  } catch (err) {
+    console.error("[adminAudit] write failed", err?.message || err);
+  }
+}
+__name(logAudit, "logAudit");
+async function listAudit(db, { actor, action, search, limit } = {}) {
+  await ensureAuditTable(db);
+  const where = [];
+  const binds = [];
+  if (actor && actor !== "all") {
+    where.push("actor = ?");
+    binds.push(actor);
+  }
+  if (action && action !== "all") {
+    where.push("action LIKE ?");
+    binds.push(`${action}%`);
+  }
+  if (search) {
+    where.push("(target LIKE ? OR detail LIKE ? OR action LIKE ?)");
+    binds.push(`%${search}%`, `%${search}%`, `%${search}%`);
+  }
+  const cap = Math.min(Math.max(Number(limit) || 200, 1), 1e3);
+  const sql = `SELECT id, actor, actorRole, action, target, detail, outcome, ip, userAgent, createdAt
+       FROM AdminDashboardAuditLog` + (where.length ? ` WHERE ${where.join(" AND ")}` : "") + ` ORDER BY createdAt DESC, rowid DESC LIMIT ${cap}`;
+  const { results = [] } = await db.prepare(sql).bind(...binds).all();
+  return results.map((r) => ({
+    ...r,
+    detail: r.detail ? safeParse(r.detail) : null
+  }));
+}
+__name(listAudit, "listAudit");
+async function listAuditActors(db) {
+  await ensureAuditTable(db);
+  const { results = [] } = await db.prepare(`SELECT DISTINCT actor FROM AdminDashboardAuditLog ORDER BY actor`).all();
+  return results.map((r) => r.actor).filter(Boolean);
+}
+__name(listAuditActors, "listAuditActors");
+function safeParse(s) {
+  try {
+    return JSON.parse(s);
+  } catch (_) {
+    return s;
+  }
+}
+__name(safeParse, "safeParse");
+
+// src/handlers/adminDashboard/index.js
+function getDb(env2) {
+  return env2.CONSENT_WEBAPP || null;
+}
+__name(getDb, "getDb");
+function getScannerDb(env2) {
+  return env2.COOKIE_SCANNER_DB || null;
+}
+__name(getScannerDb, "getScannerDb");
+function noDb() {
+  return Response.json({ success: false, error: "CONSENT_WEBAPP not configured" }, { status: 503 });
+}
+__name(noDb, "noDb");
+async function handleAdminDashboardAuth(request, env2) {
+  if (request.method !== "POST") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const db = getDb(env2);
+  if (!db) return noDb();
+  let username = "";
+  let secret = "";
+  try {
+    const body = await request.json();
+    username = String(body?.username ?? "");
+    secret = String(body?.secret ?? "");
+  } catch (_) {
+    return Response.json({ success: false, error: "Bad request" }, { status: 400 });
+  }
+  try {
+    const account = await resolveAccount(db, username, secret);
+    if (!account) {
+      await logAudit(db, request, {
+        action: "login",
+        actor: normalizeUsername(username) || "-",
+        target: normalizeUsername(username) || null,
+        outcome: "denied",
+        detail: { reason: "invalid credentials" }
+      });
+      return Response.json({ role: null }, { status: 401 });
+    }
+    await touchLogin(db, account.username);
+    await logAudit(db, request, {
+      action: "login",
+      actor: account.username,
+      actorRole: account.role
+    });
+    return Response.json({ role: account.role, username: account.username });
+  } catch (err) {
+    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
+  }
+}
+__name(handleAdminDashboardAuth, "handleAdminDashboardAuth");
+async function handleAdminDashboardAccountSetup(request, env2) {
+  const db = getDb(env2);
+  if (!db) return noDb();
+  try {
+    if (request.method === "GET") {
+      const token = new URL(request.url).searchParams.get("token") || "";
+      const found = await resolveToken(db, token);
+      if (!found) {
+        return Response.json(
+          { success: false, error: "That link is invalid or has expired." },
+          { status: 400 }
+        );
+      }
+      return Response.json({ username: found.username, purpose: found.purpose });
+    }
+    if (request.method === "POST") {
+      let body = {};
+      try {
+        body = await request.json();
+      } catch (_) {
+        return Response.json({ success: false, error: "Bad request" }, { status: 400 });
+      }
+      const r = await completeWithToken(db, String(body?.token || ""), body?.secret);
+      if (!r.ok) return Response.json({ success: false, error: r.error }, { status: 400 });
+      await logAudit(db, request, {
+        action: r.purpose === "invite" ? "account.invite_accepted" : "account.password_reset",
+        actor: r.username,
+        actorRole: r.role,
+        target: r.username
+      });
+      return Response.json({ ok: true, username: r.username, purpose: r.purpose });
+    }
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  } catch (err) {
+    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
+  }
+}
+__name(handleAdminDashboardAccountSetup, "handleAdminDashboardAccountSetup");
+async function handleAdminDashboardRecover(request, env2, ctx) {
+  if (request.method !== "POST") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const db = getDb(env2);
+  if (!db) return noDb();
+  let email = "";
+  try {
+    const body = await request.json();
+    email = normalizeUsername(body?.email);
+  } catch (_) {
+    return Response.json({ success: false, error: "Bad request" }, { status: 400 });
+  }
+  const generic = { ok: true, message: "If that account exists, a reset link is on its way." };
+  if (!email) return Response.json(generic);
+  try {
+    const r = await startPasswordReset(db, email);
+    if (r.token) {
+      await sendAdminResetEmail(env2, ctx, { to: r.username, token: r.token });
+      await logAudit(db, request, {
+        action: "account.reset_requested",
+        actor: r.username,
+        target: r.username
+      });
+    } else {
+      await logAudit(db, request, {
+        action: "account.reset_requested",
+        actor: email,
+        target: email,
+        outcome: "denied",
+        detail: { reason: "no such active account" }
+      });
+    }
+  } catch (err) {
+    console.error("[adminDashboard] recover failed", err?.message || err);
+  }
+  return Response.json(generic);
+}
+__name(handleAdminDashboardRecover, "handleAdminDashboardRecover");
+async function handleAdminDashboardAudit(request, env2) {
+  if (request.method !== "GET") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const db = getDb(env2);
+  if (!db) return noDb();
+  const caller = await resolveCaller(request, env2, db);
+  if (!caller) return unauthorized();
+  if (caller.role !== "admin") return forbidden("Only an admin can view the activity log.");
+  const url = new URL(request.url);
+  try {
+    const entries = await listAudit(db, {
+      actor: url.searchParams.get("actor") || void 0,
+      action: url.searchParams.get("action") || void 0,
+      search: (url.searchParams.get("search") || "").trim() || void 0,
+      limit: url.searchParams.get("limit") || void 0
+    });
+    return Response.json({ entries, actors: await listAuditActors(db), count: entries.length });
+  } catch (err) {
+    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
+  }
+}
+__name(handleAdminDashboardAudit, "handleAdminDashboardAudit");
+async function handleAdminDashboardSites(request, env2) {
+  if (request.method !== "GET") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const db = getDb(env2);
+  if (!db) return noDb();
+  const caller = await resolveCaller(request, env2, db);
+  if (!caller) return unauthorized();
+  const url = new URL(request.url);
+  try {
+    const sites = await listSites2(db, {
+      search: (url.searchParams.get("search") || "").trim(),
+      platform: url.searchParams.get("platform") || "all",
+      banner: url.searchParams.get("banner") || "all",
+      regulation: url.searchParams.get("regulation") || "all",
+      year: url.searchParams.get("year") || "",
+      month: url.searchParams.get("month") || "",
+      audience: url.searchParams.get("audience") || "all",
+      limit: url.searchParams.get("limit") || void 0
+    });
+    return Response.json({ sites, stats: await getSiteStats(db), count: sites.length });
+  } catch (err) {
+    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
+  }
+}
+__name(handleAdminDashboardSites, "handleAdminDashboardSites");
+async function handleAdminDashboardScans(request, env2) {
+  if (request.method !== "GET") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const db = getDb(env2);
+  if (!db) return noDb();
+  const caller = await resolveCaller(request, env2, db);
+  if (!caller) return unauthorized();
+  const scannerDb = getScannerDb(env2);
+  if (!scannerDb) {
+    return Response.json(
+      { success: false, error: "COOKIE_SCANNER_DB not configured" },
+      { status: 503 }
+    );
+  }
+  const url = new URL(request.url);
+  try {
+    const events = await listScanEvents(scannerDb, {
+      search: (url.searchParams.get("search") || "").trim() || void 0,
+      days: url.searchParams.get("days") || void 0,
+      year: url.searchParams.get("year") || void 0,
+      month: url.searchParams.get("month") || void 0,
+      claimed: url.searchParams.get("claimed") || void 0,
+      limit: url.searchParams.get("limit") || void 0
+    });
+    return Response.json({ events, stats: await getScanStats(scannerDb), count: events.length });
+  } catch (err) {
+    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
+  }
+}
+__name(handleAdminDashboardScans, "handleAdminDashboardScans");
+async function handleAdminDashboardAccounts(request, env2, ctx) {
+  const db = getDb(env2);
+  if (!db) return noDb();
+  const caller = await resolveCaller(request, env2, db);
+  if (!caller) return unauthorized();
+  const who = { actor: caller.username, actorRole: caller.role };
+  try {
+    if (request.method === "GET") {
+      if (caller.role === "admin") {
+        return Response.json({ accounts: await listAccounts(db), me: caller.username });
+      }
+      const self2 = await getAccount(db, caller.username);
+      return Response.json({ accounts: self2 ? [self2] : [], me: caller.username });
+    }
+    if (request.method === "POST") {
+      let body = {};
+      try {
+        body = await request.json();
+      } catch (_) {
+        return Response.json({ success: false, error: "Bad request" }, { status: 400 });
+      }
+      const action = String(body?.action || "change-key");
+      if (action === "invite" || action === "create") {
+        if (caller.role !== "admin") {
+          await logAudit(db, request, {
+            ...who,
+            action: "account.invite",
+            target: normalizeUsername(body?.username || body?.email),
+            outcome: "denied"
+          });
+          return forbidden("Only an admin can add accounts.");
+        }
+        const r = await inviteViewer(db, body?.username || body?.email, caller.username);
+        if (!r.ok) return Response.json({ success: false, error: r.error }, { status: 400 });
+        await sendAdminInviteEmail(env2, ctx, {
+          to: r.username,
+          token: r.token,
+          invitedBy: caller.username
+        });
+        await logAudit(db, request, { ...who, action: "account.invite", target: r.username });
+        return Response.json({
+          ok: true,
+          username: r.username,
+          invited: true,
+          accounts: await listAccounts(db)
+        });
+      }
+      if (action === "resend-invite") {
+        if (caller.role !== "admin") return forbidden("Only an admin can resend invitations.");
+        const r = await reissueInvite(db, body?.username, caller.username);
+        if (!r.ok) return Response.json({ success: false, error: r.error }, { status: 400 });
+        await sendAdminInviteEmail(env2, ctx, {
+          to: r.username,
+          token: r.token,
+          invitedBy: caller.username
+        });
+        await logAudit(db, request, { ...who, action: "account.invite_resent", target: r.username });
+        return Response.json({ ok: true, username: r.username, accounts: await listAccounts(db) });
+      }
+      if (action === "rename") {
+        if (caller.role !== "admin") {
+          return forbidden("Only an admin can change a username.");
+        }
+        const r = await renameAccount(db, body?.username, body?.newUsername);
+        if (!r.ok) return Response.json({ success: false, error: r.error }, { status: 400 });
+        await logAudit(db, request, {
+          ...who,
+          action: "account.rename",
+          target: r.username,
+          detail: { from: r.previousUsername, to: r.username }
+        });
+        return Response.json({
+          ok: true,
+          username: r.username,
+          previousUsername: r.previousUsername,
+          accounts: await listAccounts(db)
+        });
+      }
+      if (action === "change-key") {
+        const target = normalizeUsername(body?.username || caller.username);
+        if (target !== caller.username) {
+          return forbidden("You can only change your own key.");
+        }
+        const r = await changeAccountSecret(db, target, body?.currentSecret, body?.secret);
+        if (!r.ok) {
+          await logAudit(db, request, {
+            ...who,
+            action: "account.change_password",
+            target,
+            outcome: "failed",
+            detail: { reason: r.error }
+          });
+          return Response.json({ success: false, error: r.error }, { status: 400 });
+        }
+        await logAudit(db, request, { ...who, action: "account.change_password", target: r.username });
+        return Response.json({ ok: true, username: r.username });
+      }
+      return Response.json({ success: false, error: "Unknown action" }, { status: 400 });
+    }
+    if (request.method === "DELETE") {
+      if (caller.role !== "admin") {
+        return forbidden("Only an admin can remove viewer accounts.");
+      }
+      const url = new URL(request.url);
+      const username = normalizeUsername(url.searchParams.get("username") || "");
+      if (!username) {
+        return Response.json({ success: false, error: "Missing username" }, { status: 400 });
+      }
+      if (username === caller.username) {
+        return Response.json(
+          { success: false, error: "You cannot delete your own account." },
+          { status: 400 }
+        );
+      }
+      const r = await deleteAccount(db, username);
+      if (!r.ok) return Response.json({ success: false, error: r.error }, { status: 400 });
+      await logAudit(db, request, { ...who, action: "account.delete", target: r.username });
+      return Response.json({ ok: true, accounts: await listAccounts(db) });
+    }
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  } catch (err) {
+    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
+  }
+}
+__name(handleAdminDashboardAccounts, "handleAdminDashboardAccounts");
+async function handleAdminDashboardStats(request, env2) {
+  if (request.method !== "GET") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const db = getDb(env2);
+  if (!db) return noDb();
+  if (!await resolveCaller(request, env2, db)) return unauthorized();
+  try {
+    const stats = await getStats(db);
+    return Response.json(stats);
+  } catch (err) {
+    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
+  }
+}
+__name(handleAdminDashboardStats, "handleAdminDashboardStats");
+async function handleAdminDashboardUsers(request, env2) {
+  const db = getDb(env2);
+  if (!db) return noDb();
+  const caller = await resolveCaller(request, env2, db);
+  if (!caller) return unauthorized();
+  const url = new URL(request.url);
+  if (request.method === "DELETE") {
+    if (caller.role !== "admin") return forbidden();
+    const ids = (url.searchParams.get("ids") || "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (!ids.length) {
+      return Response.json({ success: false, error: "Missing ids" }, { status: 400 });
+    }
+    if (url.searchParams.get("confirm") !== "DELETE") {
+      return Response.json(
+        { success: false, error: "Confirmation did not match. Deletion aborted." },
+        { status: 400 }
+      );
+    }
+    const totals = {};
+    const results = [];
+    try {
+      for (const id of ids) {
+        const detail = await getUserDetail(db, id);
+        const email = detail?.email || null;
+        if (!detail) {
+          results.push({ id, email, ok: false, error: "User not found" });
+          continue;
+        }
+        const report2 = await deleteUserEverywhere(db, id);
+        results.push({ id, email, ok: !!report2.ok, error: report2.error || null });
+        for (const [table, n] of Object.entries(report2.deleted || {})) {
+          totals[table] = (totals[table] || 0) + n;
+        }
+      }
+    } catch (err) {
+      return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
+    }
+    const deletedCount = results.filter((r) => r.ok).length;
+    const failed = results.filter((r) => !r.ok);
+    await logAudit(db, request, {
+      actor: caller.username,
+      actorRole: caller.role,
+      action: "user.bulk_delete",
+      target: `${deletedCount} users`,
+      outcome: failed.length ? "failed" : "ok",
+      detail: {
+        requested: ids.length,
+        deleted: results.filter((r) => r.ok).map((r) => r.email || r.id),
+        failed: failed.map((f) => ({ id: f.id, error: f.error })),
+        rows: totals
+      }
+    });
+    return Response.json({
+      ok: failed.length === 0,
+      requested: ids.length,
+      deletedCount,
+      failed,
+      results,
+      deleted: totals,
+      ...failed.length ? {
+        error: `${deletedCount} of ${ids.length} deleted. ${failed.length} failed: ${failed.map((f) => `${f.email || f.id} (${f.error})`).join("; ")}`
+      } : {}
+    });
+  }
+  if (request.method !== "GET") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const platform2 = url.searchParams.get("platform") || "all";
+  const search = (url.searchParams.get("search") || "").trim();
+  const plan = url.searchParams.get("plan") || "all";
+  const status = url.searchParams.get("status") || "all";
+  const year = url.searchParams.get("year") || "";
+  const month = url.searchParams.get("month") || "";
+  const audience = url.searchParams.get("audience") || "all";
+  const billing = url.searchParams.get("billing") || "all";
+  try {
+    const users = await listUsers(db, { platform: platform2, search, plan, status, year, month, audience, billing });
+    return Response.json({ users, count: users.length });
+  } catch (err) {
+    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
+  }
+}
+__name(handleAdminDashboardUsers, "handleAdminDashboardUsers");
+async function handleAdminDashboardSite(request, env2) {
+  const db = getDb(env2);
+  if (!db) return noDb();
+  const caller = await resolveCaller(request, env2, db);
+  if (!caller) return unauthorized();
+  if (caller.role !== "admin") return forbidden();
+  if (request.method !== "DELETE") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const url = new URL(request.url);
+  const idsParam = url.searchParams.get("ids") || "";
+  const ids = idsParam.split(",").map((s) => s.trim()).filter(Boolean);
+  if (!ids.length) {
+    return Response.json({ success: false, error: "Missing ids" }, { status: 400 });
+  }
+  try {
+    const report2 = await deleteSites(db, ids);
+    await logAudit(db, request, {
+      actor: caller.username,
+      actorRole: caller.role,
+      action: "site.delete",
+      target: (report2.sites || []).map((s) => s.domain || s.id).join(", ") || ids.join(", "),
+      outcome: report2.ok ? "ok" : "failed",
+      detail: { ids, rows: report2.deleted, error: report2.error || null }
+    });
+    if (!report2.ok) return Response.json({ success: false, error: report2.error }, { status: 400 });
+    return Response.json(report2);
+  } catch (err) {
+    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
+  }
+}
+__name(handleAdminDashboardSite, "handleAdminDashboardSite");
+async function handleAdminDashboardUser(request, env2) {
+  const db = getDb(env2);
+  if (!db) return noDb();
+  const caller = await resolveCaller(request, env2, db);
+  if (!caller) return unauthorized();
+  if (request.method !== "GET" && caller.role !== "admin") return forbidden();
+  const url = new URL(request.url);
+  const id = url.searchParams.get("id");
+  if (!id) {
+    return Response.json({ success: false, error: "Missing id" }, { status: 400 });
+  }
+  try {
+    if (request.method === "GET") {
+      const detail = await getUserDetail(db, id, getScannerDb(env2));
+      if (!detail) return Response.json({ success: false, error: "User not found" }, { status: 404 });
+      return Response.json(detail);
+    }
+    if (request.method === "PATCH") {
+      let body = {};
+      try {
+        body = await request.json();
+      } catch (_) {
+        return Response.json({ success: false, error: "Bad request" }, { status: 400 });
+      }
+      const fields = {};
+      if ("name" in body) fields.name = body.name === "" ? null : body.name;
+      if ("email" in body) fields.email = String(body.email);
+      const before = await getUserDetail(db, id);
+      const result = await updateUser(db, id, fields);
+      if (!result.ok) return Response.json({ success: false, error: result.error }, { status: 400 });
+      const detail = await getUserDetail(db, id, getScannerDb(env2));
+      await logAudit(db, request, {
+        actor: caller.username,
+        actorRole: caller.role,
+        action: "user.edit",
+        target: detail?.email || id,
+        detail: {
+          id,
+          from: { name: before?.name ?? null, email: before?.email ?? null },
+          to: { name: detail?.name ?? null, email: detail?.email ?? null }
+        }
+      });
+      return Response.json({ ok: true, user: detail });
+    }
+    if (request.method === "DELETE") {
+      const confirm = url.searchParams.get("confirm");
+      const detail = await getUserDetail(db, id);
+      if (!detail) return Response.json({ success: false, error: "User not found" }, { status: 404 });
+      if (confirm !== detail.email) {
+        return Response.json(
+          { success: false, error: "Confirmation email did not match. Deletion aborted." },
+          { status: 400 }
+        );
+      }
+      const report2 = await deleteUserEverywhere(db, id);
+      await logAudit(db, request, {
+        actor: caller.username,
+        actorRole: caller.role,
+        action: "user.delete",
+        target: detail.email,
+        outcome: report2.ok ? "ok" : "failed",
+        detail: { id, rows: report2.deleted, error: report2.error || null }
+      });
+      if (!report2.ok) return Response.json({ success: false, error: report2.error }, { status: 400 });
+      return Response.json(report2);
+    }
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  } catch (err) {
+    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
+  }
+}
+__name(handleAdminDashboardUser, "handleAdminDashboardUser");
+
 // src/handlers/checkLegacyScript.js
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
@@ -41469,6 +45787,106 @@ __name(handleCheckLegacyScript, "handleCheckLegacyScript");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
+
+// src/services/subscriptionGate.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+init_db();
+var TAG3 = "[consent-gate]";
+var ENTITLED_STATUSES = /* @__PURE__ */ new Set(["active", "trialing"]);
+function isEntitledStatus(status) {
+  return ENTITLED_STATUSES.has(String(status ?? "").trim().toLowerCase());
+}
+__name(isEntitledStatus, "isEntitledStatus");
+async function resolveSiteRow(db, siteId) {
+  return db.prepare(
+    `SELECT id, organizationId, domain, platformSiteId FROM Site
+       WHERE id = ?1 OR platformSiteId = ?1 LIMIT 1`
+  ).bind(String(siteId)).first().catch((e) => {
+    console.warn(`${TAG3} site lookup failed`, e?.message);
+    return null;
+  });
+}
+__name(resolveSiteRow, "resolveSiteRow");
+async function legacyKvActive(env2, site) {
+  const kv = env2.ACTIVE_SITES_CONSENTBIT;
+  if (!kv) return null;
+  const domains = [];
+  const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
+  if (platformSiteId && env2.WEBFLOW_AUTHENTICATION) {
+    try {
+      const raw = await env2.WEBFLOW_AUTHENTICATION.get(platformSiteId);
+      if (raw) {
+        const entry = typeof raw === "string" ? JSON.parse(raw) : raw;
+        for (const d of [entry.customDomain, entry.stagingUrl, entry.domain]) if (d) domains.push(d);
+        if (Array.isArray(entry.domains)) {
+          for (const d of entry.domains) if (d?.url) domains.push(d.url);
+        }
+      }
+    } catch (e) {
+      console.warn(`${TAG3} WEBFLOW_AUTHENTICATION read failed`, e?.message);
+    }
+  }
+  if (site.domain) domains.push(site.domain);
+  if (domains.length === 0) return null;
+  const tried = /* @__PURE__ */ new Set();
+  let sawInactive = false;
+  for (const raw of domains) {
+    const clean = String(raw).replace(/^https?:\/\//, "").replace(/\/$/, "").toLowerCase();
+    if (!clean) continue;
+    for (const key of [clean, `https://${clean}`, `www.${clean}`, `https://www.${clean}`]) {
+      if (tried.has(key)) continue;
+      tried.add(key);
+      let entry = null;
+      try {
+        entry = await kv.get(key, { type: "json" });
+      } catch {
+      }
+      if (!entry) continue;
+      if (entry.active === true) return true;
+      if (entry.active === false) sawInactive = true;
+    }
+  }
+  return sawInactive ? false : null;
+}
+__name(legacyKvActive, "legacyKvActive");
+async function getConsentReportEntitlement(env2, siteId) {
+  const db = env2.CONSENT_WEBAPP;
+  if (!db || !siteId) return { entitled: false, status: "none", siteRowId: null, reason: "NO_SITE_ID" };
+  const site = await resolveSiteRow(db, siteId);
+  if (!site) return { entitled: false, status: "none", siteRowId: null, reason: "SITE_NOT_FOUND" };
+  let sub = await getSubscriptionBySiteId(db, site.id).catch(() => null);
+  if (!sub) {
+    const orgId = site.organizationId ?? site.organizationid ?? null;
+    if (orgId) sub = await getSubscriptionByOrganization(db, orgId).catch(() => null);
+  }
+  const status = String(sub?.status ?? "").trim().toLowerCase() || "none";
+  let entitled = isEntitledStatus(status);
+  let reason = entitled ? "D1_ACTIVE" : status === "none" ? "NO_SUBSCRIPTION" : `STATUS_${status.toUpperCase()}`;
+  const kvActive = await legacyKvActive(env2, site);
+  if (!entitled && kvActive === true && status !== "canceled") {
+    entitled = true;
+    reason = "LEGACY_KV_ACTIVE";
+  } else if (entitled && kvActive === false) {
+    entitled = false;
+    reason = "LEGACY_KV_INACTIVE";
+  }
+  return { entitled, status, siteRowId: site.id, reason };
+}
+__name(getConsentReportEntitlement, "getConsentReportEntitlement");
+async function requireActiveSubscriptionForConsentReport(env2, siteId) {
+  const result = await getConsentReportEntitlement(env2, siteId);
+  if (result.entitled) return { ok: true };
+  console.log(`${TAG3} denied \u2014 siteId=${siteId} status=${result.status} reason=${result.reason}`);
+  return {
+    ok: false,
+    status: 403,
+    code: "SUBSCRIPTION_INACTIVE",
+    subscriptionStatus: result.status,
+    error: "Consent log reports require an active subscription. Reactivate your plan to view or export consent records."
+  };
+}
+__name(requireActiveSubscriptionForConsentReport, "requireActiveSubscriptionForConsentReport");
 
 // src/handlers/legacyConsentHelpers.js
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
@@ -41695,12 +46113,12 @@ function transformEntry(entry, siteId) {
 __name(transformEntry, "transformEntry");
 
 // src/handlers/legacyConsentLogs.js
-function getSessionIdFromCookie10(request) {
+function getSessionIdFromCookie11(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie10, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie11, "getSessionIdFromCookie");
 async function handleLegacyConsentLogs(request, env2) {
   const db = env2.CONSENT_WEBAPP;
   const url = new URL(request.url);
@@ -41710,7 +46128,7 @@ async function handleLegacyConsentLogs(request, env2) {
   const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10), 500);
   const offset = parseInt(url.searchParams.get("offset") || "0", 10);
   console.log("[LegacyConsentLogs] request params \u2014", { siteId, year, month, limit, offset });
-  const sid = getSessionIdFromCookie10(request);
+  const sid = getSessionIdFromCookie11(request);
   if (!sid) {
     console.warn("[LegacyConsentLogs] no session cookie");
     return Response.json({ success: false, error: "Not authenticated" }, { status: 401 });
@@ -41739,6 +46157,13 @@ async function handleLegacyConsentLogs(request, env2) {
   if (!site) {
     console.warn("[LegacyConsentLogs] site not found \u2014 siteId:", siteId, "userId:", userId);
     return Response.json({ success: false, error: "Legacy site not found or access denied" }, { status: 404 });
+  }
+  const gate = await requireActiveSubscriptionForConsentReport(env2, site.id);
+  if (!gate.ok) {
+    return Response.json(
+      { success: false, error: gate.error, code: gate.code, subscriptionStatus: gate.subscriptionStatus },
+      { status: gate.status }
+    );
   }
   const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
   console.log("[LegacyConsentLogs] site found \u2014", {
@@ -41906,7 +46331,7 @@ init_db();
 // src/utils/signedToken.js
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
-var TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7;
+var TOKEN_TTL_SECONDS2 = 60 * 60 * 24 * 7;
 function base64url(buf) {
   return btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
@@ -41929,7 +46354,7 @@ async function getKey(secret) {
 }
 __name(getKey, "getKey");
 async function createDownloadToken(secret, siteId, id) {
-  const exp = Math.floor(Date.now() / 1e3) + TOKEN_TTL_SECONDS;
+  const exp = Math.floor(Date.now() / 1e3) + TOKEN_TTL_SECONDS2;
   const expB64 = base64url(new TextEncoder().encode(String(exp)));
   const message = `${siteId}:${id}:${exp}`;
   const key = await getKey(secret);
@@ -41961,12 +46386,12 @@ async function verifyDownloadToken(secret, token, expectedSiteId, expectedId) {
 __name(verifyDownloadToken, "verifyDownloadToken");
 
 // src/handlers/legacyConsentCsv.js
-function getSessionIdFromCookie11(request) {
+function getSessionIdFromCookie12(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie11, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie12, "getSessionIdFromCookie");
 function x(s) {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
@@ -42011,7 +46436,7 @@ function buildWorkbookXml(headerRow, dataRows) {
 __name(buildWorkbookXml, "buildWorkbookXml");
 async function handleLegacyConsentCsv(request, env2) {
   const db = env2.CONSENT_WEBAPP;
-  const sid = getSessionIdFromCookie11(request);
+  const sid = getSessionIdFromCookie12(request);
   if (!sid) return new Response("Unauthorized", { status: 401 });
   const session = await getSessionById(db, sid).catch(() => null);
   if (!session) return new Response("Unauthorized", { status: 401 });
@@ -42027,6 +46452,8 @@ async function handleLegacyConsentCsv(request, env2) {
        WHERE (s.id = ?1 OR s.platformSiteId = ?1) AND u.id = ?2 AND (s.isLegacy = 1 OR s.platformSiteId IS NOT NULL)`
   ).bind(siteId, userId).first().catch(() => null);
   if (!site) return new Response("Legacy site not found", { status: 404 });
+  const gate = await requireActiveSubscriptionForConsentReport(env2, site.id);
+  if (!gate.ok) return new Response(gate.error, { status: gate.status });
   const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
   const kv = env2.WEBFLOW_AUTHENTICATION;
   const r2 = env2.R2;
@@ -42173,10 +46600,10 @@ function normalizeCategories(cats) {
   return cats.categories && typeof cats.categories === "object" ? cats.categories : cats;
 }
 __name(normalizeCategories, "normalizeCategories");
-function escapeHtml(s) {
+function escapeHtml2(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
-__name(escapeHtml, "escapeHtml");
+__name(escapeHtml2, "escapeHtml");
 function cookieDuration(expires) {
   if (!expires || expires.toLowerCase() === "session") return "session";
   try {
@@ -42242,20 +46669,26 @@ function buildHtml(consent, cookies, customCookieRules, siteDomain, logoUrl = nu
   const cookieRows = (() => {
     const scanned = relevantCookies.map((c) => `
       <tr>
-        <td class="proof-td">${escapeHtml(c.name || "\u2014")}</td>
-        <td class="proof-td">${escapeHtml(cookieDuration(c.expires))}</td>
-        <td class="proof-td">${escapeHtml(c.description || "\u2014")}</td>
+        <td class="proof-td">${escapeHtml2(c.name || "\u2014")}</td>
+        <td class="proof-td">${escapeHtml2(cookieDuration(c.expires))}</td>
+        <td class="proof-td">${escapeHtml2(c.description || "\u2014")}</td>
       </tr>`);
     const custom = relevantCustomRules.map((r) => `
       <tr>
-        <td class="proof-td">${escapeHtml(r.name || "\u2014")} <span style="font-size:10px;color:#6b7280">(custom)</span></td>
-        <td class="proof-td">${escapeHtml(r.duration || "\u2014")}</td>
-        <td class="proof-td">${escapeHtml(r.description || "\u2014")}</td>
+        <td class="proof-td">${escapeHtml2(r.name || "\u2014")} <span style="font-size:10px;color:#6b7280">(custom)</span></td>
+        <td class="proof-td">${escapeHtml2(r.duration || "\u2014")}</td>
+        <td class="proof-td">${escapeHtml2(r.description || "\u2014")}</td>
       </tr>`);
     const all = [...scanned, ...custom];
     return all.length > 0 ? all.join("") : `<tr><td class="proof-td" colspan="3" style="color:#6b7280;text-align:center">No cookies recorded for accepted categories.</td></tr>`;
   })();
-  const consentStatusLabel = isGiven ? "Accepted" : "Rejected";
+  const consentStatusLabel = (() => {
+    const s = (consent.status || "").toLowerCase();
+    if (s === "given" || s === "accepted") return "Accepted";
+    if (s === "rejected") return "Rejected";
+    if (s === "partial") return "Partial";
+    return consent.status ? consent.status.charAt(0).toUpperCase() + consent.status.slice(1) : "Rejected";
+  })();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -42297,18 +46730,18 @@ function buildHtml(consent, cookies, customCookieRules, siteDomain, logoUrl = nu
   </div>
 
   <table class="proof-meta" role="presentation">
-    <tr><td class="proof-label">Consented domain</td><td class="proof-value">${escapeHtml(siteDomain)}</td></tr>
-    <tr><td class="proof-label">Consent date</td><td class="proof-value">${escapeHtml(ts)}</td></tr>
-    <tr><td class="proof-label">Consent ID</td><td class="proof-value">${escapeHtml(consent.id || "\u2014")}</td></tr>
-    <tr><td class="proof-label">Country</td><td class="proof-value">${escapeHtml(consent.country || "\u2014")}</td></tr>
-    <tr><td class="proof-label">Anonymized IP address</td><td class="proof-value">${escapeHtml(anonIp)}</td></tr>
-    <tr><td class="proof-label">Consent status</td><td class="proof-value">${escapeHtml(consentStatusLabel)}</td></tr>
+    <tr><td class="proof-label">Consented domain</td><td class="proof-value">${escapeHtml2(siteDomain)}</td></tr>
+    <tr><td class="proof-label">Consent date</td><td class="proof-value">${escapeHtml2(ts)}</td></tr>
+    <tr><td class="proof-label">Consent ID</td><td class="proof-value">${escapeHtml2(consent.id || "\u2014")}</td></tr>
+    <tr><td class="proof-label">Country</td><td class="proof-value">${escapeHtml2(consent.country || "\u2014")}</td></tr>
+    <tr><td class="proof-label">Anonymized IP address</td><td class="proof-value">${escapeHtml2(anonIp)}</td></tr>
+    <tr><td class="proof-label">Consent status</td><td class="proof-value">${escapeHtml2(consentStatusLabel)}</td></tr>
   </table>
 
   <div class="proof-section-box">
     <div class="proof-categories-header">
       <p class="proof-categories-title">Accepted Categories</p>
-      <p class="proof-categories-line">${escapeHtml(acceptedLabels)}</p>
+      <p class="proof-categories-line">${escapeHtml2(acceptedLabels)}</p>
     </div>
     <table class="proof-cookie-table">
       <thead>
@@ -42396,12 +46829,12 @@ async function handleConsentPdf(request, env2) {
 __name(handleConsentPdf, "handleConsentPdf");
 
 // src/handlers/legacyConsentPdf.js
-function getSessionIdFromCookie12(request) {
+function getSessionIdFromCookie13(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie12, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie13, "getSessionIdFromCookie");
 async function handleLegacyConsentPdf(request, env2) {
   const db = env2.CONSENT_WEBAPP;
   const url = new URL(request.url);
@@ -42414,7 +46847,7 @@ async function handleLegacyConsentPdf(request, env2) {
     const valid = await verifyDownloadToken(env2.JWT_SECRET, token, siteId, visitorId);
     if (!valid) return new Response("Link expired or invalid", { status: 401 });
   } else {
-    const sid = getSessionIdFromCookie12(request);
+    const sid = getSessionIdFromCookie13(request);
     if (!sid) return new Response("Unauthorized", { status: 401 });
     const session = await getSessionById(db, sid).catch(() => null);
     if (!session) return new Response("Unauthorized", { status: 401 });
@@ -42431,6 +46864,8 @@ async function handleLegacyConsentPdf(request, env2) {
          FROM Site s WHERE (s.id = ?1 OR s.platformSiteId = ?1) AND (s.isLegacy = 1 OR s.platformSiteId IS NOT NULL)`
   ).bind(siteId).first()).catch(() => null);
   if (!site) return new Response("Site not found", { status: 404 });
+  const gate = await requireActiveSubscriptionForConsentReport(env2, site.id);
+  if (!gate.ok) return new Response(gate.error, { status: gate.status });
   const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
   const kv = env2.WEBFLOW_AUTHENTICATION;
   const r2 = env2.R2;
@@ -42525,12 +46960,12 @@ __name(handleLegacyConsentPdf, "handleLegacyConsentPdf");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie13(request) {
+function getSessionIdFromCookie14(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie13, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie14, "getSessionIdFromCookie");
 async function getFramerConsentRows(kv, platformSiteId) {
   if (!kv || !platformSiteId) {
     console.warn("[legacyConsentLogsFramer] missing kv or platformSiteId", { hasKv: !!kv, platformSiteId });
@@ -42563,7 +46998,7 @@ async function getFramerConsentRows(kv, platformSiteId) {
 __name(getFramerConsentRows, "getFramerConsentRows");
 async function handleLegacyConsentLogsFramer(request, env2) {
   const db = env2.CONSENT_WEBAPP;
-  const sid = getSessionIdFromCookie13(request);
+  const sid = getSessionIdFromCookie14(request);
   if (!sid) return Response.json({ success: false, error: "Not authenticated" }, { status: 401 });
   const session = await getSessionById(db, sid).catch(() => null);
   if (!session) return Response.json({ success: false, error: "Not authenticated" }, { status: 401 });
@@ -42579,6 +47014,13 @@ async function handleLegacyConsentLogsFramer(request, env2) {
        WHERE (s.id = ?1 OR s.platformSiteId = ?1) AND u.id = ?2`
   ).bind(siteId, userId).first().catch(() => null);
   if (!site) return Response.json({ success: false, error: "Site not found or access denied" }, { status: 404 });
+  const gate = await requireActiveSubscriptionForConsentReport(env2, site.id);
+  if (!gate.ok) {
+    return Response.json(
+      { success: false, error: gate.error, code: gate.code, subscriptionStatus: gate.subscriptionStatus },
+      { status: gate.status }
+    );
+  }
   console.log("[legacyConsentLogsFramer] site row", { id: site.id, domain: site.domain, platformSiteId: site.platformSiteId ?? site.platformsiteid });
   const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
   if (!platformSiteId) {
@@ -42630,6 +47072,8 @@ async function handleLegacyConsentFramerRaw(request, env2) {
        LIMIT 1`
   ).bind(siteIdParam).first().catch(() => null);
   if (!site) return Response.json({ error: "Site not found" }, { status: 404 });
+  const gate = await requireActiveSubscriptionForConsentReport(env2, site.id);
+  if (!gate.ok) return Response.json({ error: gate.error, code: gate.code }, { status: gate.status });
   const siteId = site.id;
   const clientId = site.domain || "";
   const year = url.searchParams.get("year");
@@ -42735,12 +47179,12 @@ __name(handleLegacyConsentFramerRaw, "handleLegacyConsentFramerRaw");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie14(request) {
+function getSessionIdFromCookie15(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie14, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie15, "getSessionIdFromCookie");
 function x2(s) {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
@@ -42772,7 +47216,7 @@ async function getFramerConsentRows2(kv, platformSiteId) {
 __name(getFramerConsentRows2, "getFramerConsentRows");
 async function handleLegacyConsentCsvFramer(request, env2) {
   const db = env2.CONSENT_WEBAPP;
-  const sid = getSessionIdFromCookie14(request);
+  const sid = getSessionIdFromCookie15(request);
   if (!sid) return new Response("Unauthorized", { status: 401 });
   const session = await getSessionById(db, sid).catch(() => null);
   if (!session) return new Response("Unauthorized", { status: 401 });
@@ -42788,6 +47232,8 @@ async function handleLegacyConsentCsvFramer(request, env2) {
        WHERE (s.id = ?1 OR s.platformSiteId = ?1) AND u.id = ?2`
   ).bind(siteId, userId).first().catch(() => null);
   if (!site) return new Response("Site not found", { status: 404 });
+  const gate = await requireActiveSubscriptionForConsentReport(env2, site.id);
+  if (!gate.ok) return new Response(gate.error, { status: gate.status });
   const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
   if (!platformSiteId) return new Response("Site missing platformSiteId", { status: 400 });
   const kv = env2.CONSENT_STORE_FRAMER;
@@ -42879,12 +47325,12 @@ __name(handleLegacyConsentCsvFramer, "handleLegacyConsentCsvFramer");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie15(request) {
+function getSessionIdFromCookie16(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie15, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie16, "getSessionIdFromCookie");
 function yesNo(val) {
   if (val === void 0 || val === null) return "\u2014";
   return val ? "Yes" : "No";
@@ -43029,7 +47475,7 @@ async function handleLegacyConsentPdfFramer(request, env2) {
     const valid = await verifyDownloadToken(env2.JWT_SECRET, token, siteId, visitorId);
     if (!valid) return new Response("Link expired or invalid", { status: 401 });
   } else {
-    const sid = getSessionIdFromCookie15(request);
+    const sid = getSessionIdFromCookie16(request);
     if (!sid) return new Response("Unauthorized", { status: 401 });
     const session = await getSessionById(db, sid).catch(() => null);
     if (!session) return new Response("Unauthorized", { status: 401 });
@@ -43046,6 +47492,8 @@ async function handleLegacyConsentPdfFramer(request, env2) {
          FROM Site s WHERE (s.id = ?1 OR s.platformSiteId = ?1)`
   ).bind(siteId).first()).catch(() => null);
   if (!site) return new Response("Site not found", { status: 404 });
+  const gate = await requireActiveSubscriptionForConsentReport(env2, site.id);
+  if (!gate.ok) return new Response(gate.error, { status: gate.status });
   const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
   if (!platformSiteId) return new Response("Site missing platformSiteId", { status: 400 });
   const kv = env2.CONSENT_STORE_FRAMER;
@@ -43104,6 +47552,7 @@ async function handleConsentCsv(request, env2) {
   const db = env2.CONSENT_WEBAPP;
   const url = new URL(request.url);
   const siteId = url.searchParams.get("siteId");
+  console.log(`[PostHog DEBUG] consent-csv handler reached: siteId=${siteId}`);
   if (!siteId) return new Response("siteId required", { status: 400 });
   const year = url.searchParams.get("year");
   const month = url.searchParams.get("month");
@@ -43112,6 +47561,21 @@ async function handleConsentCsv(request, env2) {
        WHERE s.id = ?1 AND (s.isLegacy = 0 OR s.isLegacy IS NULL)`
   ).bind(siteId).first().catch(() => null);
   if (!site) return new Response("Site not found", { status: 404 });
+  try {
+    const ownerRow = await db.prepare(
+      `SELECT u.email AS email, s.platform AS platform FROM Site s
+         JOIN OrganizationMember om ON om.organizationId = s.organizationId
+         JOIN User u ON u.id = om.userId WHERE s.id = ?1 LIMIT 1`
+    ).bind(siteId).first();
+    if (ownerRow?.email && String(ownerRow.platform || "").toLowerCase() === "webflow") {
+      await capturePostHogEvent(env2, ownerRow.email, "consent_logs_viewed", {
+        action: "export_csv",
+        platform: "webflow",
+        site_id: siteId
+      });
+    }
+  } catch {
+  }
   const hasDateFilter = year && month;
   const paddedMonth = hasDateFilter ? month.padStart(2, "0") : "";
   const { results: rows } = hasDateFilter ? await db.prepare(
@@ -43137,14 +47601,20 @@ async function handleConsentCsv(request, env2) {
       }
     }
     const isCcpa = (row.regulation || "").toLowerCase() === "ccpa" || cats && cats.ccpa !== void 0;
-    const isAccepted = ["given", "accepted"].includes((row.status || "").toLowerCase());
+    const statusLabel = (() => {
+      const s = (row.status || "").toLowerCase();
+      if (s === "given" || s === "accepted") return "Accepted";
+      if (s === "rejected") return "Rejected";
+      if (s === "partial") return "Partial";
+      return row.status ? row.status.charAt(0).toUpperCase() + row.status.slice(1) : "";
+    })();
     const token = await createDownloadToken(env2.JWT_SECRET, siteId, row.id || "");
     const pdfUrl = `${workerOrigin}/api/consent-pdf?siteId=${encodeURIComponent(siteId)}&consentId=${encodeURIComponent(row.id || "")}&token=${encodeURIComponent(token)}`;
     return `<Row>
       ${cell3(i + 1)}
       ${cell3(row.id || "")}
       ${cell3(row.createdAt ? new Date(row.createdAt).toUTCString() : "")}
-      ${cell3(isAccepted ? "Accepted" : "Rejected")}
+      ${cell3(statusLabel)}
       ${cell3((row.regulation || "gdpr").toUpperCase())}
       ${cell3(row.country || "")}
       ${cell3(row.region || "")}
@@ -43385,15 +47855,15 @@ __name(handleLicenseTransfer, "handleLicenseTransfer");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie16(request) {
+function getSessionIdFromCookie17(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie16, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie17, "getSessionIdFromCookie");
 async function requireAuth(request, env2) {
   const db = env2.CONSENT_WEBAPP;
-  const sid = getSessionIdFromCookie16(request);
+  const sid = getSessionIdFromCookie17(request);
   if (!sid) return { ok: false, status: 401, body: { error: "Login required" } };
   const session = await getSessionById(db, sid);
   if (!session) return { ok: false, status: 401, body: { error: "Login required" } };
@@ -43775,10 +48245,12 @@ async function ensureTable(db) {
   }
 }
 __name(ensureTable, "ensureTable");
+var TAG4 = "[CustomCookieRules]";
 async function handleCustomCookieRules(request, env2) {
   const db = env2.CONSENT_WEBAPP;
   const url = new URL(request.url);
   const { method } = request;
+  console.log(`${TAG4} ${method} ${url.pathname}${url.search} origin=${request.headers.get("origin") || "-"}`);
   try {
     await ensureTable(db);
     if (method === "GET") {
@@ -43797,10 +48269,14 @@ async function handleCustomCookieRules(request, env2) {
     if (method === "DELETE") {
       const id = (url.searchParams.get("id") || "").trim();
       if (!id) {
+        console.warn(`${TAG4} DELETE missing id`);
         return Response.json({ success: false, error: "id is required" }, { status: 400 });
       }
-      await db.prepare(`DELETE FROM CustomCookieRule WHERE id = ?1`).bind(id).run();
-      return Response.json({ success: true });
+      const res = await db.prepare(`DELETE FROM CustomCookieRule WHERE id = ?1`).bind(id).run();
+      const changes = res?.meta?.changes ?? 0;
+      console.log(`${TAG4} DELETE id=${id} \u2192 rowsDeleted=${changes}`);
+      if (changes === 0) console.warn(`${TAG4} DELETE matched no row for id=${id} (already gone or wrong id)`);
+      return Response.json({ success: true, deleted: changes });
     }
     if (method === "POST") {
       let body;
@@ -43808,6 +48284,18 @@ async function handleCustomCookieRules(request, env2) {
         body = await request.json();
       } catch {
         return Response.json({ success: false, error: "Invalid JSON body" }, { status: 400 });
+      }
+      if (body?.action === "delete") {
+        const id2 = String(body?.id || "").trim();
+        if (!id2) {
+          console.warn(`${TAG4} POST delete missing id`);
+          return Response.json({ success: false, error: "id is required" }, { status: 400 });
+        }
+        const res = await db.prepare(`DELETE FROM CustomCookieRule WHERE id = ?1`).bind(id2).run();
+        const changes = res?.meta?.changes ?? 0;
+        console.log(`${TAG4} POST action=delete id=${id2} \u2192 rowsDeleted=${changes}`);
+        if (changes === 0) console.warn(`${TAG4} POST delete matched no row for id=${id2} (already gone or wrong id)`);
+        return Response.json({ success: true, deleted: changes });
       }
       if (body?.action === "publish") {
         const siteId2 = String(body?.siteId || "").trim();
@@ -43902,12 +48390,12 @@ __name(handleScanPending, "handleScanPending");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie17(request) {
+function getSessionIdFromCookie18(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie17, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie18, "getSessionIdFromCookie");
 function embedScriptUrlNeedsRepair(embedUrl) {
   return /YOUR-ACCOUNT|YOUR_ACCOUNT/i.test(String(embedUrl || ""));
 }
@@ -43917,7 +48405,7 @@ async function handleAuthDashboardInit(request, env2) {
   if (request.method !== "GET") {
     return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
   }
-  const sid = getSessionIdFromCookie17(request);
+  const sid = getSessionIdFromCookie18(request);
   if (!sid) {
     return Response.json(
       { authenticated: false, success: false, error: "Login required", sites: [], effectivePlanId: "free", organizations: [] },
@@ -43983,11 +48471,11 @@ async function handleAuthDashboardInit(request, env2) {
   const pageStatsMap = {};
   if (siteIds.length > 0) {
     try {
-      const placeholders = siteIds.map((_, i) => `?${i + 1}`).join(",");
+      const placeholders2 = siteIds.map((_, i) => `?${i + 1}`).join(",");
       const { results: cookieRows } = await db.prepare(
         `SELECT siteId, COUNT(*) as total, COUNT(DISTINCT category) as cats
            FROM Cookie
-           WHERE siteId IN (${placeholders}) AND (isExpected = 0 OR isExpected IS NULL)
+           WHERE siteId IN (${placeholders2}) AND (isExpected = 0 OR isExpected IS NULL)
            GROUP BY siteId`
       ).bind(...siteIds).all();
       for (const row of cookieRows || []) {
@@ -44001,11 +48489,11 @@ async function handleAuthDashboardInit(request, env2) {
     } catch (_) {
     }
     try {
-      const placeholders = siteIds.map((_, i) => `?${i + 1}`).join(",");
+      const placeholders2 = siteIds.map((_, i) => `?${i + 1}`).join(",");
       const { results: pageRows } = await db.prepare(
         `SELECT siteId, COUNT(*) as pagesScanned
            FROM ScanHistory
-           WHERE siteId IN (${placeholders})
+           WHERE siteId IN (${placeholders2})
              AND LOWER(TRIM(COALESCE(scanStatus, ''))) IN ('completed', '')
              AND strftime('%Y-%m', createdAt) = strftime('%Y-%m', 'now')
            GROUP BY siteId`
@@ -44046,10 +48534,10 @@ async function handleAuthDashboardInit(request, env2) {
   });
   let unassignedRows = [];
   try {
-    const placeholders = allOrgIds.map((_, i) => `?${i + 1}`).join(",");
+    const placeholders2 = allOrgIds.map((_, i) => `?${i + 1}`).join(",");
     const { results: unassignedSubs } = await db.prepare(
       `SELECT * FROM Subscription
-         WHERE organizationId IN (${placeholders})
+         WHERE organizationId IN (${placeholders2})
            AND licenseKey IS NOT NULL
            AND (siteId IS NULL OR siteId = '')
          ORDER BY createdAt DESC`
@@ -44251,15 +48739,15 @@ __name(handleAuthSignup, "handleAuthSignup");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie18(request) {
+function getSessionIdFromCookie19(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie18, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie19, "getSessionIdFromCookie");
 async function handleAuthMe(request, env2) {
   const db = env2.CONSENT_WEBAPP;
-  const sid = getSessionIdFromCookie18(request);
+  const sid = getSessionIdFromCookie19(request);
   if (!sid) {
     return Response.json({ authenticated: false }, { status: 200 });
   }
@@ -44301,12 +48789,12 @@ __name(handleAuthMe, "handleAuthMe");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie19(request) {
+function getSessionIdFromCookie20(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie19, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie20, "getSessionIdFromCookie");
 function isValidEmail(email) {
   return typeof email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 }
@@ -44316,7 +48804,7 @@ async function handleAuthProfile(request, env2) {
   if (request.method !== "PATCH") {
     return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
   }
-  const sid = getSessionIdFromCookie19(request);
+  const sid = getSessionIdFromCookie20(request);
   if (!sid) {
     return Response.json({ success: false, error: "Login required" }, { status: 401 });
   }
@@ -44352,25 +48840,301 @@ async function handleAuthProfile(request, env2) {
 }
 __name(handleAuthProfile, "handleAuthProfile");
 
+// src/handlers/authTransferOwnership.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+init_db();
+function getSessionIdFromCookie21(request) {
+  const cookie = request.headers.get("Cookie") || "";
+  const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
+  return match ? match[1].trim() : null;
+}
+__name(getSessionIdFromCookie21, "getSessionIdFromCookie");
+function isValidEmail2(email) {
+  const e = (email || "").trim().toLowerCase();
+  return e.includes("@") && e.includes(".") && e.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+}
+__name(isValidEmail2, "isValidEmail");
+async function sha256Hex3(s) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(sha256Hex3, "sha256Hex");
+function randomToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(randomToken, "randomToken");
+async function sendEmailViaBrevo(env2, { to, name, subject, text, html }) {
+  const apiKey = env2.BREVO_API_KEY;
+  const fromEmail = env2.BREVO_FROM_EMAIL;
+  const fromName = env2.BREVO_FROM_NAME || "ConsentBit";
+  if (!apiKey) throw new Error("BREVO_API_KEY not configured");
+  if (!fromEmail) throw new Error("BREVO_FROM_EMAIL not configured");
+  const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: { "content-type": "application/json", "api-key": apiKey, accept: "application/json" },
+    body: JSON.stringify({
+      sender: { email: fromEmail, name: fromName },
+      to: [{ email: to, name: name || to }],
+      subject,
+      textContent: text,
+      htmlContent: html
+    })
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`Brevo send failed: ${res.status} ${t}`.slice(0, 300));
+  }
+}
+__name(sendEmailViaBrevo, "sendEmailViaBrevo");
+function resolveAppOrigin(request, env2, suppliedOrigin) {
+  const candidate = (suppliedOrigin || "").trim();
+  if (candidate) {
+    try {
+      const u = new URL(candidate);
+      if (u.protocol === "http:" || u.protocol === "https:") return u.origin;
+    } catch (_) {
+    }
+  }
+  const configured = (env2.WEBAPP_PUBLIC_URL || "").trim().replace(/\/+$/, "");
+  if (configured) return configured;
+  try {
+    return new URL(request.url).origin;
+  } catch (_) {
+    return "";
+  }
+}
+__name(resolveAppOrigin, "resolveAppOrigin");
+function authEmailHtml({ ownerName, newEmail, newName, link, ttlMinutes }) {
+  return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f3f4f6;">
+  <div style="max-width:520px;margin:0 auto;padding:32px 24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <div style="background:#ffffff;border-radius:12px;padding:32px 28px;border:1px solid #e5e7eb;">
+      <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hello${ownerName ? ` ${ownerName}` : ""},</p>
+      <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">We received a request to <strong>transfer ownership</strong> of your ConsentBit account to:</p>
+      <div style="background:#f3f4f6;border:1px solid #e5e7eb;border-radius:10px;padding:16px 18px;margin:0 0 22px;">
+        <p style="margin:0 0 4px;color:#111827;font-size:15px;font-weight:600;">${newName ? `${newName}` : newEmail}</p>
+        <p style="margin:0;color:#6b7280;font-size:14px;">${newEmail}</p>
+      </div>
+      <p style="margin:0 0 22px;color:#6b7280;font-size:15px;line-height:1.6;">If you made this request, click the button below to authorize it. After that, this account (all its sites, subscription and consent data) will belong to the new owner, and you will be signed out.</p>
+      <p style="margin:0 0 24px;text-align:center;">
+        <a href="${link}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#007AFF;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:14px 32px;border-radius:8px;">Authorize transfer</a>
+      </p>
+      <p style="margin:0 0 18px;color:#9ca3af;font-size:13px;line-height:1.6;">This link expires in ${ttlMinutes} minutes. If you did not request this, ignore this email and your account stays unchanged.</p>
+      <p style="margin:0;color:#6b7280;font-size:14px;line-height:1.6;">Best regards,<br/>ConsentBit Team</p>
+    </div>
+  </div>
+  </body></html>`;
+}
+__name(authEmailHtml, "authEmailHtml");
+async function resolveWebflowSiteOwner(db, webflowSiteId) {
+  if (!webflowSiteId) return null;
+  try {
+    return await db.prepare(
+      `SELECT u.id, u.email, u.name
+           FROM Site s
+           JOIN OrganizationMember m ON m.organizationId = s.organizationId AND lower(m.role) = 'owner'
+           JOIN User u ON u.id = m.userId
+          WHERE s.platformSiteId = ?1
+          ORDER BY s.createdAt ASC
+          LIMIT 1`
+    ).bind(webflowSiteId).first();
+  } catch (e) {
+    console.warn("[TransferOwnership] resolveWebflowSiteOwner failed:", e?.message || e);
+    return null;
+  }
+}
+__name(resolveWebflowSiteOwner, "resolveWebflowSiteOwner");
+async function handleTransferOwnershipRequest(request, env2, ctx) {
+  const db = env2.CONSENT_WEBAPP;
+  if (request.method !== "POST") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const sid = getSessionIdFromCookie21(request);
+  if (!sid) return Response.json({ success: false, error: "Login required" }, { status: 401 });
+  const session = await getSessionById(db, sid);
+  if (!session) return Response.json({ success: false, error: "Login required" }, { status: 401 });
+  const userId = session.userId ?? session.user_id;
+  const owner = await getUserById(db, userId);
+  if (!owner) return Response.json({ success: false, error: "User not found" }, { status: 404 });
+  return processTransferRequest(request, env2, ctx, owner);
+}
+__name(handleTransferOwnershipRequest, "handleTransferOwnershipRequest");
+async function handleWfTransferOwnershipRequest(request, env2, ctx, identity2) {
+  const db = env2.CONSENT_WEBAPP;
+  if (request.method !== "POST") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const webflowSiteId = identity2?.webflowSiteId || request.headers.get("X-Webflow-Site-Id") || request.headers.get("x-webflow-site-id");
+  const owner = await resolveWebflowSiteOwner(db, webflowSiteId);
+  if (!owner) {
+    return Response.json({ success: false, error: "No account owner found for this site." }, { status: 404 });
+  }
+  return processTransferRequest(request, env2, ctx, owner, { platform: "webflow" });
+}
+__name(handleWfTransferOwnershipRequest, "handleWfTransferOwnershipRequest");
+async function processTransferRequest(request, env2, ctx, owner, opts = {}) {
+  const db = env2.CONSENT_WEBAPP;
+  const userId = owner.id ?? owner.userId;
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ success: false, error: "Invalid JSON" }, { status: 400 });
+  }
+  const newEmail = String(body?.newEmail || "").trim().toLowerCase();
+  const newName = String(body?.newName || "").trim();
+  const appOrigin = String(body?.appOrigin || "").trim();
+  if (!isValidEmail2(newEmail)) {
+    return Response.json({ success: false, error: "A valid new owner email is required" }, { status: 400 });
+  }
+  if (!newName) {
+    return Response.json({ success: false, error: "New owner name is required" }, { status: 400 });
+  }
+  if (newEmail === String(owner.email || "").trim().toLowerCase()) {
+    return Response.json({ success: false, error: "The new owner email must be different from the current one" }, { status: 400 });
+  }
+  const clash = await getUserByEmail(db, newEmail);
+  if (clash) {
+    return Response.json({ success: false, error: "That email already has a ConsentBit account. Ownership can only be transferred to an email without an existing account." }, { status: 409 });
+  }
+  await cancelPendingOwnershipTransfers(db, userId);
+  const secret = randomToken();
+  const tokenHash = await sha256Hex3(secret);
+  const ttlMinutes = Number(env2.OWNERSHIP_TRANSFER_TTL_MINUTES || 60) || 60;
+  const row = await createOwnershipTransfer(db, {
+    userId,
+    currentEmail: owner.email,
+    newEmail,
+    newName,
+    tokenHash,
+    ttlMinutes
+  });
+  if (opts.platform === "webflow" && owner.email) {
+    try {
+      const domainOf = /* @__PURE__ */ __name((e) => String(e || "").split("@")[1] || "", "domainOf");
+      await capturePostHogEvent(env2, owner.email, "ownership_transfer_sent", {
+        recipient_domain_match: domainOf(newEmail) === domainOf(owner.email),
+        platform: "webflow"
+      });
+    } catch {
+    }
+  }
+  const token = `${row.id}.${secret}`;
+  const origin = resolveAppOrigin(request, env2, appOrigin);
+  const link = `${origin}/transfer-ownership/authorize?token=${encodeURIComponent(token)}`;
+  const subject = "Authorize the ownership transfer of your ConsentBit account";
+  const text = `Hello${owner.name ? ` ${owner.name}` : ""},
+
+We received a request to transfer ownership of your ConsentBit account to ${newName} (${newEmail}).
+
+If you made this request, authorize it here:
+${link}
+
+This link expires in ${ttlMinutes} minutes. If you did not request this, ignore this email and your account stays unchanged.
+
+Best regards,
+ConsentBit Team
+`;
+  const html = authEmailHtml({ ownerName: owner.name, newEmail, newName, link, ttlMinutes });
+  const hasBrevoConfig = Boolean(env2.BREVO_API_KEY && env2.BREVO_FROM_EMAIL);
+  if (!hasBrevoConfig) {
+    console.warn("[TransferOwnership] \u26A0\uFE0F DEV fallback \u2014 Brevo not configured; returning link in response.");
+    return Response.json(
+      { success: true, message: "DEV: email not configured; use the link below", authorizeLink: link, expiresAt: row.expiresAt },
+      { status: 200 }
+    );
+  }
+  ctx.waitUntil(
+    sendEmailViaBrevo(env2, { to: owner.email, name: owner.name, subject, text, html }).then(() => console.log("[TransferOwnership] \u2705 authorization email sent to owner")).catch((e) => console.error("[TransferOwnership] \u274C email send failed:", e?.message || e))
+  );
+  return Response.json(
+    { success: true, sentTo: owner.email, expiresAt: row.expiresAt },
+    { status: 200 }
+  );
+}
+__name(processTransferRequest, "processTransferRequest");
+async function handleTransferOwnershipAuthorize(request, env2) {
+  const db = env2.CONSENT_WEBAPP;
+  if (request.method !== "POST") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  let token = "";
+  try {
+    const body = await request.json();
+    token = String(body?.token || "").trim();
+  } catch {
+    return Response.json({ success: false, error: "Invalid JSON" }, { status: 400 });
+  }
+  if (!token) {
+    try {
+      token = String(new URL(request.url).searchParams.get("token") || "").trim();
+    } catch (_) {
+    }
+  }
+  if (!token || !token.includes(".")) {
+    return Response.json({ success: false, error: "Invalid or missing authorization token" }, { status: 400 });
+  }
+  const [id, secret] = token.split(".");
+  const row = await getOwnershipTransferById(db, id);
+  if (!row) {
+    return Response.json({ success: false, error: "This authorization link is invalid." }, { status: 400 });
+  }
+  if (row.status === "authorized") {
+    return Response.json({ success: false, error: "This transfer has already been authorized." }, { status: 409 });
+  }
+  if (row.status !== "pending") {
+    return Response.json({ success: false, error: "This transfer request is no longer valid." }, { status: 400 });
+  }
+  const attempts = Number(row.attempts ?? 0);
+  if (attempts >= 5) {
+    return Response.json({ success: false, error: "Too many attempts for this link." }, { status: 429 });
+  }
+  if (new Date(row.expiresAt).getTime() <= Date.now()) {
+    return Response.json({ success: false, error: "This authorization link has expired. Please start the transfer again." }, { status: 410 });
+  }
+  const computed = await sha256Hex3(secret || "");
+  if (!secret || computed !== row.tokenHash) {
+    await incrementOwnershipTransferAttempts(db, id);
+    return Response.json({ success: false, error: "This authorization link is invalid." }, { status: 400 });
+  }
+  const clash = await getUserByEmail(db, row.newEmail);
+  if (clash && clash.id !== row.userId) {
+    return Response.json({ success: false, error: "That email now has its own ConsentBit account, so the transfer cannot be completed." }, { status: 409 });
+  }
+  const updated = await renameUserAccount(db, row.userId, { email: row.newEmail, name: row.newName });
+  await markOwnershipTransferAuthorized(db, id);
+  await deleteSessionsForUser(db, row.userId);
+  return Response.json(
+    {
+      success: true,
+      message: "Ownership transferred successfully.",
+      newOwner: { email: updated?.email ?? row.newEmail, name: updated?.name ?? row.newName }
+    },
+    { status: 200 }
+  );
+}
+__name(handleTransferOwnershipAuthorize, "handleTransferOwnershipAuthorize");
+
 // src/handlers/authRequestCode.js
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function isValidEmail2(email) {
+function isValidEmail3(email) {
   const e = (email || "").trim().toLowerCase();
   return e.includes("@") && e.includes(".") && e.length <= 320;
 }
-__name(isValidEmail2, "isValidEmail");
+__name(isValidEmail3, "isValidEmail");
 function generateCode() {
   return String(Math.floor(1e5 + Math.random() * 9e5));
 }
 __name(generateCode, "generateCode");
-async function sha256Hex(s) {
+async function sha256Hex4(s) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-__name(sha256Hex, "sha256Hex");
-async function sendEmailViaBrevo(env2, { to, subject, text, html }) {
+__name(sha256Hex4, "sha256Hex");
+async function sendEmailViaBrevo2(env2, { to, subject, text, html }) {
   const apiKey = env2.BREVO_API_KEY;
   const fromEmail = env2.BREVO_FROM_EMAIL;
   const fromName = env2.BREVO_FROM_NAME || "ConsentBit";
@@ -44398,7 +49162,7 @@ async function sendEmailViaBrevo(env2, { to, subject, text, html }) {
     throw new Error(`Brevo send failed: ${res.status} ${t}`.slice(0, 300));
   }
 }
-__name(sendEmailViaBrevo, "sendEmailViaBrevo");
+__name(sendEmailViaBrevo2, "sendEmailViaBrevo");
 async function handleAuthRequestCode(request, env2, ctx) {
   const db = env2.CONSENT_WEBAPP;
   if (request.method !== "POST") {
@@ -44414,7 +49178,7 @@ async function handleAuthRequestCode(request, env2, ctx) {
   const purpose = body?.purpose === "signup" ? "signup" : "login";
   const name = purpose === "signup" ? (body?.name || "").trim() : null;
   const emailDomain = email.includes("@") ? email.split("@")[1] : "";
-  if (!isValidEmail2(email)) {
+  if (!isValidEmail3(email)) {
     return Response.json({ success: false, error: "Valid email is required" }, { status: 400 });
   }
   if (purpose === "signup" && !name) {
@@ -44422,9 +49186,21 @@ async function handleAuthRequestCode(request, env2, ctx) {
   }
   const code = generateCode();
   const salt = env2.OTP_SECRET || "dev-otp-secret";
+  const testEmail = (env2.TEST_LOGIN_EMAIL || "").trim().toLowerCase();
+  const testCode = (env2.TEST_LOGIN_CODE || "").trim();
+  if (testEmail && testCode && email === testEmail && purpose === "login") {
+    const ttlMinutes2 = Number(env2.OTP_TTL_MINUTES || 10) || 10;
+    const fixedHash = await sha256Hex4(`${purpose}|${email}|${testCode}|${salt}`);
+    const fixedRow = await createEmailVerificationCode(db, { email, purpose, codeHash: fixedHash, name: null, ttlMinutes: ttlMinutes2 });
+    console.log("[AuthRequestCode] test-login: issued fixed code (email skipped) for", email, "requestId", fixedRow.id);
+    return Response.json(
+      { success: true, requestId: fixedRow.id, expiresAt: fixedRow.expiresAt },
+      { status: 200 }
+    );
+  }
   const [existingUser, codeHash] = await Promise.all([
     getUserByEmail(db, email),
-    sha256Hex(`${purpose}|${email}|${code}|${salt}`)
+    sha256Hex4(`${purpose}|${email}|${code}|${salt}`)
   ]);
   if (purpose === "login" && !existingUser) {
     return Response.json({ success: false, error: "No account found with this email. Please sign up first." }, { status: 404 });
@@ -44486,7 +49262,7 @@ ConsentBit Team
   }
   console.log("[AuthRequestCode] dispatching Brevo email to:", email);
   ctx.waitUntil(
-    sendEmailViaBrevo(env2, { to: email, subject, text, html }).then(() => {
+    sendEmailViaBrevo2(env2, { to: email, subject, text, html }).then(() => {
       console.log("[AuthRequestCode] \u2705 Brevo email sent to:", email);
     }).catch((e) => {
       console.error("[AuthRequestCode] \u274C Brevo send failed:", e?.message || e);
@@ -44503,164 +49279,16 @@ __name(handleAuthRequestCode, "handleAuthRequestCode");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-
-// src/services/scanReport.js
-init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
-init_performance2();
-function esc(v) {
-  return String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-__name(esc, "esc");
-function buildScanReportHtml(data, meta) {
-  const c = data.counts || {};
-  const cookies = Array.isArray(data.cookies) ? data.cookies : [];
-  const trackers = Array.isArray(data.trackers) ? data.trackers : [];
-  const cookieRows = cookies.slice(0, 300).map((ck) => `
-    <tr>
-      <td>${esc(ck.name)}</td>
-      <td>${esc(ck.category || "other")}</td>
-      <td>${esc(ck.provider || "-")}</td>
-      <td>${esc(ck.duration || "-")}</td>
-    </tr>`).join("");
-  const trackerRows = trackers.slice(0, 150).map((t) => `
-    <tr><td>${esc(t.name)}</td><td>${esc(t.category)}</td><td>${esc(t.owner || "-")}</td></tr>`).join("");
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"/>
-  <style>
-    * { font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; }
-    body { color:#111827; margin:40px; }
-    h1 { color:#262E84; font-size:26px; margin:0 0 4px; }
-    .sub { color:#6b7280; font-size:13px; margin:0 0 24px; }
-    .grade { display:inline-block; background:#262E84; color:#fff; font-size:34px; font-weight:700; padding:10px 22px; border-radius:12px; }
-    .cards { display:flex; gap:12px; margin:20px 0 28px; flex-wrap:wrap; }
-    .card { border:1px solid #e5e7eb; border-radius:10px; padding:12px 16px; min-width:110px; }
-    .card .n { font-size:22px; font-weight:700; }
-    .card .l { font-size:11px; color:#6b7280; text-transform:uppercase; letter-spacing:.04em; }
-    h2 { font-size:16px; margin:26px 0 10px; color:#111827; }
-    table { width:100%; border-collapse:collapse; font-size:12px; }
-    th,td { text-align:left; padding:7px 8px; border-bottom:1px solid #eef0f3; }
-    th { background:#f8f9fc; color:#374151; }
-  </style></head><body>
-    <h1>Cookie Compliance Report</h1>
-    <p class="sub">${esc(data.scannedUrl || meta.scanned_url)} \xB7 Scanned ${esc(meta.scan_date)}</p>
-    <div><span class="grade">${esc(data.grade || "-")}</span></div>
-    <div class="cards">
-      <div class="card"><div class="n">${esc(data.totalCookies ?? cookies.length)}</div><div class="l">Cookies</div></div>
-      <div class="card"><div class="n">${esc(c.necessary || 0)}</div><div class="l">Necessary</div></div>
-      <div class="card"><div class="n">${esc(c.analytics || 0)}</div><div class="l">Analytics</div></div>
-      <div class="card"><div class="n">${esc(c.advertisement || 0)}</div><div class="l">Advertising</div></div>
-      <div class="card"><div class="n">${esc(c.functional || 0)}</div><div class="l">Functional</div></div>
-      <div class="card"><div class="n">${esc(data.totalDomains || 0)}</div><div class="l">Domains</div></div>
-    </div>
-    <h2>Cookies (${cookies.length})</h2>
-    <table><thead><tr><th>Name</th><th>Category</th><th>Provider</th><th>Duration</th></tr></thead>
-    <tbody>${cookieRows || '<tr><td colspan="4">None detected</td></tr>'}</tbody></table>
-    <h2>Trackers (${trackers.length})</h2>
-    <table><thead><tr><th>Name</th><th>Category</th><th>Owner</th></tr></thead>
-    <tbody>${trackerRows || '<tr><td colspan="3">None detected</td></tr>'}</tbody></table>
-  </body></html>`;
-}
-__name(buildScanReportHtml, "buildScanReportHtml");
-function bytesToBase64(bytes) {
-  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  let binary = "";
-  const chunk = 32768;
-  for (let i = 0; i < arr.length; i += chunk) {
-    binary += String.fromCharCode.apply(null, arr.subarray(i, i + chunk));
-  }
-  return btoa(binary);
-}
-__name(bytesToBase64, "bytesToBase64");
-async function sendScanReportForId(env2, { to, name, scanId }) {
-  if (!scanId) return;
-  const db = env2.COOKIE_SCANNER_DB;
-  if (!db) {
-    console.warn("[ScanReport] COOKIE_SCANNER_DB not bound \u2014 skipping");
-    return;
-  }
-  if (!env2.BROWSER) {
-    console.warn("[ScanReport] BROWSER not bound \u2014 skipping");
-    return;
-  }
-  let row;
-  try {
-    row = await db.prepare(`SELECT id, scanned_url, scan_date, report_data FROM scan_reports WHERE id = ?1`).bind(scanId).first();
-  } catch (e) {
-    console.error("[ScanReport] lookup failed:", e?.message);
-    return;
-  }
-  if (!row) {
-    console.warn("[ScanReport] no scan_reports row for id", scanId);
-    return;
-  }
-  let data;
-  try {
-    data = JSON.parse(row.report_data);
-  } catch {
-    data = {};
-  }
-  const domain2 = data.scannedDomain || data.scannedUrl || row.scanned_url || "";
-  const html = buildScanReportHtml(data, row);
-  let browser;
-  let pdfBase64;
-  try {
-    browser = await puppeteer_cloudflare_default.launch(env2.BROWSER);
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: "networkidle0" });
-    const pdf = await page.pdf({ format: "A4", printBackground: true, margin: { top: "20px", bottom: "20px" } });
-    pdfBase64 = bytesToBase64(pdf);
-  } catch (e) {
-    console.error("[ScanReport] PDF render failed:", e?.message);
-    if (browser) await browser.close().catch(() => {
-    });
-    return;
-  }
-  if (browser) await browser.close().catch(() => {
-  });
-  const displayName = name || "there";
-  const displayDomain = domain2 || "your website";
-  const subject = `Your cookie scan report${domain2 ? ` for ${displayDomain}` : ""}`;
-  const html_email = `
-    <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi ${esc(displayName)},</p>
-    <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
-      Thanks for scanning <strong style="color:#111827;">${esc(displayDomain)}</strong> with ConsentBit.
-      Your full cookie compliance report is attached to this email as a PDF.
-    </p>
-    <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
-      It lists every cookie and tracker we detected, grouped by category, along with your compliance grade.
-      Log in any time to set up a consent banner that brings your site into compliance.
-    </p>
-    <p style="margin:18px 0 0;color:#6b7280;font-size:14px;line-height:1.6;">Best regards,<br/>ConsentBit Team</p>`;
-  const text = `Hi ${displayName},
-
-Thanks for scanning ${displayDomain} with ConsentBit. Your full cookie compliance report is attached to this email as a PDF.
-
-It lists every cookie and tracker we detected, grouped by category, along with your compliance grade.
-
-Best regards,
-ConsentBit Team
-`;
-  await sendBrevoEmail(env2, {
-    to,
-    name,
-    subject,
-    html: html_email,
-    text,
-    attachment: [{ content: pdfBase64, name: "cookie-scan-report.pdf" }]
-  });
-}
-__name(sendScanReportForId, "sendScanReportForId");
-
-// src/handlers/authVerifyCode.js
-function isValidEmail3(email) {
+function isValidEmail4(email) {
   const e = (email || "").trim().toLowerCase();
   return e.includes("@") && e.includes(".") && e.length <= 320;
 }
-__name(isValidEmail3, "isValidEmail");
-async function sha256Hex2(s) {
+__name(isValidEmail4, "isValidEmail");
+async function sha256Hex5(s) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-__name(sha256Hex2, "sha256Hex");
+__name(sha256Hex5, "sha256Hex");
 async function handleAuthVerifyCode(request, env2, ctx) {
   const db = env2.CONSENT_WEBAPP;
   if (request.method !== "POST") {
@@ -44676,7 +49304,8 @@ async function handleAuthVerifyCode(request, env2, ctx) {
   const purpose = body?.purpose === "signup" ? "signup" : "login";
   const code = String(body?.code || "").trim();
   const scanId = (body?.scanId || "").trim();
-  if (!isValidEmail3(email)) {
+  console.log("[AuthVerifyCode] purpose:", purpose, "| scanId received:", scanId || "(none)");
+  if (!isValidEmail4(email)) {
     return Response.json({ success: false, error: "Valid email is required" }, { status: 400 });
   }
   if (!/^\d{6}$/.test(code)) {
@@ -44689,7 +49318,7 @@ async function handleAuthVerifyCode(request, env2, ctx) {
     const [row2, userPrefetch, computed2] = await Promise.all([
       getLatestValidEmailVerificationCode(db, { email, purpose }),
       getUserByEmail(db, email),
-      sha256Hex2(`${purpose}|${email}|${code}|${salt}`)
+      sha256Hex5(`${purpose}|${email}|${code}|${salt}`)
     ]);
     if (!row2?.id) return Response.json({ success: false, error: "Code expired or not found" }, { status: 400 });
     const attempts2 = Number(row2.attempts ?? row2.Attempts ?? 0);
@@ -44707,6 +49336,14 @@ async function handleAuthVerifyCode(request, env2, ctx) {
     ]);
     if (scanId && ctx?.waitUntil) {
       ctx.waitUntil(sendScanReportForId(env2, { to: email, name: userPrefetch.name || "", scanId }));
+      ctx.waitUntil(
+        recordScanClaim(env2.COOKIE_SCANNER_DB, {
+          scanId,
+          email,
+          userId: userPrefetch.id,
+          purpose: "login"
+        })
+      );
     }
     return Response.json(
       { success: true },
@@ -44715,7 +49352,7 @@ async function handleAuthVerifyCode(request, env2, ctx) {
   }
   const [row, computed] = await Promise.all([
     getLatestValidEmailVerificationCode(db, { email, purpose }),
-    sha256Hex2(`${purpose}|${email}|${code}|${salt}`)
+    sha256Hex5(`${purpose}|${email}|${code}|${salt}`)
   ]);
   if (!row?.id) return Response.json({ success: false, error: "Code expired or not found" }, { status: 400 });
   const attempts = Number(row.attempts ?? row.Attempts ?? 0);
@@ -44735,6 +49372,14 @@ async function handleAuthVerifyCode(request, env2, ctx) {
   sendWelcomeEmail(env2, ctx, { to: user.email, name: user.name || "" });
   if (scanId && ctx?.waitUntil) {
     ctx.waitUntil(sendScanReportForId(env2, { to: user.email, name: user.name || "", scanId }));
+    ctx.waitUntil(
+      recordScanClaim(env2.COOKIE_SCANNER_DB, {
+        scanId,
+        email: user.email,
+        userId: user.id,
+        purpose: "signup"
+      })
+    );
   }
   return Response.json(
     { success: true, user: { id: user.id, email: user.email, name: user.name } },
@@ -44747,18 +49392,18 @@ __name(handleAuthVerifyCode, "handleAuthVerifyCode");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie20(request) {
+function getSessionIdFromCookie22(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie20, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie22, "getSessionIdFromCookie");
 async function handleAuthLogout(request, env2) {
   const db = env2.CONSENT_WEBAPP;
   if (request.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405 });
   }
-  const sid = getSessionIdFromCookie20(request);
+  const sid = getSessionIdFromCookie22(request);
   if (sid) {
     await deleteSessionById(db, sid);
   }
@@ -44778,18 +49423,18 @@ __name(handleAuthLogout, "handleAuthLogout");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie21(request) {
+function getSessionIdFromCookie23(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie21, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie23, "getSessionIdFromCookie");
 async function handleOnboardingFirstSetup(request, env2, ctx) {
   const db = env2.CONSENT_WEBAPP;
   if (request.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405 });
   }
-  const sid = getSessionIdFromCookie21(request);
+  const sid = getSessionIdFromCookie23(request);
   if (!sid) {
     return Response.json({ success: false, error: "Not authenticated" }, { status: 401 });
   }
@@ -44865,6 +49510,25 @@ async function handleOnboardingFirstSetup(request, env2, ctx) {
     throw e;
   }
   const scriptUrl = site.embedScriptUrl || buildEmbedScriptUrl(embedOrigin || new URL(request.url).origin, site.cdnScriptId) || `${new URL(request.url).origin}/consentbit/${site.cdnScriptId}/script.js`;
+  if (user.email && site._created) {
+    try {
+      await capturePostHogEvent(env2, user.email, "script_generated", {
+        site_id: site.id,
+        domain: site.domain,
+        script_url: scriptUrl,
+        plan_tier: "free",
+        platform: "webapp",
+        ...site.id ? { $groups: { site: String(site.id) } } : {}
+      });
+      await captureGa4Event(env2, user.email, "script_generated", {
+        site_id: site.id,
+        domain: site.domain,
+        plan_tier: "free",
+        platform: "webapp"
+      });
+    } catch (e) {
+    }
+  }
   sendFreePlanEmail(env2, ctx, {
     to: user.email,
     name: user.name || "",
@@ -44888,12 +49552,12 @@ __name(handleOnboardingFirstSetup, "handleOnboardingFirstSetup");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie22(request) {
+function getSessionIdFromCookie24(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie22, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie24, "getSessionIdFromCookie");
 function isActiveSubscription(sub) {
   const status = sub ? String(sub.status || "").toLowerCase() : "";
   return status === "active" || status === "trialing";
@@ -44904,7 +49568,7 @@ async function handleCheckDomainAvailability(request, env2) {
   if (request.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405 });
   }
-  const sid = getSessionIdFromCookie22(request);
+  const sid = getSessionIdFromCookie24(request);
   if (!sid) {
     return Response.json({ success: false, error: "Not authenticated" }, { status: 401 });
   }
@@ -45000,12 +49664,12 @@ __name(handleCheckDomainAvailability, "handleCheckDomainAvailability");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie23(request) {
+function getSessionIdFromCookie25(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie23, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie25, "getSessionIdFromCookie");
 function isActiveSubscription2(sub) {
   const status = sub ? String(sub.status || "").toLowerCase() : "";
   return status === "active" || status === "trialing";
@@ -45077,7 +49741,7 @@ async function handleRenameDomain(request, env2) {
   if (request.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405 });
   }
-  const sid = getSessionIdFromCookie23(request);
+  const sid = getSessionIdFromCookie25(request);
   if (!sid) {
     return Response.json({ success: false, error: "Not authenticated" }, { status: 401 });
   }
@@ -45205,12 +49869,12 @@ __name(handleRenameDomain, "handleRenameDomain");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie24(request) {
+function getSessionIdFromCookie26(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie24, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie26, "getSessionIdFromCookie");
 async function handleFeedback(request, env2) {
   const db = env2.CONSENT_WEBAPP;
   await ensureSchema(db);
@@ -45230,7 +49894,7 @@ async function handleFeedback(request, env2) {
   }
   if (request.method === "POST") {
     let userId = null;
-    const sid = getSessionIdFromCookie24(request);
+    const sid = getSessionIdFromCookie26(request);
     if (sid) {
       try {
         const session = await getSessionById(db, sid);
@@ -45275,17 +49939,17 @@ init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
 var VALID_PLAN_IDS = ["basic", "essential", "growth"];
-function isValidEmail4(email) {
+function isValidEmail5(email) {
   const e = (email || "").trim().toLowerCase();
   return e.includes("@") && e.includes(".") && e.length <= 320;
 }
-__name(isValidEmail4, "isValidEmail");
-function trimEnv4(v) {
+__name(isValidEmail5, "isValidEmail");
+function trimEnv5(v) {
   if (v == null) return null;
   const s = String(v).trim();
   return s || null;
 }
-__name(trimEnv4, "trimEnv");
+__name(trimEnv5, "trimEnv");
 function toTimestamp3(ts) {
   if (ts == null) return null;
   if (typeof ts === "number") return new Date(ts * 1e3).toISOString();
@@ -45294,14 +49958,14 @@ function toTimestamp3(ts) {
 __name(toTimestamp3, "toTimestamp");
 function getPriceId(env2, planId, interval) {
   const key = `STRIPE_PRICE_${planId.toUpperCase()}_${interval === "yearly" ? "YEARLY" : "MONTHLY"}`;
-  return trimEnv4(env2[key]);
+  return trimEnv5(env2[key]);
 }
 __name(getPriceId, "getPriceId");
 function capturePosthog(env2, ctx, { event, distinctId, properties }) {
   try {
-    const apiKey = trimEnv4(env2.POSTHOG_API_KEY);
+    const apiKey = trimEnv5(env2.POSTHOG_API_KEY);
     if (!apiKey || !distinctId || !event) return;
-    const host = trimEnv4(env2.POSTHOG_HOST) || "https://us.i.posthog.com";
+    const host = trimEnv5(env2.POSTHOG_HOST) || "https://us.i.posthog.com";
     const url = `${host.replace(/\/+$/, "")}/capture/`;
     const payload = {
       api_key: apiKey,
@@ -45410,7 +50074,27 @@ async function findOrCreateStripeCustomer(secret, email, paymentMethodId) {
   return created.id;
 }
 __name(findOrCreateStripeCustomer, "findOrCreateStripeCustomer");
-async function provisionAccount(db, env2, request, {
+async function cancelOldStripeSubscription(secret, oldSubId, newSubId, db) {
+  if (!secret || !oldSubId || oldSubId === newSubId) return;
+  try {
+    const res = await fetch(`https://api.stripe.com/v1/subscriptions/${oldSubId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${secret}` }
+    });
+    const data = await res.json().catch(() => null);
+    if (data?.error && data.error.code !== "resource_missing") {
+      console.warn("[CustomCheckout] upgrade: Stripe cancel of old sub failed", data.error?.message);
+    } else {
+      console.log("[CustomCheckout] upgrade: cancelled old subscription", oldSubId);
+    }
+    await db.prepare("UPDATE Subscription SET status = 'canceled', cancelAtPeriodEnd = 1, updatedAt = ?2 WHERE stripeSubscriptionId = ?1").bind(oldSubId, (/* @__PURE__ */ new Date()).toISOString()).run().catch(() => {
+    });
+  } catch (e) {
+    console.warn("[CustomCheckout] upgrade: could not cancel old subscription", e?.message);
+  }
+}
+__name(cancelOldStripeSubscription, "cancelOldStripeSubscription");
+async function provisionAccount(db, env2, request, ctx, {
   email,
   domain: domain2,
   siteName,
@@ -45442,6 +50126,19 @@ async function provisionAccount(db, env2, request, {
     bannerType: "gdpr",
     regionMode: "gdpr"
   });
+  if (site._created && (user.email || email)) {
+    capturePosthog(env2, ctx, {
+      event: "script_generated",
+      distinctId: user.email || email,
+      properties: {
+        site_id: site.id,
+        domain: site.domain,
+        plan_tier: planId,
+        platform: platform2 || "webapp",
+        ...site.id ? { $groups: { site: String(site.id) } } : {}
+      }
+    });
+  }
   const trialAlreadyUsed = await getSiteTrialUsed(db, site.id);
   if (!trialAlreadyUsed && subscriptionStatus === "trialing") {
     await markTrialUsed(db, site.id);
@@ -45464,6 +50161,26 @@ async function provisionAccount(db, env2, request, {
     licenseKey,
     amountCents: amountCents ?? null
   });
+  {
+    const _clickup = (async () => {
+      if (stripeSubscriptionId && await wasClickUpTaskCreated(env2, stripeSubscriptionId)) return;
+      const added = await addCustomerToClickUp(env2, {
+        email: billingEmail || email || null,
+        name: user?.name || "",
+        platform: platform2,
+        plan: planId || null,
+        interval,
+        domain: domain2,
+        amountCents: amountCents ?? null,
+        currency: "usd",
+        subscriptionId: stripeSubscriptionId || null,
+        customerId: stripeCustomerId || null,
+        isFirstPurchase: isNewUser
+      }).catch(() => false);
+      if (added && stripeSubscriptionId) await markClickUpTaskCreated(env2, stripeSubscriptionId);
+    })();
+    if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(_clickup);
+  }
   const billingEmailToStore = billingEmail || null;
   const platformSiteIdToStore = wfSiteId || null;
   if (billingEmailToStore || platformSiteIdToStore) {
@@ -45494,7 +50211,7 @@ async function provisionAccount(db, env2, request, {
   return { user, isNewUser, session, org, site };
 }
 __name(provisionAccount, "provisionAccount");
-async function persistPaidStatusToKv(env2, { platform: platform2, platformSiteId, site, user }) {
+async function persistPaidStatusToKv(env2, { platform: platform2, platformSiteId, site, user, planId }) {
   if (!platformSiteId) return;
   const p = String(platform2 || "").toLowerCase();
   const kv = p === "framer" ? env2.AUTH_STORE_FRAMER : env2.WEBFLOW_AUTHENTICATION;
@@ -45514,17 +50231,20 @@ async function persistPaidStatusToKv(env2, { platform: platform2, platformSiteId
       webAppSiteId: site.id,
       userId: user.id,
       cdnScriptId: site.cdnScriptId ?? site.cdnscriptid ?? null,
-      paid: true
+      paid: true,
+      // Stamp the plan so the Webflow status endpoint can fall back to KV when the
+      // D1 Subscription row isn't found (DB-first → KV-fallback).
+      ...planId ? { plan: planId } : {}
     };
     const merged = existing && typeof existing === "object" ? { ...existing, ...newFields } : newFields;
     await kv.put(platformSiteId, JSON.stringify(merged));
-    console.log("[CustomCheckout] paid-status KV updated", { platform: p || "webflow", platformSiteId, mergedWithExisting: !!existing });
+    console.log("[CustomCheckout] paid-status KV updated", { platform: p || "webflow", platformSiteId, plan: planId || null, mergedWithExisting: !!existing });
   } catch (e) {
     console.error("[CustomCheckout] persistPaidStatusToKv failed", e?.message);
   }
 }
 __name(persistPaidStatusToKv, "persistPaidStatusToKv");
-async function postCheckoutWebflowInject(env2, { wfSiteId, site, request, user, billingEmail }) {
+async function postCheckoutWebflowInject(env2, { wfSiteId, site, request, user, billingEmail, planId }) {
   console.log("[CustomCheckout] postCheckoutWebflowInject start", { wfSiteId, siteId: site?.id, cdnScriptId: site?.cdnScriptId });
   if (!wfSiteId || !env2.WEBFLOW_AUTHENTICATION) {
     console.warn("[CustomCheckout] postCheckoutWebflowInject skipped: missing wfSiteId or WEBFLOW_AUTHENTICATION binding");
@@ -45557,13 +50277,15 @@ async function postCheckoutWebflowInject(env2, { wfSiteId, site, request, user, 
       isWebappMigrated: true,
       ...result.webflowScriptId ? { webflowScriptId: result.webflowScriptId } : {},
       ...user?.email ? { email: user.email } : {},
-      ...billingEmail ? { billingEmail } : {}
+      ...billingEmail ? { billingEmail } : {},
+      // Stamp the plan so the Webflow status endpoint's KV fallback can read it.
+      ...planId ? { plan: planId } : {}
     };
     await env2.WEBFLOW_AUTHENTICATION.put(wfSiteId, JSON.stringify(updatedKv));
     console.log("[CustomCheckout] postCheckoutWebflowInject KV updated with webappSiteId:", site.id);
     if (result.success) {
       try {
-        const WEBFLOW_API = "https://api.webflow.com/v2";
+        const WEBFLOW_API2 = "https://api.webflow.com/v2";
         const pubHeaders = {
           "Authorization": `Bearer ${accessToken}`,
           "Content-Type": "application/json",
@@ -45571,14 +50293,14 @@ async function postCheckoutWebflowInject(env2, { wfSiteId, site, request, user, 
         };
         let customDomains = [];
         try {
-          const siteInfoRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}`, { headers: pubHeaders });
+          const siteInfoRes = await fetch(`${WEBFLOW_API2}/sites/${wfSiteId}`, { headers: pubHeaders });
           if (siteInfoRes.ok) {
             const siteInfo = await siteInfoRes.json();
             customDomains = (siteInfo.customDomains || []).map((d) => d.url || d.name).filter(Boolean);
           }
         } catch (_) {
         }
-        const publishRes = await fetch(`${WEBFLOW_API}/sites/${wfSiteId}/publish`, {
+        const publishRes = await fetch(`${WEBFLOW_API2}/sites/${wfSiteId}/publish`, {
           method: "POST",
           headers: pubHeaders,
           body: JSON.stringify({ publishToWebflowSubdomain: true, customDomains })
@@ -45603,7 +50325,7 @@ async function handleCustomCheckout(request, env2, ctx) {
     console.warn("[CustomCheckout] rejected: method not POST");
     return Response.json({ success: false, error: "Method not allowed" }, { status: 405 });
   }
-  const secret = trimEnv4(env2.STRIPE_SECRET_KEY);
+  const secret = trimEnv5(env2.STRIPE_SECRET_KEY);
   const db = env2.CONSENT_WEBAPP;
   console.log("[CustomCheckout] Stripe key mode:", secret ? secret.startsWith("sk_live") ? "LIVE" : "TEST" : "NOT SET");
   if (!secret) {
@@ -45633,7 +50355,7 @@ async function handleCustomCheckout(request, env2, ctx) {
   const platform2 = (body.platform || "").trim().toLowerCase() || (wfSiteId ? "webflow" : null);
   const confirmUpgrade = body.confirmUpgrade === true;
   const promotionCodeId = (body.promotionCodeId || "").trim() || null;
-  if (!isValidEmail4(email)) {
+  if (!isValidEmail5(email)) {
     console.warn("[CustomCheckout] validation failed: invalid email", email);
     return Response.json({ success: false, error: "Valid email is required" }, { status: 400 });
   }
@@ -45658,6 +50380,7 @@ async function handleCustomCheckout(request, env2, ctx) {
       error: `Stripe price not configured. Set ${envKey} to a recurring price_ id.`
     }, { status: 503 });
   }
+  let oldStripeSubscriptionId = null;
   if (!subscriptionId) {
     const canonDomain = normalizeDomain(rawDomain);
     const existingSite = canonDomain ? await db.prepare("SELECT id, organizationId FROM Site WHERE domain = ?1").bind(canonDomain).first().catch(() => null) : null;
@@ -45694,6 +50417,8 @@ async function handleCustomCheckout(request, env2, ctx) {
             message: `This domain already has an active ${existingSub?.planId || ""} plan on your account. Set confirmUpgrade: true to upgrade it.`
           }, { status: 409 });
         }
+        oldStripeSubscriptionId = existingSub?.stripeSubscriptionId ?? existingSub?.stripesubscriptionid ?? null;
+        console.log("[CustomCheckout] upgrade confirmed \u2014 old sub to cancel:", oldStripeSubscriptionId);
       }
     }
   }
@@ -45714,7 +50439,7 @@ async function handleCustomCheckout(request, env2, ctx) {
       }, { status: 402 });
     }
     try {
-      const { user, isNewUser, session, site, org } = await provisionAccount(db, env2, request, {
+      const { user, isNewUser, session, site, org } = await provisionAccount(db, env2, request, ctx, {
         email,
         domain: rawDomain,
         siteName,
@@ -45731,9 +50456,15 @@ async function handleCustomCheckout(request, env2, ctx) {
         wfSiteId,
         platform: platform2
       });
-      if (wfSiteId && platform2 === "webflow") postCheckoutWebflowInject(env2, { wfSiteId, site, request, user, billingEmail }).catch((e) => console.error("[CustomCheckout] postCheckoutWebflowInject outer error", e?.message));
-      if (platform2 && wfSiteId) persistPaidStatusToKv(env2, { platform: platform2, platformSiteId: wfSiteId, site, user }).catch(() => {
+      if (wfSiteId && platform2 === "webflow") postCheckoutWebflowInject(env2, { wfSiteId, site, request, user, billingEmail, planId }).catch((e) => console.error("[CustomCheckout] postCheckoutWebflowInject outer error", e?.message));
+      if (platform2 && wfSiteId) persistPaidStatusToKv(env2, { platform: platform2, platformSiteId: wfSiteId, site, user, planId }).catch(() => {
       });
+      if (oldStripeSubscriptionId) {
+        const _p = cancelOldStripeSubscription(secret, oldStripeSubscriptionId, sub2?.id, db);
+        if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(_p);
+        else await _p.catch(() => {
+        });
+      }
       const _orgId = org?.id ?? org?.organizationId;
       let _emailTo = billingEmail || email;
       let _emailSource = billingEmail ? "checkout-billingEmail" : "account-email";
@@ -45753,12 +50484,17 @@ async function handleCustomCheckout(request, env2, ctx) {
       console.log("[CustomCheckout] sending paid-plan email", { to: _emailTo, source: _emailSource, domain: rawDomain, planId, hasInvoice: !!_invoiceData });
       sendPaidPlanEmail(env2, ctx, { to: _emailTo, name: "", domain: rawDomain, planName: planId, invoice: _invoiceData });
       capturePosthog(env2, ctx, {
-        event: "paid_plan_activated",
+        event: "subscription_activated",
         distinctId: user.email || email,
         properties: {
+          status: sub2.status,
           platform: platform2 || null,
           plan: planId,
+          plan_tier: planId,
           interval,
+          billing_cycle: /^(year|annual)/i.test(String(interval)) ? "annual" : "monthly",
+          ...typeof sub2.items?.data?.[0]?.price?.unit_amount === "number" ? { price: sub2.items.data[0].price.unit_amount / 100 } : {},
+          currency: (sub2.items?.data?.[0]?.price?.currency || "usd").toUpperCase(),
           domain: rawDomain,
           siteId: site.id,
           subscriptionId,
@@ -45778,6 +50514,17 @@ async function handleCustomCheckout(request, env2, ctx) {
       return Response.json({ success: false, error: "Account setup failed after payment. Contact support with your email." }, { status: 500 });
     }
   }
+  capturePosthog(env2, ctx, {
+    event: "plan_selected",
+    distinctId: email,
+    properties: {
+      plan_tier: planId,
+      billing_cycle: /^(year|annual)/i.test(String(interval)) ? "annual" : "monthly",
+      interval,
+      platform: platform2 || null,
+      domain: rawDomain
+    }
+  });
   let customerId;
   try {
     customerId = await findOrCreateStripeCustomer(secret, email, paymentMethodId);
@@ -45839,7 +50586,7 @@ async function handleCustomCheckout(request, env2, ctx) {
   const paymentIntent = sub.latest_invoice?.payment_intent;
   if (subStatus === "active" || subStatus === "trialing") {
     try {
-      const { user, isNewUser, session, site, org } = await provisionAccount(db, env2, request, {
+      const { user, isNewUser, session, site, org } = await provisionAccount(db, env2, request, ctx, {
         email,
         domain: rawDomain,
         siteName,
@@ -45856,9 +50603,15 @@ async function handleCustomCheckout(request, env2, ctx) {
         wfSiteId,
         platform: platform2
       });
-      if (wfSiteId && platform2 === "webflow") postCheckoutWebflowInject(env2, { wfSiteId, site, request, user, billingEmail }).catch((e) => console.error("[CustomCheckout] postCheckoutWebflowInject outer error", e?.message));
-      if (platform2 && wfSiteId) persistPaidStatusToKv(env2, { platform: platform2, platformSiteId: wfSiteId, site, user }).catch(() => {
+      if (wfSiteId && platform2 === "webflow") postCheckoutWebflowInject(env2, { wfSiteId, site, request, user, billingEmail, planId }).catch((e) => console.error("[CustomCheckout] postCheckoutWebflowInject outer error", e?.message));
+      if (platform2 && wfSiteId) persistPaidStatusToKv(env2, { platform: platform2, platformSiteId: wfSiteId, site, user, planId }).catch(() => {
       });
+      if (oldStripeSubscriptionId) {
+        const _p = cancelOldStripeSubscription(secret, oldStripeSubscriptionId, sub?.id, db);
+        if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(_p);
+        else await _p.catch(() => {
+        });
+      }
       const _orgId = org?.id ?? org?.organizationId;
       let _emailTo = billingEmail || email;
       let _emailSource = billingEmail ? "checkout-billingEmail" : "account-email";
@@ -45878,12 +50631,17 @@ async function handleCustomCheckout(request, env2, ctx) {
       console.log("[CustomCheckout] sending paid-plan email", { to: _emailTo, source: _emailSource, domain: rawDomain, planId, hasInvoice: !!_invoiceData });
       sendPaidPlanEmail(env2, ctx, { to: _emailTo, name: "", domain: rawDomain, planName: planId, invoice: _invoiceData });
       capturePosthog(env2, ctx, {
-        event: "paid_plan_activated",
+        event: "subscription_activated",
         distinctId: user.email || email,
         properties: {
+          status: subStatus,
           platform: platform2 || null,
           plan: planId,
+          plan_tier: planId,
           interval,
+          billing_cycle: /^(year|annual)/i.test(String(interval)) ? "annual" : "monthly",
+          ...typeof sub.items?.data?.[0]?.price?.unit_amount === "number" ? { price: sub.items.data[0].price.unit_amount / 100 } : {},
+          currency: (sub.items?.data?.[0]?.price?.currency || "usd").toUpperCase(),
           domain: rawDomain,
           siteId: site.id,
           subscriptionId: sub.id,
@@ -45916,15 +50674,20 @@ async function handleCustomCheckout(request, env2, ctx) {
 }
 __name(handleCustomCheckout, "handleCustomCheckout");
 async function handleValidateCoupon(request, env2) {
-  const secret = trimEnv4(env2.STRIPE_SECRET_KEY);
+  console.log("[ValidateCoupon] request received", { method: request.method, url: request.url });
+  const secret = trimEnv5(env2.STRIPE_SECRET_KEY);
   if (!secret) {
+    console.error("[ValidateCoupon] STRIPE_SECRET_KEY not set on worker \u2014 cannot validate");
     return Response.json({ valid: false, error: "Stripe not configured" }, { status: 503 });
   }
+  console.log("[ValidateCoupon] stripe key present", { keyPrefix: secret.slice(0, 7) });
   const url = new URL(request.url);
   const code = (url.searchParams.get("code") || "").trim();
   if (!code) {
+    console.warn("[ValidateCoupon] no code provided");
     return Response.json({ valid: false, error: "code required" }, { status: 400 });
   }
+  console.log("[ValidateCoupon] looking up code", { code });
   let promo = null;
   try {
     const params = new URLSearchParams({
@@ -45937,6 +50700,7 @@ async function handleValidateCoupon(request, env2) {
       { headers: { Authorization: `Bearer ${secret}` } }
     );
     const data = await res.json();
+    console.log("[ValidateCoupon] stripe responded", { httpStatus: res.status, matches: data?.data?.length ?? 0 });
     if (data?.error) {
       console.warn("[ValidateCoupon] Stripe list error", data.error?.message);
       return Response.json({ valid: false, error: data.error.message || "Coupon lookup failed" }, { status: 400 });
@@ -45947,13 +50711,22 @@ async function handleValidateCoupon(request, env2) {
     return Response.json({ valid: false, error: "Coupon lookup failed" }, { status: 500 });
   }
   if (!promo || !promo.active) {
+    console.log("[ValidateCoupon] no active promo found", { found: !!promo, active: promo?.active ?? false });
     return Response.json({ valid: false, error: "Invalid or expired code" }, { status: 200 });
   }
   const c = promo.coupon || {};
+  console.log("[ValidateCoupon] valid promo", {
+    promotionCodeId: promo.id,
+    couponId: c.id || null,
+    percentOff: c.percent_off ?? null,
+    amountOff: c.amount_off ?? null
+  });
   return Response.json({
     valid: true,
     promotionCodeId: promo.id,
     // promo_xxx — send back on checkout
+    couponId: c.id || null,
+    // coupon_xxx — required by frontend as fallback
     code: promo.code,
     name: c.name || promo.code,
     percentOff: c.percent_off ?? null,
@@ -45976,11 +50749,33 @@ function buildVerifyScriptUrl(cdnScriptId) {
   return `${VERIFY_SCRIPT_BASE_URL}/${cdnScriptId}/script.js`;
 }
 __name(buildVerifyScriptUrl, "buildVerifyScriptUrl");
-function isValidEmail5(email) {
+function isValidEmail6(email) {
   const e = (email || "").trim().toLowerCase();
   return e.includes("@") && e.includes(".") && e.length <= 320;
 }
-__name(isValidEmail5, "isValidEmail");
+__name(isValidEmail6, "isValidEmail");
+async function capturePosthog2(env2, { event, distinctId, properties }) {
+  try {
+    const apiKey = (env2.POSTHOG_API_KEY || "").trim();
+    if (!apiKey || !distinctId || !event) return;
+    const host = (env2.POSTHOG_HOST || "").trim() || "https://us.i.posthog.com";
+    const url = `${host.replace(/\/+$/, "")}/capture/`;
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: apiKey,
+        event,
+        distinct_id: distinctId,
+        properties: properties || {},
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      })
+    }).catch((err) => console.warn("[SyncPlugin] posthog capture failed", err?.message));
+  } catch (e) {
+    console.warn("[SyncPlugin] capturePosthog threw (non-fatal)", e?.message);
+  }
+}
+__name(capturePosthog2, "capturePosthog");
 async function findFreePlanSite(db, organizationId) {
   if (!organizationId) return null;
   const sites = await listSites(db, { organizationId });
@@ -46066,7 +50861,7 @@ async function handleSyncPlugin(request, env2) {
   const siteName = (body?.siteName || "").trim() || rawDomain;
   const platformSiteId = (body?.platformSiteId || "").trim();
   const customization = body?.customization && typeof body.customization === "object" ? body.customization : null;
-  if (!isValidEmail5(email)) {
+  if (!isValidEmail6(email)) {
     return Response.json({ success: false, error: "Valid email is required" }, { status: 400 });
   }
   if (!rawDomain) {
@@ -46249,6 +51044,18 @@ async function handleSyncPlugin(request, env2) {
       console.warn("[SyncPlugin] markSiteVerified failed for new site (non-fatal)", e?.message);
     }
   }
+  await capturePosthog2(env2, {
+    event: "plan_selected",
+    distinctId: email,
+    properties: {
+      plan_tier: "free",
+      billing_cycle: "monthly",
+      plan_price: 0,
+      platform: "framer",
+      domain: rawDomain,
+      siteId: site.id
+    }
+  });
   return Response.json({
     success: true,
     isNewUser,
@@ -46393,11 +51200,31 @@ async function handleGetPluginPlan(request, env2) {
     }
     planId = ["basic", "essential", "growth"].includes(resolved) ? resolved : "free";
   }
+  let email = null;
+  let name = null;
+  try {
+    const owner = await db.prepare(
+      `SELECT u.email, u.name
+           FROM Site s
+           JOIN Organization o ON o.id = s.organizationId
+           JOIN User u ON u.id = o.ownerUserId
+          WHERE s.id = ?1
+          LIMIT 1`
+    ).bind(webAppSiteId).first();
+    if (owner) {
+      email = owner.email ?? null;
+      name = owner.name ?? null;
+    }
+  } catch (e) {
+    console.warn("[GetPluginPlan] owner lookup failed (non-fatal)", e?.message);
+  }
   return Response.json({
     success: true,
     webAppSiteId,
     planId,
     status,
+    email,
+    name,
     subscription: sub ? {
       id: sub.id,
       stripeSubscriptionId: sub.stripeSubscriptionId ?? sub.stripesubscriptionid ?? null,
@@ -46549,6 +51376,3201 @@ async function handlePaymentSubscription(request, env2) {
 }
 __name(handlePaymentSubscription, "handlePaymentSubscription");
 
+// src/handlers/webflowBilling.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+init_db();
+var TAG5 = "[webflow-billing]";
+async function resolveLimits(db, planId) {
+  try {
+    const plan = await getPlanById(db, planId || "free");
+    return {
+      scansLimit: plan?.scansIncluded ?? plan?.scansincluded ?? 100,
+      pageviewsLimit: plan?.pageviewsIncluded ?? plan?.pageviewsincluded ?? 7500
+    };
+  } catch {
+    return { scansLimit: 100, pageviewsLimit: 7500 };
+  }
+}
+__name(resolveLimits, "resolveLimits");
+async function resolveUsage(db, site) {
+  if (!site?.id) return { scansUsed: 0, pageviewsUsed: 0, yearMonth: null };
+  try {
+    const [pv, sc] = await Promise.all([
+      getPageviewUsageForSite(db, site.id),
+      getScanUsageForSite(db, site.id)
+    ]);
+    return {
+      scansUsed: sc?.scanCount ?? 0,
+      pageviewsUsed: pv?.pageviewCount ?? 0,
+      yearMonth: pv?.yearMonth ?? sc?.yearMonth ?? null
+    };
+  } catch (e) {
+    console.warn(`${TAG5} usage lookup failed`, e?.message);
+    return { scansUsed: 0, pageviewsUsed: 0, yearMonth: null };
+  }
+}
+__name(resolveUsage, "resolveUsage");
+async function resolveSite2(db, siteId) {
+  if (!siteId) return null;
+  return db.prepare("SELECT id, organizationId FROM Site WHERE id = ?1 OR platformSiteId = ?1 ORDER BY createdAt ASC LIMIT 1").bind(siteId).first().catch(() => null);
+}
+__name(resolveSite2, "resolveSite");
+async function resolveSubscription(db, site) {
+  if (!site) return null;
+  const cols = "id, organizationId, siteId, planId, planType, status, stripeSubscriptionId, stripeCustomerId, interval, currentPeriodEnd, cancelAtPeriodEnd";
+  let sub = await db.prepare(
+    `SELECT ${cols} FROM Subscription WHERE siteId = ?1
+       ORDER BY CASE WHEN lower(status) IN ('active','trialing') THEN 0 ELSE 1 END, createdAt DESC
+       LIMIT 1`
+  ).bind(site.id).first().catch(() => null);
+  if (!sub && site.organizationId) {
+    sub = await db.prepare(
+      `SELECT ${cols} FROM Subscription WHERE organizationId = ?1 AND lower(status) IN ('active','trialing') ORDER BY createdAt DESC LIMIT 1`
+    ).bind(site.organizationId).first().catch(() => null);
+  }
+  return sub;
+}
+__name(resolveSubscription, "resolveSubscription");
+function pick(sub, camel, snake) {
+  return sub?.[camel] ?? sub?.[snake] ?? null;
+}
+__name(pick, "pick");
+async function handleWebflowBilling(request, env2) {
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) return Response.json({ success: false, error: "Database unavailable" }, { status: 503 });
+  const url = new URL(request.url);
+  const siteId = (url.searchParams.get("siteId") || "").trim();
+  if (!siteId) return Response.json({ success: false, error: "siteId required" }, { status: 400 });
+  const site = await resolveSite2(db, siteId);
+  const sub = await resolveSubscription(db, site);
+  const usage = await resolveUsage(db, site);
+  if (!sub) {
+    const limits3 = await resolveLimits(db, "free");
+    return Response.json({ success: true, plan: "free", status: null, invoices: [], stripeSubscriptionId: null, ...usage, ...limits3 });
+  }
+  const stripeSubscriptionId = pick(sub, "stripeSubscriptionId", "stripesubscriptionid");
+  const stripeCustomerId = pick(sub, "stripeCustomerId", "stripecustomerid");
+  const planId = pick(sub, "planId", "planid");
+  const cancelRaw = pick(sub, "cancelAtPeriodEnd", "cancelatperiodend");
+  let cancelAtPeriodEnd = cancelRaw === 1 || cancelRaw === true || cancelRaw === "1" || String(pick(sub, "status", "status") || "").toLowerCase() === "canceled";
+  if (stripeSubscriptionId && env2.STRIPE_SECRET_KEY) {
+    try {
+      const sres = await fetch(`https://api.stripe.com/v1/subscriptions/${stripeSubscriptionId}`, {
+        headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` }
+      });
+      const sdata = await sres.json();
+      if (!sdata.error) {
+        cancelAtPeriodEnd = !!sdata.cancel_at_period_end || String(sdata.status || "").toLowerCase() === "canceled";
+      }
+    } catch (e) {
+      console.warn(`${TAG5} subscription fetch failed`, e?.message);
+    }
+  }
+  let invoices = [];
+  if (stripeCustomerId && env2.STRIPE_SECRET_KEY) {
+    try {
+      const siteSubIds = /* @__PURE__ */ new Set();
+      if (stripeSubscriptionId) siteSubIds.add(stripeSubscriptionId);
+      try {
+        const subRows = await db.prepare(`SELECT stripeSubscriptionId FROM Subscription WHERE siteId = ?1 AND stripeSubscriptionId IS NOT NULL`).bind(site.id).all();
+        for (const r of subRows?.results || []) {
+          const sid = r.stripeSubscriptionId ?? r.stripesubscriptionid;
+          if (sid) siteSubIds.add(sid);
+        }
+      } catch (e) {
+        console.warn(`${TAG5} site sub lookup failed`, e?.message);
+      }
+      const res = await fetch(
+        `https://api.stripe.com/v1/invoices?customer=${stripeCustomerId}&limit=100`,
+        { headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` } }
+      );
+      const data = await res.json();
+      const filtered = (data.data || []).filter((inv) => inv.subscription && siteSubIds.has(inv.subscription)).filter((inv) => {
+        const status = String(inv.status || "").toLowerCase();
+        return status !== "draft" && status !== "void";
+      });
+      const bySub = /* @__PURE__ */ new Map();
+      for (const inv of filtered) {
+        const key = inv.subscription || inv.id;
+        const prev = bySub.get(key);
+        if (!prev || (inv.created || 0) > (prev.created || 0)) bySub.set(key, inv);
+      }
+      invoices = [...bySub.values()].sort((a, b) => (b.created || 0) - (a.created || 0)).map((inv) => ({
+        id: inv.id,
+        number: inv.number || null,
+        status: inv.status || null,
+        amountPaid: inv.amount_paid ?? 0,
+        amountDue: inv.amount_due ?? 0,
+        currency: (inv.currency || "usd").toUpperCase(),
+        created: inv.created ? new Date(inv.created * 1e3).toISOString() : null,
+        hostedInvoiceUrl: inv.hosted_invoice_url || null,
+        invoicePdf: inv.invoice_pdf || null
+      }));
+      console.log(`${TAG5} invoices site=${site.id} kept=${invoices.length} ofTotal=${(data.data || []).length}`);
+    } catch (e) {
+      console.warn(`${TAG5} invoice fetch failed`, e?.message);
+    }
+  }
+  const limits2 = await resolveLimits(db, planId);
+  return Response.json({
+    success: true,
+    plan: planId || "free",
+    status: pick(sub, "status", "status"),
+    interval: pick(sub, "interval", "interval"),
+    currentPeriodEnd: pick(sub, "currentPeriodEnd", "currentperiodend"),
+    cancelAtPeriodEnd,
+    stripeSubscriptionId,
+    invoices,
+    ...usage,
+    ...limits2
+  });
+}
+__name(handleWebflowBilling, "handleWebflowBilling");
+async function handleWebflowSwitchInterval(request, env2) {
+  if (request.method !== "POST") return Response.json({ success: false, error: "Method not allowed" }, { status: 405 });
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) return Response.json({ success: false, error: "Database unavailable" }, { status: 503 });
+  if (!env2.STRIPE_SECRET_KEY) return Response.json({ success: false, error: "Stripe not configured" }, { status: 503 });
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ success: false, error: "Invalid JSON body" }, { status: 400 });
+  }
+  const siteId = (body.siteId || "").trim();
+  const targetInterval = body.targetInterval === "yearly" ? "yearly" : body.targetInterval === "monthly" ? "monthly" : null;
+  if (!siteId) return Response.json({ success: false, error: "siteId required" }, { status: 400 });
+  if (!targetInterval) return Response.json({ success: false, error: "targetInterval must be monthly or yearly" }, { status: 400 });
+  const site = await resolveSite2(db, siteId);
+  const sub = await resolveSubscription(db, site);
+  const stripeSubId = pick(sub, "stripeSubscriptionId", "stripesubscriptionid");
+  const currentInterval = String(pick(sub, "interval", "interval") || "monthly").toLowerCase();
+  const planId = String(pick(sub, "planId", "planid") || "").toLowerCase();
+  if (!stripeSubId) return Response.json({ success: false, error: "No active subscription found for this site." }, { status: 400 });
+  if (currentInterval === targetInterval) return Response.json({ success: false, error: `Already on ${targetInterval} billing` }, { status: 400 });
+  if (!["basic", "essential", "growth"].includes(planId)) return Response.json({ success: false, error: "Cannot switch interval for this plan." }, { status: 400 });
+  const trim = /* @__PURE__ */ __name((v) => v == null ? null : String(v).trim() || null, "trim");
+  const tierPriceMap3 = {
+    basic: { monthly: trim(env2.STRIPE_PRICE_BASIC_MONTHLY), yearly: trim(env2.STRIPE_PRICE_BASIC_YEARLY) },
+    essential: { monthly: trim(env2.STRIPE_PRICE_ESSENTIAL_MONTHLY), yearly: trim(env2.STRIPE_PRICE_ESSENTIAL_YEARLY) },
+    growth: { monthly: trim(env2.STRIPE_PRICE_GROWTH_MONTHLY), yearly: trim(env2.STRIPE_PRICE_GROWTH_YEARLY) }
+  };
+  const newPriceId = tierPriceMap3[planId]?.[targetInterval];
+  if (!newPriceId) return Response.json({ success: false, error: `Price not configured for ${planId} ${targetInterval}` }, { status: 503 });
+  const stripeSub = await fetch(`https://api.stripe.com/v1/subscriptions/${stripeSubId}`, {
+    headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` }
+  }).then((r) => r.json()).catch(() => ({ error: { message: "network" } }));
+  if (stripeSub.error) return Response.json({ success: false, error: stripeSub.error.message || "Failed to read subscription" }, { status: 400 });
+  if (stripeSub.status === "canceled" || stripeSub.status === "incomplete_expired") {
+    return Response.json(
+      { success: false, canceled: true, plan: planId, targetInterval, error: "This subscription was canceled. Start a new checkout to resubscribe." },
+      { status: 409 }
+    );
+  }
+  const subItemId = stripeSub.items?.data?.[0]?.id;
+  if (!subItemId) return Response.json({ success: false, error: "Could not read subscription item" }, { status: 500 });
+  const nowSec = Math.floor(Date.now() / 1e3);
+  const isTrialing = stripeSub.status === "trialing" || stripeSub.trial_end && stripeSub.trial_end > nowSec;
+  const updateParams = new URLSearchParams({
+    "items[0][id]": subItemId,
+    "items[0][price]": newPriceId,
+    proration_behavior: "create_prorations"
+  });
+  if (targetInterval === "yearly" && !isTrialing) updateParams.set("billing_cycle_anchor", "now");
+  const updated = await fetch(`https://api.stripe.com/v1/subscriptions/${stripeSubId}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}`, "Content-Type": "application/x-www-form-urlencoded" },
+    body: updateParams.toString()
+  }).then((r) => r.json());
+  if (updated.error) return Response.json({ success: false, error: updated.error.message || "Failed to switch billing interval" }, { status: 400 });
+  const newPeriodEndISO = updated.current_period_end ? new Date(updated.current_period_end * 1e3).toISOString() : null;
+  await db.prepare(
+    "UPDATE Subscription SET interval = ?1, stripePriceId = ?2, currentPeriodEnd = ?3, updatedAt = ?4 WHERE stripeSubscriptionId = ?5"
+  ).bind(targetInterval, newPriceId, newPeriodEndISO, (/* @__PURE__ */ new Date()).toISOString(), stripeSubId).run().catch(() => {
+  });
+  return Response.json({ success: true, interval: targetInterval, nextBillingDate: newPeriodEndISO });
+}
+__name(handleWebflowSwitchInterval, "handleWebflowSwitchInterval");
+async function handleWebflowCancelSubscription(request, env2) {
+  if (request.method !== "POST") {
+    return Response.json({ success: false, error: "Method not allowed" }, { status: 405 });
+  }
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) return Response.json({ success: false, error: "Database unavailable" }, { status: 503 });
+  if (!env2.STRIPE_SECRET_KEY) return Response.json({ success: false, error: "Stripe not configured" }, { status: 503 });
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ success: false, error: "Invalid JSON body" }, { status: 400 });
+  }
+  const siteId = (body.siteId || "").trim();
+  if (!siteId) return Response.json({ success: false, error: "siteId required" }, { status: 400 });
+  const site = await resolveSite2(db, siteId);
+  const sub = await resolveSubscription(db, site);
+  const stripeSubscriptionId = pick(sub, "stripeSubscriptionId", "stripesubscriptionid");
+  if (!stripeSubscriptionId) {
+    return Response.json({ success: false, error: "No active subscription found for this site." }, { status: 400 });
+  }
+  const params = new URLSearchParams();
+  params.set("cancel_at_period_end", "true");
+  const res = await fetch(`https://api.stripe.com/v1/subscriptions/${stripeSubscriptionId}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}`, "Content-Type": "application/x-www-form-urlencoded" },
+    body: params.toString()
+  });
+  const data = await res.json();
+  if (data.error) {
+    const errMsg = String(data.error?.message || "");
+    const alreadyCanceled = /canceled subscription can only update/i.test(errMsg) || data.error?.code === "subscription_already_canceled";
+    if (alreadyCanceled) {
+      try {
+        await db.prepare("UPDATE Subscription SET cancelAtPeriodEnd = 1, status = 'canceled', updatedAt = ?1 WHERE stripeSubscriptionId = ?2").bind((/* @__PURE__ */ new Date()).toISOString(), stripeSubscriptionId).run();
+      } catch (e) {
+        console.warn(`${TAG5} D1 reconcile failed (non-fatal)`, e?.message);
+      }
+      console.log(`${TAG5} already canceled on Stripe \u2014 reconciled DB to canceled`, stripeSubscriptionId);
+      return Response.json({ success: true, alreadyCanceled: true, cancelAtPeriodEnd: true });
+    }
+    console.error(`${TAG5} Stripe cancel error`, data.error?.message);
+    return Response.json({ success: false, error: data.error.message || "Stripe error" }, { status: 502 });
+  }
+  try {
+    await db.prepare("UPDATE Subscription SET cancelAtPeriodEnd = 1, updatedAt = ?1 WHERE stripeSubscriptionId = ?2").bind((/* @__PURE__ */ new Date()).toISOString(), stripeSubscriptionId).run();
+  } catch (e) {
+    console.warn(`${TAG5} D1 update failed (non-fatal)`, e?.message);
+  }
+  return Response.json({
+    success: true,
+    cancelAtPeriodEnd: true,
+    currentPeriodEnd: data.current_period_end ? new Date(data.current_period_end * 1e3).toISOString() : null
+  });
+}
+__name(handleWebflowCancelSubscription, "handleWebflowCancelSubscription");
+
+// src/handlers/webflowBillingWf.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+init_db();
+var TAG6 = "[webflow-billing-wf]";
+async function resolveLimits2(db, planId) {
+  try {
+    const plan = await getPlanById(db, planId || "free");
+    return {
+      scansLimit: plan?.scansIncluded ?? plan?.scansincluded ?? 100,
+      pageviewsLimit: plan?.pageviewsIncluded ?? plan?.pageviewsincluded ?? 7500
+    };
+  } catch {
+    return { scansLimit: 100, pageviewsLimit: 7500 };
+  }
+}
+__name(resolveLimits2, "resolveLimits");
+async function resolveUsage2(db, site) {
+  if (!site?.id) return { scansUsed: 0, pageviewsUsed: 0, yearMonth: null };
+  try {
+    const [pv, sc] = await Promise.all([
+      getPageviewUsageForSite(db, site.id),
+      getScanUsageForSite(db, site.id)
+    ]);
+    return {
+      scansUsed: sc?.scanCount ?? 0,
+      pageviewsUsed: pv?.pageviewCount ?? 0,
+      yearMonth: pv?.yearMonth ?? sc?.yearMonth ?? null
+    };
+  } catch (e) {
+    console.warn(`${TAG6} usage lookup failed`, e?.message);
+    return { scansUsed: 0, pageviewsUsed: 0, yearMonth: null };
+  }
+}
+__name(resolveUsage2, "resolveUsage");
+async function resolveSite3(db, siteId) {
+  if (!siteId) return null;
+  return db.prepare("SELECT id, organizationId FROM Site WHERE id = ?1 OR platformSiteId = ?1 ORDER BY createdAt ASC LIMIT 1").bind(siteId).first().catch(() => null);
+}
+__name(resolveSite3, "resolveSite");
+async function resolveSubscription2(db, site) {
+  if (!site) return null;
+  const cols = "id, organizationId, siteId, planId, planType, status, stripeSubscriptionId, stripeCustomerId, interval, currentPeriodEnd, cancelAtPeriodEnd";
+  let sub = await db.prepare(
+    `SELECT ${cols} FROM Subscription WHERE siteId = ?1
+       ORDER BY CASE WHEN lower(status) IN ('active','trialing') THEN 0 ELSE 1 END, createdAt DESC
+       LIMIT 1`
+  ).bind(site.id).first().catch(() => null);
+  if (!sub && site.organizationId) {
+    sub = await db.prepare(
+      `SELECT ${cols} FROM Subscription WHERE organizationId = ?1 AND lower(status) IN ('active','trialing') ORDER BY createdAt DESC LIMIT 1`
+    ).bind(site.organizationId).first().catch(() => null);
+  }
+  return sub;
+}
+__name(resolveSubscription2, "resolveSubscription");
+function pick2(sub, camel, snake) {
+  return sub?.[camel] ?? sub?.[snake] ?? null;
+}
+__name(pick2, "pick");
+async function handleWebflowBillings(request, env2) {
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) return Response.json({ success: false, error: "Database unavailable" }, { status: 503 });
+  const url = new URL(request.url);
+  const siteId = (url.searchParams.get("siteId") || "").trim();
+  if (!siteId) return Response.json({ success: false, error: "siteId required" }, { status: 400 });
+  const site = await resolveSite3(db, siteId);
+  const sub = await resolveSubscription2(db, site);
+  const usage = await resolveUsage2(db, site);
+  if (!sub) {
+    const limits3 = await resolveLimits2(db, "free");
+    return Response.json({ success: true, plan: "free", status: null, invoices: [], stripeSubscriptionId: null, ...usage, ...limits3 });
+  }
+  const stripeSubscriptionId = pick2(sub, "stripeSubscriptionId", "stripesubscriptionid");
+  const stripeCustomerId = pick2(sub, "stripeCustomerId", "stripecustomerid");
+  const planId = pick2(sub, "planId", "planid");
+  const cancelRaw = pick2(sub, "cancelAtPeriodEnd", "cancelatperiodend");
+  let cancelAtPeriodEnd = cancelRaw === 1 || cancelRaw === true || cancelRaw === "1" || String(pick2(sub, "status", "status") || "").toLowerCase() === "canceled";
+  if (stripeSubscriptionId && env2.STRIPE_SECRET_KEY) {
+    try {
+      const sres = await fetch(`https://api.stripe.com/v1/subscriptions/${stripeSubscriptionId}`, {
+        headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` }
+      });
+      const sdata = await sres.json();
+      if (!sdata.error) {
+        cancelAtPeriodEnd = !!sdata.cancel_at_period_end || String(sdata.status || "").toLowerCase() === "canceled";
+      }
+    } catch (e) {
+      console.warn(`${TAG6} subscription fetch failed`, e?.message);
+    }
+  }
+  let invoices = [];
+  if (stripeCustomerId && env2.STRIPE_SECRET_KEY) {
+    try {
+      const siteSubIds = /* @__PURE__ */ new Set();
+      if (stripeSubscriptionId) siteSubIds.add(stripeSubscriptionId);
+      try {
+        const subRows = await db.prepare(`SELECT stripeSubscriptionId FROM Subscription WHERE siteId = ?1 AND stripeSubscriptionId IS NOT NULL`).bind(site.id).all();
+        for (const r of subRows?.results || []) {
+          const sid = r.stripeSubscriptionId ?? r.stripesubscriptionid;
+          if (sid) siteSubIds.add(sid);
+        }
+      } catch (e) {
+        console.warn(`${TAG6} site sub lookup failed`, e?.message);
+      }
+      const res = await fetch(
+        `https://api.stripe.com/v1/invoices?customer=${stripeCustomerId}&limit=100`,
+        { headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` } }
+      );
+      const data = await res.json();
+      const filtered = (data.data || []).filter((inv) => inv.subscription && siteSubIds.has(inv.subscription)).filter((inv) => {
+        const status = String(inv.status || "").toLowerCase();
+        return status !== "draft" && status !== "void";
+      });
+      const bySub = /* @__PURE__ */ new Map();
+      for (const inv of filtered) {
+        const key = inv.subscription || inv.id;
+        const prev = bySub.get(key);
+        if (!prev || (inv.created || 0) > (prev.created || 0)) bySub.set(key, inv);
+      }
+      invoices = [...bySub.values()].sort((a, b) => (b.created || 0) - (a.created || 0)).map((inv) => ({
+        id: inv.id,
+        number: inv.number || null,
+        status: inv.status || null,
+        amountPaid: inv.amount_paid ?? 0,
+        amountDue: inv.amount_due ?? 0,
+        currency: (inv.currency || "usd").toUpperCase(),
+        created: inv.created ? new Date(inv.created * 1e3).toISOString() : null,
+        hostedInvoiceUrl: inv.hosted_invoice_url || null,
+        invoicePdf: inv.invoice_pdf || null
+      }));
+      console.log(`${TAG6} invoices site=${site.id} kept=${invoices.length} ofTotal=${(data.data || []).length}`);
+    } catch (e) {
+      console.warn(`${TAG6} invoice fetch failed`, e?.message);
+    }
+  }
+  const limits2 = await resolveLimits2(db, planId);
+  return Response.json({
+    success: true,
+    plan: planId || "free",
+    status: pick2(sub, "status", "status"),
+    interval: pick2(sub, "interval", "interval"),
+    currentPeriodEnd: pick2(sub, "currentPeriodEnd", "currentperiodend"),
+    cancelAtPeriodEnd,
+    stripeSubscriptionId,
+    invoices,
+    ...usage,
+    ...limits2
+  });
+}
+__name(handleWebflowBillings, "handleWebflowBillings");
+async function handleWebflowSwitchIntervals(request, env2) {
+  if (request.method !== "POST") return Response.json({ success: false, error: "Method not allowed" }, { status: 405 });
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) return Response.json({ success: false, error: "Database unavailable" }, { status: 503 });
+  if (!env2.STRIPE_SECRET_KEY) return Response.json({ success: false, error: "Stripe not configured" }, { status: 503 });
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ success: false, error: "Invalid JSON body" }, { status: 400 });
+  }
+  const siteId = (body.siteId || "").trim();
+  const targetInterval = body.targetInterval === "yearly" ? "yearly" : body.targetInterval === "monthly" ? "monthly" : null;
+  if (!siteId) return Response.json({ success: false, error: "siteId required" }, { status: 400 });
+  if (!targetInterval) return Response.json({ success: false, error: "targetInterval must be monthly or yearly" }, { status: 400 });
+  const site = await resolveSite3(db, siteId);
+  const sub = await resolveSubscription2(db, site);
+  const stripeSubId = pick2(sub, "stripeSubscriptionId", "stripesubscriptionid");
+  const currentInterval = String(pick2(sub, "interval", "interval") || "monthly").toLowerCase();
+  const planId = String(pick2(sub, "planId", "planid") || "").toLowerCase();
+  if (!stripeSubId) return Response.json({ success: false, error: "No active subscription found for this site." }, { status: 400 });
+  if (currentInterval === targetInterval) return Response.json({ success: false, error: `Already on ${targetInterval} billing` }, { status: 400 });
+  if (!["basic", "essential", "growth"].includes(planId)) return Response.json({ success: false, error: "Cannot switch interval for this plan." }, { status: 400 });
+  const trim = /* @__PURE__ */ __name((v) => v == null ? null : String(v).trim() || null, "trim");
+  const tierPriceMap3 = {
+    basic: { monthly: trim(env2.STRIPE_PRICE_BASIC_MONTHLY), yearly: trim(env2.STRIPE_PRICE_BASIC_YEARLY) },
+    essential: { monthly: trim(env2.STRIPE_PRICE_ESSENTIAL_MONTHLY), yearly: trim(env2.STRIPE_PRICE_ESSENTIAL_YEARLY) },
+    growth: { monthly: trim(env2.STRIPE_PRICE_GROWTH_MONTHLY), yearly: trim(env2.STRIPE_PRICE_GROWTH_YEARLY) }
+  };
+  const newPriceId = tierPriceMap3[planId]?.[targetInterval];
+  if (!newPriceId) return Response.json({ success: false, error: `Price not configured for ${planId} ${targetInterval}` }, { status: 503 });
+  const stripeSub = await fetch(`https://api.stripe.com/v1/subscriptions/${stripeSubId}`, {
+    headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` }
+  }).then((r) => r.json()).catch(() => ({ error: { message: "network" } }));
+  if (stripeSub.error) return Response.json({ success: false, error: stripeSub.error.message || "Failed to read subscription" }, { status: 400 });
+  if (stripeSub.status === "canceled" || stripeSub.status === "incomplete_expired") {
+    return Response.json(
+      { success: false, canceled: true, plan: planId, targetInterval, error: "This subscription was canceled. Start a new checkout to resubscribe." },
+      { status: 409 }
+    );
+  }
+  const subItemId = stripeSub.items?.data?.[0]?.id;
+  if (!subItemId) return Response.json({ success: false, error: "Could not read subscription item" }, { status: 500 });
+  const nowSec = Math.floor(Date.now() / 1e3);
+  const isTrialing = stripeSub.status === "trialing" || stripeSub.trial_end && stripeSub.trial_end > nowSec;
+  const updateParams = new URLSearchParams({
+    "items[0][id]": subItemId,
+    "items[0][price]": newPriceId,
+    proration_behavior: "create_prorations"
+  });
+  if (targetInterval === "yearly" && !isTrialing) updateParams.set("billing_cycle_anchor", "now");
+  const updated = await fetch(`https://api.stripe.com/v1/subscriptions/${stripeSubId}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}`, "Content-Type": "application/x-www-form-urlencoded" },
+    body: updateParams.toString()
+  }).then((r) => r.json());
+  if (updated.error) return Response.json({ success: false, error: updated.error.message || "Failed to switch billing interval" }, { status: 400 });
+  const newPeriodEndISO = updated.current_period_end ? new Date(updated.current_period_end * 1e3).toISOString() : null;
+  await db.prepare(
+    "UPDATE Subscription SET interval = ?1, stripePriceId = ?2, currentPeriodEnd = ?3, updatedAt = ?4 WHERE stripeSubscriptionId = ?5"
+  ).bind(targetInterval, newPriceId, newPeriodEndISO, (/* @__PURE__ */ new Date()).toISOString(), stripeSubId).run().catch(() => {
+  });
+  return Response.json({ success: true, interval: targetInterval, nextBillingDate: newPeriodEndISO });
+}
+__name(handleWebflowSwitchIntervals, "handleWebflowSwitchIntervals");
+async function handleWebflowCancelSubscriptions(request, env2) {
+  if (request.method !== "POST") {
+    return Response.json({ success: false, error: "Method not allowed" }, { status: 405 });
+  }
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) return Response.json({ success: false, error: "Database unavailable" }, { status: 503 });
+  if (!env2.STRIPE_SECRET_KEY) return Response.json({ success: false, error: "Stripe not configured" }, { status: 503 });
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ success: false, error: "Invalid JSON body" }, { status: 400 });
+  }
+  const siteId = (body.siteId || "").trim();
+  if (!siteId) return Response.json({ success: false, error: "siteId required" }, { status: 400 });
+  const site = await resolveSite3(db, siteId);
+  const sub = await resolveSubscription2(db, site);
+  const stripeSubscriptionId = pick2(sub, "stripeSubscriptionId", "stripesubscriptionid");
+  if (!stripeSubscriptionId) {
+    return Response.json({ success: false, error: "No active subscription found for this site." }, { status: 400 });
+  }
+  const params = new URLSearchParams();
+  params.set("cancel_at_period_end", "true");
+  const res = await fetch(`https://api.stripe.com/v1/subscriptions/${stripeSubscriptionId}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}`, "Content-Type": "application/x-www-form-urlencoded" },
+    body: params.toString()
+  });
+  const data = await res.json();
+  if (data.error) {
+    const errMsg = String(data.error?.message || "");
+    const alreadyCanceled = /canceled subscription can only update/i.test(errMsg) || data.error?.code === "subscription_already_canceled";
+    if (alreadyCanceled) {
+      try {
+        await db.prepare("UPDATE Subscription SET cancelAtPeriodEnd = 1, status = 'canceled', updatedAt = ?1 WHERE stripeSubscriptionId = ?2").bind((/* @__PURE__ */ new Date()).toISOString(), stripeSubscriptionId).run();
+      } catch (e) {
+        console.warn(`${TAG6} D1 reconcile failed (non-fatal)`, e?.message);
+      }
+      console.log(`${TAG6} already canceled on Stripe \u2014 reconciled DB to canceled`, stripeSubscriptionId);
+      return Response.json({ success: true, alreadyCanceled: true, cancelAtPeriodEnd: true });
+    }
+    console.error(`${TAG6} Stripe cancel error`, data.error?.message);
+    return Response.json({ success: false, error: data.error.message || "Stripe error" }, { status: 502 });
+  }
+  try {
+    await db.prepare("UPDATE Subscription SET cancelAtPeriodEnd = 1, updatedAt = ?1 WHERE stripeSubscriptionId = ?2").bind((/* @__PURE__ */ new Date()).toISOString(), stripeSubscriptionId).run();
+  } catch (e) {
+    console.warn(`${TAG6} D1 update failed (non-fatal)`, e?.message);
+  }
+  return Response.json({
+    success: true,
+    cancelAtPeriodEnd: true,
+    currentPeriodEnd: data.current_period_end ? new Date(data.current_period_end * 1e3).toISOString() : null
+  });
+}
+__name(handleWebflowCancelSubscriptions, "handleWebflowCancelSubscriptions");
+
+// src/middleware/consentAccess.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+init_db();
+function sidFromCookie(request) {
+  const cookie = request.headers.get("Cookie") || request.headers.get("cookie") || "";
+  const m = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
+  return m ? m[1].trim() : null;
+}
+__name(sidFromCookie, "sidFromCookie");
+async function sessionOwnsSite(request, env2, siteId) {
+  const db = env2.CONSENT_WEBAPP;
+  if (!db || !siteId) return false;
+  const sid = sidFromCookie(request);
+  if (!sid) return false;
+  const session = await getSessionById(db, sid);
+  if (!session?.userId) return false;
+  const owns = await db.prepare(
+    `SELECT 1 FROM Site s
+       JOIN OrganizationMember om ON om.organizationId = s.organizationId
+       WHERE s.id = ?1 AND om.userId = ?2 LIMIT 1`
+  ).bind(siteId, session.userId).first().catch(() => null);
+  return !!owns;
+}
+__name(sessionOwnsSite, "sessionOwnsSite");
+async function requireConsentSession(request, env2) {
+  const url = new URL(request.url);
+  const siteId = url.searchParams.get("siteId") || url.searchParams.get("site_id");
+  if (!siteId) return { ok: false, status: 400, error: "siteId is required" };
+  if (!await sessionOwnsSite(request, env2, siteId)) {
+    return { ok: false, status: 401, error: "Authentication required." };
+  }
+  return requireActiveSubscriptionForConsentReport(env2, siteId);
+}
+__name(requireConsentSession, "requireConsentSession");
+async function requireConsentPdfAccess(request, env2) {
+  const url = new URL(request.url);
+  const siteId = url.searchParams.get("siteId") || url.searchParams.get("site_id");
+  const consentId = url.searchParams.get("consentId");
+  if (!siteId || !consentId) return { ok: false, status: 400, error: "siteId and consentId required" };
+  const token = url.searchParams.get("token");
+  const authorized = token && env2.JWT_SECRET && await verifyDownloadToken(env2.JWT_SECRET, token, siteId, consentId) || await sessionOwnsSite(request, env2, siteId);
+  if (!authorized) return { ok: false, status: 401, error: "Authentication required." };
+  return requireActiveSubscriptionForConsentReport(env2, siteId);
+}
+__name(requireConsentPdfAccess, "requireConsentPdfAccess");
+
+// src/handlers/framerBilling.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+async function handleFramerBilling(request, env2) {
+  return handleWebflowBilling(request, env2);
+}
+__name(handleFramerBilling, "handleFramerBilling");
+async function handleFramerCancelSubscription(request, env2) {
+  return handleWebflowCancelSubscription(request, env2);
+}
+__name(handleFramerCancelSubscription, "handleFramerCancelSubscription");
+async function handleFramerSwitchInterval(request, env2) {
+  return handleWebflowSwitchInterval(request, env2);
+}
+__name(handleFramerSwitchInterval, "handleFramerSwitchInterval");
+
+// src/handlers/framerUpgrade.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+var TAG7 = "[framer-upgrade]";
+var PLAN_ORDER2 = { basic: 1, essential: 2, growth: 3 };
+var fail3 = /* @__PURE__ */ __name((error, status) => Response.json({ success: false, error }, { status }), "fail");
+function trimEnv6(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s || null;
+}
+__name(trimEnv6, "trimEnv");
+function base64UrlToBytes(b64url) {
+  let b64 = String(b64url).replace(/-/g, "+").replace(/_/g, "/");
+  while (b64.length % 4) b64 += "=";
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+__name(base64UrlToBytes, "base64UrlToBytes");
+function base64UrlToString(b64url) {
+  return new TextDecoder().decode(base64UrlToBytes(b64url));
+}
+__name(base64UrlToString, "base64UrlToString");
+function extractBearer(request) {
+  const h = request.headers.get("Authorization") || request.headers.get("authorization") || "";
+  const m = /^Bearer\s+(.+)$/i.exec(h.trim());
+  return m ? m[1].trim() : null;
+}
+__name(extractBearer, "extractBearer");
+async function verifyJwtHS256(token, secret) {
+  try {
+    const parts = String(token).split(".");
+    if (parts.length !== 3) return null;
+    const [h, p, s] = parts;
+    let header;
+    try {
+      header = JSON.parse(base64UrlToString(h));
+    } catch {
+      return null;
+    }
+    if (!header || header.alg !== "HS256") return null;
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"]
+    );
+    const ok = await crypto.subtle.verify(
+      "HMAC",
+      key,
+      base64UrlToBytes(s),
+      new TextEncoder().encode(`${h}.${p}`)
+    );
+    if (!ok) return null;
+    let payload;
+    try {
+      payload = JSON.parse(base64UrlToString(p));
+    } catch {
+      return null;
+    }
+    const nowSec = Math.floor(Date.now() / 1e3);
+    if (payload.exp != null && Number(payload.exp) < nowSec) return null;
+    if (payload.nbf != null && Number(payload.nbf) > nowSec) return null;
+    return payload;
+  } catch (e) {
+    console.warn(`${TAG7} JWT verify error:`, e?.message || e);
+    return null;
+  }
+}
+__name(verifyJwtHS256, "verifyJwtHS256");
+function emailFromPayload(payload) {
+  const candidates = [
+    payload?.email,
+    payload?.user?.email,
+    payload?.data?.email,
+    payload?.sub
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.includes("@")) return c.trim().toLowerCase();
+  }
+  return null;
+}
+__name(emailFromPayload, "emailFromPayload");
+async function orgHasMemberEmail(db, organizationId, email) {
+  if (!db || !organizationId || !email) return false;
+  try {
+    const row = await db.prepare(
+      `SELECT 1 AS ok
+           FROM OrganizationMember m
+           JOIN User u ON u.id = m.userId
+          WHERE m.organizationId = ?1 AND lower(u.email) = ?2
+          LIMIT 1`
+    ).bind(organizationId, email).first();
+    return !!row;
+  } catch (e) {
+    console.warn(`${TAG7} orgHasMemberEmail failed:`, e?.message || e);
+    return false;
+  }
+}
+__name(orgHasMemberEmail, "orgHasMemberEmail");
+async function requireFramerAuth(request, env2, site) {
+  const token = extractBearer(request);
+  if (!token) return { ok: false, res: fail3("Missing authorization token", 401) };
+  const secret = trimEnv6(env2.FRAMER_JWT_SECRET);
+  if (!secret) {
+    console.error(`${TAG7} FRAMER_JWT_SECRET not configured`);
+    return { ok: false, res: fail3("Auth not configured", 503) };
+  }
+  const payload = await verifyJwtHS256(token, secret);
+  if (!payload) return { ok: false, res: fail3("Invalid or expired token", 401) };
+  const tokenEmail = emailFromPayload(payload);
+  const tokenSiteId = payload?.siteId != null ? String(payload.siteId) : null;
+  let bound = false;
+  let boundBy = "none";
+  if (site) {
+    if (tokenSiteId && (tokenSiteId === String(site.id) || tokenSiteId === String(site.platformSiteId))) {
+      bound = true;
+      boundBy = "siteId";
+    } else if (tokenEmail && await orgHasMemberEmail(env2.CONSENT_WEBAPP, site.organizationId, tokenEmail)) {
+      bound = true;
+      boundBy = "email";
+    }
+  }
+  if (!bound) {
+    const strict = trimEnv6(env2.FRAMER_UPGRADE_STRICT_BINDING) === "true";
+    console.warn(
+      `${TAG7} site binding unmatched \u2014 tokenSiteId=${tokenSiteId || "-"} tokenEmail=${tokenEmail || "-"} site.id=${site?.id || "-"} site.platformSiteId=${site?.platformSiteId || "-"} org=${site?.organizationId || "-"} strict=${strict}`
+    );
+    if (strict && site && (tokenSiteId || tokenEmail)) {
+      return { ok: false, res: fail3("Not authorized for this site", 403) };
+    }
+  } else {
+    console.log(`${TAG7} authorized via ${boundBy} \u2014 site.id=${site?.id} user=${tokenEmail || "-"}`);
+  }
+  return { ok: true, email: tokenEmail || null };
+}
+__name(requireFramerAuth, "requireFramerAuth");
+function pick3(sub, camel, snake) {
+  return sub?.[camel] ?? sub?.[snake] ?? null;
+}
+__name(pick3, "pick");
+async function resolveSite4(db, siteId) {
+  if (!siteId) return null;
+  return db.prepare("SELECT id, organizationId, platformSiteId FROM Site WHERE id = ?1 OR platformSiteId = ?1 ORDER BY createdAt ASC LIMIT 1").bind(siteId).first().catch(() => null);
+}
+__name(resolveSite4, "resolveSite");
+async function resolveSubscription3(db, site) {
+  if (!site) return null;
+  const cols = "id, organizationId, siteId, planId, planType, status, stripeSubscriptionId, stripeCustomerId, interval, currentPeriodEnd, cancelAtPeriodEnd";
+  let sub = await db.prepare(
+    `SELECT ${cols} FROM Subscription WHERE siteId = ?1
+       ORDER BY CASE WHEN lower(status) IN ('active','trialing') THEN 0 ELSE 1 END, createdAt DESC
+       LIMIT 1`
+  ).bind(site.id).first().catch(() => null);
+  if (!sub && site.organizationId) {
+    sub = await db.prepare(
+      `SELECT ${cols} FROM Subscription WHERE organizationId = ?1 AND lower(status) IN ('active','trialing') ORDER BY createdAt DESC LIMIT 1`
+    ).bind(site.organizationId).first().catch(() => null);
+  }
+  return sub;
+}
+__name(resolveSubscription3, "resolveSubscription");
+async function stripeGet2(env2, path) {
+  const res = await fetch(`https://api.stripe.com/v1${path}`, {
+    headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` }
+  });
+  return { status: res.status, body: await res.json() };
+}
+__name(stripeGet2, "stripeGet");
+async function stripePost2(env2, path, formObj) {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(formObj)) {
+    if (v != null) params.set(k, String(v));
+  }
+  const res = await fetch(`https://api.stripe.com/v1${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}`,
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: params.toString()
+  });
+  return { status: res.status, body: await res.json() };
+}
+__name(stripePost2, "stripePost");
+function tierPriceMap(env2) {
+  return {
+    basic: { monthly: trimEnv6(env2.STRIPE_PRICE_BASIC_MONTHLY), yearly: trimEnv6(env2.STRIPE_PRICE_BASIC_YEARLY) },
+    essential: { monthly: trimEnv6(env2.STRIPE_PRICE_ESSENTIAL_MONTHLY), yearly: trimEnv6(env2.STRIPE_PRICE_ESSENTIAL_YEARLY) },
+    growth: { monthly: trimEnv6(env2.STRIPE_PRICE_GROWTH_MONTHLY), yearly: trimEnv6(env2.STRIPE_PRICE_GROWTH_YEARLY) }
+  };
+}
+__name(tierPriceMap, "tierPriceMap");
+function sumProrationCents3(invoiceBody) {
+  let total = 0;
+  let sawProration = false;
+  for (const line of invoiceBody?.lines?.data || []) {
+    if (line.proration === true) {
+      total += line.amount || 0;
+      sawProration = true;
+    }
+  }
+  return sawProration ? total : invoiceBody?.amount_due ?? invoiceBody?.total ?? null;
+}
+__name(sumProrationCents3, "sumProrationCents");
+async function previewImmediateAmount2(env2, ctx) {
+  const { stripeSubId, subItemId, newPriceId, promotionCodeId, stripeSub } = ctx;
+  const base = {
+    subscription: stripeSubId,
+    "subscription_items[0][id]": subItemId,
+    "subscription_items[0][price]": newPriceId,
+    subscription_proration_behavior: "create_prorations"
+  };
+  if (promotionCodeId) base["discounts[0][promotion_code]"] = promotionCodeId;
+  const qs = new URLSearchParams(base).toString();
+  const up = await stripeGet2(env2, `/invoices/upcoming?${qs}`);
+  if (!up.body.error) {
+    return { amountDueCents: sumProrationCents3(up.body), currency: up.body.currency || "usd" };
+  }
+  const flexible = up.status === 400 && /billing_mode = flexible/i.test(up.body.error?.message || "");
+  if (!flexible) {
+    if (promotionCodeId) {
+      const retry2 = { ...base };
+      delete retry2["discounts[0][promotion_code]"];
+      const up2 = await stripeGet2(env2, `/invoices/upcoming?${new URLSearchParams(retry2).toString()}`);
+      if (!up2.body.error) {
+        return { amountDueCents: sumProrationCents3(up2.body), currency: up2.body.currency || "usd", couponPreviewSkipped: true };
+      }
+    }
+    return { error: up.body.error.message || "Could not preview the charge" };
+  }
+  const customerId = stripeSub.customer;
+  const items = stripeSub.items?.data || [];
+  const form = {
+    customer: customerId,
+    subscription: stripeSubId,
+    "subscription_details[proration_behavior]": "create_prorations"
+  };
+  items.forEach((item, i) => {
+    form[`subscription_details[items][${i}][id]`] = item.id;
+    form[`subscription_details[items][${i}][price]`] = i === 0 ? newPriceId : item.price?.id;
+  });
+  if (promotionCodeId) form["discounts[0][promotion_code]"] = promotionCodeId;
+  const prev = await stripePost2(env2, "/invoices/create_preview", form);
+  if (prev.body.error) {
+    return { error: prev.body.error.message || "Could not preview the charge" };
+  }
+  return { amountDueCents: sumProrationCents3(prev.body), currency: prev.body.currency || "usd" };
+}
+__name(previewImmediateAmount2, "previewImmediateAmount");
+async function prepareChange2(request, env2) {
+  if (request.method !== "POST") return { error: fail3("Method not allowed", 405) };
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) return { error: fail3("Database not available", 503) };
+  if (!env2.STRIPE_SECRET_KEY) return { error: fail3("Stripe not configured", 503) };
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return { error: fail3("Invalid JSON", 400) };
+  }
+  const siteId = (body.siteId || "").trim();
+  const planId = ["basic", "essential", "growth"].includes(body.planId) ? body.planId : null;
+  const interval = body.interval === "yearly" ? "yearly" : "monthly";
+  const promotionCodeId = body.promotionCodeId && String(body.promotionCodeId).trim() ? String(body.promotionCodeId).trim() : null;
+  const paymentMethodId = body.paymentMethodId && String(body.paymentMethodId).trim() ? String(body.paymentMethodId).trim() : null;
+  if (!siteId) return { error: fail3("siteId required", 400) };
+  if (!planId) return { error: fail3("planId must be basic, essential, or growth", 400) };
+  const site = await resolveSite4(db, siteId);
+  const auth = await requireFramerAuth(request, env2, site);
+  if (!auth.ok) return { error: auth.res };
+  const sub = await resolveSubscription3(db, site);
+  if (!sub) return { error: fail3("No active subscription found", 404) };
+  const stripeSubId = pick3(sub, "stripeSubscriptionId", "stripesubscriptionid");
+  const currentPlanId = String(pick3(sub, "planId", "planid") || "").toLowerCase();
+  const currentInterval = String(pick3(sub, "interval", "interval") || "monthly").toLowerCase();
+  if (!stripeSubId) return { error: fail3("Subscription has no Stripe ID", 400) };
+  if (!PLAN_ORDER2[currentPlanId]) {
+    return { error: fail3("Current plan is not a tier plan; cannot change here", 400) };
+  }
+  if (currentPlanId === planId && currentInterval === interval) {
+    return { error: fail3("Already on this plan", 400) };
+  }
+  const newPriceId = tierPriceMap(env2)[planId]?.[interval];
+  if (!newPriceId) {
+    console.error(`${TAG7} Missing price env var for`, planId, interval);
+    return { error: fail3(`Price not configured for ${planId} ${interval}`, 503) };
+  }
+  const isDowngrade = PLAN_ORDER2[planId] < PLAN_ORDER2[currentPlanId];
+  const subRes = await stripeGet2(env2, `/subscriptions/${stripeSubId}`);
+  if (subRes.body.error) {
+    console.error(`${TAG7} Stripe fetch sub failed:`, subRes.body.error.message);
+    return { error: fail3(subRes.body.error.message || "Failed to read subscription", 400) };
+  }
+  const stripeSub = subRes.body;
+  const subItemId = stripeSub.items?.data?.[0]?.id;
+  if (!subItemId) return { error: fail3("Could not read subscription item ID", 500) };
+  const nowSec = Math.floor(Date.now() / 1e3);
+  const isTrialing = stripeSub.status === "trialing" || stripeSub.trial_end && stripeSub.trial_end > nowSec;
+  const trialEndISO = stripeSub.trial_end ? new Date(stripeSub.trial_end * 1e3).toISOString() : null;
+  const periodEndISO = stripeSub.current_period_end ? new Date(stripeSub.current_period_end * 1e3).toISOString() : null;
+  return {
+    ctx: {
+      db,
+      email: auth.email,
+      env: env2,
+      siteId,
+      planId,
+      interval,
+      promotionCodeId,
+      paymentMethodId,
+      sub,
+      stripeSubId,
+      stripeSub,
+      subItemId,
+      newPriceId,
+      currentPlanId,
+      currentInterval,
+      isDowngrade,
+      isTrialing,
+      trialEndISO,
+      periodEndISO
+    }
+  };
+}
+__name(prepareChange2, "prepareChange");
+async function handleFramerChangeTierPreview(request, env2) {
+  const prep = await prepareChange2(request, env2);
+  if (prep.error) return prep.error;
+  const ctx = prep.ctx;
+  const { currentPlanId, currentInterval, planId, interval, isDowngrade, isTrialing, trialEndISO, periodEndISO, newPriceId } = ctx;
+  if (isTrialing) {
+    const priceRes = await stripeGet2(env2, `/prices/${newPriceId}`);
+    if (priceRes.body.error) return fail3(priceRes.body.error.message || "Could not read the plan price", 400);
+    return Response.json({
+      success: true,
+      direction: isDowngrade ? "downgrade" : "upgrade",
+      currentPlanId,
+      currentInterval,
+      planId,
+      interval,
+      isTrialing: true,
+      amountDueCents: priceRes.body.unit_amount ?? null,
+      currency: priceRes.body.currency || "usd",
+      trialEnd: trialEndISO,
+      effectiveAt: null
+    });
+  }
+  if (isDowngrade) {
+    const priceRes = await stripeGet2(env2, `/prices/${newPriceId}`);
+    const newAmount = priceRes.body?.error ? null : priceRes.body.unit_amount ?? null;
+    return Response.json({
+      success: true,
+      direction: "downgrade",
+      currentPlanId,
+      currentInterval,
+      planId,
+      interval,
+      isTrialing: false,
+      amountDueCents: 0,
+      newPlanAmountCents: newAmount,
+      currency: priceRes.body?.currency || "usd",
+      trialEnd: null,
+      effectiveAt: periodEndISO
+    });
+  }
+  const res = await previewImmediateAmount2(env2, ctx);
+  if (res.error) return fail3(res.error, 400);
+  return Response.json({
+    success: true,
+    direction: "upgrade",
+    currentPlanId,
+    currentInterval,
+    planId,
+    interval,
+    isTrialing: false,
+    amountDueCents: res.amountDueCents,
+    currency: res.currency,
+    couponPreviewSkipped: !!res.couponPreviewSkipped,
+    trialEnd: null,
+    effectiveAt: null
+  });
+}
+__name(handleFramerChangeTierPreview, "handleFramerChangeTierPreview");
+async function handleFramerChangeTier(request, env2) {
+  const prep = await prepareChange2(request, env2);
+  if (prep.error) return prep.error;
+  const {
+    db,
+    email,
+    siteId,
+    planId,
+    interval,
+    promotionCodeId,
+    paymentMethodId,
+    sub,
+    stripeSubId,
+    stripeSub,
+    subItemId,
+    newPriceId,
+    isDowngrade,
+    isTrialing,
+    periodEndISO
+  } = prep.ctx;
+  if (isDowngrade && !isTrialing) {
+    const currentPriceId = stripeSub.items?.data?.[0]?.price?.id;
+    const startDate = stripeSub.current_period_start;
+    const changeDate = stripeSub.current_period_end;
+    if (stripeSub.schedule) {
+      await stripePost2(env2, `/subscription_schedules/${stripeSub.schedule}/release`, {}).catch(() => {
+      });
+    }
+    const created = await stripePost2(env2, "/subscription_schedules", { from_subscription: stripeSubId });
+    if (created.body.error) {
+      console.error(`${TAG7} schedule create failed:`, created.body.error.message);
+      return fail3(created.body.error.message || "Could not schedule the downgrade", 400);
+    }
+    const schedId = created.body.id;
+    const updateForm2 = {
+      end_behavior: "release",
+      "phases[0][items][0][price]": currentPriceId,
+      "phases[0][items][0][quantity]": "1",
+      "phases[0][start_date]": startDate,
+      "phases[0][end_date]": changeDate,
+      "phases[0][proration_behavior]": "none",
+      "phases[1][items][0][price]": newPriceId,
+      "phases[1][items][0][quantity]": "1",
+      "phases[1][proration_behavior]": "none",
+      "metadata[planId]": planId,
+      "metadata[interval]": interval,
+      "metadata[siteId]": siteId || (sub.siteId ?? sub.siteid ?? ""),
+      "metadata[organizationId]": pick3(sub, "organizationId", "organizationid") || ""
+    };
+    const updated = await stripePost2(env2, `/subscription_schedules/${schedId}`, updateForm2);
+    if (updated.body.error) {
+      console.error(`${TAG7} schedule update failed:`, updated.body.error.message);
+      return fail3(updated.body.error.message || "Could not schedule the downgrade", 400);
+    }
+    return Response.json({
+      success: true,
+      direction: "downgrade",
+      scheduled: true,
+      effectiveAt: periodEndISO,
+      planId,
+      interval
+    });
+  }
+  if (stripeSub.schedule) {
+    await stripePost2(env2, `/subscription_schedules/${stripeSub.schedule}/release`, {}).catch(() => {
+    });
+  }
+  const customerId = stripeSub.customer;
+  if (paymentMethodId) {
+    const attach = await stripePost2(env2, `/payment_methods/${paymentMethodId}/attach`, { customer: customerId });
+    if (attach.body.error) {
+      console.error(`${TAG7} card attach failed:`, attach.body.error.message);
+      return fail3(attach.body.error.message || "Could not use that card. Please try another.", 400);
+    }
+  }
+  const updateForm = {
+    "items[0][id]": subItemId,
+    "items[0][price]": newPriceId,
+    proration_behavior: isTrialing ? "none" : "always_invoice",
+    payment_behavior: paymentMethodId ? "default_incomplete" : "error_if_incomplete",
+    "metadata[planId]": planId,
+    "metadata[interval]": interval,
+    "expand[0]": "latest_invoice.payment_intent"
+  };
+  if (paymentMethodId) updateForm["default_payment_method"] = paymentMethodId;
+  if (promotionCodeId) updateForm["discounts[0][promotion_code]"] = promotionCodeId;
+  const updateRes = await stripePost2(env2, `/subscriptions/${stripeSubId}`, updateForm);
+  if (updateRes.body.error) {
+    console.error(`${TAG7} Stripe update failed:`, updateRes.body.error.message);
+    return fail3(updateRes.body.error.message || "Payment could not be completed", 400);
+  }
+  const updatedSub = updateRes.body;
+  const latestInv = updatedSub.latest_invoice && typeof updatedSub.latest_invoice === "object" ? updatedSub.latest_invoice : null;
+  const pi = latestInv && typeof latestInv.payment_intent === "object" ? latestInv.payment_intent : null;
+  if (paymentMethodId && pi) {
+    if (pi.status === "requires_action" || pi.status === "requires_confirmation") {
+      return Response.json({
+        success: true,
+        direction: "upgrade",
+        scheduled: false,
+        requiresAction: true,
+        clientSecret: pi.client_secret,
+        subscriptionId: stripeSubId,
+        invoiceId: latestInv.id,
+        planId,
+        interval
+      });
+    }
+    if (pi.status === "requires_payment_method") {
+      return fail3("Your card was declined. Please try another card.", 402);
+    }
+  }
+  let amountPaidCents = null;
+  let currency = "usd";
+  let invoiceId = latestInv ? latestInv.id : updatedSub.latest_invoice || null;
+  let invoiceUrl = null;
+  let paymentStatus = "paid";
+  if (invoiceId) {
+    const inv = await stripeGet2(env2, `/invoices/${invoiceId}`);
+    if (!inv.body.error) {
+      amountPaidCents = inv.body.amount_paid ?? inv.body.amount_due ?? null;
+      currency = inv.body.currency || "usd";
+      invoiceUrl = inv.body.hosted_invoice_url || null;
+      paymentStatus = inv.body.status || paymentStatus;
+    }
+  }
+  const newPeriodEndISO = updatedSub.current_period_end ? new Date(updatedSub.current_period_end * 1e3).toISOString() : periodEndISO;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  await db.prepare(
+    `UPDATE Subscription SET planId = ?, planType = 'tier', interval = ?, stripePriceId = ?, currentPeriodEnd = ?, updatedAt = ?
+     WHERE stripeSubscriptionId = ?`
+  ).bind(planId, interval, newPriceId, newPeriodEndISO, now, stripeSubId).run();
+  try {
+    const sId = siteId ?? sub.siteId ?? sub.siteid;
+    const siteRow = sId ? await db.prepare("SELECT domain, legacySource FROM Site WHERE id = ?1 OR platformSiteId = ?1 LIMIT 1").bind(sId).first() : null;
+    await syncSubscriptionUpdateToLegacy(env2, {
+      email: email || null,
+      domain: siteRow?.domain || null,
+      subscriptionId: stripeSubId,
+      customerId: pick3(sub, "stripeCustomerId", "stripecustomerid"),
+      status: "active",
+      cancelAtPeriodEnd: !!pick3(sub, "cancelAtPeriodEnd", "cancelatperiodend"),
+      platform: siteRow?.legacySource || "framer",
+      interval
+    });
+  } catch (syncErr) {
+    console.warn(`${TAG7} Legacy sync failed (non-critical):`, syncErr?.message);
+  }
+  console.log(`${TAG7} upgraded to`, planId, interval, "for site:", siteId);
+  return Response.json({
+    success: true,
+    direction: "upgrade",
+    scheduled: false,
+    planId,
+    interval,
+    amountPaidCents,
+    currency,
+    invoiceId,
+    invoiceUrl,
+    paymentStatus,
+    nextBillingDate: newPeriodEndISO
+  });
+}
+__name(handleFramerChangeTier, "handleFramerChangeTier");
+async function prepareSwitch2(request, env2) {
+  if (request.method !== "POST") return { error: fail3("Method not allowed", 405) };
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) return { error: fail3("Database not available", 503) };
+  if (!env2.STRIPE_SECRET_KEY) return { error: fail3("Stripe not configured", 503) };
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return { error: fail3("Invalid JSON", 400) };
+  }
+  const siteId = (body.siteId || "").trim();
+  const targetInterval = body.targetInterval === "yearly" ? "yearly" : body.targetInterval === "monthly" ? "monthly" : null;
+  if (!siteId) return { error: fail3("siteId required", 400) };
+  if (!targetInterval) return { error: fail3("targetInterval must be monthly or yearly", 400) };
+  const site = await resolveSite4(db, siteId);
+  const auth = await requireFramerAuth(request, env2, site);
+  if (!auth.ok) return { error: auth.res };
+  const sub = await resolveSubscription3(db, site);
+  if (!sub) return { error: fail3("No active subscription found", 404) };
+  const stripeSubId = pick3(sub, "stripeSubscriptionId", "stripesubscriptionid");
+  const currentInterval = String(pick3(sub, "interval", "interval") || "monthly").toLowerCase();
+  const planId = String(pick3(sub, "planId", "planid") || "").toLowerCase();
+  if (!stripeSubId) return { error: fail3("Subscription has no Stripe ID", 400) };
+  if (currentInterval === targetInterval) return { error: fail3(`Already on ${targetInterval} billing`, 400) };
+  if (!["basic", "essential", "growth"].includes(planId)) {
+    return { error: fail3("Cannot switch interval for this plan type", 400) };
+  }
+  const newPriceId = tierPriceMap(env2)[planId]?.[targetInterval];
+  if (!newPriceId) {
+    console.error(`${TAG7} Missing price env var for`, planId, targetInterval);
+    return { error: fail3(`Price not configured for ${planId} ${targetInterval}`, 503) };
+  }
+  const subRes = await stripeGet2(env2, `/subscriptions/${stripeSubId}`);
+  if (subRes.body.error) {
+    console.error(`${TAG7} Stripe fetch sub failed:`, subRes.body.error.message);
+    return { error: fail3(subRes.body.error.message || "Failed to read subscription", 400) };
+  }
+  const stripeSub = subRes.body;
+  if (stripeSub.status === "canceled" || stripeSub.status === "incomplete_expired") {
+    return {
+      error: Response.json(
+        { success: false, canceled: true, plan: planId, targetInterval, error: "This subscription was canceled. Start a new checkout to resubscribe." },
+        { status: 409 }
+      )
+    };
+  }
+  const subItemId = stripeSub.items?.data?.[0]?.id;
+  if (!subItemId) return { error: fail3("Could not read subscription item ID", 500) };
+  const nowSec = Math.floor(Date.now() / 1e3);
+  const isTrialing = stripeSub.status === "trialing" || stripeSub.trial_end && stripeSub.trial_end > nowSec;
+  const trialEndISO = stripeSub.trial_end ? new Date(stripeSub.trial_end * 1e3).toISOString() : null;
+  return {
+    ctx: {
+      db,
+      email: auth.email,
+      siteId,
+      targetInterval,
+      currentInterval,
+      planId,
+      sub,
+      stripeSubId,
+      stripeSub,
+      subItemId,
+      newPriceId,
+      isTrialing,
+      trialEndISO
+    }
+  };
+}
+__name(prepareSwitch2, "prepareSwitch");
+async function handleFramerSwitchIntervalPreview(request, env2) {
+  const prep = await prepareSwitch2(request, env2);
+  if (prep.error) return prep.error;
+  const { stripeSubId, subItemId, newPriceId, targetInterval, currentInterval, isTrialing, trialEndISO } = prep.ctx;
+  let amountDueCents = null;
+  let currency = "usd";
+  if (isTrialing) {
+    const priceRes = await stripeGet2(env2, `/prices/${newPriceId}`);
+    if (priceRes.body.error) return fail3(priceRes.body.error.message || "Could not read the plan price", 400);
+    amountDueCents = priceRes.body.unit_amount ?? null;
+    currency = priceRes.body.currency || "usd";
+  } else {
+    const params = new URLSearchParams({
+      subscription: stripeSubId,
+      "subscription_items[0][id]": subItemId,
+      "subscription_items[0][price]": newPriceId,
+      subscription_proration_behavior: "create_prorations"
+    });
+    const inv = await stripeGet2(env2, `/invoices/upcoming?${params.toString()}`);
+    if (inv.body.error) {
+      console.warn(`${TAG7} preview upcoming-invoice error:`, inv.body.error.message);
+      return fail3(inv.body.error.message || "Could not preview the charge", 400);
+    }
+    amountDueCents = sumProrationCents3(inv.body);
+    currency = inv.body.currency || "usd";
+  }
+  return Response.json({
+    success: true,
+    currentInterval,
+    targetInterval,
+    isTrialing: !!isTrialing,
+    amountDueCents,
+    currency,
+    trialEnd: isTrialing ? trialEndISO : null
+  });
+}
+__name(handleFramerSwitchIntervalPreview, "handleFramerSwitchIntervalPreview");
+async function handleFramerSwitchInterval2(request, env2) {
+  const prep = await prepareSwitch2(request, env2);
+  if (prep.error) return prep.error;
+  const {
+    db,
+    email,
+    siteId,
+    targetInterval,
+    currentInterval,
+    sub,
+    stripeSubId,
+    subItemId,
+    newPriceId,
+    isTrialing
+  } = prep.ctx;
+  const updateForm = {
+    "items[0][id]": subItemId,
+    "items[0][price]": newPriceId,
+    proration_behavior: isTrialing ? "none" : "always_invoice",
+    payment_behavior: "error_if_incomplete"
+  };
+  const updateRes = await stripePost2(env2, `/subscriptions/${stripeSubId}`, updateForm);
+  if (updateRes.body.error) {
+    console.error(`${TAG7} Stripe update failed:`, updateRes.body.error.message);
+    return fail3(updateRes.body.error.message || "Failed to switch billing interval", 400);
+  }
+  const updated = updateRes.body;
+  let newPeriodEnd = updated.current_period_end || null;
+  if (!newPeriodEnd) {
+    const fresh = await stripeGet2(env2, `/subscriptions/${stripeSubId}`);
+    newPeriodEnd = fresh.body?.current_period_end || null;
+  }
+  const newPeriodEndISO = newPeriodEnd ? new Date(newPeriodEnd * 1e3).toISOString() : null;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  await db.prepare(
+    `UPDATE Subscription SET interval = ?, stripePriceId = ?, currentPeriodEnd = ?, updatedAt = ?
+     WHERE stripeSubscriptionId = ?`
+  ).bind(targetInterval, newPriceId, newPeriodEndISO, now, stripeSubId).run();
+  try {
+    const sId = siteId ?? sub.siteId ?? sub.siteid;
+    const siteRow = sId ? await db.prepare("SELECT domain, legacySource FROM Site WHERE id = ?1 OR platformSiteId = ?1 LIMIT 1").bind(sId).first() : null;
+    await syncSubscriptionUpdateToLegacy(env2, {
+      email: email || null,
+      domain: siteRow?.domain || null,
+      subscriptionId: stripeSubId,
+      customerId: pick3(sub, "stripeCustomerId", "stripecustomerid"),
+      status: pick3(sub, "status", "status") || "active",
+      cancelAtPeriodEnd: !!pick3(sub, "cancelAtPeriodEnd", "cancelatperiodend"),
+      platform: siteRow?.legacySource || "framer",
+      interval: targetInterval
+    });
+  } catch (syncErr) {
+    console.warn(`${TAG7} Legacy sync failed (non-critical):`, syncErr?.message);
+  }
+  console.log(`${TAG7} switched`, currentInterval, "\u2192", targetInterval, "for site:", siteId);
+  return Response.json({
+    success: true,
+    interval: targetInterval,
+    nextBillingDate: newPeriodEndISO
+  });
+}
+__name(handleFramerSwitchInterval2, "handleFramerSwitchInterval");
+
+// src/handlers/webflowUpgrade.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+
+// src/middleware/webflowIdentity.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+init_db();
+var TAG8 = "[webflow-identity]";
+var RESOLVE_URL = "https://api.webflow.com/beta/token/resolve";
+function extractIdToken(request) {
+  const h = request.headers.get("Authorization") || request.headers.get("authorization") || "";
+  const m = /^Bearer\s+(.+)$/i.exec(h.trim());
+  return m ? m[1].trim() : null;
+}
+__name(extractIdToken, "extractIdToken");
+async function extractSiteId(request) {
+  const url = new URL(request.url);
+  const fromQuery = url.searchParams.get("siteId") || url.searchParams.get("site_id") || url.searchParams.get("wfSiteId") || url.searchParams.get("platformId");
+  if (fromQuery) return fromQuery;
+  if (["GET", "HEAD", "DELETE"].includes(request.method)) return null;
+  try {
+    const body = await request.clone().json();
+    return body?.siteId || body?.site_id || body?.wfSiteId || body?.platformId || null;
+  } catch {
+    return null;
+  }
+}
+__name(extractSiteId, "extractSiteId");
+async function resolveIdToken(appToken, idToken) {
+  try {
+    const res = await fetch(RESOLVE_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${appToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      body: JSON.stringify({ idToken })
+    });
+    if (!res.ok) {
+      console.warn(`${TAG8} resolve returned HTTP ${res.status}`);
+      return null;
+    }
+    return await res.json().catch(() => null);
+  } catch (e) {
+    console.warn(`${TAG8} resolve fetch error (non-fatal)`, e?.message || e);
+    return null;
+  }
+}
+__name(resolveIdToken, "resolveIdToken");
+async function ownedSiteIds(env2, webflowSiteId) {
+  const set = /* @__PURE__ */ new Set([String(webflowSiteId)]);
+  try {
+    const rows = await env2.CONSENT_WEBAPP.prepare("SELECT id FROM Site WHERE platformSiteId = ?1").bind(webflowSiteId).all();
+    for (const r of rows?.results || []) {
+      if (r?.id != null) set.add(String(r.id));
+    }
+  } catch (e) {
+    console.warn(`${TAG8} ownedSiteIds lookup failed (non-fatal)`, e?.message || e);
+  }
+  return set;
+}
+__name(ownedSiteIds, "ownedSiteIds");
+async function requireWebflowIdentity(request, env2, opts = {}) {
+  const { allowUnauthorizedSite = false } = opts;
+  const db = env2.CONSENT_WEBAPP;
+  const idToken = extractIdToken(request);
+  if (!idToken) {
+    return { ok: false, status: 401, code: "MISSING_ID_TOKEN", error: "Missing Webflow ID token." };
+  }
+  const headerSiteId = request.headers.get("X-Webflow-Site-Id") || request.headers.get("x-webflow-site-id") || null;
+  const requestSiteId = await extractSiteId(request);
+  const webflowSiteId = headerSiteId || requestSiteId;
+  if (!webflowSiteId) {
+    return { ok: false, status: 400, code: "MISSING_SITE_ID", error: "Missing Webflow site id." };
+  }
+  const target = requestSiteId || webflowSiteId;
+  const row = await resolveWebflowOAuthToken(db, env2.WEBFLOW_AUTHENTICATION, webflowSiteId);
+  if (!row?.accessToken) {
+    if (allowUnauthorizedSite) {
+      if (String(target) !== String(webflowSiteId)) {
+        console.warn(`${TAG8} unauthorized-site escape with mismatched target: site=${webflowSiteId} target=${target} \u2014 denying`);
+        return { ok: false, status: 403, code: "SITE_FORBIDDEN", error: "Not authorized for this resource." };
+      }
+      return { ok: true, identity: { userId: null, email: null, webflowSiteId: String(webflowSiteId), siteId: String(target), unverified: true } };
+    }
+    console.warn(`${TAG8} no app token for site ${webflowSiteId} \u2014 cannot authorize`);
+    return { ok: false, status: 401, code: "SITE_NOT_AUTHORIZED", error: "Site is not authorized." };
+  }
+  const resolved = await resolveIdToken(row.accessToken, idToken);
+  if (!resolved?.siteId) {
+    console.warn(`${TAG8} ID token did not resolve for site ${webflowSiteId}`);
+    return { ok: false, status: 401, code: "INVALID_ID_TOKEN", error: "Invalid or expired Webflow ID token." };
+  }
+  if (String(resolved.siteId) !== String(webflowSiteId)) {
+    console.warn(`${TAG8} token/site mismatch: token=${resolved.siteId} claimed=${webflowSiteId} \u2014 denying`);
+    return { ok: false, status: 403, code: "SITE_FORBIDDEN", error: "Not authorized for this site." };
+  }
+  const owned = await ownedSiteIds(env2, webflowSiteId);
+  if (!owned.has(String(target))) {
+    console.warn(`${TAG8} target not owned: site=${webflowSiteId} target=${target} \u2014 denying`);
+    return { ok: false, status: 403, code: "SITE_FORBIDDEN", error: "Not authorized for this resource." };
+  }
+  console.log(`${TAG8} \u2713 authorized \u2014 webflowSite=${webflowSiteId} target=${target} user=${resolved.email || resolved.id || "?"}`);
+  return {
+    ok: true,
+    identity: {
+      userId: resolved.id || null,
+      email: resolved.email ? String(resolved.email).trim().toLowerCase() : null,
+      webflowSiteId: String(webflowSiteId),
+      siteId: String(target)
+    }
+  };
+}
+__name(requireWebflowIdentity, "requireWebflowIdentity");
+
+// src/handlers/webflowUpgrade.js
+var TAG9 = "[webflow-upgrade]";
+var PLAN_ORDER3 = { basic: 1, essential: 2, growth: 3 };
+function newReqId() {
+  try {
+    return crypto.randomUUID().slice(0, 8);
+  } catch {
+    return String(Date.now()).slice(-8);
+  }
+}
+__name(newReqId, "newReqId");
+var log = /* @__PURE__ */ __name((rid, ...a) => console.log(`${TAG9}[${rid}]`, ...a), "log");
+var warn = /* @__PURE__ */ __name((rid, ...a) => console.warn(`${TAG9}[${rid}]`, ...a), "warn");
+var fail4 = /* @__PURE__ */ __name((error, status, extra) => Response.json({ success: false, error, ...extra || {} }, { status }), "fail");
+var failLog = /* @__PURE__ */ __name((rid, error, status, extra) => {
+  warn(rid, `\u2717 ${status} ${error}`);
+  return fail4(error, status, extra);
+}, "failLog");
+function trimEnv7(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s || null;
+}
+__name(trimEnv7, "trimEnv");
+async function requireWebflowAuth(request, env2, identity2, rid) {
+  let id = identity2;
+  if (!id) {
+    log(rid, "auth: no identity passed by router \u2014 resolving ID token inline");
+    const auth = await requireWebflowIdentity(request, env2);
+    if (!auth.ok) {
+      return { ok: false, res: failLog(rid, auth.error, auth.status, { code: auth.code }) };
+    }
+    id = auth.identity;
+  }
+  if (id.unverified) {
+    return { ok: false, res: failLog(rid, "Site is not authorized.", 401, { code: "SITE_NOT_AUTHORIZED" }) };
+  }
+  if (!id.webflowSiteId) {
+    return { ok: false, res: failLog(rid, "Missing Webflow site id.", 400, { code: "MISSING_SITE_ID" }) };
+  }
+  log(rid, `auth ok \u2014 user=${id.email || id.userId || "?"} webflowSite=${id.webflowSiteId} target=${id.siteId || "-"}`);
+  return { ok: true, identity: id };
+}
+__name(requireWebflowAuth, "requireWebflowAuth");
+function siteBelongsToWebflowSite(site, webflowSiteId) {
+  if (!site) return false;
+  const wf = String(webflowSiteId);
+  return String(site.id) === wf || String(site.platformSiteId ?? "") === wf;
+}
+__name(siteBelongsToWebflowSite, "siteBelongsToWebflowSite");
+function pick4(sub, camel, snake) {
+  return sub?.[camel] ?? sub?.[snake] ?? null;
+}
+__name(pick4, "pick");
+async function resolveSite5(db, siteId) {
+  if (!siteId) return null;
+  return db.prepare("SELECT id, organizationId, platformSiteId FROM Site WHERE id = ?1 OR platformSiteId = ?1 ORDER BY createdAt ASC LIMIT 1").bind(siteId).first().catch(() => null);
+}
+__name(resolveSite5, "resolveSite");
+async function resolveSubscription4(db, site) {
+  if (!site) return null;
+  const cols = "id, organizationId, siteId, planId, planType, status, stripeSubscriptionId, stripeCustomerId, interval, currentPeriodEnd, cancelAtPeriodEnd";
+  let sub = await db.prepare(
+    `SELECT ${cols} FROM Subscription WHERE siteId = ?1
+       ORDER BY CASE WHEN lower(status) IN ('active','trialing') THEN 0 ELSE 1 END, createdAt DESC
+       LIMIT 1`
+  ).bind(site.id).first().catch(() => null);
+  if (!sub && site.organizationId) {
+    sub = await db.prepare(
+      `SELECT ${cols} FROM Subscription WHERE organizationId = ?1 AND lower(status) IN ('active','trialing') ORDER BY createdAt DESC LIMIT 1`
+    ).bind(site.organizationId).first().catch(() => null);
+  }
+  return sub;
+}
+__name(resolveSubscription4, "resolveSubscription");
+async function stripeGet3(env2, path) {
+  const res = await fetch(`https://api.stripe.com/v1${path}`, {
+    headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` }
+  });
+  return { status: res.status, body: await res.json() };
+}
+__name(stripeGet3, "stripeGet");
+async function stripePost3(env2, path, formObj) {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(formObj)) {
+    if (v != null) params.set(k, String(v));
+  }
+  const res = await fetch(`https://api.stripe.com/v1${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}`,
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: params.toString()
+  });
+  return { status: res.status, body: await res.json() };
+}
+__name(stripePost3, "stripePost");
+function tierPriceMap2(env2) {
+  return {
+    basic: { monthly: trimEnv7(env2.STRIPE_PRICE_BASIC_MONTHLY), yearly: trimEnv7(env2.STRIPE_PRICE_BASIC_YEARLY) },
+    essential: { monthly: trimEnv7(env2.STRIPE_PRICE_ESSENTIAL_MONTHLY), yearly: trimEnv7(env2.STRIPE_PRICE_ESSENTIAL_YEARLY) },
+    growth: { monthly: trimEnv7(env2.STRIPE_PRICE_GROWTH_MONTHLY), yearly: trimEnv7(env2.STRIPE_PRICE_GROWTH_YEARLY) }
+  };
+}
+__name(tierPriceMap2, "tierPriceMap");
+function sumProrationCents4(invoiceBody) {
+  let total = 0;
+  let sawProration = false;
+  for (const line of invoiceBody?.lines?.data || []) {
+    if (line.proration === true) {
+      total += line.amount || 0;
+      sawProration = true;
+    }
+  }
+  return sawProration ? total : invoiceBody?.amount_due ?? invoiceBody?.total ?? null;
+}
+__name(sumProrationCents4, "sumProrationCents");
+async function previewImmediateAmount3(env2, ctx) {
+  const { stripeSubId, subItemId, newPriceId, promotionCodeId, stripeSub } = ctx;
+  const base = {
+    subscription: stripeSubId,
+    "subscription_items[0][id]": subItemId,
+    "subscription_items[0][price]": newPriceId,
+    subscription_proration_behavior: "create_prorations"
+  };
+  if (promotionCodeId) base["discounts[0][promotion_code]"] = promotionCodeId;
+  const qs = new URLSearchParams(base).toString();
+  const up = await stripeGet3(env2, `/invoices/upcoming?${qs}`);
+  if (!up.body.error) {
+    return { amountDueCents: sumProrationCents4(up.body), currency: up.body.currency || "usd" };
+  }
+  const flexible = up.status === 400 && /billing_mode = flexible/i.test(up.body.error?.message || "");
+  if (!flexible) {
+    if (promotionCodeId) {
+      const retry2 = { ...base };
+      delete retry2["discounts[0][promotion_code]"];
+      const up2 = await stripeGet3(env2, `/invoices/upcoming?${new URLSearchParams(retry2).toString()}`);
+      if (!up2.body.error) {
+        return { amountDueCents: sumProrationCents4(up2.body), currency: up2.body.currency || "usd", couponPreviewSkipped: true };
+      }
+    }
+    return { error: up.body.error.message || "Could not preview the charge" };
+  }
+  const customerId = stripeSub.customer;
+  const items = stripeSub.items?.data || [];
+  const form = {
+    customer: customerId,
+    subscription: stripeSubId,
+    "subscription_details[proration_behavior]": "create_prorations"
+  };
+  items.forEach((item, i) => {
+    form[`subscription_details[items][${i}][id]`] = item.id;
+    form[`subscription_details[items][${i}][price]`] = i === 0 ? newPriceId : item.price?.id;
+  });
+  if (promotionCodeId) form["discounts[0][promotion_code]"] = promotionCodeId;
+  const prev = await stripePost3(env2, "/invoices/create_preview", form);
+  if (prev.body.error) {
+    return { error: prev.body.error.message || "Could not preview the charge" };
+  }
+  return { amountDueCents: sumProrationCents4(prev.body), currency: prev.body.currency || "usd" };
+}
+__name(previewImmediateAmount3, "previewImmediateAmount");
+async function prepareChange3(request, env2, identity2, label) {
+  const rid = newReqId();
+  const t0 = Date.now();
+  log(rid, `\u2192 ${label} ${request.method} site=${request.headers.get("X-Webflow-Site-Id") || "-"} hasToken=${!!request.headers.get("Authorization")}`);
+  if (request.method !== "POST") return { error: failLog(rid, "Method not allowed", 405) };
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) return { error: failLog(rid, "Database not available", 503) };
+  if (!env2.STRIPE_SECRET_KEY) return { error: failLog(rid, "Stripe not configured", 503) };
+  const auth = await requireWebflowAuth(request, env2, identity2, rid);
+  if (!auth.ok) return { error: auth.res };
+  const id = auth.identity;
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return { error: failLog(rid, "Invalid JSON", 400) };
+  }
+  const siteId = String(body.siteId || id.siteId || id.webflowSiteId || "").trim();
+  const planId = ["basic", "essential", "growth"].includes(body.planId) ? body.planId : null;
+  const interval = body.interval === "yearly" ? "yearly" : "monthly";
+  const promotionCodeId = body.promotionCodeId && String(body.promotionCodeId).trim() ? String(body.promotionCodeId).trim() : null;
+  const paymentMethodId = body.paymentMethodId && String(body.paymentMethodId).trim() ? String(body.paymentMethodId).trim() : null;
+  log(rid, `body: siteId=${siteId || "-"} planId=${body.planId || "-"} interval=${body.interval || "-"} promo=${promotionCodeId ? "yes" : "no"} pm=${paymentMethodId ? "yes" : "no"}`);
+  if (!siteId) return { error: failLog(rid, "siteId required", 400) };
+  if (!planId) return { error: failLog(rid, "planId must be basic, essential, or growth", 400) };
+  const site = await resolveSite5(db, siteId);
+  if (!site) return { error: failLog(rid, "Site not found", 404) };
+  if (!siteBelongsToWebflowSite(site, id.webflowSiteId)) {
+    warn(rid, `site not owned \u2014 site.id=${site.id} platformSiteId=${site.platformSiteId || "-"} webflowSite=${id.webflowSiteId}`);
+    return { error: failLog(rid, "Not authorized for this site", 403, { code: "SITE_FORBIDDEN" }) };
+  }
+  log(rid, `site ok \u2014 id=${site.id} platformSiteId=${site.platformSiteId || "-"} org=${site.organizationId || "-"}`);
+  const sub = await resolveSubscription4(db, site);
+  if (!sub) return { error: failLog(rid, "No active subscription found", 404) };
+  const stripeSubId = pick4(sub, "stripeSubscriptionId", "stripesubscriptionid");
+  const currentPlanId = String(pick4(sub, "planId", "planid") || "").toLowerCase();
+  const currentInterval = String(pick4(sub, "interval", "interval") || "monthly").toLowerCase();
+  log(rid, `sub ok \u2014 d1Id=${sub.id} plan=${currentPlanId || "-"}/${currentInterval} status=${pick4(sub, "status", "status") || "-"} stripeSub=${stripeSubId || "MISSING"}`);
+  if (!stripeSubId) return { error: failLog(rid, "Subscription has no Stripe ID", 400) };
+  if (!PLAN_ORDER3[currentPlanId]) {
+    return { error: failLog(rid, "Current plan is not a tier plan; cannot change here", 400) };
+  }
+  if (currentPlanId === planId && currentInterval === interval) {
+    return { error: failLog(rid, "Already on this plan", 400) };
+  }
+  const newPriceId = tierPriceMap2(env2)[planId]?.[interval];
+  if (!newPriceId) {
+    console.error(`${TAG9}[${rid}] Missing price env var for`, planId, interval);
+    return { error: failLog(rid, `Price not configured for ${planId} ${interval}`, 503) };
+  }
+  const isDowngrade = PLAN_ORDER3[planId] < PLAN_ORDER3[currentPlanId];
+  log(rid, `plan ${currentPlanId}/${currentInterval} \u2192 ${planId}/${interval} (${isDowngrade ? "DOWNGRADE" : "UPGRADE"}) price=${newPriceId}`);
+  const subRes = await stripeGet3(env2, `/subscriptions/${stripeSubId}`);
+  if (subRes.body.error) {
+    return { error: failLog(rid, subRes.body.error.message || "Failed to read subscription", 400) };
+  }
+  const stripeSub = subRes.body;
+  const subItemId = stripeSub.items?.data?.[0]?.id;
+  if (!subItemId) return { error: failLog(rid, "Could not read subscription item ID", 500) };
+  const nowSec = Math.floor(Date.now() / 1e3);
+  const isTrialing = stripeSub.status === "trialing" || stripeSub.trial_end && stripeSub.trial_end > nowSec;
+  const trialEndISO = stripeSub.trial_end ? new Date(stripeSub.trial_end * 1e3).toISOString() : null;
+  const periodEndISO = stripeSub.current_period_end ? new Date(stripeSub.current_period_end * 1e3).toISOString() : null;
+  log(rid, `stripe sub ok \u2014 status=${stripeSub.status} item=${subItemId} trialing=${!!isTrialing} periodEnd=${periodEndISO || "-"} schedule=${stripeSub.schedule || "none"}`);
+  return {
+    ctx: {
+      rid,
+      t0,
+      db,
+      email: id.email || null,
+      env: env2,
+      siteId,
+      site,
+      planId,
+      interval,
+      promotionCodeId,
+      paymentMethodId,
+      sub,
+      stripeSubId,
+      stripeSub,
+      subItemId,
+      newPriceId,
+      currentPlanId,
+      currentInterval,
+      isDowngrade,
+      isTrialing,
+      trialEndISO,
+      periodEndISO
+    }
+  };
+}
+__name(prepareChange3, "prepareChange");
+async function handleWebflowChangeTierPreview(request, env2, ctxArg, identity2) {
+  const prep = await prepareChange3(request, env2, identity2, "change-tier/preview");
+  if (prep.error) return prep.error;
+  const ctx = prep.ctx;
+  const { rid, t0, currentPlanId, currentInterval, planId, interval, isDowngrade, isTrialing, trialEndISO, periodEndISO, newPriceId } = ctx;
+  if (isTrialing) {
+    const priceRes = await stripeGet3(env2, `/prices/${newPriceId}`);
+    if (priceRes.body.error) return failLog(rid, priceRes.body.error.message || "Could not read the plan price", 400);
+    log(rid, `\u2713 preview (trialing) \u2014 charged at trial end: ${priceRes.body.unit_amount} ${priceRes.body.currency || "usd"} (${Date.now() - t0}ms)`);
+    return Response.json({
+      success: true,
+      direction: isDowngrade ? "downgrade" : "upgrade",
+      currentPlanId,
+      currentInterval,
+      planId,
+      interval,
+      isTrialing: true,
+      amountDueCents: priceRes.body.unit_amount ?? null,
+      currency: priceRes.body.currency || "usd",
+      trialEnd: trialEndISO,
+      effectiveAt: null
+    });
+  }
+  if (isDowngrade) {
+    const priceRes = await stripeGet3(env2, `/prices/${newPriceId}`);
+    const newAmount = priceRes.body?.error ? null : priceRes.body.unit_amount ?? null;
+    log(rid, `\u2713 preview (downgrade) \u2014 no charge now, effective ${periodEndISO || "-"}, new plan ${newAmount} ${priceRes.body?.currency || "usd"} (${Date.now() - t0}ms)`);
+    return Response.json({
+      success: true,
+      direction: "downgrade",
+      currentPlanId,
+      currentInterval,
+      planId,
+      interval,
+      isTrialing: false,
+      amountDueCents: 0,
+      newPlanAmountCents: newAmount,
+      currency: priceRes.body?.currency || "usd",
+      trialEnd: null,
+      effectiveAt: periodEndISO
+    });
+  }
+  const res = await previewImmediateAmount3(env2, ctx);
+  if (res.error) return failLog(rid, res.error, 400);
+  log(rid, `\u2713 preview (upgrade) \u2014 due now: ${res.amountDueCents} ${res.currency}${res.couponPreviewSkipped ? " [coupon skipped in preview]" : ""} (${Date.now() - t0}ms)`);
+  return Response.json({
+    success: true,
+    direction: "upgrade",
+    currentPlanId,
+    currentInterval,
+    planId,
+    interval,
+    isTrialing: false,
+    amountDueCents: res.amountDueCents,
+    currency: res.currency,
+    couponPreviewSkipped: !!res.couponPreviewSkipped,
+    trialEnd: null,
+    effectiveAt: null
+  });
+}
+__name(handleWebflowChangeTierPreview, "handleWebflowChangeTierPreview");
+async function handleWebflowChangeTier(request, env2, ctxArg, identity2) {
+  const prep = await prepareChange3(request, env2, identity2, "change-tier");
+  if (prep.error) return prep.error;
+  const {
+    rid,
+    t0,
+    db,
+    email,
+    siteId,
+    planId,
+    interval,
+    promotionCodeId,
+    paymentMethodId,
+    sub,
+    stripeSubId,
+    stripeSub,
+    subItemId,
+    newPriceId,
+    isDowngrade,
+    isTrialing,
+    periodEndISO
+  } = prep.ctx;
+  if (isDowngrade && !isTrialing) {
+    log(rid, "commit: scheduling downgrade at period end");
+    const currentPriceId = stripeSub.items?.data?.[0]?.price?.id;
+    const startDate = stripeSub.current_period_start;
+    const changeDate = stripeSub.current_period_end;
+    if (stripeSub.schedule) {
+      log(rid, `releasing existing schedule ${stripeSub.schedule}`);
+      await stripePost3(env2, `/subscription_schedules/${stripeSub.schedule}/release`, {}).catch(() => {
+      });
+    }
+    const created = await stripePost3(env2, "/subscription_schedules", { from_subscription: stripeSubId });
+    if (created.body.error) {
+      return failLog(rid, created.body.error.message || "Could not schedule the downgrade", 400);
+    }
+    const schedId = created.body.id;
+    log(rid, `schedule created ${schedId}`);
+    const updateForm2 = {
+      end_behavior: "release",
+      "phases[0][items][0][price]": currentPriceId,
+      "phases[0][items][0][quantity]": "1",
+      "phases[0][start_date]": startDate,
+      "phases[0][end_date]": changeDate,
+      "phases[0][proration_behavior]": "none",
+      "phases[1][items][0][price]": newPriceId,
+      "phases[1][items][0][quantity]": "1",
+      "phases[1][proration_behavior]": "none",
+      "metadata[planId]": planId,
+      "metadata[interval]": interval,
+      "metadata[siteId]": siteId || (sub.siteId ?? sub.siteid ?? ""),
+      "metadata[organizationId]": pick4(sub, "organizationId", "organizationid") || ""
+    };
+    const updated = await stripePost3(env2, `/subscription_schedules/${schedId}`, updateForm2);
+    if (updated.body.error) {
+      return failLog(rid, updated.body.error.message || "Could not schedule the downgrade", 400);
+    }
+    log(rid, `\u2713 done \u2014 downgrade to ${planId}/${interval} scheduled for ${periodEndISO || "-"} (${Date.now() - t0}ms)`);
+    return Response.json({
+      success: true,
+      direction: "downgrade",
+      scheduled: true,
+      effectiveAt: periodEndISO,
+      planId,
+      interval
+    });
+  }
+  log(rid, `commit: applying ${isTrialing ? "trialing (no proration)" : "immediate + always_invoice"} change now`);
+  if (stripeSub.schedule) {
+    log(rid, `releasing existing schedule ${stripeSub.schedule}`);
+    await stripePost3(env2, `/subscription_schedules/${stripeSub.schedule}/release`, {}).catch(() => {
+    });
+  }
+  const customerId = stripeSub.customer;
+  if (paymentMethodId) {
+    const attach = await stripePost3(env2, `/payment_methods/${paymentMethodId}/attach`, { customer: customerId });
+    if (attach.body.error) {
+      return failLog(rid, attach.body.error.message || "Could not use that card. Please try another.", 400);
+    }
+    log(rid, `card ${paymentMethodId} attached to ${customerId}`);
+  }
+  const updateForm = {
+    "items[0][id]": subItemId,
+    "items[0][price]": newPriceId,
+    proration_behavior: isTrialing ? "none" : "always_invoice",
+    payment_behavior: paymentMethodId ? "default_incomplete" : "error_if_incomplete",
+    "metadata[planId]": planId,
+    "metadata[interval]": interval,
+    "expand[0]": "latest_invoice.payment_intent"
+  };
+  if (paymentMethodId) updateForm["default_payment_method"] = paymentMethodId;
+  if (promotionCodeId) updateForm["discounts[0][promotion_code]"] = promotionCodeId;
+  const updateRes = await stripePost3(env2, `/subscriptions/${stripeSubId}`, updateForm);
+  if (updateRes.body.error) {
+    return failLog(rid, updateRes.body.error.message || "Payment could not be completed", 400);
+  }
+  const updatedSub = updateRes.body;
+  log(rid, `stripe sub updated \u2014 status=${updatedSub.status} price=${updatedSub.items?.data?.[0]?.price?.id || "-"}`);
+  const latestInv = updatedSub.latest_invoice && typeof updatedSub.latest_invoice === "object" ? updatedSub.latest_invoice : null;
+  const pi = latestInv && typeof latestInv.payment_intent === "object" ? latestInv.payment_intent : null;
+  if (paymentMethodId && pi) {
+    log(rid, `payment intent ${pi.id} status=${pi.status}`);
+    if (pi.status === "requires_action" || pi.status === "requires_confirmation") {
+      log(rid, `\u2713 done \u2014 3DS required, returning clientSecret (${Date.now() - t0}ms)`);
+      return Response.json({
+        success: true,
+        direction: "upgrade",
+        scheduled: false,
+        requiresAction: true,
+        clientSecret: pi.client_secret,
+        subscriptionId: stripeSubId,
+        invoiceId: latestInv.id,
+        planId,
+        interval
+      });
+    }
+    if (pi.status === "requires_payment_method") {
+      return failLog(rid, "Your card was declined. Please try another card.", 402);
+    }
+  }
+  let amountPaidCents = null;
+  let currency = "usd";
+  let invoiceId = latestInv ? latestInv.id : updatedSub.latest_invoice || null;
+  let invoiceUrl = null;
+  let paymentStatus = "paid";
+  if (invoiceId) {
+    const inv = await stripeGet3(env2, `/invoices/${invoiceId}`);
+    if (!inv.body.error) {
+      amountPaidCents = inv.body.amount_paid ?? inv.body.amount_due ?? null;
+      currency = inv.body.currency || "usd";
+      invoiceUrl = inv.body.hosted_invoice_url || null;
+      paymentStatus = inv.body.status || paymentStatus;
+      log(rid, `invoice ${invoiceId} \u2014 status=${paymentStatus} paid=${amountPaidCents} ${currency}`);
+    } else {
+      warn(rid, `invoice ${invoiceId} read failed: ${inv.body.error.message}`);
+    }
+  } else {
+    log(rid, "no invoice on the updated subscription (nothing to charge)");
+  }
+  const newPeriodEndISO = updatedSub.current_period_end ? new Date(updatedSub.current_period_end * 1e3).toISOString() : periodEndISO;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  try {
+    const upd = await db.prepare(
+      `UPDATE Subscription SET planId = ?, planType = 'tier', interval = ?, stripePriceId = ?, currentPeriodEnd = ?, updatedAt = ?
+       WHERE stripeSubscriptionId = ?`
+    ).bind(planId, interval, newPriceId, newPeriodEndISO, now, stripeSubId).run();
+    const rows = upd?.meta?.changes ?? upd?.meta?.rows_written ?? "?";
+    log(rid, `d1 updated \u2014 ${rows} row(s) \u2192 ${planId}/${interval} periodEnd=${newPeriodEndISO || "-"}`);
+    if (rows === 0) warn(rid, `d1 matched NO row for stripeSubscriptionId=${stripeSubId} \u2014 the app will still show the old plan`);
+  } catch (dbErr) {
+    console.error(`${TAG9}[${rid}] d1 update FAILED (Stripe change already applied):`, dbErr?.message || dbErr);
+  }
+  try {
+    const sId = siteId ?? sub.siteId ?? sub.siteid;
+    const siteRow = sId ? await db.prepare("SELECT domain, legacySource FROM Site WHERE id = ?1 OR platformSiteId = ?1 LIMIT 1").bind(sId).first() : null;
+    await syncSubscriptionUpdateToLegacy(env2, {
+      email: email || null,
+      domain: siteRow?.domain || null,
+      subscriptionId: stripeSubId,
+      customerId: pick4(sub, "stripeCustomerId", "stripecustomerid"),
+      status: "active",
+      cancelAtPeriodEnd: !!pick4(sub, "cancelAtPeriodEnd", "cancelatperiodend"),
+      platform: siteRow?.legacySource || "webflow",
+      interval
+    });
+    log(rid, `legacy sync ok \u2014 domain=${siteRow?.domain || "-"} source=${siteRow?.legacySource || "webflow"}`);
+  } catch (syncErr) {
+    warn(rid, "legacy sync failed (non-critical):", syncErr?.message);
+  }
+  log(rid, `\u2713 done \u2014 ${planId}/${interval} live, charged ${amountPaidCents} ${currency}, invoice=${paymentStatus} (${Date.now() - t0}ms)`);
+  return Response.json({
+    success: true,
+    direction: "upgrade",
+    scheduled: false,
+    planId,
+    interval,
+    amountPaidCents,
+    currency,
+    invoiceId,
+    invoiceUrl,
+    paymentStatus,
+    nextBillingDate: newPeriodEndISO
+  });
+}
+__name(handleWebflowChangeTier, "handleWebflowChangeTier");
+async function prepareSwitch3(request, env2, identity2, label) {
+  const rid = newReqId();
+  const t0 = Date.now();
+  log(rid, `\u2192 ${label} ${request.method} site=${request.headers.get("X-Webflow-Site-Id") || "-"} hasToken=${!!request.headers.get("Authorization")}`);
+  if (request.method !== "POST") return { error: failLog(rid, "Method not allowed", 405) };
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) return { error: failLog(rid, "Database not available", 503) };
+  if (!env2.STRIPE_SECRET_KEY) return { error: failLog(rid, "Stripe not configured", 503) };
+  const auth = await requireWebflowAuth(request, env2, identity2, rid);
+  if (!auth.ok) return { error: auth.res };
+  const id = auth.identity;
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return { error: failLog(rid, "Invalid JSON", 400) };
+  }
+  const siteId = String(body.siteId || id.siteId || id.webflowSiteId || "").trim();
+  const targetInterval = body.targetInterval === "yearly" ? "yearly" : body.targetInterval === "monthly" ? "monthly" : null;
+  log(rid, `body: siteId=${siteId || "-"} targetInterval=${body.targetInterval || "-"}`);
+  if (!siteId) return { error: failLog(rid, "siteId required", 400) };
+  if (!targetInterval) return { error: failLog(rid, "targetInterval must be monthly or yearly", 400) };
+  const site = await resolveSite5(db, siteId);
+  if (!site) return { error: failLog(rid, "Site not found", 404) };
+  if (!siteBelongsToWebflowSite(site, id.webflowSiteId)) {
+    warn(rid, `site not owned \u2014 site.id=${site.id} platformSiteId=${site.platformSiteId || "-"} webflowSite=${id.webflowSiteId}`);
+    return { error: failLog(rid, "Not authorized for this site", 403, { code: "SITE_FORBIDDEN" }) };
+  }
+  log(rid, `site ok \u2014 id=${site.id} platformSiteId=${site.platformSiteId || "-"} org=${site.organizationId || "-"}`);
+  const sub = await resolveSubscription4(db, site);
+  if (!sub) return { error: failLog(rid, "No active subscription found", 404) };
+  const stripeSubId = pick4(sub, "stripeSubscriptionId", "stripesubscriptionid");
+  const currentInterval = String(pick4(sub, "interval", "interval") || "monthly").toLowerCase();
+  const planId = String(pick4(sub, "planId", "planid") || "").toLowerCase();
+  log(rid, `sub ok \u2014 d1Id=${sub.id} plan=${planId || "-"}/${currentInterval} status=${pick4(sub, "status", "status") || "-"} stripeSub=${stripeSubId || "MISSING"}`);
+  if (!stripeSubId) return { error: failLog(rid, "Subscription has no Stripe ID", 400) };
+  if (currentInterval === targetInterval) return { error: failLog(rid, `Already on ${targetInterval} billing`, 400) };
+  if (!["basic", "essential", "growth"].includes(planId)) {
+    return { error: failLog(rid, "Cannot switch interval for this plan type", 400) };
+  }
+  const newPriceId = tierPriceMap2(env2)[planId]?.[targetInterval];
+  if (!newPriceId) {
+    console.error(`${TAG9}[${rid}] Missing price env var for`, planId, targetInterval);
+    return { error: failLog(rid, `Price not configured for ${planId} ${targetInterval}`, 503) };
+  }
+  log(rid, `interval ${currentInterval} \u2192 ${targetInterval} on ${planId} price=${newPriceId}`);
+  const subRes = await stripeGet3(env2, `/subscriptions/${stripeSubId}`);
+  if (subRes.body.error) {
+    return { error: failLog(rid, subRes.body.error.message || "Failed to read subscription", 400) };
+  }
+  const stripeSub = subRes.body;
+  if (stripeSub.status === "canceled" || stripeSub.status === "incomplete_expired") {
+    warn(rid, `\u2717 409 subscription is ${stripeSub.status} \u2014 caller must resubscribe via checkout`);
+    return {
+      error: Response.json(
+        { success: false, canceled: true, plan: planId, targetInterval, error: "This subscription was canceled. Start a new checkout to resubscribe." },
+        { status: 409 }
+      )
+    };
+  }
+  const subItemId = stripeSub.items?.data?.[0]?.id;
+  if (!subItemId) return { error: failLog(rid, "Could not read subscription item ID", 500) };
+  const nowSec = Math.floor(Date.now() / 1e3);
+  const isTrialing = stripeSub.status === "trialing" || stripeSub.trial_end && stripeSub.trial_end > nowSec;
+  const trialEndISO = stripeSub.trial_end ? new Date(stripeSub.trial_end * 1e3).toISOString() : null;
+  log(rid, `stripe sub ok \u2014 status=${stripeSub.status} item=${subItemId} trialing=${!!isTrialing}`);
+  return {
+    ctx: {
+      rid,
+      t0,
+      db,
+      email: id.email || null,
+      siteId,
+      site,
+      targetInterval,
+      currentInterval,
+      planId,
+      sub,
+      stripeSubId,
+      stripeSub,
+      subItemId,
+      newPriceId,
+      isTrialing,
+      trialEndISO
+    }
+  };
+}
+__name(prepareSwitch3, "prepareSwitch");
+async function handleWebflowSwitchIntervalPreview(request, env2, ctxArg, identity2) {
+  const prep = await prepareSwitch3(request, env2, identity2, "switch-interval/preview");
+  if (prep.error) return prep.error;
+  const { rid, t0, stripeSubId, subItemId, newPriceId, targetInterval, currentInterval, isTrialing, trialEndISO } = prep.ctx;
+  let amountDueCents = null;
+  let currency = "usd";
+  if (isTrialing) {
+    const priceRes = await stripeGet3(env2, `/prices/${newPriceId}`);
+    if (priceRes.body.error) return failLog(rid, priceRes.body.error.message || "Could not read the plan price", 400);
+    amountDueCents = priceRes.body.unit_amount ?? null;
+    currency = priceRes.body.currency || "usd";
+  } else {
+    const params = new URLSearchParams({
+      subscription: stripeSubId,
+      "subscription_items[0][id]": subItemId,
+      "subscription_items[0][price]": newPriceId,
+      subscription_proration_behavior: "create_prorations"
+    });
+    const inv = await stripeGet3(env2, `/invoices/upcoming?${params.toString()}`);
+    if (inv.body.error) {
+      return failLog(rid, inv.body.error.message || "Could not preview the charge", 400);
+    }
+    amountDueCents = sumProrationCents4(inv.body);
+    currency = inv.body.currency || "usd";
+  }
+  log(rid, `\u2713 preview (interval) \u2014 ${currentInterval}\u2192${targetInterval} due now: ${amountDueCents} ${currency} trialing=${!!isTrialing} (${Date.now() - t0}ms)`);
+  return Response.json({
+    success: true,
+    currentInterval,
+    targetInterval,
+    isTrialing: !!isTrialing,
+    amountDueCents,
+    currency,
+    trialEnd: isTrialing ? trialEndISO : null
+  });
+}
+__name(handleWebflowSwitchIntervalPreview, "handleWebflowSwitchIntervalPreview");
+async function handleWebflowSwitchInterval2(request, env2, ctxArg, identity2) {
+  const prep = await prepareSwitch3(request, env2, identity2, "switch-interval");
+  if (prep.error) return prep.error;
+  const {
+    rid,
+    t0,
+    db,
+    email,
+    siteId,
+    targetInterval,
+    currentInterval,
+    sub,
+    stripeSubId,
+    subItemId,
+    newPriceId,
+    isTrialing
+  } = prep.ctx;
+  const updateForm = {
+    "items[0][id]": subItemId,
+    "items[0][price]": newPriceId,
+    proration_behavior: isTrialing ? "none" : "always_invoice",
+    payment_behavior: "error_if_incomplete"
+  };
+  log(rid, `commit: switching interval (${isTrialing ? "no proration \u2014 trialing" : "always_invoice"})`);
+  const updateRes = await stripePost3(env2, `/subscriptions/${stripeSubId}`, updateForm);
+  if (updateRes.body.error) {
+    return failLog(rid, updateRes.body.error.message || "Failed to switch billing interval", 400);
+  }
+  const updated = updateRes.body;
+  log(rid, `stripe sub updated \u2014 status=${updated.status} price=${updated.items?.data?.[0]?.price?.id || "-"}`);
+  let newPeriodEnd = updated.current_period_end || null;
+  if (!newPeriodEnd) {
+    const fresh = await stripeGet3(env2, `/subscriptions/${stripeSubId}`);
+    newPeriodEnd = fresh.body?.current_period_end || null;
+  }
+  const newPeriodEndISO = newPeriodEnd ? new Date(newPeriodEnd * 1e3).toISOString() : null;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  try {
+    const upd = await db.prepare(
+      `UPDATE Subscription SET interval = ?, stripePriceId = ?, currentPeriodEnd = ?, updatedAt = ?
+       WHERE stripeSubscriptionId = ?`
+    ).bind(targetInterval, newPriceId, newPeriodEndISO, now, stripeSubId).run();
+    const rows = upd?.meta?.changes ?? upd?.meta?.rows_written ?? "?";
+    log(rid, `d1 updated \u2014 ${rows} row(s) \u2192 interval=${targetInterval} periodEnd=${newPeriodEndISO || "-"}`);
+    if (rows === 0) warn(rid, `d1 matched NO row for stripeSubscriptionId=${stripeSubId} \u2014 the app will still show the old interval`);
+  } catch (dbErr) {
+    console.error(`${TAG9}[${rid}] d1 update FAILED (Stripe change already applied):`, dbErr?.message || dbErr);
+  }
+  try {
+    const sId = siteId ?? sub.siteId ?? sub.siteid;
+    const siteRow = sId ? await db.prepare("SELECT domain, legacySource FROM Site WHERE id = ?1 OR platformSiteId = ?1 LIMIT 1").bind(sId).first() : null;
+    await syncSubscriptionUpdateToLegacy(env2, {
+      email: email || null,
+      domain: siteRow?.domain || null,
+      subscriptionId: stripeSubId,
+      customerId: pick4(sub, "stripeCustomerId", "stripecustomerid"),
+      status: pick4(sub, "status", "status") || "active",
+      cancelAtPeriodEnd: !!pick4(sub, "cancelAtPeriodEnd", "cancelatperiodend"),
+      platform: siteRow?.legacySource || "webflow",
+      interval: targetInterval
+    });
+    log(rid, `legacy sync ok \u2014 domain=${siteRow?.domain || "-"} source=${siteRow?.legacySource || "webflow"}`);
+  } catch (syncErr) {
+    warn(rid, "legacy sync failed (non-critical):", syncErr?.message);
+  }
+  log(rid, `\u2713 done \u2014 ${currentInterval}\u2192${targetInterval} live, nextBilling=${newPeriodEndISO || "-"} (${Date.now() - t0}ms)`);
+  return Response.json({
+    success: true,
+    interval: targetInterval,
+    nextBillingDate: newPeriodEndISO
+  });
+}
+__name(handleWebflowSwitchInterval2, "handleWebflowSwitchInterval");
+
+// src/handlers/authTransferOwnershipFramer.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+init_db();
+var TAG10 = "[framer-transfer-ownership]";
+var DEFAULT_ACCOUNTS_ORIGIN = "https://accounts.consentbit.com";
+function isValidEmail7(email) {
+  const e = (email || "").trim().toLowerCase();
+  return e.includes("@") && e.includes(".") && e.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+}
+__name(isValidEmail7, "isValidEmail");
+async function sha256Hex6(s) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(sha256Hex6, "sha256Hex");
+function randomToken2() {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(randomToken2, "randomToken");
+function resolveAccountsOrigin(env2) {
+  const configured = (env2.WEBAPP_PUBLIC_URL || "").trim().replace(/\/+$/, "");
+  if (configured) {
+    try {
+      return new URL(configured).origin;
+    } catch (_) {
+    }
+  }
+  return DEFAULT_ACCOUNTS_ORIGIN;
+}
+__name(resolveAccountsOrigin, "resolveAccountsOrigin");
+async function resolveFramerSiteOwner(db, siteId) {
+  if (!siteId) return null;
+  try {
+    return await db.prepare(
+      `SELECT u.id, u.email, u.name
+           FROM Site s
+           JOIN OrganizationMember m ON m.organizationId = s.organizationId AND lower(m.role) = 'owner'
+           JOIN User u ON u.id = m.userId
+          WHERE s.id = ?1 OR s.platformSiteId = ?1
+          ORDER BY s.createdAt ASC
+          LIMIT 1`
+    ).bind(siteId).first();
+  } catch (e) {
+    console.warn(`${TAG10} resolveFramerSiteOwner failed:`, e?.message || e);
+    return null;
+  }
+}
+__name(resolveFramerSiteOwner, "resolveFramerSiteOwner");
+function authEmailHtml2({ ownerName, newEmail, newName, link, ttlMinutes }) {
+  return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f3f4f6;">
+  <div style="max-width:520px;margin:0 auto;padding:32px 24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <div style="background:#ffffff;border-radius:12px;padding:32px 28px;border:1px solid #e5e7eb;">
+      <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hello${ownerName ? ` ${ownerName}` : ""},</p>
+      <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">We received a request to <strong>transfer ownership</strong> of your ConsentBit account to:</p>
+      <div style="background:#f3f4f6;border:1px solid #e5e7eb;border-radius:10px;padding:16px 18px;margin:0 0 22px;">
+        <p style="margin:0 0 4px;color:#111827;font-size:15px;font-weight:600;">${newName ? `${newName}` : newEmail}</p>
+        <p style="margin:0;color:#6b7280;font-size:14px;">${newEmail}</p>
+      </div>
+      <p style="margin:0 0 22px;color:#6b7280;font-size:15px;line-height:1.6;">If you made this request, click the button below to authorize it. After that, this account (all its sites, subscription and consent data) will belong to the new owner, and you will be signed out.</p>
+      <p style="margin:0 0 24px;text-align:center;">
+        <a href="${link}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#007AFF;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:14px 32px;border-radius:8px;">Authorize transfer</a>
+      </p>
+      <p style="margin:0 0 18px;color:#9ca3af;font-size:13px;line-height:1.6;">This link expires in ${ttlMinutes} minutes. If you did not request this, ignore this email and your account stays unchanged.</p>
+      <p style="margin:0;color:#6b7280;font-size:14px;line-height:1.6;">Best regards,<br/>ConsentBit Team</p>
+    </div>
+  </div>
+  </body></html>`;
+}
+__name(authEmailHtml2, "authEmailHtml");
+async function sendEmailViaBrevo3(env2, { to, name, subject, text, html }) {
+  const apiKey = env2.BREVO_API_KEY;
+  const fromEmail = env2.BREVO_FROM_EMAIL;
+  const fromName = env2.BREVO_FROM_NAME || "ConsentBit";
+  if (!apiKey) throw new Error("BREVO_API_KEY not configured");
+  if (!fromEmail) throw new Error("BREVO_FROM_EMAIL not configured");
+  const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: { "content-type": "application/json", "api-key": apiKey, accept: "application/json" },
+    body: JSON.stringify({
+      sender: { email: fromEmail, name: fromName },
+      to: [{ email: to, name: name || to }],
+      subject,
+      textContent: text,
+      htmlContent: html
+    })
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`Brevo send failed: ${res.status} ${t}`.slice(0, 300));
+  }
+}
+__name(sendEmailViaBrevo3, "sendEmailViaBrevo");
+async function handleFramerTransferOwnershipRequest(request, env2, ctx) {
+  const db = env2.CONSENT_WEBAPP;
+  if (request.method !== "POST") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  if (!db) return Response.json({ success: false, error: "Database unavailable" }, { status: 503 });
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ success: false, error: "Invalid JSON" }, { status: 400 });
+  }
+  const siteId = String(body?.siteId || "").trim();
+  const newEmail = String(body?.newEmail || "").trim().toLowerCase();
+  const newName = String(body?.newName || "").trim();
+  if (!siteId) {
+    return Response.json({ success: false, error: "siteId required" }, { status: 400 });
+  }
+  const owner = await resolveFramerSiteOwner(db, siteId);
+  if (!owner) {
+    return Response.json({ success: false, error: "No account owner found for this site." }, { status: 404 });
+  }
+  if (!isValidEmail7(newEmail)) {
+    return Response.json({ success: false, error: "A valid new owner email is required" }, { status: 400 });
+  }
+  if (!newName) {
+    return Response.json({ success: false, error: "New owner name is required" }, { status: 400 });
+  }
+  if (newEmail === String(owner.email || "").trim().toLowerCase()) {
+    return Response.json({ success: false, error: "The new owner email must be different from the current one" }, { status: 400 });
+  }
+  const clash = await getUserByEmail(db, newEmail);
+  if (clash) {
+    return Response.json(
+      { success: false, error: "That email already has a ConsentBit account. Ownership can only be transferred to an email without an existing account." },
+      { status: 409 }
+    );
+  }
+  const userId = owner.id ?? owner.userId;
+  await cancelPendingOwnershipTransfers(db, userId);
+  const secret = randomToken2();
+  const tokenHash = await sha256Hex6(secret);
+  const ttlMinutes = Number(env2.OWNERSHIP_TRANSFER_TTL_MINUTES || 60) || 60;
+  const row = await createOwnershipTransfer(db, {
+    userId,
+    currentEmail: owner.email,
+    newEmail,
+    newName,
+    tokenHash,
+    ttlMinutes
+  });
+  const token = `${row.id}.${secret}`;
+  const origin = resolveAccountsOrigin(env2);
+  const link = `${origin}/transfer-ownership/authorize?token=${encodeURIComponent(token)}`;
+  const subject = "Authorize the ownership transfer of your ConsentBit account";
+  const text = `Hello${owner.name ? ` ${owner.name}` : ""},
+
+We received a request to transfer ownership of your ConsentBit account to ${newName} (${newEmail}).
+
+If you made this request, authorize it here:
+${link}
+
+This link expires in ${ttlMinutes} minutes. If you did not request this, ignore this email and your account stays unchanged.
+
+Best regards,
+ConsentBit Team
+`;
+  const html = authEmailHtml2({ ownerName: owner.name, newEmail, newName, link, ttlMinutes });
+  const hasBrevoConfig = Boolean(env2.BREVO_API_KEY && env2.BREVO_FROM_EMAIL);
+  if (!hasBrevoConfig) {
+    console.warn(`${TAG10} \u26A0\uFE0F DEV fallback \u2014 Brevo not configured; returning link in response.`);
+    return Response.json(
+      { success: true, message: "DEV: email not configured; use the link below", authorizeLink: link, expiresAt: row.expiresAt },
+      { status: 200 }
+    );
+  }
+  ctx.waitUntil(
+    sendEmailViaBrevo3(env2, { to: owner.email, name: owner.name, subject, text, html }).then(() => console.log(`${TAG10} \u2705 authorization email sent to owner`)).catch((e) => console.error(`${TAG10} \u274C email send failed:`, e?.message || e))
+  );
+  return Response.json(
+    { success: true, sentTo: owner.email, expiresAt: row.expiresAt },
+    { status: 200 }
+  );
+}
+__name(handleFramerTransferOwnershipRequest, "handleFramerTransferOwnershipRequest");
+
+// src/handlers/webflowScriptCleanup.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+var TAG11 = "[webflow-script-cleanup]";
+var WEBFLOW_API = "https://api.webflow.com/v2";
+var CB_NAME_PREFIXES = [
+  "ConsentScript2025",
+  // V1  (old live app: displayName `ConsentScript2025<ts>`)
+  "ConsentScriptV22025",
+  // V2  (old live app: displayName `ConsentScriptV22025<ts>`)
+  "ConsentScriptVersion22025",
+  // V2 (defensive: tolerate the longer variant too)
+  "ConsentScriptVersion312025",
+  // V2.1 / V3
+  "appscript",
+  // inline loader (api.consentbit.com/consent.js)
+  "ConsentBitBanner"
+  // runtime loader injected by the new app's API path
+];
+var CB_URL_MARKERS = [
+  "cdn.jsdelivr.net/gh/reshmalb17/",
+  // ALL old-app jsdelivr repos (cmp_script, cmp_script_V2, …)
+  "gh/seattlenewmedia/consentbit-public",
+  // hosted consent.js repo
+  "api.consentbit.com/consent.js",
+  // old inline loader target
+  "/api/v2/cdn/runtime/",
+  // new app runtime loader
+  "app.consentbit.com",
+  // new app host
+  "/consentbit/"
+  // worker-hosted /consentbit/<id>/script.js
+];
+async function resolveAccessToken(env2, siteId) {
+  try {
+    const raw = await env2.WEBFLOW_AUTHENTICATION?.get(siteId);
+    if (!raw) return null;
+    const entry = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return entry?.accessToken || null;
+  } catch {
+    return null;
+  }
+}
+__name(resolveAccessToken, "resolveAccessToken");
+function webflowHeaders(accessToken) {
+  return {
+    Authorization: `Bearer ${accessToken}`,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    "accept-version": "1.0.0"
+  };
+}
+__name(webflowHeaders, "webflowHeaders");
+function isConsentBitScript(reg, sourceCode) {
+  const name = reg?.displayName || "";
+  const hay = `${reg?.hostedLocation || ""} ${sourceCode || ""}`.toLowerCase();
+  const byName = CB_NAME_PREFIXES.some((p) => name.startsWith(p));
+  const byUrl = CB_URL_MARKERS.some((m) => hay.includes(m));
+  return byName || byUrl;
+}
+__name(isConsentBitScript, "isConsentBitScript");
+function referencesCurrentInstall(reg, sourceCode, currentCdnScriptId) {
+  if (!currentCdnScriptId) return false;
+  const id = String(currentCdnScriptId).toLowerCase();
+  const hay = `${reg?.hostedLocation || ""} ${sourceCode || ""} ${reg?.displayName || ""}`.toLowerCase();
+  return hay.includes(id);
+}
+__name(referencesCurrentInstall, "referencesCurrentInstall");
+async function resolveCurrentCdnScriptId(env2, siteId) {
+  try {
+    const row = await env2.CONSENT_WEBAPP?.prepare("SELECT cdnScriptId FROM Site WHERE platformSiteId = ?1 AND cdnScriptId IS NOT NULL ORDER BY createdAt ASC LIMIT 1").bind(siteId).first();
+    return row?.cdnScriptId || null;
+  } catch {
+    return null;
+  }
+}
+__name(resolveCurrentCdnScriptId, "resolveCurrentCdnScriptId");
+async function fetchScriptDetail(siteId, scriptId, headers) {
+  try {
+    const res = await fetch(`${WEBFLOW_API}/sites/${siteId}/registered_scripts/${scriptId}`, { headers });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+__name(fetchScriptDetail, "fetchScriptDetail");
+async function analyzeSite(siteId, accessToken, currentCdnScriptId) {
+  const headers = webflowHeaders(accessToken);
+  let appliedScripts = [];
+  {
+    const res = await fetch(`${WEBFLOW_API}/sites/${siteId}/custom_code`, { headers });
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      appliedScripts = Array.isArray(data.scripts) ? data.scripts : [];
+    } else if (res.status !== 404) {
+      const msg = (await res.json().catch(() => ({})))?.message || `HTTP ${res.status}`;
+      throw new Error(`Webflow custom_code read failed: ${msg}`);
+    }
+  }
+  const registeredById = /* @__PURE__ */ new Map();
+  {
+    const res = await fetch(`${WEBFLOW_API}/sites/${siteId}/registered_scripts`, { headers });
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      for (const s of data.registeredScripts || []) {
+        if (s?.id) registeredById.set(s.id, s);
+      }
+    } else if (res.status !== 404) {
+      const msg = (await res.json().catch(() => ({})))?.message || `HTTP ${res.status}`;
+      throw new Error(`Webflow registered_scripts read failed: ${msg}`);
+    }
+  }
+  const legacy = [];
+  const kept = [];
+  let hasCurrent = false;
+  for (const applied of appliedScripts) {
+    let reg = registeredById.get(applied.id) || { id: applied.id, displayName: "" };
+    if (!reg.hostedLocation && !reg.sourceCode) {
+      const detail = await fetchScriptDetail(siteId, applied.id, headers);
+      if (detail) {
+        reg = {
+          id: applied.id,
+          displayName: reg.displayName || detail.displayName || "",
+          hostedLocation: reg.hostedLocation || detail.hostedLocation || null,
+          sourceCode: reg.sourceCode || detail.sourceCode || null,
+          version: reg.version || detail.version || null
+        };
+      }
+    }
+    const sourceCode = reg.sourceCode || null;
+    const looksConsentBit = isConsentBitScript(reg, sourceCode);
+    const keepEntry = { id: applied.id, location: applied.location, version: applied.version };
+    if (looksConsentBit && referencesCurrentInstall(reg, sourceCode, currentCdnScriptId)) {
+      hasCurrent = true;
+      kept.push(keepEntry);
+    } else if (looksConsentBit) {
+      legacy.push({
+        id: applied.id,
+        displayName: reg.displayName || "",
+        hostedLocation: reg.hostedLocation || null,
+        location: applied.location || null,
+        version: applied.version || reg.version || null
+      });
+    } else {
+      kept.push(keepEntry);
+    }
+  }
+  return { appliedScripts, legacy, kept, hasCurrent };
+}
+__name(analyzeSite, "analyzeSite");
+async function handleWebflowScriptCleanupReport(request, env2) {
+  const url = new URL(request.url);
+  const siteId = url.searchParams.get("siteId") || url.searchParams.get("site_id");
+  if (!siteId) return Response.json({ success: false, error: "Missing siteId" }, { status: 400 });
+  const accessToken = await resolveAccessToken(env2, siteId);
+  if (!accessToken) {
+    return Response.json({ success: false, error: "Site not authorized", code: "NOT_AUTHORIZED" }, { status: 401 });
+  }
+  try {
+    const currentCdnScriptId = await resolveCurrentCdnScriptId(env2, siteId);
+    const { legacy, hasCurrent } = await analyzeSite(siteId, accessToken, currentCdnScriptId);
+    return Response.json({
+      success: true,
+      hasLegacy: legacy.length > 0,
+      legacyCount: legacy.length,
+      legacyScripts: legacy,
+      hasCurrent
+      // true → the site already has the current-version script installed
+    });
+  } catch (e) {
+    console.error(`${TAG11} report failed for ${siteId}`, e?.message || e);
+    return Response.json({ success: false, error: e?.message || "Cleanup report failed" }, { status: 502 });
+  }
+}
+__name(handleWebflowScriptCleanupReport, "handleWebflowScriptCleanupReport");
+async function handleWebflowScriptCleanupRemove(request, env2) {
+  let body = {};
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ success: false, error: "Invalid JSON body" }, { status: 400 });
+  }
+  const siteId = body.siteId || body.site_id;
+  if (!siteId) return Response.json({ success: false, error: "Missing siteId" }, { status: 400 });
+  const accessToken = await resolveAccessToken(env2, siteId);
+  if (!accessToken) {
+    return Response.json({ success: false, error: "Site not authorized", code: "NOT_AUTHORIZED" }, { status: 401 });
+  }
+  try {
+    const currentCdnScriptId = await resolveCurrentCdnScriptId(env2, siteId);
+    const { legacy, kept } = await analyzeSite(siteId, accessToken, currentCdnScriptId);
+    if (legacy.length === 0) {
+      return Response.json({ success: true, removed: [], removedCount: 0, message: "No legacy scripts found" });
+    }
+    const headers = webflowHeaders(accessToken);
+    const res = await fetch(`${WEBFLOW_API}/sites/${siteId}/custom_code`, {
+      method: kept.length > 0 ? "PUT" : "DELETE",
+      headers,
+      ...kept.length > 0 ? { body: JSON.stringify({ scripts: kept }) } : {}
+    });
+    if (!res.ok && res.status !== 404) {
+      const msg = (await res.json().catch(() => ({})))?.message || `HTTP ${res.status}`;
+      console.warn(`${TAG11} remove failed for ${siteId}`, msg);
+      return Response.json({ success: false, error: `Webflow update failed: ${msg}`, webflowStatus: res.status }, { status: 502 });
+    }
+    const removedIds = legacy.map((s) => s.id);
+    console.log(`${TAG11} \u2713 removed ${removedIds.length} legacy script(s) for ${siteId}`);
+    return Response.json({
+      success: true,
+      removed: removedIds,
+      removedCount: removedIds.length,
+      legacyScripts: legacy,
+      remainingCount: kept.length
+    });
+  } catch (e) {
+    console.error(`${TAG11} remove error for ${siteId}`, e?.message || e);
+    return Response.json({ success: false, error: e?.message || "Cleanup failed" }, { status: 502 });
+  }
+}
+__name(handleWebflowScriptCleanupRemove, "handleWebflowScriptCleanupRemove");
+
+// src/handlers/webflowOAuth.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+init_db();
+var TAG12 = "[webflow-oauth]";
+var AUTHORIZE_URL = "https://webflow.com/oauth/authorize";
+var TOKEN_URL = "https://api.webflow.com/oauth/access_token";
+var SITES_URL = "https://api.webflow.com/v2/sites";
+var AUTH_INFO_URL = "https://api.webflow.com/v2/token/authorized_by";
+var DEFAULT_SCOPES = "sites:read sites:write authorized_user:read custom_code:read custom_code:write";
+function isTrustedEmbedHost(host, env2) {
+  const h = String(host || "").toLowerCase();
+  if (!h) return false;
+  if (h === "consentbit.com" || h.endsWith(".consentbit.com")) return true;
+  for (const key of ["CDN_BASE_URL", "API_BASE_URL", "WEBAPP_PUBLIC_URL"]) {
+    const val = env2?.[key];
+    if (!val) continue;
+    try {
+      if (new URL(val).hostname.toLowerCase() === h) return true;
+    } catch {
+    }
+  }
+  return false;
+}
+__name(isTrustedEmbedHost, "isTrustedEmbedHost");
+function trustedServeOrigin(env2, requestOrigin) {
+  const pin = String(env2?.CDN_BASE_URL || env2?.API_BASE_URL || "").trim().replace(/\/+$/, "");
+  for (const cand of [pin, requestOrigin]) {
+    if (!cand) continue;
+    try {
+      const c = new URL(cand);
+      if (c.protocol === "https:" && isTrustedEmbedHost(c.hostname, env2)) return cand.replace(/\/+$/, "");
+    } catch {
+    }
+  }
+  return null;
+}
+__name(trustedServeOrigin, "trustedServeOrigin");
+function sanitizeEmbedScriptUrl(scriptUrl, env2, cdnScriptId, requestOrigin) {
+  if (!scriptUrl) return null;
+  let u;
+  try {
+    u = new URL(String(scriptUrl));
+  } catch {
+    return null;
+  }
+  let reqHost = null;
+  try {
+    reqHost = requestOrigin ? new URL(requestOrigin).hostname.toLowerCase() : null;
+  } catch {
+  }
+  const hostTrusted = isTrustedEmbedHost(u.hostname, env2) || reqHost && u.hostname.toLowerCase() === reqHost;
+  if (u.protocol === "https:" && hostTrusted) {
+    return u.toString();
+  }
+  const origin = trustedServeOrigin(env2, requestOrigin);
+  if (origin && cdnScriptId) {
+    return `${origin}/consentbit/${cdnScriptId}/script.js`;
+  }
+  console.warn(`${TAG12} embed scriptUrl not trusted and no trusted origin to re-pin to (rejected): ${u.protocol}//${u.hostname}`);
+  return null;
+}
+__name(sanitizeEmbedScriptUrl, "sanitizeEmbedScriptUrl");
+function resolveRedirectUri(env2, url) {
+  if (env2.WEBFLOW_OAUTH_REDIRECT_URI) return env2.WEBFLOW_OAUTH_REDIRECT_URI;
+  return `${url.origin}/api/webflow/oauth/callback`;
+}
+__name(resolveRedirectUri, "resolveRedirectUri");
+function safeReturnTo(returnTo, env2) {
+  if (!returnTo) return "";
+  let u;
+  try {
+    u = new URL(returnTo);
+  } catch {
+    return "";
+  }
+  if (u.protocol !== "https:") return "";
+  const h = u.hostname.toLowerCase();
+  const ok = h === "webflow.com" || h.endsWith(".webflow.com") || h.endsWith(".webflow-ext.com") || h === "consentbit.com" || h.endsWith(".consentbit.com") || h.endsWith(".consentbit-webapp-frontend-test.pages.dev") || h === "consentbit-webapp-frontend-test.pages.dev";
+  if (ok) return u.toString();
+  for (const key of ["WEBFLOW_APP_REDIRECT", "WEBAPP_PUBLIC_URL", "CHECKOUT_BASE_URL"]) {
+    const val = env2?.[key];
+    if (!val) continue;
+    try {
+      if (new URL(val).hostname.toLowerCase() === h) return u.toString();
+    } catch {
+    }
+  }
+  return "";
+}
+__name(safeReturnTo, "safeReturnTo");
+function randomState() {
+  const a = new Uint8Array(16);
+  crypto.getRandomValues(a);
+  return [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(randomState, "randomState");
+function redirect(location) {
+  return new Response(null, { status: 302, headers: { Location: location } });
+}
+__name(redirect, "redirect");
+function finishToApp(env2, { ok, error, sites, returnTo }) {
+  const base = returnTo || env2.WEBFLOW_APP_REDIRECT || env2.WEBAPP_PUBLIC_URL || "";
+  if (!base) {
+    return Response.json({ success: !!ok, sites: sites ?? 0, error: error || null });
+  }
+  let dest;
+  try {
+    dest = new URL(base);
+  } catch {
+    return Response.json({ success: !!ok, sites: sites ?? 0, error: error || null });
+  }
+  dest.searchParams.set("webflow_oauth", ok ? "success" : "error");
+  if (error) dest.searchParams.set("error", error);
+  if (typeof sites === "number") dest.searchParams.set("sites", String(sites));
+  return redirect(dest.toString());
+}
+__name(finishToApp, "finishToApp");
+async function handleWebflowOAuthAuthorize(request, env2) {
+  if (request.method !== "GET") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const clientId = env2.WEBFLOW_CLIENT_ID || env2.webflow_TEST_CLIENT_ID;
+  if (!clientId) {
+    console.error(`${TAG12} WEBFLOW_CLIENT_ID (or legacy webflow_TEST_CLIENT_ID) is not set`);
+    return Response.json({ success: false, error: "OAuth not configured" }, { status: 503 });
+  }
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) {
+    console.error(`${TAG12} CONSENT_WEBAPP D1 binding is missing`);
+    return Response.json({ success: false, error: "Database unavailable" }, { status: 503 });
+  }
+  const url = new URL(request.url);
+  const state = randomState();
+  const returnTo = safeReturnTo(url.searchParams.get("returnTo") || "", env2);
+  const redirectUri = resolveRedirectUri(env2, url);
+  const scope = env2.WEBFLOW_OAUTH_SCOPES || DEFAULT_SCOPES;
+  console.log(`${TAG12} \u2192 /authorize`, {
+    clientIdSet: !!clientId,
+    redirectUri,
+    scope,
+    returnTo: returnTo || "(none)",
+    state: state.slice(0, 8) + "\u2026",
+    format: url.searchParams.get("format") || "redirect"
+  });
+  await createWebflowOAuthState(db, { state, returnTo, ttlMinutes: 10 });
+  console.log(`${TAG12} state stored in D1 (10 min ttl)`);
+  const authUrl = new URL(AUTHORIZE_URL);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("client_id", clientId);
+  authUrl.searchParams.set("redirect_uri", redirectUri);
+  authUrl.searchParams.set("scope", scope);
+  authUrl.searchParams.set("state", state);
+  if (url.searchParams.get("format") === "json") {
+    console.log(`${TAG12} returning authorize URL as JSON`);
+    return Response.json({ success: true, url: authUrl.toString(), state });
+  }
+  console.log(`${TAG12} redirecting user to Webflow consent screen`);
+  return redirect(authUrl.toString());
+}
+__name(handleWebflowOAuthAuthorize, "handleWebflowOAuthAuthorize");
+async function handleWebflowOAuthStatus(request, env2, opts = {}) {
+  const { authenticated = false } = opts;
+  if (request.method !== "GET") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) {
+    console.error(`${TAG12} CONSENT_WEBAPP D1 binding is missing`);
+    return Response.json({ success: false, error: "Database unavailable" }, { status: 503 });
+  }
+  const url = new URL(request.url);
+  const siteId = url.searchParams.get("siteId") || url.searchParams.get("site_id") || "";
+  if (!siteId) {
+    return Response.json({ success: false, error: "Missing siteId" }, { status: 400 });
+  }
+  const authorizeUrl = `${url.origin}/api/webflow/oauth/authorize`;
+  const row = await resolveWebflowOAuthToken(db, env2.WEBFLOW_AUTHENTICATION, siteId);
+  if (!row?.accessToken) {
+    console.log(`${TAG12} status: ${siteId} not authorized (no token in D1 or KV)`);
+    return Response.json({ success: true, authorized: false, authorizeUrl });
+  }
+  console.log(`${TAG12} status: ${siteId} authorized via ${row.source}`);
+  if (url.searchParams.get("verify") !== "false") {
+    try {
+      const res = await fetch(AUTH_INFO_URL, {
+        headers: { Authorization: `Bearer ${row.accessToken}`, Accept: "application/json" }
+      });
+      if (res.status === 401) {
+        console.warn(`${TAG12} status: token for ${siteId} was revoked \u2014 invalidating`);
+        await invalidateWebflowOAuthToken(db, env2.WEBFLOW_AUTHENTICATION, siteId);
+        return Response.json({ success: true, authorized: false, revoked: true, authorizeUrl });
+      }
+    } catch (e) {
+      console.warn(`${TAG12} status: token verify failed (non-fatal)`, e?.message || e);
+    }
+  }
+  let registered = false;
+  let webappSiteId = null;
+  let plan = null;
+  let version2 = null;
+  let scriptUrl = null;
+  let cdnScriptId = null;
+  let bannerCreated = false;
+  let ownerEmail = null;
+  try {
+    const site = await db.prepare("SELECT id, organizationId, version, cdnScriptId, embedScriptUrl FROM Site WHERE platformSiteId = ?1 ORDER BY createdAt ASC LIMIT 1").bind(siteId).first();
+    if (site) {
+      registered = true;
+      webappSiteId = site.id;
+      version2 = site.version ?? null;
+      cdnScriptId = site.cdnScriptId ?? null;
+      try {
+        bannerCreated = !!await getBannerCustomization(db, site.id);
+      } catch (_) {
+      }
+      scriptUrl = site.embedScriptUrl || buildEmbedScriptUrl(canonicalEmbedOrigin(request, env2) || url.origin, site.cdnScriptId) || `${url.origin}/consentbit/${site.cdnScriptId}/script.js`;
+      scriptUrl = sanitizeEmbedScriptUrl(scriptUrl, env2, site.cdnScriptId, url.origin);
+      const sub = await getSubscriptionBySiteId(db, site.id);
+      let planId = sub ? sub.planId ?? sub.planid ?? null : null;
+      if (!planId && site.organizationId) {
+        try {
+          const orgResult = await getEffectivePlanForOrganization(db, site.organizationId, env2);
+          planId = orgResult?.planId || null;
+        } catch (_) {
+        }
+      }
+      plan = planId && ["basic", "essential", "growth"].includes(planId) ? planId : "free";
+      if (site.organizationId) {
+        try {
+          const owner = await db.prepare(
+            `SELECT u.email FROM OrganizationMember m JOIN User u ON u.id = m.userId
+               WHERE m.organizationId = ?1 AND lower(m.role) = 'owner' LIMIT 1`
+          ).bind(site.organizationId).first();
+          if (owner?.email) ownerEmail = String(owner.email).trim().toLowerCase();
+        } catch (_) {
+        }
+      }
+    }
+    console.log(`${TAG12} status: ${siteId} registered=${registered} plan=${plan ?? "none"} version=${version2 ?? "null"} bannerCreated=${bannerCreated}`);
+  } catch (e) {
+    console.warn(`${TAG12} status: registration lookup failed (non-fatal)`, e?.message || e);
+  }
+  let email = ownerEmail || null;
+  let billingEmail = null;
+  try {
+    const kvRaw = await env2.WEBFLOW_AUTHENTICATION?.get(siteId);
+    if (kvRaw) {
+      const kvEntry = typeof kvRaw === "string" ? JSON.parse(kvRaw) : kvRaw;
+      if (kvEntry?.billingEmail) billingEmail = String(kvEntry.billingEmail).trim().toLowerCase();
+      if (!email) email = billingEmail || (kvEntry?.email ? String(kvEntry.email).trim().toLowerCase() : null);
+      if ((!plan || plan === "free") && kvEntry?.plan) {
+        const kvPlan = String(kvEntry.plan).trim().toLowerCase();
+        if (["basic", "essential", "growth"].includes(kvPlan)) {
+          plan = kvPlan;
+          console.log(`${TAG12} status: ${siteId} plan from KV fallback=${kvPlan} (no paid plan in D1)`);
+        }
+      }
+    }
+  } catch (_) {
+  }
+  let freeUsed = false;
+  try {
+    if (email && !registered) {
+      const user = await db.prepare("SELECT id FROM User WHERE email = ?1").bind(email).first();
+      if (user) {
+        const org = await db.prepare(
+          `SELECT o.id FROM Organization o
+           LEFT JOIN OrganizationMember ou ON ou.organizationId = o.id
+           WHERE ou.userId = ?1
+           ORDER BY o.createdAt ASC LIMIT 1`
+        ).bind(user.id).first();
+        if (org) {
+          const sites = await db.prepare("SELECT platformSiteId FROM Site WHERE organizationId = ?1 LIMIT 5").bind(org.id).all();
+          const list = sites?.results || [];
+          freeUsed = list.some((s) => s.platformSiteId && s.platformSiteId !== siteId);
+        }
+      }
+    }
+    console.log(`${TAG12} status: ${siteId} freeUsed=${freeUsed}`);
+  } catch (e) {
+    console.warn(`${TAG12} status: freeUsed check failed (non-fatal)`, e?.message || e);
+  }
+  console.log(`[PostHog DEBUG] webflow_app_opened guard: siteId=${siteId} authenticated=${authenticated} registered=${registered} email=${email || "NONE"}`);
+  if (authenticated && registered && email) {
+    try {
+      const kv = env2.WEBFLOW_AUTHENTICATION;
+      const seen = kv ? await kv.get(`appopen:${siteId}`) : null;
+      console.log(`[PostHog DEBUG] webflow_app_opened dedup: appopen:${siteId} seen=${seen ? "YES (skipping)" : "no (will fire)"}`);
+      if (!seen) {
+        let wfUserId = null;
+        try {
+          const rawAuth = kv ? await kv.get(siteId) : null;
+          if (rawAuth) {
+            const e = typeof rawAuth === "string" ? JSON.parse(rawAuth) : rawAuth;
+            wfUserId = e?.userId || null;
+          }
+        } catch {
+        }
+        await capturePostHogEvent(env2, email, "webflow_app_opened", {
+          site_id: siteId,
+          webflow_user_id: wfUserId,
+          plan: plan || null,
+          platform: "webflow"
+        });
+        if (kv) await kv.put(`appopen:${siteId}`, "1", { expirationTtl: 1800 });
+      }
+    } catch {
+    }
+  }
+  return Response.json({
+    success: true,
+    authorized: true,
+    source: row.source,
+    registered,
+    webappSiteId,
+    plan,
+    version: version2,
+    scriptUrl,
+    cdnScriptId,
+    bannerCreated,
+    freeUsed,
+    email: authenticated ? email : null,
+    billingEmail: authenticated ? billingEmail : null
+  });
+}
+__name(handleWebflowOAuthStatus, "handleWebflowOAuthStatus");
+async function handleWebflowOAuthCallback(request, env2) {
+  if (request.method !== "GET") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const url = new URL(request.url);
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+  const providerError = url.searchParams.get("error");
+  console.log(`${TAG12} \u2190 /callback`, {
+    hasCode: !!code,
+    state: state ? state.slice(0, 8) + "\u2026" : "(none)",
+    providerError: providerError || "(none)"
+  });
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) {
+    console.error(`${TAG12} CONSENT_WEBAPP D1 binding is missing`);
+    return Response.json({ success: false, error: "Database unavailable" }, { status: 503 });
+  }
+  if (providerError) {
+    console.warn(`${TAG12} provider returned error: ${providerError}`);
+    await capturePostHogEvent(env2, crypto.randomUUID(), "oauth_completed", {
+      status: "failed",
+      error: providerError,
+      platform: "webflow"
+    });
+    return finishToApp(env2, { ok: false, error: providerError });
+  }
+  if (!code) {
+    console.warn(`${TAG12} missing authorization code`);
+    return Response.json({ success: false, error: "Missing authorization code" }, { status: 400 });
+  }
+  let returnTo = "";
+  if (state) {
+    const stateRow = await consumeWebflowOAuthState(db, state);
+    if (!stateRow) {
+      console.warn(`${TAG12} invalid or expired state \u2014 rejecting`);
+      return Response.json({ success: false, error: "Invalid or expired state" }, { status: 400 });
+    }
+    returnTo = stateRow.returnTo || "";
+    console.log(`${TAG12} app-initiated install; state OK, returnTo=${returnTo || "(none)"}`);
+  } else {
+    console.log(`${TAG12} Webflow-initiated install (no state) \u2014 proceeding without CSRF check`);
+  }
+  const clientId = env2.WEBFLOW_CLIENT_ID || env2.webflow_TEST_CLIENT_ID;
+  const clientSecret = env2.WEBFLOW_CLIENT_SECRET || env2.WEBFLOW_CLIENT_TEST_SECRET;
+  if (!clientId || !clientSecret) {
+    console.error(`${TAG12} client credentials missing (need WEBFLOW_CLIENT_ID + WEBFLOW_CLIENT_SECRET, or legacy webflow_TEST_CLIENT_ID + WEBFLOW_CLIENT_TEST_SECRET)`);
+    return Response.json({ success: false, error: "OAuth not configured" }, { status: 503 });
+  }
+  const redirectUri = resolveRedirectUri(env2, url);
+  const tokenBody = {
+    client_id: clientId,
+    client_secret: clientSecret,
+    code,
+    grant_type: "authorization_code"
+  };
+  if (state) tokenBody.redirect_uri = redirectUri;
+  console.log(`${TAG12} exchanging code for token`, {
+    tokenUrl: TOKEN_URL,
+    redirectUri: state ? redirectUri : "(omitted \u2014 Webflow-initiated)"
+  });
+  let tokenJson;
+  try {
+    const res = await fetch(TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(tokenBody)
+    });
+    tokenJson = await res.json().catch(() => ({}));
+    if (!res.ok || !tokenJson.access_token) {
+      console.error(`${TAG12} token exchange failed (HTTP ${res.status})`, tokenJson);
+      await capturePostHogEvent(env2, crypto.randomUUID(), "oauth_completed", {
+        status: "failed",
+        error: "token_exchange_failed",
+        platform: "webflow"
+      });
+      return Response.json({ success: false, error: "Token exchange failed" }, { status: 502 });
+    }
+    console.log(`${TAG12} token exchange OK`, {
+      httpStatus: res.status,
+      tokenType: tokenJson.token_type || "bearer",
+      tokenLength: tokenJson.access_token.length,
+      // never log the token itself
+      scope: tokenJson.scope || "(not returned)"
+    });
+  } catch (e) {
+    console.error(`${TAG12} token exchange error`, e);
+    return Response.json({ success: false, error: "Token exchange error" }, { status: 502 });
+  }
+  const accessToken = tokenJson.access_token;
+  let sites = [];
+  let authorizedBy = null;
+  try {
+    const sres = await fetch(SITES_URL, {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" }
+    });
+    if (sres.ok) {
+      const sjson = await sres.json();
+      sites = Array.isArray(sjson.sites) ? sjson.sites : [];
+      console.log(
+        `${TAG12} fetched ${sites.length} site(s)`,
+        sites.map((s) => ({ id: s.id, name: s.displayName, shortName: s.shortName }))
+      );
+    } else {
+      console.warn(`${TAG12} sites fetch returned HTTP ${sres.status}`);
+    }
+  } catch (e) {
+    console.warn(`${TAG12} sites fetch failed`, e);
+  }
+  try {
+    const ures = await fetch(AUTH_INFO_URL, {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" }
+    });
+    if (ures.ok) {
+      authorizedBy = await ures.json();
+      console.log(`${TAG12} authorized_by`, {
+        userId: authorizedBy?.user?.id || authorizedBy?.id || "(unknown)",
+        email: authorizedBy?.email || authorizedBy?.user?.email || "(n/a)"
+      });
+    } else {
+      console.warn(`${TAG12} authorized_by fetch returned HTTP ${ures.status}`);
+    }
+  } catch {
+  }
+  const userKey = authorizedBy?.user?.id || authorizedBy?.id || sites[0]?.id || state;
+  console.log(`${TAG12} persisting token to D1`, { userKey, siteCount: sites.length });
+  try {
+    await saveWebflowOAuthToken(db, {
+      userKey,
+      accessToken,
+      tokenType: tokenJson.token_type || "bearer",
+      scope: tokenJson.scope || env2.WEBFLOW_OAUTH_SCOPES || DEFAULT_SCOPES,
+      authorizedBy,
+      sites: sites.map((s) => ({ id: s.id, displayName: s.displayName, shortName: s.shortName }))
+    });
+  } catch (e) {
+    console.error(`${TAG12} failed to persist token`, e);
+    return Response.json({ success: false, error: "Failed to store authorization" }, { status: 500 });
+  }
+  if (env2.WEBFLOW_AUTHENTICATION && sites.length) {
+    const wfUserId = authorizedBy?.user?.id || authorizedBy?.id || null;
+    const wfEmail = authorizedBy?.email || authorizedBy?.user?.email || null;
+    await Promise.all(
+      sites.map(async (s) => {
+        if (!s?.id) return;
+        try {
+          const raw = await env2.WEBFLOW_AUTHENTICATION.get(s.id);
+          const existing = raw ? typeof raw === "string" ? JSON.parse(raw) : raw : {};
+          await env2.WEBFLOW_AUTHENTICATION.put(
+            s.id,
+            JSON.stringify({
+              ...existing,
+              accessToken,
+              ...wfUserId ? { userId: wfUserId } : {},
+              ...wfEmail ? { email: wfEmail } : {}
+            })
+          );
+        } catch (kvErr) {
+          console.warn(`${TAG12} KV mirror failed for site ${s.id}`, kvErr?.message || kvErr);
+        }
+      })
+    );
+    console.log(`${TAG12} mirrored accessToken into WEBFLOW_AUTHENTICATION KV for ${sites.length} site(s)`);
+  }
+  const installedSite = sites[0];
+  const designerUrl = installedSite?.shortName ? `https://webflow.com/design/${installedSite.shortName}` : "";
+  const dest = returnTo || env2.WEBFLOW_APP_REDIRECT || designerUrl;
+  console.log(`${TAG12} \u2713 done \u2014 authorized ${sites.length} site(s) for ${userKey}; redirecting to ${dest || "(none \u2192 JSON)"}`);
+  const phUserId = authorizedBy?.user?.id || authorizedBy?.id || null;
+  const phEmail = authorizedBy?.email || authorizedBy?.user?.email || null;
+  await capturePostHogEvent(env2, phEmail || userKey, "oauth_completed", {
+    status: "success",
+    webflow_user_id: phUserId,
+    sites: sites.length,
+    platform: "webflow"
+  });
+  return finishToApp(env2, { ok: true, sites: sites.length, returnTo: dest });
+}
+__name(handleWebflowOAuthCallback, "handleWebflowOAuthCallback");
+
+// src/handlers/webflowPublish.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+init_db();
+var TAG13 = "[webflow-publish]";
+var PUBLISH_URL = /* @__PURE__ */ __name((siteId) => `https://api.webflow.com/v2/sites/${siteId}/publish`, "PUBLISH_URL");
+var SITE_URL = /* @__PURE__ */ __name((siteId) => `https://api.webflow.com/v2/sites/${siteId}`, "SITE_URL");
+async function handleWebflowDomains(request, env2) {
+  if (request.method !== "GET") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) {
+    return Response.json({ success: false, error: "Database unavailable" }, { status: 503 });
+  }
+  const url = new URL(request.url);
+  const siteId = url.searchParams.get("siteId") || url.searchParams.get("site_id");
+  if (!siteId) {
+    return Response.json({ success: false, error: "Missing siteId" }, { status: 400 });
+  }
+  const row = await resolveWebflowOAuthToken(db, env2.WEBFLOW_AUTHENTICATION, siteId);
+  if (!row?.accessToken) {
+    return Response.json(
+      { success: false, error: "Site not authorized", code: "NOT_AUTHORIZED" },
+      { status: 401 }
+    );
+  }
+  let res, data;
+  try {
+    res = await fetch(SITE_URL(siteId), {
+      headers: { Authorization: `Bearer ${row.accessToken}`, Accept: "application/json" }
+    });
+    data = await res.json().catch(() => ({}));
+  } catch (e) {
+    console.error(`${TAG13} site fetch failed`, e?.message || e);
+    return Response.json({ success: false, error: "Failed to load site" }, { status: 502 });
+  }
+  if (!res.ok) {
+    const wfMsg = data?.message || data?.code || `HTTP ${res.status}`;
+    return Response.json(
+      { success: false, error: `Webflow site lookup failed: ${wfMsg}`, webflowStatus: res.status },
+      { status: res.status === 403 ? 403 : 502 }
+    );
+  }
+  const customDomains = Array.isArray(data.customDomains) ? data.customDomains.map((d) => ({ id: d.id, url: d.url, lastPublished: d.lastPublished || null })) : [];
+  const subdomain = data.shortName ? `${data.shortName}.webflow.io` : null;
+  return Response.json({ success: true, subdomain, customDomains });
+}
+__name(handleWebflowDomains, "handleWebflowDomains");
+async function handleWebflowPublish(request, env2) {
+  if (request.method !== "POST") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) {
+    console.error(`${TAG13} CONSENT_WEBAPP D1 binding is missing`);
+    return Response.json({ success: false, error: "Database unavailable" }, { status: 503 });
+  }
+  let body = {};
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ success: false, error: "Invalid JSON body" }, { status: 400 });
+  }
+  const siteId = body.siteId || body.site_id;
+  if (!siteId) {
+    return Response.json({ success: false, error: "Missing siteId" }, { status: 400 });
+  }
+  const customDomains = Array.isArray(body.customDomains) ? body.customDomains : [];
+  const publishToWebflowSubdomain = body.publishToWebflowSubdomain ?? customDomains.length === 0;
+  const row = await resolveWebflowOAuthToken(db, env2.WEBFLOW_AUTHENTICATION, siteId);
+  if (!row?.accessToken) {
+    console.log(`${TAG13} ${siteId} not authorized (no token in D1 or KV)`);
+    return Response.json(
+      { success: false, error: "Site not authorized", code: "NOT_AUTHORIZED" },
+      { status: 401 }
+    );
+  }
+  const payload = { publishToWebflowSubdomain };
+  if (customDomains.length) payload.customDomains = customDomains;
+  console.log(`${TAG13} publishing ${siteId}`, {
+    publishToWebflowSubdomain,
+    customDomains: customDomains.length,
+    source: row.source
+  });
+  let res, data;
+  try {
+    res = await fetch(PUBLISH_URL(siteId), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${row.accessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+    data = await res.json().catch(() => ({}));
+  } catch (e) {
+    console.error(`${TAG13} publish request failed`, e?.message || e);
+    return Response.json({ success: false, error: "Publish request failed" }, { status: 502 });
+  }
+  if (!res.ok) {
+    const wfMsg = data?.message || data?.msg || data?.code || `HTTP ${res.status}`;
+    const needsReauth = res.status === 403 || /scope/i.test(String(wfMsg));
+    const rateLimited = res.status === 429;
+    console.warn(`${TAG13} Webflow publish failed (HTTP ${res.status})`, data);
+    return Response.json(
+      {
+        success: false,
+        error: rateLimited ? "Webflow allows one publish per minute. Your site was just published \u2014 please wait a moment before publishing again." : `Webflow publish failed: ${wfMsg}`,
+        code: rateLimited ? "RATE_LIMITED" : needsReauth ? "MISSING_PUBLISH_SCOPE" : "PUBLISH_FAILED",
+        ...needsReauth ? { hint: "Re-authorize the app \u2014 the stored token is missing the sites:write scope." } : {},
+        webflowStatus: res.status
+      },
+      { status: rateLimited ? 429 : res.status === 403 ? 403 : 502 }
+    );
+  }
+  console.log(`${TAG13} \u2713 publish accepted for ${siteId}`, { httpStatus: res.status });
+  try {
+    const ownerRow = await db.prepare(
+      `SELECT u.email AS email, s.domain AS domain FROM Site s
+         JOIN OrganizationMember om ON om.organizationId = s.organizationId AND lower(om.role) = 'owner'
+         JOIN User u ON u.id = om.userId
+        WHERE s.platformSiteId = ?1 ORDER BY s.createdAt ASC LIMIT 1`
+    ).bind(siteId).first();
+    if (ownerRow?.email) {
+      await capturePostHogEvent(env2, ownerRow.email, "banner_changes_published", {
+        domain_url: ownerRow.domain || null,
+        platform: "webflow",
+        wf_site_id: siteId
+      });
+    }
+  } catch {
+  }
+  return Response.json({ success: true, result: data });
+}
+__name(handleWebflowPublish, "handleWebflowPublish");
+
 // src/utils/cors.js
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
@@ -46560,10 +54582,20 @@ var DEV_ORIGINS = [
   "http://localhost:1337"
 ];
 var KNOWN_PROD_ORIGINS = [
-  "https://accounts.consentbit.com"
+  "https://accounts.consentbit.com",
+  // Cloudflare Pages test frontend (apex project domain). Preview/hash builds are
+  // covered by the *.consentbit-webapp-frontend-test.pages.dev pattern below.
+  "https://consentbit-webapp-frontend-test.pages.dev"
 ];
 var ALLOWED_ORIGIN_PATTERNS = [
-  /^https:\/\/[a-z0-9-]+\.plugins\.framercdn\.com$/i
+  /^https:\/\/[a-z0-9-]+\.plugins\.framercdn\.com$/i,
+  // Webflow Designer Extensions serve the app UI from a per-app subdomain on
+  // webflow-ext.com (assigned by Webflow, changes per app/build) — same situation as
+  // Framer plugins above, so match the host pattern rather than an exact origin.
+  /^https:\/\/[a-z0-9-]+\.webflow-ext\.com$/i,
+  // Cloudflare Pages preview deployments of the test frontend get a per-build
+  // hash subdomain (e.g. https://abc123.consentbit-webapp-frontend-test.pages.dev).
+  /^https:\/\/[a-z0-9-]+\.consentbit-webapp-frontend-test\.pages\.dev$/i
 ];
 function getAllowedOrigins(env2) {
   const origins = [...DEV_ORIGINS, ...KNOWN_PROD_ORIGINS];
@@ -46584,8 +54616,8 @@ function isOriginAllowed(origin, env2) {
   return ALLOWED_ORIGIN_PATTERNS.some((re) => re.test(origin));
 }
 __name(isOriginAllowed, "isOriginAllowed");
-var ALLOW_HEADERS = "Content-Type, X-Requested-With, X-CB-Client, Authorization";
-var ALLOW_METHODS = "GET, HEAD, POST, OPTIONS";
+var ALLOW_HEADERS = "Content-Type, X-Requested-With, X-CB-Client, Authorization, X-Webflow-Site-Id";
+var ALLOW_METHODS = "GET, HEAD, POST, DELETE, OPTIONS";
 var MAX_AGE = "86400";
 function withCors(response, request, env2) {
   const origin = request.headers.get("Origin");
@@ -46621,13 +54653,32 @@ function handleOptions(request, env2) {
     "/api/scan-cookies",
     "/api/pageview",
     "/api/scan-site",
+    "/api/scan-site-consented",
     "/api/scan-pending",
     "/api/v2/webflow-free-register",
     "/api/payment/subscription",
+    "/api/webflow/billing",
+    "/api/webflow/cancel-subscription",
+    "/api/webflow/switch-interval",
+    "/api/webflow/script-cleanup",
+    // Framer plugin billing surface — see handlers/framerBilling.js.
+    "/api/framer/billing",
+    "/api/framer/cancel-subscription",
+    "/api/framer/switch-interval",
+    // Framer plugin upgrade surface (JWT-authed inside the handler) — see handlers/framerUpgrade.js.
+    "/api/framer/upgrade/change-tier",
+    "/api/framer/upgrade/change-tier/preview",
+    "/api/framer/upgrade/switch-interval",
+    "/api/framer/upgrade/switch-interval/preview",
+    // Framer account ownership transfer — see handlers/authTransferOwnershipFramer.js.
+    "/api/framer/transfer-ownership/request",
+    "/api/webflow/publish",
+    "/api/webflow/domains",
     "/api/banner-customization",
     "/api/licenses/activate-license",
     "/api/licenses/check-domain-script",
     "/api/checkout-token",
+    "/api/v2/webflow-checkout-token",
     // Legacy aliases without /api/ prefix (backwards-compat for older bundles)
     "/licenses/activate-license",
     "/licenses/check-domain-script"
@@ -46829,22 +54880,119 @@ var PUBLIC_PATHS = /* @__PURE__ */ new Set([
   "/api/scan-cookies",
   "/api/pageview",
   "/api/scan-site",
+  "/api/scan-site-consented",
   "/api/scan-pending",
   "/api/v2/webflow-free-register",
   "/api/payment/subscription",
+  "/api/webflow/billing",
+  "/api/webflow/cancel-subscription",
+  "/api/webflow/switch-interval",
+  "/api/webflow/script-cleanup",
+  // Framer plugin billing surface. Public + authless by design (see the SECURITY
+  // note in handlers/framerBilling.js) — these restore the behaviour the Framer
+  // plugin had before /api/webflow/* was put behind a Webflow ID token, which
+  // Framer cannot mint. Gate these and remove them from this set when the Framer
+  // identity check lands.
+  "/api/framer/billing",
+  "/api/framer/cancel-subscription",
+  "/api/framer/switch-interval",
+  // Framer plugin UPGRADE surface (tier change + interval switch, with proration
+  // preview). These are "public" only for TRANSPORT (any-origin CORS, no cookie/CSRF,
+  // plain-JSON responses) — authorization is enforced INSIDE each handler via the
+  // Framer plugin's JWT (Authorization: Bearer <auth_token>), verified with
+  // env.FRAMER_JWT_SECRET. See handlers/framerUpgrade.js.
+  "/api/framer/upgrade/change-tier",
+  "/api/framer/upgrade/change-tier/preview",
+  "/api/framer/upgrade/switch-interval",
+  "/api/framer/upgrade/switch-interval/preview",
+  // Framer account ownership transfer (request step). Authless by design — the
+  // authorization link is emailed only to the resolved owner, who must click it to
+  // complete the transfer (see SECURITY note in authTransferOwnershipFramer.js).
+  // The authorize step reuses /api/auth/transfer-ownership/authorize (token-only).
+  "/api/framer/transfer-ownership/request",
+  // Webflow OAuth (browser redirects) — must skip body-encoding so the 302
+  // Location survives, allow any origin, and skip CSRF (GET).
+  "/api/webflow/oauth/authorize",
+  "/api/webflow/oauth/callback",
+  "/api/webflow/oauth/status",
+  // Webflow site publish + domains (called from the Designer extension).
+  "/api/webflow/publish",
+  "/api/webflow/domains",
   "/api/banner-customization",
   "/api/licenses/activate-license",
   "/api/licenses/check-domain-script",
   "/api/checkout-token",
+  "/api/v2/webflow-checkout-token",
   // Legacy aliases without /api/ prefix (backwards-compat for older bundles)
   "/licenses/activate-license",
-  "/licenses/check-domain-script"
+  "/licenses/check-domain-script",
+  // Standalone Admin Dashboard (Next.js) backend. "Public" for TRANSPORT ONLY —
+  // any-origin CORS, plain JSON, no CSRF — with authorization enforced INSIDE each
+  // handler (handlers/adminDashboard/auth.js): X-Admin-User + X-Admin-Key must match
+  // an AdminDashboardAccount row (or X-Admin-Key alone may be env.ADMIN_SECRET), and
+  // the resolved role gates writes. Called server-to-server from the dashboard's
+  // Next.js routes, so no key reaches a browser.
+  "/api/admin/dashboard/stats",
+  "/api/admin/dashboard/users",
+  "/api/admin/dashboard/user",
+  "/api/admin/dashboard/site",
+  "/api/admin/dashboard/auth",
+  "/api/admin/dashboard/accounts",
+  "/api/admin/dashboard/audit",
+  "/api/admin/dashboard/scans",
+  "/api/admin/dashboard/sites",
+  // Emailed-link surfaces. Unauthenticated by design — the single-use token in
+  // the link is the credential, and recover always answers identically so it
+  // cannot be used to discover who has an account.
+  "/api/admin/dashboard/account-setup",
+  "/api/admin/dashboard/account-recover"
+]);
+var WEBFLOW_APP_ROUTES = {
+  "oauth/status": /* @__PURE__ */ __name((req, env2) => handleWebflowOAuthStatus(req, env2, { authenticated: true }), "oauth/status"),
+  "verify-script": /* @__PURE__ */ __name((req, env2) => handleVerifyScript(req, env2), "verify-script"),
+  "banner-customization": /* @__PURE__ */ __name((req, env2) => handleBannerCustomization(req, env2), "banner-customization"),
+  "scan-site-consented": /* @__PURE__ */ __name((req, env2, ctx) => handleScanSiteConsented(req, env2, ctx), "scan-site-consented"),
+  "scan-history": /* @__PURE__ */ __name((req, env2) => handleScanHistory(req, env2), "scan-history"),
+  "cookies": /* @__PURE__ */ __name((req, env2) => handleCookies(req, env2), "cookies"),
+  "consent-logs": /* @__PURE__ */ __name((req, env2) => handleConsentLogs(req, env2), "consent-logs"),
+  "consent-csv": /* @__PURE__ */ __name((req, env2) => handleConsentCsv(req, env2), "consent-csv"),
+  "consent-pdf": /* @__PURE__ */ __name((req, env2) => handleConsentPdf(req, env2), "consent-pdf"),
+  "custom-cookie-rules": /* @__PURE__ */ __name((req, env2) => handleCustomCookieRules(req, env2), "custom-cookie-rules"),
+  "scheduled-scan": /* @__PURE__ */ __name((req, env2) => handleScheduledScan(req, env2), "scheduled-scan"),
+  "script-cleanup": /* @__PURE__ */ __name((req, env2) => req.method === "POST" ? handleWebflowScriptCleanupRemove(req, env2) : handleWebflowScriptCleanupReport(req, env2), "script-cleanup"),
+  "publish": /* @__PURE__ */ __name((req, env2) => handleWebflowPublish(req, env2), "publish"),
+  "domains": /* @__PURE__ */ __name((req, env2) => handleWebflowDomains(req, env2), "domains"),
+  "billings": /* @__PURE__ */ __name((req, env2) => handleWebflowBillings(req, env2), "billings"),
+  "cancel-subscriptions": /* @__PURE__ */ __name((req, env2) => handleWebflowCancelSubscriptions(req, env2), "cancel-subscriptions"),
+  "switch-intervals": /* @__PURE__ */ __name((req, env2) => handleWebflowSwitchIntervals(req, env2), "switch-intervals"),
+  // Designer-app UPGRADE surface (tier change + interval switch, each with a prorated
+  // preview). Webflow twin of the Framer /api/framer/upgrade/* routes — same Stripe
+  // logic, but the identity comes from the Webflow ID token already resolved above and
+  // is passed straight into the handler. See handlers/webflowUpgrade.js.
+  "upgrade/change-tier": /* @__PURE__ */ __name((req, env2, ctx, identity2) => handleWebflowChangeTier(req, env2, ctx, identity2), "upgrade/change-tier"),
+  "upgrade/change-tier/preview": /* @__PURE__ */ __name((req, env2, ctx, identity2) => handleWebflowChangeTierPreview(req, env2, ctx, identity2), "upgrade/change-tier/preview"),
+  "upgrade/switch-interval": /* @__PURE__ */ __name((req, env2, ctx, identity2) => handleWebflowSwitchInterval2(req, env2, ctx, identity2), "upgrade/switch-interval"),
+  "upgrade/switch-interval/preview": /* @__PURE__ */ __name((req, env2, ctx, identity2) => handleWebflowSwitchIntervalPreview(req, env2, ctx, identity2), "upgrade/switch-interval/preview"),
+  "payment/subscription": /* @__PURE__ */ __name((req, env2) => handlePaymentSubscription(req, env2), "payment/subscription"),
+  "webflow-free-register": /* @__PURE__ */ __name((req, env2) => handleWebflowFreeRegister(req, env2), "webflow-free-register"),
+  "webflow-checkout-token": /* @__PURE__ */ __name((req, env2) => handleWebflowCheckoutToken(req, env2), "webflow-checkout-token"),
+  "transfer-ownership/request": /* @__PURE__ */ __name((req, env2, ctx, identity2) => handleWfTransferOwnershipRequest(req, env2, ctx, identity2), "transfer-ownership/request"),
+  "track": /* @__PURE__ */ __name((req, env2, ctx, identity2) => handleWebflowTrack(req, env2, ctx, identity2), "track")
+};
+var WF_CONSENT_REPORT_ROUTES = /* @__PURE__ */ new Set(["consent-logs", "consent-csv", "consent-pdf"]);
+var LEGACY_WEBFLOW_AUTH_PATHS = /* @__PURE__ */ new Set([
+  "/api/webflow/publish",
+  "/api/webflow/domains",
+  "/api/webflow/script-cleanup",
+  "/api/v2/webflow-free-register",
+  "/api/v2/webflow-checkout-token"
 ]);
 var AUTH_RATE_PATHS = /* @__PURE__ */ new Set([
   "/api/auth/login",
   "/api/auth/signup",
   "/api/auth/request-code",
   "/api/auth/verify-code",
+  "/api/auth/transfer-ownership/authorize",
   "/api/onboarding/first-setup"
 ]);
 var CSRF_EXEMPT_PATHS = /* @__PURE__ */ new Set([
@@ -46878,8 +55026,10 @@ var CSRF_EXEMPT_PATHS = /* @__PURE__ */ new Set([
   "/api/admin/backfill-consent-r2",
   "/api/admin/backfill-stripe-subscriptions",
   "/api/admin/backfill-posthog",
+  "/api/admin/ga4-test",
   "/api/admin/backfill-clickup",
   "/api/admin/michele-clickup",
+  "/api/admin/test-scan-report",
   "/api/payment/subscription"
 ]);
 async function dispatchApiRoute(pathname, request, env2, ctx) {
@@ -46909,6 +55059,9 @@ async function dispatchApiRoute(pathname, request, env2, ctx) {
     case "/api/scan-site":
       response = await handleScanSite(request, env2, ctx);
       break;
+    case "/api/scan-site-consented":
+      response = await handleScanSiteConsented(request, env2, ctx);
+      break;
     case "/api/scan-pending":
       response = await handleScanPending(request, env2);
       break;
@@ -46936,6 +55089,12 @@ async function dispatchApiRoute(pathname, request, env2, ctx) {
       break;
     case "/api/auth/profile":
       response = await handleAuthProfile(request, env2);
+      break;
+    case "/api/auth/transfer-ownership/request":
+      response = await handleTransferOwnershipRequest(request, env2, ctx);
+      break;
+    case "/api/auth/transfer-ownership/authorize":
+      response = await handleTransferOwnershipAuthorize(request, env2);
       break;
     // — Onboarding
     case "/api/onboarding/first-setup":
@@ -46973,13 +55132,81 @@ async function dispatchApiRoute(pathname, request, env2, ctx) {
     case "/api/custom-cookie-rules":
       response = await handleCustomCookieRules(request, env2);
       break;
-    // — Consent logs
-    case "/api/consent-logs":
+    // — Consent logs (session-gated: web-app proxy forwards the sid cookie)
+    case "/api/consent-logs": {
+      const g = await requireConsentSession(request, env2);
+      if (!g.ok) {
+        response = Response.json({ success: false, error: g.error }, { status: g.status });
+        break;
+      }
       response = await handleConsentLogs(request, env2);
       break;
+    }
     // — Payment subscription check (Webflow app)
     case "/api/payment/subscription":
       response = await handlePaymentSubscription(request, env2);
+      break;
+    // — Webflow app billing (siteId-keyed): invoices + cancel + interval.
+    // KEPT and intentionally NOT in the wf identity gate — the LIVE Framer plugin
+    // still calls these singular /api/webflow/* paths directly and cannot mint a
+    // Webflow ID token. The authenticated copies the Webflow extension uses live at
+    // /api/wf/billings, /api/wf/cancel-subscriptions, /api/wf/switch-intervals.
+    case "/api/webflow/billing":
+      response = await handleWebflowBilling(request, env2);
+      break;
+    case "/api/webflow/cancel-subscription":
+      response = await handleWebflowCancelSubscription(request, env2);
+      break;
+    case "/api/webflow/switch-interval":
+      response = await handleWebflowSwitchInterval(request, env2);
+      break;
+    // — Framer plugin billing (authless, siteId-keyed): invoices + cancel + interval
+    case "/api/framer/billing":
+      response = await handleFramerBilling(request, env2);
+      break;
+    case "/api/framer/cancel-subscription":
+      response = await handleFramerCancelSubscription(request, env2);
+      break;
+    case "/api/framer/switch-interval":
+      response = await handleFramerSwitchInterval(request, env2);
+      break;
+    // — Framer plugin UPGRADE (JWT-authed, siteId-keyed): tier change + interval switch,
+    //   each with a prorated preview. See handlers/framerUpgrade.js.
+    case "/api/framer/upgrade/change-tier":
+      response = await handleFramerChangeTier(request, env2);
+      break;
+    case "/api/framer/upgrade/change-tier/preview":
+      response = await handleFramerChangeTierPreview(request, env2);
+      break;
+    case "/api/framer/upgrade/switch-interval":
+      response = await handleFramerSwitchInterval2(request, env2);
+      break;
+    case "/api/framer/upgrade/switch-interval/preview":
+      response = await handleFramerSwitchIntervalPreview(request, env2);
+      break;
+    // — Framer account ownership transfer (request step; authorize reuses /api/auth/*)
+    case "/api/framer/transfer-ownership/request":
+      response = await handleFramerTransferOwnershipRequest(request, env2, ctx);
+      break;
+    // — Legacy script cleanup (remove old auto-injected ConsentBit head script)
+    case "/api/webflow/script-cleanup":
+      response = request.method === "POST" ? await handleWebflowScriptCleanupRemove(request, env2) : await handleWebflowScriptCleanupReport(request, env2);
+      break;
+    // — Webflow OAuth install (browser redirects) + Designer status/publish
+    case "/api/webflow/oauth/authorize":
+      response = await handleWebflowOAuthAuthorize(request, env2);
+      break;
+    case "/api/webflow/oauth/callback":
+      response = await handleWebflowOAuthCallback(request, env2);
+      break;
+    case "/api/webflow/oauth/status":
+      response = await handleWebflowOAuthStatus(request, env2);
+      break;
+    case "/api/webflow/publish":
+      response = await handleWebflowPublish(request, env2);
+      break;
+    case "/api/webflow/domains":
+      response = await handleWebflowDomains(request, env2);
       break;
     // — Billing / payments
     case "/api/validate-promo":
@@ -46993,6 +55220,9 @@ async function dispatchApiRoute(pathname, request, env2, ctx) {
       break;
     case "/api/checkout-token":
       response = await handleCheckoutToken(request, env2);
+      break;
+    case "/api/v2/webflow-checkout-token":
+      response = await handleWebflowCheckoutToken(request, env2);
       break;
     case "/api/checkout-success-redirect":
       response = await handleCheckoutSuccessRedirect(request, env2);
@@ -47035,6 +55265,12 @@ async function dispatchApiRoute(pathname, request, env2, ctx) {
       break;
     case "/api/subscriptions/switch-interval/preview":
       response = await handleSwitchIntervalPreview(request, env2);
+      break;
+    case "/api/subscriptions/change-tier":
+      response = await handleChangeTier(request, env2);
+      break;
+    case "/api/subscriptions/change-tier/preview":
+      response = await handleChangeTierPreview(request, env2);
       break;
     case "/api/billing/setup-intent":
       response = await handleCreateSetupIntent(request, env2);
@@ -47129,11 +55365,51 @@ async function dispatchApiRoute(pathname, request, env2, ctx) {
     case "/api/admin/backfill-posthog":
       response = await handleAdminBackfillPosthog(request, env2);
       break;
+    case "/api/admin/ga4-test":
+      response = await handleAdminGa4Test(request, env2);
+      break;
     case "/api/admin/backfill-clickup":
       response = await handleAdminBackfillClickup(request, env2);
       break;
     case "/api/admin/michele-clickup":
       response = await handleAdminMicheleClickup(request, env2);
+      break;
+    case "/api/admin/test-scan-report":
+      response = await handleAdminTestScanReport(request, env2, ctx);
+      break;
+    // — Admin Dashboard (standalone Next.js app) — read/edit/delete users
+    case "/api/admin/dashboard/stats":
+      response = await handleAdminDashboardStats(request, env2);
+      break;
+    case "/api/admin/dashboard/users":
+      response = await handleAdminDashboardUsers(request, env2);
+      break;
+    case "/api/admin/dashboard/user":
+      response = await handleAdminDashboardUser(request, env2);
+      break;
+    case "/api/admin/dashboard/site":
+      response = await handleAdminDashboardSite(request, env2);
+      break;
+    case "/api/admin/dashboard/auth":
+      response = await handleAdminDashboardAuth(request, env2);
+      break;
+    case "/api/admin/dashboard/accounts":
+      response = await handleAdminDashboardAccounts(request, env2, ctx);
+      break;
+    case "/api/admin/dashboard/account-setup":
+      response = await handleAdminDashboardAccountSetup(request, env2);
+      break;
+    case "/api/admin/dashboard/account-recover":
+      response = await handleAdminDashboardRecover(request, env2, ctx);
+      break;
+    case "/api/admin/dashboard/audit":
+      response = await handleAdminDashboardAudit(request, env2);
+      break;
+    case "/api/admin/dashboard/scans":
+      response = await handleAdminDashboardScans(request, env2);
+      break;
+    case "/api/admin/dashboard/sites":
+      response = await handleAdminDashboardSites(request, env2);
       break;
     case "/api/check-legacy-script":
       response = await handleCheckLegacyScript(request, env2);
@@ -47161,12 +55437,26 @@ async function dispatchApiRoute(pathname, request, env2, ctx) {
     case "/api/legacy-consent-pdf-framer":
       response = await handleLegacyConsentPdfFramer(request, env2);
       break;
-    case "/api/consent-pdf":
+    // — Consent PDF (session OR a valid signed download token from CSV-embedded links)
+    case "/api/consent-pdf": {
+      const g = await requireConsentPdfAccess(request, env2);
+      if (!g.ok) {
+        response = Response.json({ success: false, error: g.error }, { status: g.status });
+        break;
+      }
       response = await handleConsentPdf(request, env2);
       break;
-    case "/api/consent-csv":
+    }
+    // — Consent CSV (session-gated: web-app proxy forwards the sid cookie)
+    case "/api/consent-csv": {
+      const g = await requireConsentSession(request, env2);
+      if (!g.ok) {
+        response = Response.json({ success: false, error: g.error }, { status: g.status });
+        break;
+      }
       response = await handleConsentCsv(request, env2);
       break;
+    }
     // — Bidirectional sync: receives events from dashboard-server
     case "/api/sync/event":
       response = await handleSyncEvent(request, env2);
@@ -47188,8 +55478,28 @@ async function executeScheduledScans(env2, ctx) {
   await ensureSchema(db);
   try {
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    const scheduledScans = await getDueScheduledScans(db);
-    console.log("[Cron] executeScheduledScans \u2014", { time: now, dueScans: scheduledScans.length });
+    const dueRaw = await getDueScheduledScans(db);
+    const bySite = /* @__PURE__ */ new Map();
+    for (const s of dueRaw) {
+      const prev = bySite.get(s.siteId);
+      const createdAt = s.createdAt || s.createdat || "";
+      if (!prev || String(createdAt) > String(prev.createdAt || prev.createdat || "")) {
+        if (prev) {
+          try {
+            await deactivateScheduledScan(db, prev.id, now);
+          } catch (_) {
+          }
+        }
+        bySite.set(s.siteId, s);
+      } else {
+        try {
+          await deactivateScheduledScan(db, s.id, now);
+        } catch (_) {
+        }
+      }
+    }
+    const scheduledScans = [...bySite.values()];
+    console.log("[Cron] executeScheduledScans \u2014", { time: now, dueRaw: dueRaw.length, dueScans: scheduledScans.length });
     const executed = [];
     for (const scheduledScan of scheduledScans) {
       try {
@@ -47219,20 +55529,34 @@ async function executeScheduledScans(env2, ctx) {
             continue;
           }
         }
+        const isOnce = scheduledScan.frequency === "once";
+        let newNextRunAt = null;
+        if (!isOnce) {
+          newNextRunAt = calculateNextRunAt(scheduledScan.scheduledAt, scheduledScan.frequency, scheduledScan.nextRunAt);
+          let guard = 0;
+          while (new Date(newNextRunAt).getTime() <= Date.now() && guard < 1e3) {
+            newNextRunAt = calculateNextRunAt(scheduledScan.scheduledAt, scheduledScan.frequency, newNextRunAt);
+            guard++;
+          }
+        }
+        const claimed = await claimDueScheduledScan(db, {
+          id: scheduledScan.id,
+          currentNextRunAt: scheduledScan.nextRunAt,
+          once: isOnce,
+          newNextRunAt,
+          now
+        });
+        if (!claimed) {
+          executed.push({ id: scheduledScan.id, status: "skipped", reason: "already_claimed" });
+          continue;
+        }
         const scanRequest = new Request("https://internal/scan-site", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ siteId: scheduledScan.siteId })
         });
-        await handleScanSite(scanRequest, env2, ctx);
-        if (scheduledScan.frequency === "once") {
-          await deactivateScheduledScan(db, scheduledScan.id, now);
-          executed.push({ id: scheduledScan.id, status: "completed", deactivated: true });
-        } else {
-          const nextRunAt = calculateNextRunAt(scheduledScan.scheduledAt, scheduledScan.frequency, scheduledScan.nextRunAt);
-          await updateScheduledScanAfterRun(db, scheduledScan.id, now, nextRunAt);
-          executed.push({ id: scheduledScan.id, status: "completed" });
-        }
+        await handleScanSite(scanRequest, env2, ctx, { acceptConsent: true });
+        executed.push({ id: scheduledScan.id, status: "completed", deactivated: isOnce });
       } catch (err) {
         console.error(`[Cron] Failed to execute scheduled scan ${scheduledScan.id}:`, err);
         executed.push({ id: scheduledScan.id, status: "failed", error: err.message });
@@ -47313,6 +55637,60 @@ async function processSubscriptionQueue(env2) {
   }
 }
 __name(processSubscriptionQueue, "processSubscriptionQueue");
+var FINAL_REMINDER_DELAY_DAYS = 5;
+async function processFinalPaymentReminders(env2, ctx) {
+  const db = env2.CONSENT_WEBAPP;
+  if (!db || !env2.STRIPE_SECRET_KEY) return;
+  try {
+    await ensureSchema(db);
+  } catch (err) {
+    console.error("[Cron] processFinalPaymentReminders ensureSchema failed", err);
+    return;
+  }
+  const cutoff = new Date(Date.now() - FINAL_REMINDER_DELAY_DAYS * 864e5).toISOString();
+  let pending;
+  try {
+    pending = await getPendingFinalPaymentReminders(db, cutoff, 20);
+  } catch (err) {
+    console.error("[Cron] getPendingFinalPaymentReminders failed", err);
+    return;
+  }
+  if (pending.length === 0) return;
+  console.log("[Cron] final dunning reminders due:", pending.length);
+  for (const row of pending) {
+    const invoiceId = getRow(row, "invoiceId");
+    const to = getRow(row, "recipientEmail");
+    const name = getRow(row, "recipientName") || "";
+    try {
+      const res = await fetch(`https://api.stripe.com/v1/invoices/${invoiceId}`, {
+        headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` }
+      });
+      const invoice = await res.json();
+      if (!res.ok) {
+        console.warn("[Cron] final reminder: Stripe invoice fetch failed for", invoiceId, invoice?.error?.message);
+        continue;
+      }
+      const stillOwing = invoice.status === "open" || invoice.status === "past_due";
+      const claimed = await claimPaymentFailureEmail(db, {
+        invoiceId,
+        reminderNumber: 3,
+        recipientEmail: to,
+        recipientName: name
+      });
+      if (!claimed) continue;
+      if (!stillOwing) {
+        console.log("[Cron] final reminder skipped \u2014 invoice", invoiceId, "is", invoice.status);
+        continue;
+      }
+      const billingUrl = (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "");
+      sendPaymentFailureEmail(env2, ctx, { to, name, updatePaymentUrl: billingUrl, reminderNumber: 3 });
+      console.log("[Cron] final dunning reminder sent for invoice", invoiceId);
+    } catch (err) {
+      console.error("[Cron] final reminder failed for invoice", invoiceId, err);
+    }
+  }
+}
+__name(processFinalPaymentReminders, "processFinalPaymentReminders");
 var index_default = {
   async scheduled(event, env2, ctx) {
     console.log("[Worker] scheduled cron fired \u2014", { cron: event?.cron, scheduledTime: event?.scheduledTime });
@@ -47320,7 +55698,8 @@ var index_default = {
       Promise.all([
         executeScheduledScans(env2, ctx),
         processSubscriptionQueue(env2),
-        reportStripeMeteredUsage(env2)
+        reportStripeMeteredUsage(env2),
+        processFinalPaymentReminders(env2, ctx)
       ])
     );
   },
@@ -47347,6 +55726,60 @@ var index_default = {
     if (!globalRl.ok) {
       const r = withSecurityHeaders(rateLimitedResponse(globalRl));
       return PUBLIC_PATHS.has(pathname) ? withPublicCors(r, request) : withCors(r, request, env2);
+    }
+    if (pathname.startsWith("/api/wf/")) {
+      const req = request;
+      console.log(`[wf] \u2192 ${request.method} ${pathname} siteHdr=${request.headers.get("X-Webflow-Site-Id") || "-"} hasToken=${!!request.headers.get("Authorization")}`);
+      const auth = await requireWebflowIdentity(req, env2, {
+        // oauth/status must still answer for a not-yet-authorized site (no token
+        // stored) so the app can show the authorize screen. Such a site has no
+        // stored data, so allowing the read leaks nothing.
+        allowUnauthorizedSite: pathname === "/api/wf/oauth/status"
+      });
+      console.log(`[wf] ${pathname} \u2192 ${auth.ok ? "OK" : "DENIED " + auth.status + " " + auth.code}`);
+      if (!auth.ok) {
+        const denied = withSecurityHeaders(
+          Response.json({ success: false, error: auth.error, code: auth.code }, { status: auth.status })
+        );
+        return withCors(denied, request, env2);
+      }
+      const sub = pathname.slice("/api/wf/".length);
+      const handler = WEBFLOW_APP_ROUTES[sub];
+      if (!handler) {
+        const nf = withSecurityHeaders(Response.json({ success: false, error: "Not Found" }, { status: 404 }));
+        return withCors(nf, request, env2);
+      }
+      if (WF_CONSENT_REPORT_ROUTES.has(sub)) {
+        const gate = await requireActiveSubscriptionForConsentReport(env2, auth.identity.siteId);
+        if (!gate.ok) {
+          const denied = withSecurityHeaders(
+            Response.json(
+              { success: false, error: gate.error, code: gate.code, subscriptionStatus: gate.subscriptionStatus },
+              { status: gate.status }
+            )
+          );
+          return withCors(denied, request, env2);
+        }
+      }
+      let wfResp;
+      try {
+        wfResp = await handler(req, env2, ctx, auth.identity);
+      } catch (err) {
+        console.error("[Worker] /api/wf handler error:", err);
+        wfResp = Response.json({ success: false, error: "Internal server error" }, { status: 500 });
+      }
+      return withCors(withSecurityHeaders(wfResp), request, env2);
+    }
+    if (LEGACY_WEBFLOW_AUTH_PATHS.has(pathname)) {
+      const auth = await requireWebflowIdentity(request, env2);
+      if (!auth.ok) {
+        const denied = await wrapAndEncodeResponse(
+          withSecurityHeaders(
+            Response.json({ success: false, error: auth.error, code: auth.code }, { status: auth.status })
+          )
+        );
+        return PUBLIC_PATHS.has(pathname) ? withPublicCors(denied, request) : withCors(denied, request, env2);
+      }
     }
     if (pathname === "/api/pageview") {
       const pvRl = checkRateLimit(`${ip}:pv`, 60);
@@ -47391,7 +55824,7 @@ var index_default = {
     } catch (err) {
       console.error("[Worker] Unhandled error:", err);
       response = Response.json({ success: false, error: "Internal server error" }, { status: 500 });
-      isPublic = false;
+      isPublic = PUBLIC_PATHS.has(pathname);
     }
     response = withSecurityHeaders(response);
     if (!isPublic && pathname !== "/api/webhooks/stripe") {

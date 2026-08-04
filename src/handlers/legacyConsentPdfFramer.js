@@ -6,6 +6,7 @@
 
 import puppeteer from '@cloudflare/puppeteer';
 import { getSessionById } from '../services/db.js';
+import { requireActiveSubscriptionForConsentReport } from '../services/subscriptionGate.js';
 import { verifyDownloadToken } from '../utils/signedToken.js';
 import { fetchImageAsDataUrl } from './consentPdf.js';
 
@@ -192,6 +193,11 @@ export async function handleLegacyConsentPdfFramer(request, env) {
   ).catch(() => null);
 
   if (!site) return new Response('Site not found', { status: 404 });
+
+  // Paid deliverable — applies to the signed-link path too, so an old CSV's embedded
+  // PDF links stop working once the subscription lapses.
+  const gate = await requireActiveSubscriptionForConsentReport(env, site.id);
+  if (!gate.ok) return new Response(gate.error, { status: gate.status });
 
   const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
   if (!platformSiteId) return new Response('Site missing platformSiteId', { status: 400 });

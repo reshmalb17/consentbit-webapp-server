@@ -154,18 +154,26 @@ export async function handleWebflowPublish(request, env) {
     // the `sites:write` scope → user must re-authorize.
     const wfMsg = data?.message || data?.msg || data?.code || `HTTP ${res.status}`;
     const needsReauth = res.status === 403 || /scope/i.test(String(wfMsg));
+    // Webflow rate-limits site publishes to ~once per minute. A rapid second
+    // Publish click returns 429 — that's not a real failure (the site is already
+    // published from the first click), so tag it distinctly and preserve the 429
+    // so the client can show a friendly "just published" message instead of the
+    // generic verification-error/Retry state.
+    const rateLimited = res.status === 429;
     console.warn(`${TAG} Webflow publish failed (HTTP ${res.status})`, data);
     return Response.json(
       {
         success: false,
-        error: `Webflow publish failed: ${wfMsg}`,
-        code: needsReauth ? 'MISSING_PUBLISH_SCOPE' : 'PUBLISH_FAILED',
+        error: rateLimited
+          ? 'Webflow allows one publish per minute. Your site was just published — please wait a moment before publishing again.'
+          : `Webflow publish failed: ${wfMsg}`,
+        code: rateLimited ? 'RATE_LIMITED' : needsReauth ? 'MISSING_PUBLISH_SCOPE' : 'PUBLISH_FAILED',
         ...(needsReauth
           ? { hint: 'Re-authorize the app — the stored token is missing the sites:write scope.' }
           : {}),
         webflowStatus: res.status,
       },
-      { status: res.status === 403 ? 403 : 502 }
+      { status: rateLimited ? 429 : res.status === 403 ? 403 : 502 }
     );
   }
 

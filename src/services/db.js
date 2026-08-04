@@ -621,6 +621,23 @@ export async function ensureSchema(db) {
     )
   `).run();
 
+  // SentPaymentFailureEmail: idempotency + scheduling for dunning emails. Stripe
+  // retries an invoice up to 8 times and re-delivers each webhook until we 2xx,
+  // so without this a customer received ~20+ identical "final notice" mails per
+  // invoice. The (invoiceId, reminderNumber) PK caps it at one email per tier —
+  // 3 per invoice, no matter how many attempts or re-deliveries. The recipient is
+  // stored so the cron can send reminder 3 later without re-deriving it.
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS SentPaymentFailureEmail (
+      invoiceId TEXT NOT NULL,
+      reminderNumber INTEGER NOT NULL,
+      recipientEmail TEXT,
+      recipientName TEXT,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (invoiceId, reminderNumber)
+    )
+  `).run();
+
   // SubscriptionQueue: pending bulk licenses; cron creates one Stripe subscription per row, deletes on success
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS SubscriptionQueue (
@@ -1541,6 +1558,14 @@ export async function incrementPromoRedemption(db, promoId) {
 }
 
 // --- Plan helpers ---
+// Annual figures must match the live Stripe prices exactly — Stripe is what
+// actually charges the card, and this seed overwrites the Plan rows on every
+// ensureSchema() call, so a mismatch here silently re-corrupts the table.
+// Stripe applies a flat 20% annual discount, rounded to the dollar:
+//   Basic     $9  x12 = $108 -> $86    Essential $20 x12 = $240 -> $192
+//   Growth    $56 x12 = $672 -> $538
+// yearlyAmountCents is the derived "per month, billed annually" display value
+// (total / 12, rounded to the cent) — the total is the authoritative number.
 export async function ensureDefaultPlans(db) {
   const now = new Date().toISOString();
   const plans = [
@@ -1562,8 +1587,8 @@ export async function ensureDefaultPlans(db) {
       id: 'basic',
       name: 'Basic plan',
       monthlyAmountCents: 900,
-      yearlyAmountCents: 800,
-      yearlyTotalCents: 9600,
+      yearlyAmountCents: 717, // 8600 / 12
+      yearlyTotalCents: 8600,
       domainsIncluded: 1,
       scansIncluded: 750,
       pageviewsIncluded: 100000,
@@ -1590,8 +1615,8 @@ export async function ensureDefaultPlans(db) {
       id: 'growth',
       name: 'Growth plan',
       monthlyAmountCents: 5600,
-      yearlyAmountCents: 4200,
-      yearlyTotalCents: 50400,
+      yearlyAmountCents: 4483, // 53800 / 12
+      yearlyTotalCents: 53800,
       domainsIncluded: 1,
       scansIncluded: 10000,
       pageviewsIncluded: 2000000,
@@ -2186,6 +2211,52 @@ export async function markSubscriptionQueueFailed(db, id, errorMessage) {
     .prepare('UPDATE SubscriptionQueue SET status = ?1, errorMessage = ?2, updatedAt = ?3 WHERE id = ?4')
     .bind('failed', errorMessage || null, now, id)
     .run();
+}
+
+// --- Dunning email helpers ---
+
+/**
+ * Atomically claim the right to send one dunning email for (invoice, tier).
+ * INSERT OR IGNORE means only the first caller sees changes > 0 — concurrent
+ * webhook re-deliveries of the same event all lose the race and send nothing.
+ *
+ * @returns {Promise<boolean>} true if this caller should send the email
+ */
+export async function claimPaymentFailureEmail(db, { invoiceId, reminderNumber, recipientEmail, recipientName }) {
+  if (!invoiceId) return true; // nothing to key on — fall back to sending
+  const res = await db
+    .prepare(
+      `INSERT OR IGNORE INTO SentPaymentFailureEmail (invoiceId, reminderNumber, recipientEmail, recipientName, createdAt)
+       VALUES (?1, ?2, ?3, ?4, ?5)`
+    )
+    .bind(invoiceId, reminderNumber, recipientEmail || null, recipientName || null, new Date().toISOString())
+    .run();
+  return Number(res?.meta?.changes ?? 0) > 0;
+}
+
+/**
+ * Invoices whose reminder-2 email went out before `cutoffIso` and that have not
+ * had a reminder 3 claimed yet. Drives the delayed final notice from the cron.
+ * cutoffIso must be an ISO string — createdAt is stored as ISO, and SQLite's
+ * datetime() renders a space-separated form that would not compare correctly.
+ */
+export async function getPendingFinalPaymentReminders(db, cutoffIso, limit = 20) {
+  const { results } = await db
+    .prepare(
+      `SELECT s2.invoiceId AS invoiceId, s2.recipientEmail AS recipientEmail, s2.recipientName AS recipientName
+         FROM SentPaymentFailureEmail s2
+         LEFT JOIN SentPaymentFailureEmail s3
+           ON s3.invoiceId = s2.invoiceId AND s3.reminderNumber = 3
+        WHERE s2.reminderNumber = 2
+          AND s3.invoiceId IS NULL
+          AND s2.recipientEmail IS NOT NULL
+          AND s2.createdAt <= ?1
+        ORDER BY s2.createdAt
+        LIMIT ?2`
+    )
+    .bind(cutoffIso, limit)
+    .all();
+  return results || [];
 }
 
 // --- PaymentEvent helpers ---

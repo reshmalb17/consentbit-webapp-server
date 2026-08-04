@@ -7,7 +7,7 @@
  *   BREVO_API_KEY      — your Brevo API key (v3)
  *   BREVO_FROM_EMAIL   — verified sender address, e.g. hello@consentbit.com
  *   BREVO_FROM_NAME    — sender display name, defaults to "ConsentBit"
- *   WEBAPP_PUBLIC_URL  — production webapp URL, e.g. https://app.consentbit.com
+ *   WEBAPP_PUBLIC_URL  — production webapp URL, e.g. https://accounts.consentbit.com
  *
  * Three emails are sent automatically:
  *   1. Welcome       — immediately after a new user completes OTP signup
@@ -546,7 +546,7 @@ Team ConsentBit
  */
 export function sendPaymentFailureEmail(env, ctx, { to, name, updatePaymentUrl, reminderNumber = 1 }) {
   const displayName   = name || 'there';
-  const billingUrl    = updatePaymentUrl || ((env.WEBAPP_PUBLIC_URL || 'https://app.consentbit.com').replace(/\/$/, '') + '/billing');
+  const billingUrl    = updatePaymentUrl || ((env.WEBAPP_PUBLIC_URL || 'https://accounts.consentbit.com').replace(/\/$/, ''));
 
   const configs = {
     1: {
@@ -632,7 +632,7 @@ Support Team
 export function sendScanLimitEmail(env, ctx, { to, name, domain, scansLimit, upgradeUrl }) {
   const displayName   = name || 'there';
   const displayDomain = domain || 'your website';
-  const billingUrl    = upgradeUrl || ((env.WEBAPP_PUBLIC_URL || 'https://app.consentbit.com').replace(/\/$/, '') + '/billing');
+  const billingUrl    = upgradeUrl || ((env.WEBAPP_PUBLIC_URL || 'https://accounts.consentbit.com').replace(/\/$/, ''));
 
   const subject = `Your scheduled scan was paused; scan limit reached`;
 

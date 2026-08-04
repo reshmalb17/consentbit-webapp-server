@@ -1,5 +1,6 @@
 // handlers/legacyConsentCsv.js
 import { getSessionById } from '../services/db.js';
+import { requireActiveSubscriptionForConsentReport } from '../services/subscriptionGate.js';
 import { buildSearchKeys, getConsentRowsFromR2, getConsentRowsFromKV } from './legacyConsentHelpers.js';
 import { createDownloadToken } from '../utils/signedToken.js';
 
@@ -78,6 +79,10 @@ export async function handleLegacyConsentCsv(request, env) {
     .catch(() => null);
 
   if (!site) return new Response('Legacy site not found', { status: 404 });
+
+  // Paid deliverable — no export for lapsed/cancelled/deleted subscriptions.
+  const gate = await requireActiveSubscriptionForConsentReport(env, site.id);
+  if (!gate.ok) return new Response(gate.error, { status: gate.status });
 
   const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
   const kv = env.WEBFLOW_AUTHENTICATION;
