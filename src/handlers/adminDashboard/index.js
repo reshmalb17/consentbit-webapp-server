@@ -16,9 +16,11 @@
 //   GET    /api/admin/dashboard/stats
 //   GET    /api/admin/dashboard/users?platform=&search=
 //   GET    /api/admin/dashboard/user?id=<id>
-//   PATCH  /api/admin/dashboard/user?id=<id>          body: { name?, email? }   admin only
+//   PATCH  /api/admin/dashboard/user?id=<id>   { name?, email?, billingEmail? } admin only
 //   DELETE /api/admin/dashboard/user?id=<id>&confirm=<email>                    admin only
+//   PATCH  /api/admin/dashboard/site?id=<id>   { name?, domain?, ... }          admin only
 //   DELETE /api/admin/dashboard/site?ids=<id,...>                               admin only
+//   PATCH  /api/admin/dashboard/organization?id=<id>  { name }                  admin only
 //   GET    /api/admin/dashboard/sites?search=&platform=&banner=&regulation=&year=&month=&audience=
 //   GET    /api/admin/dashboard/scans?search=&days=&year=&month=&claimed=&env=  cookie-checker activity
 //   GET    /api/admin/dashboard/accounts              list logins (no keys ever)
@@ -34,6 +36,8 @@ import {
   getSiteStats,
   getUserDetail,
   updateUser,
+  updateOrganization,
+  updateSite,
   deleteUserEverywhere,
   deleteSites,
 } from './queries.js';
@@ -608,11 +612,53 @@ export async function handleAdminDashboardSite(request, env) {
   if (!caller) return unauthorized();
   if (caller.role !== 'admin') return forbidden();
 
+  const url = new URL(request.url);
+
+  // PATCH /api/admin/dashboard/site?id=<id> — edit one site's own fields. The
+  // billing rows hanging off its organization are Stripe's and stay read-only.
+  if (request.method === 'PATCH') {
+    const id = url.searchParams.get('id');
+    if (!id) return Response.json({ success: false, error: 'Missing id' }, { status: 400 });
+
+    let body = {};
+    try {
+      body = await request.json();
+    } catch (_) {
+      return Response.json({ success: false, error: 'Bad request' }, { status: 400 });
+    }
+
+    const fields = {};
+    for (const k of ['name', 'domain', 'customDomain', 'stagingUrl', 'platform',
+                     'banner_type', 'region_mode', 'verified']) {
+      if (k in body) fields[k] = body[k];
+    }
+
+    const result = await updateSite(db, id, fields);
+    if (!result.ok) return Response.json({ success: false, error: result.error }, { status: 400 });
+
+    const after = await db
+      .prepare(
+        `SELECT id, organizationId, name, domain, customDomain, stagingUrl, platform,
+                banner_type, region_mode, verified
+           FROM Site WHERE id = ?`
+      )
+      .bind(id)
+      .first();
+
+    await logAudit(db, request, {
+      actor: caller.username,
+      actorRole: caller.role,
+      action: 'site.edit',
+      target: after?.domain || id,
+      detail: { id, from: result.before, to: after },
+    });
+    return Response.json({ ok: true, site: after });
+  }
+
   if (request.method !== 'DELETE') {
     return Response.json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
   }
 
-  const url = new URL(request.url);
   const idsParam = url.searchParams.get('ids') || '';
   const ids = idsParam.split(',').map((s) => s.trim()).filter(Boolean);
   if (!ids.length) {
@@ -637,9 +683,58 @@ export async function handleAdminDashboardSite(request, env) {
 }
 
 /**
+ * PATCH /api/admin/dashboard/organization?id=<id>  body: { name }
+ * The only editable field — ownerUserId is a real ownership transfer, which has
+ * its own authorized flow, and the billing rows below it belong to Stripe.
+ */
+export async function handleAdminDashboardOrganization(request, env) {
+  const db = getDb(env);
+  if (!db) return noDb();
+  const caller = await resolveCaller(request, env, db);
+  if (!caller) return unauthorized();
+  if (caller.role !== 'admin') return forbidden();
+
+  if (request.method !== 'PATCH') {
+    return Response.json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
+  }
+
+  const id = new URL(request.url).searchParams.get('id');
+  if (!id) return Response.json({ success: false, error: 'Missing id' }, { status: 400 });
+
+  let body = {};
+  try {
+    body = await request.json();
+  } catch (_) {
+    return Response.json({ success: false, error: 'Bad request' }, { status: 400 });
+  }
+
+  try {
+    const fields = {};
+    if ('name' in body) fields.name = body.name;
+    const result = await updateOrganization(db, id, fields);
+    if (!result.ok) return Response.json({ success: false, error: result.error }, { status: 400 });
+
+    const after = await db
+      .prepare(`SELECT id, name FROM Organization WHERE id = ?`)
+      .bind(id)
+      .first();
+    await logAudit(db, request, {
+      actor: caller.username,
+      actorRole: caller.role,
+      action: 'organization.edit',
+      target: after?.name || id,
+      detail: { id, from: result.before, to: after },
+    });
+    return Response.json({ ok: true, organization: after });
+  } catch (err) {
+    return Response.json({ success: false, error: err?.message || 'Failed' }, { status: 500 });
+  }
+}
+
+/**
  * /api/admin/dashboard/user?id=<id>
  *   GET    → detail
- *   PATCH  → update { name?, email? }
+ *   PATCH  → update { name?, email?, billingEmail? } (an email change cascades)
  *   DELETE → cascade delete (requires &confirm=<email>)
  */
 export async function handleAdminDashboardUser(request, env) {
@@ -675,6 +770,7 @@ export async function handleAdminDashboardUser(request, env) {
       const fields = {};
       if ('name' in body) fields.name = body.name === '' ? null : body.name;
       if ('email' in body) fields.email = String(body.email);
+      if ('billingEmail' in body) fields.billingEmail = body.billingEmail;
 
       const before = await getUserDetail(db, id);
       const result = await updateUser(db, id, fields);
@@ -689,11 +785,27 @@ export async function handleAdminDashboardUser(request, env) {
         target: detail?.email || id,
         detail: {
           id,
-          from: { name: before?.name ?? null, email: before?.email ?? null },
-          to: { name: detail?.name ?? null, email: detail?.email ?? null },
+          from: {
+            name: before?.name ?? null,
+            email: before?.email ?? null,
+            billingEmail: before?.billingEmail ?? null,
+          },
+          to: {
+            name: detail?.name ?? null,
+            email: detail?.email ?? null,
+            billingEmail: detail?.billingEmail ?? null,
+          },
+          // Follow-on rows a rename touched, so the log shows the blast radius.
+          cascade: result.cascade || {},
+          cascadeErrors: result.errors?.length ? result.errors : undefined,
         },
       });
-      return Response.json({ ok: true, user: detail });
+      return Response.json({
+        ok: true,
+        user: detail,
+        cascade: result.cascade || {},
+        errors: result.errors || [],
+      });
     }
 
     if (request.method === 'DELETE') {
