@@ -21,7 +21,9 @@
 //   PATCH  /api/admin/dashboard/site?id=<id>   { name?, domain?, ... }          admin only
 //   DELETE /api/admin/dashboard/site?ids=<id,...>                               admin only
 //   PATCH  /api/admin/dashboard/organization?id=<id>  { name }                  admin only
+//   PATCH  /api/admin/dashboard/subscription?id=<id>  { planId?, status?, ... } admin only
 //   GET    /api/admin/dashboard/sites?search=&platform=&banner=&regulation=&year=&month=&audience=
+//   GET    /api/admin/dashboard/usage?month=&state=&plan=&platform=&legacy=      per-site usage
 //   GET    /api/admin/dashboard/scans?search=&days=&year=&month=&claimed=&env=  cookie-checker activity
 //   GET    /api/admin/dashboard/accounts              list logins (no keys ever)
 //   POST   /api/admin/dashboard/accounts              { action: 'create' }      admin only
@@ -33,11 +35,13 @@ import {
   getStats,
   listUsers,
   listSites,
+  listUsage,
   getSiteStats,
   getUserDetail,
   updateUser,
   updateOrganization,
   updateSite,
+  updateSubscription,
   deleteUserEverywhere,
   deleteSites,
 } from './queries.js';
@@ -270,9 +274,45 @@ export async function handleAdminDashboardSites(request, env) {
       year: url.searchParams.get('year') || '',
       month: url.searchParams.get('month') || '',
       audience: url.searchParams.get('audience') || 'all',
+      plan: url.searchParams.get('plan') || 'all',
+      legacy: url.searchParams.get('legacy') || 'all',
       limit: url.searchParams.get('limit') || undefined,
     });
     return Response.json({ sites, stats: await getSiteStats(db), count: sites.length });
+  } catch (err) {
+    return Response.json({ success: false, error: err?.message || 'Failed' }, { status: 500 });
+  }
+}
+
+/**
+ * GET /api/admin/dashboard/usage — per-site scan + pageview usage for a month,
+ * against each site's plan allowance.
+ *
+ * Read-only, so viewers may call it: it is consumption data with no key material.
+ * Filters: search, platform, plan, legacy, audience, state, month, limit.
+ */
+export async function handleAdminDashboardUsage(request, env) {
+  if (request.method !== 'GET') {
+    return Response.json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
+  }
+  const db = getDb(env);
+  if (!db) return noDb();
+  const caller = await resolveCaller(request, env, db);
+  if (!caller) return unauthorized();
+
+  const url = new URL(request.url);
+  try {
+    const usage = await listUsage(db, {
+      search: (url.searchParams.get('search') || '').trim(),
+      platform: url.searchParams.get('platform') || 'all',
+      plan: url.searchParams.get('plan') || 'all',
+      legacy: url.searchParams.get('legacy') || 'all',
+      audience: url.searchParams.get('audience') || 'all',
+      state: url.searchParams.get('state') || 'all',
+      month: url.searchParams.get('month') || '',
+      limit: url.searchParams.get('limit') || undefined,
+    });
+    return Response.json({ ...usage, count: usage.rows.length });
   } catch (err) {
     return Response.json({ success: false, error: err?.message || 'Failed' }, { status: 500 });
   }
@@ -590,9 +630,10 @@ export async function handleAdminDashboardUsers(request, env) {
   const month = url.searchParams.get('month') || '';
   const audience = url.searchParams.get('audience') || 'all';
   const billing = url.searchParams.get('billing') || 'all';
+  const legacy = url.searchParams.get('legacy') || 'all';
 
   try {
-    const users = await listUsers(db, { platform, search, plan, status, year, month, audience, billing });
+    const users = await listUsers(db, { platform, search, plan, status, year, month, audience, billing, legacy });
     return Response.json({ users, count: users.length });
   } catch (err) {
     return Response.json({ success: false, error: err?.message || 'Failed' }, { status: 500 });
@@ -726,6 +767,66 @@ export async function handleAdminDashboardOrganization(request, env) {
       detail: { id, from: result.before, to: after },
     });
     return Response.json({ ok: true, organization: after });
+  } catch (err) {
+    return Response.json({ success: false, error: err?.message || 'Failed' }, { status: 500 });
+  }
+}
+
+/**
+ * PATCH /api/admin/dashboard/subscription?id=<id>
+ *   body: { planId?, planType?, interval?, status?, amountCents?,
+ *           currentPeriodEnd?, cancelAtPeriodEnd?, licenseKey? }
+ *
+ * Admin only, like every other write here. The Stripe identifiers are absent by
+ * design — see the note above updateSubscription().
+ */
+export async function handleAdminDashboardSubscription(request, env) {
+  const db = getDb(env);
+  if (!db) return noDb();
+  const caller = await resolveCaller(request, env, db);
+  if (!caller) return unauthorized();
+  if (caller.role !== 'admin') return forbidden();
+
+  if (request.method !== 'PATCH') {
+    return Response.json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
+  }
+
+  const id = new URL(request.url).searchParams.get('id');
+  if (!id) return Response.json({ success: false, error: 'Missing id' }, { status: 400 });
+
+  let body = {};
+  try {
+    body = await request.json();
+  } catch (_) {
+    return Response.json({ success: false, error: 'Bad request' }, { status: 400 });
+  }
+
+  try {
+    const fields = {};
+    for (const k of ['planId', 'planType', 'interval', 'status', 'amountCents',
+                     'currentPeriodEnd', 'cancelAtPeriodEnd', 'licenseKey']) {
+      if (k in body) fields[k] = body[k];
+    }
+
+    const result = await updateSubscription(db, id, fields);
+    if (!result.ok) return Response.json({ success: false, error: result.error }, { status: 400 });
+
+    const after = await db
+      .prepare(
+        `SELECT id, organizationId, planId, planType, interval, status, amountCents,
+                currentPeriodEnd, cancelAtPeriodEnd, licenseKey
+           FROM Subscription WHERE id = ?`
+      )
+      .bind(id)
+      .first();
+    await logAudit(db, request, {
+      actor: caller.username,
+      actorRole: caller.role,
+      action: 'subscription.edit',
+      target: id,
+      detail: { id, from: result.before, to: after },
+    });
+    return Response.json({ ok: true, subscription: after });
   } catch (err) {
     return Response.json({ success: false, error: err?.message || 'Failed' }, { status: 500 });
   }
