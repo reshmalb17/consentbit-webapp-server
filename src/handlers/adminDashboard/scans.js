@@ -186,9 +186,9 @@ export function classifyHost(host) {
 
 /**
  * SQL predicate matching the requested staging groups, plus the binds it needs.
- * Applied in SQL rather than to the mapped rows for the same reason year/month
- * are: the query is capped by LIMIT, so post-filtering would search only the most
- * recent N rows instead of the whole table.
+ * Applied in SQL rather than to the mapped rows for the same reason the date
+ * range is: the query is capped by LIMIT, so post-filtering would search only
+ * the most recent N rows instead of the whole table.
  *
  * @param {string[]} [keys] group keys to match; defaults to all of them.
  */
@@ -200,12 +200,7 @@ function stagingPredicate(col, keys) {
   return { sql: `(${terms.join(' OR ')})`, binds: patterns };
 }
 
-/** ISO cutoff for a "last N days" filter, or null for no bound. */
-function cutoffIso(days) {
-  const n = Number(days);
-  if (!n || n <= 0) return null;
-  return new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
-}
+const YMD = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
  * Every URL put through the public checker, newest first.
@@ -214,7 +209,7 @@ function cutoffIso(days) {
  * one this event produced — scan_reports keeps one row per domain. So grade and
  * cookie count describe the domain's current state; submitted_at is the event's.
  */
-export async function listScanEvents(db, { search, days, year, month, claimed, env, limit } = {}) {
+export async function listScanEvents(db, { search, from, to, claimed, env, limit } = {}) {
   await ensureScanClaimsTable(db);
 
   const where = [];
@@ -229,25 +224,20 @@ export async function listScanEvents(db, { search, days, year, month, claimed, e
     );
     binds.push(`%${search}%`, `%${search}%`, `%${search}%`);
   }
-  const cutoff = cutoffIso(days);
-  if (cutoff) {
-    where.push('e.submitted_at >= ?');
-    binds.push(cutoff);
-  }
-  // Year/month are matched by slicing the stored ISO timestamp rather than with
-  // SQLite's date functions, so a malformed value can never silently become NULL
-  // and drop the row. This mirrors yearOf()/monthOf() in queries.js.
+  // Submission date window, matched by slicing the stored ISO timestamp rather
+  // than with SQLite's date functions, so a malformed value can never silently
+  // become NULL and drop the row.
   //
   // It also has to happen HERE, in SQL, and not on the mapped results: the query
   // is capped by LIMIT, so post-filtering would only ever search within the most
   // recent N rows instead of the whole table.
-  if (year) {
-    where.push('substr(e.submitted_at, 1, 4) = ?');
-    binds.push(String(year));
+  if (YMD.test(String(from))) {
+    where.push('substr(e.submitted_at, 1, 10) >= ?');
+    binds.push(String(from));
   }
-  if (month) {
-    where.push('substr(e.submitted_at, 6, 2) = ?');
-    binds.push(String(month).padStart(2, '0'));
+  if (YMD.test(String(to))) {
+    where.push('substr(e.submitted_at, 1, 10) <= ?');
+    binds.push(String(to));
   }
   if (claimed === 'claimed') {
     where.push('EXISTS (SELECT 1 FROM scan_claims c WHERE c.site_url = e.site_url)');

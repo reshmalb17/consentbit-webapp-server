@@ -1,7 +1,58 @@
 ﻿// handlers/bannerCustomization.js
-import { getBannerCustomization, saveBannerCustomization } from '../services/db.js';
+import {
+  getBannerCustomization,
+  saveBannerCustomization,
+  getSubscriptionBySiteId,
+  getEffectivePlanForOrganization,
+  inferTierPlanIdFromStripePriceId,
+} from '../services/db.js';
 import { injectScriptIntoWebflowHead } from './webflowFreeRegister.js';
 import { capturePostHogEvent, identifyPostHogPerson } from '../services/posthog.js';
+
+const PAID_TIERS = ['basic', 'essential', 'growth'];
+// Running GDPR *and* CCPA on one site (Site.region_mode='both') is an Essential/Growth
+// entitlement — matches the pricing table and the Designer app's UI gate in
+// Consentbit-Webflow-App-New -Design/src/lib/planGate.js.
+const BOTH_REGIONS_PLANS = ['essential', 'growth'];
+
+// Resolve the site's effective paid tier. Deliberately mirrors the resolution in
+// handlers/cdn.js (site subscription → Stripe price-id inference → organization
+// subscription) so what we allow to be SAVED matches what the CDN actually SERVES.
+//
+// Returns 'free' | 'basic' | 'essential' | 'growth', or null when resolution itself
+// failed. Callers must treat null as "unknown" and NOT downgrade — silently demoting
+// a paying site's compliance coverage because of a transient D1 error is worse than
+// letting one save through.
+async function resolveEffectivePlanId(db, env, siteId) {
+  try {
+    const subscription = await getSubscriptionBySiteId(db, siteId);
+    let planId = subscription ? (subscription.planId ?? subscription.planid ?? null) : null;
+    if (planId) planId = String(planId).toLowerCase();
+
+    if ((!planId || !PAID_TIERS.includes(planId)) && subscription) {
+      const priceId = subscription.stripePriceId ?? subscription.stripepriceid ?? null;
+      const inferred = inferTierPlanIdFromStripePriceId(env, priceId);
+      if (inferred) planId = inferred;
+    }
+
+    if (!planId || !PAID_TIERS.includes(planId)) {
+      const siteRow = await db
+        .prepare('SELECT organizationId FROM Site WHERE id = ?1 LIMIT 1')
+        .bind(siteId)
+        .first();
+      const orgId = siteRow?.organizationId ?? siteRow?.organizationid ?? null;
+      if (orgId) {
+        const orgResult = await getEffectivePlanForOrganization(db, orgId, env);
+        planId = orgResult?.planId || 'free';
+      }
+    }
+
+    return planId && PAID_TIERS.includes(planId) ? planId : 'free';
+  } catch (err) {
+    console.warn('[BannerCustomization] Plan resolution failed:', err?.message);
+    return null;
+  }
+}
 
 function encodeEnvelope(payload) {
   const bytes = new TextEncoder().encode(JSON.stringify(payload));
@@ -198,8 +249,10 @@ export async function handleBannerCustomization(request, env) {
     // that mode the app must NOT auto-inject the script into the head. Legacy/other
     // callers omit the flag and keep the original auto-inject behavior.
     const manualInstall = body?.manualInstall === true;
-    // compliance: ['gdpr'], ['us'], ['gdpr','us'] — from Webflow Designer App publish
-    const compliance = Array.isArray(body?.compliance) && body.compliance.length ? body.compliance : null;
+    // compliance: ['gdpr'], ['us'], ['gdpr','us'] — from Webflow Designer App publish.
+    // Reassigned below when a ['gdpr','us'] save is rejected by the plan gate, so the
+    // value persisted to KV (and reloaded by the app) matches what we actually stored.
+    let compliance = Array.isArray(body?.compliance) && body.compliance.length ? body.compliance : null;
 
 
     // If siteId provided but doesn't exist in D1, resolve via wfSiteId or platformSiteId
@@ -271,8 +324,24 @@ export async function handleBannerCustomization(request, env) {
       //   gdpr + us (both)   → banner_type='gdpr', region_mode='both'  (CDN routes by country)
       //   us only            → banner_type='ccpa', region_mode='ccpa'
       if (compliance) {
-        const hasUs = compliance.includes('us') || compliance.includes('ccpa');
+        let hasUs = compliance.includes('us') || compliance.includes('ccpa');
         const hasGdpr = compliance.includes('gdpr');
+
+        // Plan gate: region_mode='both' is Essential/Growth only. The Designer app
+        // already blocks the CCPA+GDPR option for lower tiers, but this endpoint is
+        // callable directly, so enforce the entitlement server-side too. Downgrade to
+        // GDPR-only rather than rejecting the whole request — the rest of the banner
+        // customization in this save is legitimate and should still persist.
+        if (hasUs && hasGdpr) {
+          const planId = await resolveEffectivePlanId(db, env, siteId);
+          if (planId !== null && !BOTH_REGIONS_PLANS.includes(planId)) {
+            console.warn(
+              `[BannerCustomization][POST] region_mode 'both' not available on plan '${planId}' for site ${siteId} — saving as gdpr`
+            );
+            hasUs = false;
+            compliance = ['gdpr'];
+          }
+        }
         // Default: preserve 'iab' banner_type unless the caller explicitly sends iabEnabled: false.
         // This protects sites configured via the webapp dashboard — they don't send iabEnabled at all
         // (body.iabEnabled is undefined, so iabExplicitlyDisabled = false → 'iab' is kept).

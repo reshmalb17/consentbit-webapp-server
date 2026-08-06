@@ -62,6 +62,7 @@ import {
   handleAdminDashboardUser,
   handleAdminDashboardSite,
   handleAdminDashboardOrganization,
+  handleAdminDashboardSubscription,
   handleAdminDashboardAuth,
   handleAdminDashboardAccounts,
   handleAdminDashboardAccountSetup,
@@ -69,6 +70,7 @@ import {
   handleAdminDashboardAudit,
   handleAdminDashboardScans,
   handleAdminDashboardSites,
+  handleAdminDashboardUsage,
 } from './handlers/adminDashboard/index.js';
 import { handleCheckLegacyScript } from './handlers/checkLegacyScript.js';
 import { handleLegacyConsentLogs } from './handlers/legacyConsentLogs.js';
@@ -227,11 +229,13 @@ const PUBLIC_PATHS = new Set([
   '/api/admin/dashboard/user',
   '/api/admin/dashboard/site',
   '/api/admin/dashboard/organization',
+  '/api/admin/dashboard/subscription',
   '/api/admin/dashboard/auth',
   '/api/admin/dashboard/accounts',
   '/api/admin/dashboard/audit',
   '/api/admin/dashboard/scans',
   '/api/admin/dashboard/sites',
+  '/api/admin/dashboard/usage',
   // Emailed-link surfaces. Unauthenticated by design — the single-use token in
   // the link is the credential, and recover always answers identically so it
   // cannot be used to discover who has an account.
@@ -668,6 +672,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleAdminDashboardSite(request, env); break;
     case '/api/admin/dashboard/organization':
       response = await handleAdminDashboardOrganization(request, env); break;
+    case '/api/admin/dashboard/subscription':
+      response = await handleAdminDashboardSubscription(request, env); break;
     case '/api/admin/dashboard/auth':
       response = await handleAdminDashboardAuth(request, env); break;
     case '/api/admin/dashboard/accounts':
@@ -682,6 +688,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleAdminDashboardScans(request, env); break;
     case '/api/admin/dashboard/sites':
       response = await handleAdminDashboardSites(request, env); break;
+    case '/api/admin/dashboard/usage':
+      response = await handleAdminDashboardUsage(request, env); break;
 
     case '/api/check-legacy-script':
       response = await handleCheckLegacyScript(request, env); break;

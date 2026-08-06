@@ -59,12 +59,23 @@ function deriveStatuses(concat) {
   return [...set];
 }
 
-/** "YYYY" / "MM" from a D1 datetime string like "2026-01-15 12:00:00". */
-function yearOf(dt) {
-  return dt ? String(dt).slice(0, 4) : '';
-}
-function monthOf(dt) {
-  return dt ? String(dt).slice(5, 7) : '';
+/**
+ * Distinct banner regulations across a user's sites, from a GROUP_CONCAT of
+ * "banner_type:region_mode" pairs. Derived per pair rather than per column
+ * because GDPR-only and GDPR+CCPA share banner_type='gdpr' and differ only in
+ * region_mode — reading either column alone would mislabel half of them.
+ */
+const REGULATION_ORDER = ['gdpr', 'ccpa', 'both', 'iab'];
+
+function deriveRegulations(concat) {
+  const set = new Set();
+  if (concat) {
+    for (const pair of String(concat).split(',')) {
+      const [bannerType, regionMode] = String(pair).split(':');
+      set.add(deriveRegulation(bannerType, regionMode));
+    }
+  }
+  return [...set].sort((a, b) => REGULATION_ORDER.indexOf(a) - REGULATION_ORDER.indexOf(b));
 }
 
 /** Internal (agency) email domains — these accounts are ours, not customers. */
@@ -90,10 +101,23 @@ export function isInternalOrTest(email) {
 
 export async function listUsers(
   db,
-  { platform = 'all', search = '', plan = 'all', status = 'all', year = '', month = '', audience = 'all', billing = 'all' } = {}
+  { platform = 'all', search = '', plan = 'all', status = 'all', from = '', to = '', audience = 'all', billing = 'all', legacy = 'all' } = {}
 ) {
   const where = [];
   const params = [];
+
+  // Signup date window. Applied in SQL so the LIMIT below caps the filtered set
+  // rather than filtering an already-truncated page. Compared as a date prefix
+  // because createdAt is stored both as 'YYYY-MM-DD HH:MM:SS' and as an ISO
+  // string, and slicing works for both.
+  if (YMD.test(String(from))) {
+    where.push('substr(u.createdAt, 1, 10) >= ?');
+    params.push(String(from));
+  }
+  if (YMD.test(String(to))) {
+    where.push('substr(u.createdAt, 1, 10) <= ?');
+    params.push(String(to));
+  }
 
   if (search) {
     // Match on the user (email / name / id) OR any site they own (domain, custom
@@ -114,6 +138,7 @@ export async function listUsers(
   const sql = `
     SELECT
       u.id, u.email, u.name, u.createdAt, u.updatedAt,
+      COALESCE(u.isLegacy, 0) AS isLegacy,
       (SELECT COUNT(*) FROM Organization o WHERE o.ownerUserId = u.id) AS orgCount,
       (SELECT COUNT(*) FROM Site s
          JOIN Organization o ON s.organizationId = o.id
@@ -126,7 +151,13 @@ export async function listUsers(
         WHERE o.ownerUserId = u.id) AS plans,
       (SELECT GROUP_CONCAT(DISTINCT sub.status)
          FROM Subscription sub JOIN Organization o ON sub.organizationId = o.id
-        WHERE o.ownerUserId = u.id) AS statuses
+        WHERE o.ownerUserId = u.id) AS statuses,
+      -- Pairs joined with ':' so the default ',' separator stays unambiguous;
+      -- GROUP_CONCAT(DISTINCT ...) cannot take a custom separator in SQLite.
+      (SELECT GROUP_CONCAT(DISTINCT COALESCE(NULLIF(s.banner_type, ''), 'gdpr')
+                                    || ':' || COALESCE(NULLIF(s.region_mode, ''), 'gdpr'))
+         FROM Site s JOIN Organization o ON s.organizationId = o.id
+        WHERE o.ownerUserId = u.id) AS bannerTypes
     FROM User u
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
     ORDER BY u.createdAt DESC
@@ -146,8 +177,20 @@ export async function listUsers(
     platforms: derivePlatforms(r.platforms),
     plans: derivePlans(r.plans),
     statuses: deriveStatuses(r.statuses),
+    // Which regulation each of their banners runs under. Still filtered on by
+    // `status` above — the status list stays in the payload for that.
+    regulations: deriveRegulations(r.bannerTypes),
+    // Migrated off the old Webflow/Framer system, as opposed to signing up in the
+    // current app. Distinct from `internal`, which is about OUR own test accounts.
+    isLegacy: Number(r.isLegacy) || 0,
     internal: isInternalOrTest(r.email),
   }));
+
+  if (legacy === 'legacy') {
+    mapped = mapped.filter((u) => u.isLegacy === 1);
+  } else if (legacy === 'new') {
+    mapped = mapped.filter((u) => u.isLegacy !== 1);
+  }
 
   if (audience === 'external') {
     mapped = mapped.filter((u) => !u.internal);
@@ -195,15 +238,6 @@ export async function listUsers(
   const wantedStatuses = wanted(status, (s) => (s === 'cancelled' ? 'canceled' : s));
   if (wantedStatuses.size) {
     mapped = mapped.filter((u) => u.statuses.some((s) => wantedStatuses.has(s)));
-  }
-
-  if (year) {
-    mapped = mapped.filter((u) => yearOf(u.createdAt) === String(year));
-  }
-
-  if (month) {
-    const mm = String(month).padStart(2, '0');
-    mapped = mapped.filter((u) => monthOf(u.createdAt) === mm);
   }
 
   return mapped;
@@ -269,7 +303,7 @@ export async function listSites(
   db,
   {
     search = '', platform = 'all', banner = 'all', regulation = 'all',
-    year = '', month = '', audience = 'all', limit,
+    from = '', to = '', audience = 'all', plan = 'all', legacy = 'all', limit,
   } = {}
 ) {
   const where = [];
@@ -291,15 +325,24 @@ export async function listSites(
     where.push('COALESCE(s.verified, 0) = 0');
   }
 
-  // Sliced from the stored timestamp, matching yearOf()/monthOf(). Applied in
-  // SQL so the LIMIT below caps the filtered set, not the other way round.
-  if (year) {
-    where.push('substr(s.createdAt, 1, 4) = ?');
-    params.push(String(year));
+  // Applied in SQL, like the other stored-column filters, so the LIMIT caps the
+  // filtered set rather than filtering an already-truncated page.
+  if (legacy === 'legacy') {
+    where.push('COALESCE(s.isLegacy, 0) = 1');
+  } else if (legacy === 'new') {
+    where.push('COALESCE(s.isLegacy, 0) = 0');
   }
-  if (month) {
-    where.push('substr(s.createdAt, 6, 2) = ?');
-    params.push(String(month).padStart(2, '0'));
+
+  // Registration date window, sliced from the stored timestamp so both the
+  // 'YYYY-MM-DD HH:MM:SS' and ISO forms compare correctly. Applied in SQL so the
+  // LIMIT below caps the filtered set, not the other way round.
+  if (YMD.test(String(from))) {
+    where.push('substr(s.createdAt, 1, 10) >= ?');
+    params.push(String(from));
+  }
+  if (YMD.test(String(to))) {
+    where.push('substr(s.createdAt, 1, 10) <= ?');
+    params.push(String(to));
   }
 
   const cap = Math.min(Math.max(Number(limit) || 500, 1), 2000);
@@ -310,7 +353,25 @@ export async function listSites(
       s.isLegacy, s.legacySource, s.organizationId,
       o.name AS orgName,
       u.id AS ownerId, u.email AS ownerEmail,
-      EXISTS (SELECT 1 FROM BannerCustomization b WHERE b.siteId = s.id) AS hasCustomization
+      EXISTS (SELECT 1 FROM BannerCustomization b WHERE b.siteId = s.id) AS hasCustomization,
+      -- The subscription currently governing THIS site: one pinned to it by
+      -- siteId wins, otherwise the organization's, preferring a live status over
+      -- a cancelled one and the newest row as the tie-break. Tier and status come
+      -- back as one packed value so they can never be read off different rows.
+      (SELECT COALESCE(sub.planId, '') || '|' || COALESCE(sub.status, '')
+         FROM Subscription sub
+        WHERE sub.organizationId = s.organizationId
+          AND (sub.siteId IS NULL OR sub.siteId = '' OR sub.siteId = s.id)
+        ORDER BY
+          -- "Pinned to this site" expressed with inner columns only: SQLite
+          -- rejects an outer reference (s.id) inside a subquery's ORDER BY. The
+          -- WHERE above already limits siteId to NULL/''/s.id, so "siteId is set"
+          -- means exactly "pinned to this site".
+          CASE WHEN sub.siteId IS NULL OR sub.siteId = '' THEN 1 ELSE 0 END,
+          CASE LOWER(COALESCE(sub.status, ''))
+            WHEN 'active' THEN 0 WHEN 'trialing' THEN 1 WHEN 'past_due' THEN 2 ELSE 3 END,
+          sub.createdAt DESC
+        LIMIT 1) AS planCurrent
     FROM Site s
     LEFT JOIN Organization o ON s.organizationId = o.id
     LEFT JOIN User u ON o.ownerUserId = u.id
@@ -321,10 +382,19 @@ export async function listSites(
 
   const { results = [] } = await db.prepare(sql).bind(...params).all();
 
-  let mapped = results.map((r) => ({
+  let mapped = results.map((r) => {
+    // "tier|status" from the subquery above. No subscription row at all means the
+    // site is on the free plan, which is the same fallback derivePlans() uses.
+    const [rawPlan = '', rawStatus = ''] = String(r.planCurrent || '').split('|');
+    const tier = rawPlan.trim().toLowerCase();
+    return {
     id: r.id,
     name: r.name,
     domain: r.domain,
+    plan: KNOWN_TIERS.has(tier) ? tier : 'free',
+    planStatus: rawStatus.trim().toLowerCase() === 'cancelled'
+      ? 'canceled'
+      : (rawStatus.trim().toLowerCase() || null),
     platform: normalizePlatform(r.platform),
     rawPlatform: r.platform ?? null,
     verified: Number(r.verified) || 0,
@@ -341,7 +411,8 @@ export async function listSites(
     ownerEmail: r.ownerEmail ?? null,
     hasCustomization: Number(r.hasCustomization) === 1,
     internal: isInternalOrTest(r.ownerEmail),
-  }));
+    };
+  });
 
   // Platform is normalized in JS (a NULL/'' platform means webapp), so it can
   // only be filtered after mapping — same rule as listUsers.
@@ -354,7 +425,299 @@ export async function listSites(
     mapped = mapped.filter((s) => s.internal);
   }
 
+  // Comma-separated list, matching the users page — plan is derived above, so
+  // like platform it can only be filtered after mapping.
+  const wantedPlans = new Set(
+    String(plan || '')
+      .split(',')
+      .map((p) => p.trim().toLowerCase())
+      .filter((p) => p && p !== 'all')
+  );
+  if (wantedPlans.size) {
+    mapped = mapped.filter((s) => wantedPlans.has(s.plan));
+  }
+
   return mapped;
+}
+
+/* ------------------------------------------------------------------ */
+/* Usage tracking                                                     */
+/* ------------------------------------------------------------------ */
+//
+// Two metered resources, both counted per site per calendar month (UTC):
+//   ScanUsage(siteId, yearMonth, scanCount)
+//   PageviewUsage(siteId, yearMonth, pageviewCount)
+//
+// The allowance comes from the Plan row for the site's tier — the SAME source
+// handlers/billing.js reads, so what the operator sees here matches what the
+// customer sees in the app. A site with no subscription is on 'free', and the
+// free fallbacks (100 scans / 7,500 pageviews) mirror the literals in
+// billing.js, scanSite.js and pageview.js for the case where the Plan row is
+// somehow missing.
+//
+// Site.scanLimitNotifiedMonth is set by the scheduled-scan job when it emails a
+// site's owner about the scan cap; equal to the month being viewed, it means
+// "we have already warned them this month".
+
+const FREE_FALLBACK = { scans: 100, pageviews: 7500 };
+
+/** Current calendar month as YYYY-MM, matching db.js's usage getters (UTC). */
+export function currentYearMonth(date = new Date()) {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+const YMD = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Last calendar day of the month containing a YYYY-MM-DD, as YYYY-MM-DD. */
+function endOfMonth(ymd) {
+  const [y, m] = String(ymd).split('-').map(Number);
+  // Day 0 of month m (1-based) is the last day of month m, since Date's month
+  // argument is 0-based and therefore m means "the month after".
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return `${y}-${String(m).padStart(2, '0')}-${String(last).padStart(2, '0')}`;
+}
+
+/** Every YYYY-MM a YYYY-MM-DD..YYYY-MM-DD range touches, inclusive. */
+function monthsBetween(from, to) {
+  const out = [];
+  let [y, m] = from.split('-').map(Number);
+  const [ty, tm] = to.split('-').map(Number);
+  while (y < ty || (y === ty && m <= tm)) {
+    out.push(`${y}-${String(m).padStart(2, '0')}`);
+    if (++m > 12) { m = 1; y += 1; }
+  }
+  return out;
+}
+
+/**
+ * Resolves the requested window, defaulting to the whole current month.
+ *
+ * `pageviewsAreWholeMonths` records the honest shape of the answer: pageviews
+ * are only ever stored per month (incrementPageviewUsage bumps one counter per
+ * site per month), so any range that does not start on the 1st and end on the
+ * last day returns MORE pageviews than the dates ask for. The UI says so rather
+ * than quietly reporting a number that does not match the range.
+ *
+ * `limitsApplicable` is stricter still: plan allowances are monthly, so
+ * comparing usage to one only makes sense across exactly one whole month. A
+ * partial month would understate it and a multi-month range would overstate it.
+ */
+function resolveRange(from, to) {
+  const today = new Date();
+  const defFrom = `${currentYearMonth(today)}-01`;
+
+  let start = YMD.test(String(from)) ? String(from) : defFrom;
+  let end = YMD.test(String(to)) ? String(to) : endOfMonth(start);
+  if (end < start) [start, end] = [end, start];
+
+  const months = monthsBetween(start, end);
+  const wholeMonths = start.endsWith('-01') && end === endOfMonth(start.slice(0, 7) + '-01');
+
+  return {
+    from: start,
+    to: end,
+    months,
+    pageviewsAreWholeMonths: !(start.endsWith('-01') && end === endOfMonth(end)),
+    limitsApplicable: wholeMonths && months.length === 1,
+  };
+}
+
+/** tier -> { scans, pageviews } from the Plan table, with the free fallback. */
+async function planAllowances(db) {
+  const out = new Map();
+  try {
+    const { results = [] } = await db
+      .prepare(`SELECT id, scansIncluded, pageviewsIncluded FROM Plan`)
+      .all();
+    for (const p of results) {
+      out.set(String(p.id).toLowerCase(), {
+        scans: Number(p.scansIncluded ?? 0),
+        pageviews: Number(p.pageviewsIncluded ?? 0),
+      });
+    }
+  } catch (_) {
+    /* table missing — every tier falls back below */
+  }
+  if (!out.has('free')) out.set('free', { ...FREE_FALLBACK });
+  return out;
+}
+
+/** Percentage used, capped for display. A zero/absent limit reads as unlimited. */
+function pct(used, limit) {
+  if (!limit || limit <= 0) return null;
+  return Math.round((used / limit) * 100);
+}
+
+export async function listUsage(
+  db,
+  {
+    search = '', platform = 'all', plan = 'all', legacy = 'all', audience = 'all',
+    state = 'all', from = '', to = '', limit,
+  } = {}
+) {
+  const range = resolveRange(from, to);
+  const { months, limitsApplicable } = range;
+
+  const where = [];
+  // Scans come from ScanHistory (one row per scan, so any date range is exact);
+  // pageviews from PageviewUsage, which only has month buckets.
+  const params = [range.from, range.to, months[0], months[months.length - 1]];
+
+  if (search) {
+    where.push(`(s.domain LIKE ? OR s.name LIKE ? OR s.id = ? OR u.email LIKE ? OR o.name LIKE ?)`);
+    const like = `%${search}%`;
+    params.push(like, like, search, like, like);
+  }
+  if (legacy === 'legacy') where.push('COALESCE(s.isLegacy, 0) = 1');
+  else if (legacy === 'new') where.push('COALESCE(s.isLegacy, 0) = 0');
+
+  const cap = Math.min(Math.max(Number(limit) || 1000, 1), 5000);
+
+  // Both usage joins are GROUP BY siteId derived tables, so each contributes at
+  // most one row per site and no fan-out is possible.
+  //
+  // substr(createdAt, 1, 10) rather than a range comparison because ScanHistory
+  // holds both 'YYYY-MM-DD HH:MM:SS' (D1's CURRENT_TIMESTAMP) and ISO
+  // 'YYYY-MM-DDTHH:MM:SSZ' values; comparing the date prefix is correct for both.
+  const sql = `
+    SELECT
+      s.id, s.name, s.domain, s.platform, s.isLegacy, s.verified,
+      s.scanLimitNotifiedMonth, s.organizationId,
+      o.name AS orgName,
+      u.id AS ownerId, u.email AS ownerEmail,
+      COALESCE(sc.c, 0) AS scansUsed,
+      COALESCE(pv.c, 0) AS pageviewsUsed,
+      (SELECT COALESCE(sub.planId, '') || '|' || COALESCE(sub.status, '')
+         FROM Subscription sub
+        WHERE sub.organizationId = s.organizationId
+          AND (sub.siteId IS NULL OR sub.siteId = '' OR sub.siteId = s.id)
+        ORDER BY
+          CASE WHEN sub.siteId IS NULL OR sub.siteId = '' THEN 1 ELSE 0 END,
+          CASE LOWER(COALESCE(sub.status, ''))
+            WHEN 'active' THEN 0 WHEN 'trialing' THEN 1 WHEN 'past_due' THEN 2 ELSE 3 END,
+          sub.createdAt DESC
+        LIMIT 1) AS planCurrent
+    FROM Site s
+    LEFT JOIN Organization o ON s.organizationId = o.id
+    LEFT JOIN User u ON o.ownerUserId = u.id
+    LEFT JOIN (
+      SELECT siteId, COUNT(*) AS c
+        FROM ScanHistory
+       WHERE substr(createdAt, 1, 10) BETWEEN ? AND ?
+       GROUP BY siteId
+    ) sc ON sc.siteId = s.id
+    LEFT JOIN (
+      SELECT siteId, SUM(pageviewCount) AS c
+        FROM PageviewUsage
+       WHERE yearMonth BETWEEN ? AND ?
+       GROUP BY siteId
+    ) pv ON pv.siteId = s.id
+    ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+    LIMIT ${cap}
+  `;
+
+  const [{ results = [] }, allowances] = await Promise.all([
+    db.prepare(sql).bind(...params).all(),
+    planAllowances(db),
+  ]);
+
+  let mapped = results.map((r) => {
+    const [rawPlan = ''] = String(r.planCurrent || '').split('|');
+    const tier = rawPlan.trim().toLowerCase();
+    const planId = KNOWN_TIERS.has(tier) ? tier : 'free';
+    const allow = allowances.get(planId) || allowances.get('free') || { ...FREE_FALLBACK };
+
+    const scansUsed = Number(r.scansUsed) || 0;
+    const pageviewsUsed = Number(r.pageviewsUsed) || 0;
+
+    return {
+      siteId: r.id,
+      name: r.name,
+      domain: r.domain,
+      platform: normalizePlatform(r.platform),
+      rawPlatform: r.platform ?? null,
+      isLegacy: Number(r.isLegacy) || 0,
+      verified: Number(r.verified) || 0,
+      organizationId: r.organizationId,
+      orgName: r.orgName ?? null,
+      ownerId: r.ownerId ?? null,
+      ownerEmail: r.ownerEmail ?? null,
+      plan: planId,
+      scansUsed,
+      pageviewsUsed,
+      // Allowances are monthly, so they are only comparable across exactly one
+      // whole month — otherwise the limit columns are reported as not applicable
+      // rather than shown against a mismatched period.
+      scansLimit: limitsApplicable ? allow.scans : null,
+      scansPct: limitsApplicable ? pct(scansUsed, allow.scans) : null,
+      scansOver: limitsApplicable && allow.scans > 0 && scansUsed >= allow.scans,
+      pageviewsLimit: limitsApplicable ? allow.pageviews : null,
+      pageviewsPct: limitsApplicable ? pct(pageviewsUsed, allow.pageviews) : null,
+      pageviewsOver: limitsApplicable && allow.pageviews > 0 && pageviewsUsed >= allow.pageviews,
+      // The owner already had the scan-cap email for a month this range covers.
+      scanLimitNotified: Boolean(
+        r.scanLimitNotifiedMonth && months.includes(String(r.scanLimitNotifiedMonth))
+      ),
+      internal: isInternalOrTest(r.ownerEmail),
+    };
+  });
+
+  // Derived in JS, so these filters run after mapping — same rule as listSites.
+  if (platform && platform !== 'all') {
+    mapped = mapped.filter((s) => s.platform === platform);
+  }
+  if (audience === 'external') mapped = mapped.filter((s) => !s.internal);
+  else if (audience === 'internal') mapped = mapped.filter((s) => s.internal);
+
+  const wantedPlans = new Set(
+    String(plan || '').split(',').map((p) => p.trim().toLowerCase()).filter((p) => p && p !== 'all')
+  );
+  if (wantedPlans.size) mapped = mapped.filter((s) => wantedPlans.has(s.plan));
+
+  if (state === 'over') {
+    mapped = mapped.filter((s) => s.scansOver || s.pageviewsOver);
+  } else if (state === 'near') {
+    // 80% of either allowance, but not yet over — the "about to be a problem" list.
+    mapped = mapped.filter(
+      (s) =>
+        !s.scansOver && !s.pageviewsOver &&
+        ((s.scansPct !== null && s.scansPct >= 80) || (s.pageviewsPct !== null && s.pageviewsPct >= 80))
+    );
+  } else if (state === 'active') {
+    mapped = mapped.filter((s) => s.scansUsed > 0 || s.pageviewsUsed > 0);
+  } else if (state === 'idle') {
+    mapped = mapped.filter((s) => s.scansUsed === 0 && s.pageviewsUsed === 0);
+  }
+
+  // Busiest first — whichever allowance a site is furthest through leads, so the
+  // sites closest to trouble are on page one.
+  mapped.sort((a, b) => {
+    const worst = (s) => Math.max(s.scansPct ?? 0, s.pageviewsPct ?? 0);
+    return worst(b) - worst(a) || b.scansUsed - a.scansUsed || b.pageviewsUsed - a.pageviewsUsed;
+  });
+
+  const totals = mapped.reduce(
+    (acc, s) => {
+      acc.scans += s.scansUsed;
+      acc.pageviews += s.pageviewsUsed;
+      if (s.scansOver) acc.scansOver += 1;
+      if (s.pageviewsOver) acc.pageviewsOver += 1;
+      return acc;
+    },
+    { scans: 0, pageviews: 0, scansOver: 0, pageviewsOver: 0 }
+  );
+
+  return {
+    from: range.from,
+    to: range.to,
+    months,
+    // Both flags travel to the client so the page can label exactly what the
+    // numbers mean instead of the operator having to infer it.
+    pageviewsAreWholeMonths: range.pageviewsAreWholeMonths,
+    limitsApplicable,
+    rows: mapped,
+    totals,
+  };
 }
 
 /** Counters + the years that actually contain sites, for the filter bar. */
@@ -426,7 +789,7 @@ export async function getStats(db) {
 async function selectUserRow(db, userId) {
   try {
     return await db
-      .prepare(`SELECT id, email, name, billingEmail, createdAt, updatedAt FROM User WHERE id = ?`)
+      .prepare(`SELECT id, email, name, billingEmail, isLegacy, createdAt, updatedAt FROM User WHERE id = ?`)
       .bind(userId)
       .first();
   } catch (_) {
@@ -491,7 +854,7 @@ export async function getUserDetail(db, userId, scannerDb = null) {
 
     const { results: subscriptions = [] } = await db
       .prepare(
-        `SELECT id, stripeSubscriptionId, planType, interval, status,
+        `SELECT id, stripeSubscriptionId, planId, planType, interval, status,
                 currentPeriodEnd, cancelAtPeriodEnd, amountCents, licenseKey, createdAt
            FROM Subscription WHERE organizationId = ? ORDER BY createdAt DESC`
       )
@@ -538,6 +901,9 @@ export async function getUserDetail(db, userId, scannerDb = null) {
     email: user.email,
     // Null when the customer never set one — Stripe then bills the account email.
     billingEmail: user.billingEmail ?? null,
+    // Migrated off the old Webflow/Framer system. No live Stripe webhook writes
+    // to these rows, which is what makes editing their plan stick.
+    isLegacy: Number(user.isLegacy) || 0,
     scans,
     name: user.name,
     createdAt: user.createdAt,
@@ -802,6 +1168,102 @@ export async function updateSite(db, siteId, fields) {
   params.push(siteId);
   await db.prepare(`UPDATE Site SET ${sets.join(', ')} WHERE id = ?`).bind(...params).run();
   return { ok: true, before: site };
+}
+
+/* ---- subscription ---------------------------------------------------- */
+//
+// These columns mirror Stripe. Editing them here is a LOCAL OVERRIDE: the next
+// webhook Stripe sends for this subscription rewrites status, interval, amount
+// and period from Stripe's own copy. Use it to correct a row that drifted out of
+// sync or to fix up a migrated legacy record — not to change what a customer is
+// billed, which only Stripe can do.
+//
+// The three Stripe identifiers are not editable at all: they are the join keys
+// the webhook handler uses to find this row, so a wrong value silently detaches
+// the subscription from its Stripe counterpart forever.
+
+const SUB_ENUMS = {
+  // The tier — this is what the Plan / Status filters and the badges read.
+  planId: ['free', 'basic', 'essential', 'growth'],
+  // The billing shape, which is a different axis from the tier.
+  planType: ['single', 'tier', 'bulk', 'quantity', 'free', 'subscription'],
+  interval: ['monthly', 'yearly'],
+  status: ['active', 'trialing', 'past_due', 'canceled', 'unpaid',
+           'incomplete', 'incomplete_expired', 'paused', 'pending'],
+};
+
+export async function updateSubscription(db, subId, fields) {
+  const sub = await db
+    .prepare(
+      `SELECT id, organizationId, planId, planType, interval, status, amountCents,
+              currentPeriodEnd, cancelAtPeriodEnd, licenseKey
+         FROM Subscription WHERE id = ?`
+    )
+    .bind(subId)
+    .first();
+  if (!sub) return { ok: false, error: 'Subscription not found' };
+
+  const sets = [];
+  const params = [];
+
+  for (const [col, allowed] of Object.entries(SUB_ENUMS)) {
+    if (fields[col] === undefined) continue;
+    const v = String(fields[col] ?? '').trim().toLowerCase();
+    if (!allowed.includes(v)) {
+      return { ok: false, error: `${col} must be one of: ${allowed.join(', ')}` };
+    }
+    sets.push(`${col} = ?`);
+    params.push(v);
+  }
+
+  if (fields.amountCents !== undefined) {
+    const raw = fields.amountCents;
+    if (raw === null || raw === '') {
+      sets.push('amountCents = ?');
+      params.push(null);
+    } else {
+      const cents = Number(raw);
+      if (!Number.isInteger(cents) || cents < 0) {
+        return { ok: false, error: 'Amount must be a whole number of cents, 0 or more' };
+      }
+      sets.push('amountCents = ?');
+      params.push(cents);
+    }
+  }
+
+  if (fields.currentPeriodEnd !== undefined) {
+    const raw = String(fields.currentPeriodEnd ?? '').trim();
+    if (!raw) {
+      sets.push('currentPeriodEnd = ?');
+      params.push(null);
+    } else {
+      const d = new Date(raw);
+      if (isNaN(d.getTime())) return { ok: false, error: 'Renewal date is not a valid date' };
+      sets.push('currentPeriodEnd = ?');
+      params.push(d.toISOString());
+    }
+  }
+
+  if (fields.cancelAtPeriodEnd !== undefined) {
+    sets.push('cancelAtPeriodEnd = ?');
+    params.push(fields.cancelAtPeriodEnd ? 1 : 0);
+  }
+
+  if (fields.licenseKey !== undefined) {
+    const key = String(fields.licenseKey ?? '').trim();
+    sets.push('licenseKey = ?');
+    params.push(key || null);
+  }
+
+  if (!sets.length) return { ok: true, before: sub };
+
+  sets.push('updatedAt = CURRENT_TIMESTAMP');
+  params.push(subId);
+  await db
+    .prepare(`UPDATE Subscription SET ${sets.join(', ')} WHERE id = ?`)
+    .bind(...params)
+    .run();
+  return { ok: true, before: sub };
 }
 
 /* ------------------------------------------------------------------ */
