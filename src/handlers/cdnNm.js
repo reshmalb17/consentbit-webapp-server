@@ -255,20 +255,6 @@ async function _handleCDNScript(request, env, url) {
     var saveBg = customization.saveButtonBg || custBg;
     var saveTx = customization.saveButtonText || '#0284c7';
 
-    // "Powered by ConsentBit" strip on the preferences panel. The tint is derived
-    // from the banner background (same BT.601 luma test as contrastingTextColor)
-    // so the footer reads as a footer on both light and dark dashboard themes.
-    var _bfHex = String(bgColor).replace('#', '');
-    if (_bfHex.length === 3) _bfHex = _bfHex[0] + _bfHex[0] + _bfHex[1] + _bfHex[1] + _bfHex[2] + _bfHex[2];
-    var _bfLuma =
-      0.299 * (parseInt(_bfHex.substr(0, 2), 16) || 0) +
-      0.587 * (parseInt(_bfHex.substr(2, 2), 16) || 0) +
-      0.114 * (parseInt(_bfHex.substr(4, 2), 16) || 0);
-    var _bfIsLight = _bfLuma > 128;
-    var brandFooterBg = _bfIsLight ? 'rgba(16,24,40,0.035)' : 'rgba(255,255,255,0.06)';
-    var brandFooterLine = _bfIsLight ? 'rgba(16,24,40,0.08)' : 'rgba(255,255,255,0.12)';
-    var brandFooterInk = _bfIsLight ? '#A2ABBA' : 'rgba(255,255,255,0.62)';
-
     var configTrans = {};
     try {
       var trRaw = customization.translations;
@@ -593,6 +579,12 @@ async function _handleCDNScript(request, env, url) {
       "}" +
       // Branding strip: bleeds past the panel's 28px padding so it sits flush with
       // the card edges; the panel's overflow:hidden clips it to the border radius.
+      //
+      // Colours are FIXED, never derived from the dashboard's backgroundColor, and
+      // opaque so the panel colour cannot show through. The strip is a constant piece
+      // of ConsentBit branding and must look identical on every site, whatever banner
+      // colour the customer picks. !important guards each paint property against the
+      // customer overrides layered on top of this sheet.
       "#cb-preferences-banner.cb-banner .cb-brand-footer{" +
         "flex:0 0 auto;" +
         "box-sizing:border-box;" +
@@ -605,8 +597,9 @@ async function _handleCDNScript(request, env, url) {
         "align-items:center;" +
         "justify-content:flex-end;" +
         "gap:8px;" +
-        "background:" + brandFooterBg + ";" +
-        "border-top:1px solid " + brandFooterLine + ";" +
+        "background:#F7F8FA!important;" +
+        "background-color:#F7F8FA!important;" +
+        "border-top:1px solid #EFF1F4!important;" +
       "}" +
       // !important throughout: the baseline sheet forces blue + underline on every
       // ".cb-banner a", which is right for policy links but wrong for the branding mark.
@@ -618,18 +611,19 @@ async function _handleCDNScript(request, env, url) {
         "border-radius:6px;" +
         "padding:4px 6px;" +
         "margin-right:-6px;" +
-        "color:" + brandFooterInk + "!important;" +
+        "background:transparent!important;" +
+        "color:#A2ABBA!important;" +
         "font-weight:500!important;" +
         "transition:opacity .15s ease;" +
       "}" +
       "#cb-preferences-banner.cb-banner .cb-brand-footer a:hover{opacity:.7;}" +
       "#cb-preferences-banner.cb-banner .cb-brand-credit{" +
         "font-size:11px!important;" +
-        "font-weight:500;" +
+        "font-weight:500!important;" +
         "letter-spacing:.02em;" +
         "line-height:1;" +
         "white-space:nowrap;" +
-        "color:inherit;" +
+        "color:#A2ABBA!important;" +
       "}" +
       "#cb-preferences-banner.cb-banner .cb-brand-mark{" +
         "display:flex;" +
@@ -1022,10 +1016,10 @@ ${inlineConfig}
       // clips it to the border radius. The anchor rules need !important to beat the
       // blanket ".cb-banner a{color:#007aff!important;text-decoration:underline!important}"
       // above, which is meant for policy links, not the branding mark.
-      "#cb-preferences-banner.cb-banner .cb-brand-footer{flex:0 0 auto;box-sizing:border-box;height:44px;max-height:50px;width:calc(100% + 40px);margin:16px -20px -20px;padding:0 16px;display:flex;align-items:center;justify-content:flex-end;gap:8px;background:rgba(16,24,40,0.035);border-top:1px solid rgba(16,24,40,0.08);}" +
-      "#cb-preferences-banner.cb-banner .cb-brand-footer a{display:inline-flex !important;align-items:center;gap:7px;text-decoration:none !important;color:#A2ABBA !important;font-weight:500 !important;border-radius:6px;padding:4px 6px;margin-right:-6px;transition:opacity .15s ease;}" +
+      "#cb-preferences-banner.cb-banner .cb-brand-footer{flex:0 0 auto;box-sizing:border-box;height:44px;max-height:50px;width:calc(100% + 40px);margin:16px -20px -20px;padding:0 16px;display:flex;align-items:center;justify-content:flex-end;gap:8px;background:#F7F8FA !important;background-color:#F7F8FA !important;border-top:1px solid #EFF1F4 !important;}" +
+      "#cb-preferences-banner.cb-banner .cb-brand-footer a{display:inline-flex !important;align-items:center;gap:7px;text-decoration:none !important;background:transparent !important;color:#A2ABBA !important;font-weight:500 !important;border-radius:6px;padding:4px 6px;margin-right:-6px;transition:opacity .15s ease;}" +
       "#cb-preferences-banner.cb-banner .cb-brand-footer a:hover{opacity:.7;}" +
-      "#cb-preferences-banner.cb-banner .cb-brand-credit{font-size:11px !important;font-weight:500;letter-spacing:.02em;line-height:1;white-space:nowrap;color:inherit;}" +
+      "#cb-preferences-banner.cb-banner .cb-brand-credit{font-size:11px !important;font-weight:500 !important;letter-spacing:.02em;line-height:1;white-space:nowrap;color:#A2ABBA !important;}" +
       "#cb-preferences-banner.cb-banner .cb-brand-mark{display:flex;align-items:center;opacity:.85;}" +
       "#cb-preferences-banner.cb-banner .cb-brand-mark svg{display:block;height:13px;width:auto;}";
     SITE.styles && (BASE_CSS = BASE_CSS + "\\n" + SITE.styles);
@@ -2438,12 +2432,12 @@ ${inlineConfig}
   /**
    * ConsentBit wordmark, inlined rather than fetched: a customer's Content-Security-Policy
    * can block an external <img>/<use>, and an extra request for a 13px mark is not worth it.
-   * The lettering uses currentColor so it tracks the footer's theme-derived ink; the two
-   * glyph shapes keep their fixed brand grays.
+   * Every fill is a fixed brand grey — the mark must render identically on every site,
+   * independent of whatever banner colours the customer has configured.
    */
   var CB_WORDMARK_SVG =
     '<svg viewBox="0 0 735 90" role="img" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">' +
-      '<g fill="currentColor">' +
+      '<g fill="#98A2B3">' +
         '<path d="M234.357 89.2656C227.796 89.2656 222.045 87.925 217.107 85.2439C212.238 82.4923 208.464 78.647 205.782 73.7081C203.101 68.7692 201.761 62.9484 201.761 56.2456C201.761 49.5428 203.101 43.722 205.782 38.7831C208.464 33.8442 212.238 30.0342 217.107 27.3531C222.045 24.6014 227.796 23.2256 234.357 23.2256C241.131 23.2256 246.916 24.5661 251.714 27.2472C256.582 29.9284 260.322 33.7384 262.932 38.6772C265.614 43.6161 266.954 49.4722 266.954 56.2456C266.954 62.9484 265.614 68.8045 262.932 73.8139C260.322 78.7528 256.582 82.5628 251.714 85.2439C246.846 87.925 241.06 89.2656 234.357 89.2656ZM234.357 78.8939C240.919 78.8939 245.999 76.9184 249.597 72.9672C253.266 68.9456 255.101 63.3717 255.101 56.2456C255.101 49.0489 253.266 43.475 249.597 39.5239C245.999 35.5728 240.919 33.5972 234.357 33.5972C227.866 33.5972 222.786 35.6081 219.117 39.6298C215.449 43.5809 213.614 49.1195 213.614 56.2456C213.614 63.3717 215.449 68.9456 219.117 72.9672C222.786 76.9184 227.866 78.8939 234.357 78.8939Z"/>' +
         '<path d="M158.471 89.3708C149.793 89.3708 142.208 87.5717 135.717 83.9733C129.297 80.3044 124.322 75.1539 120.795 68.5217C117.267 61.8894 115.503 54.0931 115.503 45.1325C115.503 36.1719 117.267 28.4108 120.795 21.8492C124.322 15.2169 129.297 10.1017 135.717 6.50333C142.208 2.83444 149.793 1 158.471 1C165.103 1 170.96 2.09361 176.04 4.28083C181.19 6.3975 185.423 9.53722 188.74 13.7C192.056 17.7922 194.313 22.7664 195.513 28.6225H183.236C181.966 23.1897 179.179 18.9917 174.875 16.0283C170.642 13.065 165.174 11.5833 158.471 11.5833C148.805 11.5833 141.22 14.5819 135.717 20.5792C130.214 26.5764 127.462 34.7608 127.462 45.1325C127.462 55.5747 130.214 63.7944 135.717 69.7917C141.22 75.7183 148.805 78.6817 158.471 78.6817C165.174 78.6817 170.642 77.2353 174.875 74.3425C179.179 71.3792 181.966 67.1811 183.236 61.7483H195.513C194.313 67.5339 192.056 72.5081 188.74 76.6708C185.423 80.7631 181.19 83.9028 176.04 86.09C170.96 88.2772 165.103 89.3708 158.471 89.3708Z"/>' +
         '<path d="M372.231 89.2656C363.412 89.2656 356.462 87.4311 351.382 83.7623C346.302 80.0934 343.515 74.9781 343.021 68.4164H354.769C355.263 72.297 356.956 75.1545 359.849 76.9889C362.742 78.8234 367.01 79.7406 372.655 79.7406C382.533 79.7406 387.471 76.6361 387.471 70.4272C387.471 67.8872 386.695 65.947 385.143 64.6064C383.661 63.1953 381.121 62.1722 377.523 61.5372L363.659 58.9973C351.876 56.81 345.985 51.2009 345.985 42.1697C345.985 36.3136 348.207 31.6923 352.652 28.3056C357.097 24.9189 363.165 23.2256 370.856 23.2256C378.828 23.2256 385.143 24.9542 389.8 28.4114C394.527 31.8686 397.208 36.737 397.843 43.0164H386.307C385.602 39.4886 383.944 36.8781 381.333 35.1847C378.793 33.4914 375.195 32.6448 370.538 32.6448C366.234 32.6448 362.883 33.3856 360.484 34.8673C358.156 36.3489 356.991 38.5009 356.991 41.3231C356.991 43.5103 357.732 45.2389 359.214 46.5089C360.766 47.7084 363.236 48.6256 366.622 49.2606L380.486 51.9064C386.695 53.0353 391.246 55.0461 394.139 57.9389C397.032 60.8317 398.478 64.7122 398.478 69.5806C398.478 75.7895 396.22 80.6225 391.705 84.0798C387.189 87.537 380.698 89.2656 372.231 89.2656Z"/>' +
