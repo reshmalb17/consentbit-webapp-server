@@ -1,8 +1,16 @@
-// src/handlers/adminDashboard/scans.js
+// src/handlers/scanClaims.js
 //
-// Public cookie-checker activity, surfaced in the Admin Dashboard.
+// Links a public cookie-checker scan to the person who later signed up carrying
+// its scanId. Formerly handlers/adminDashboard/scans.js — it stayed behind when
+// the Admin Dashboard API moved to its own worker (../Admin-Dashboard-Server),
+// because `recordScanClaim` is a WRITE on the customer-facing login path
+// (authVerifyCode.js), not part of the dashboard's read surface.
 //
-// This module reads a DIFFERENT database from the rest of this folder. The
+// The read side of these tables (listScanEvents / getScanStats /
+// listScansForEmail, still exported below) is what that other worker serves; the
+// exports are kept so the two copies of this file stay diffable.
+//
+// This module reads a DIFFERENT database from the rest of this worker. The
 // scanner writes to cookie-scanner-db (env.COOKIE_SCANNER_DB); users, accounts
 // and the audit log live in consent-webapp (env.CONSENT_WEBAPP). They are
 // separate D1 instances, so a scan can never be SQL-joined to a User row — the

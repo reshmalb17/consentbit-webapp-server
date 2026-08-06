@@ -15,7 +15,7 @@ import {
 } from '../services/db.js';
 import { sendWelcomeEmail } from '../services/email.js';
 import { sendScanReportForId } from '../services/scanReport.js';
-import { recordScanClaim } from './adminDashboard/scans.js';
+import { recordScanClaim } from './scanClaims.js';
 // Note: hashPassword removed — system is fully passwordless (OTP via email only)
 
 function isValidEmail(email) {

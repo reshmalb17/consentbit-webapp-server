@@ -56,22 +56,15 @@ import { handleAdminGa4Test } from './handlers/adminGa4Test.js';
 import { handleAdminBackfillClickup } from './handlers/adminBackfillClickup.js';
 import { handleAdminMicheleClickup } from './handlers/adminMicheleClickup.js';
 import { handleAdminTestScanReport } from './handlers/adminTestScanReport.js';
-import {
-  handleAdminDashboardStats,
-  handleAdminDashboardUsers,
-  handleAdminDashboardUser,
-  handleAdminDashboardSite,
-  handleAdminDashboardOrganization,
-  handleAdminDashboardSubscription,
-  handleAdminDashboardAuth,
-  handleAdminDashboardAccounts,
-  handleAdminDashboardAccountSetup,
-  handleAdminDashboardRecover,
-  handleAdminDashboardAudit,
-  handleAdminDashboardScans,
-  handleAdminDashboardSites,
-  handleAdminDashboardUsage,
-} from './handlers/adminDashboard/index.js';
+// The Admin Dashboard API (/api/admin/dashboard/*) used to live here. It now has
+// its own worker — see ../Admin-Dashboard-Server — which binds the same
+// CONSENT_WEBAPP and COOKIE_SCANNER_DB databases. Nothing about the data moved.
+//
+// The writers those dashboard views READ are still here, because they belong to
+// the customer-facing paths that produce the data:
+//   handlers/scanClaims.js       recordScanClaim      ← authVerifyCode.js
+//   services/adminNotifications  createAdminNotification ← stripeWebhook, pageview
+//   services/planTransitions     recordPlanTransition ← stripeWebhook
 import { handleCheckLegacyScript } from './handlers/checkLegacyScript.js';
 import { handleLegacyConsentLogs } from './handlers/legacyConsentLogs.js';
 import { handleLegacyConsentCsv } from './handlers/legacyConsentCsv.js';
@@ -105,6 +98,7 @@ import { handleSyncPlugin, handleSyncPluginCustomization, handleGetPluginData, h
 import { handlePaymentSubscription } from './handlers/paymentSubscription.js';
 import { handleWebflowBilling, handleWebflowCancelSubscription, handleWebflowSwitchInterval } from './handlers/webflowBilling.js';
 import { handleWebflowBillings, handleWebflowCancelSubscriptions, handleWebflowSwitchIntervals } from './handlers/webflowBillingWf.js';
+import { createAdminNotification } from './services/adminNotifications.js';
 import { requireConsentSession, requireConsentPdfAccess } from './middleware/consentAccess.js';
 import { requireActiveSubscriptionForConsentReport } from './services/subscriptionGate.js';
 import { handleFramerBilling, handleFramerCancelSubscription, handleFramerSwitchInterval } from './handlers/framerBilling.js';
@@ -218,29 +212,8 @@ const PUBLIC_PATHS = new Set([
   // Legacy aliases without /api/ prefix (backwards-compat for older bundles)
   '/licenses/activate-license',
   '/licenses/check-domain-script',
-  // Standalone Admin Dashboard (Next.js) backend. "Public" for TRANSPORT ONLY —
-  // any-origin CORS, plain JSON, no CSRF — with authorization enforced INSIDE each
-  // handler (handlers/adminDashboard/auth.js): X-Admin-User + X-Admin-Key must match
-  // an AdminDashboardAccount row (or X-Admin-Key alone may be env.ADMIN_SECRET), and
-  // the resolved role gates writes. Called server-to-server from the dashboard's
-  // Next.js routes, so no key reaches a browser.
-  '/api/admin/dashboard/stats',
-  '/api/admin/dashboard/users',
-  '/api/admin/dashboard/user',
-  '/api/admin/dashboard/site',
-  '/api/admin/dashboard/organization',
-  '/api/admin/dashboard/subscription',
-  '/api/admin/dashboard/auth',
-  '/api/admin/dashboard/accounts',
-  '/api/admin/dashboard/audit',
-  '/api/admin/dashboard/scans',
-  '/api/admin/dashboard/sites',
-  '/api/admin/dashboard/usage',
-  // Emailed-link surfaces. Unauthenticated by design — the single-use token in
-  // the link is the credential, and recover always answers identically so it
-  // cannot be used to discover who has an account.
-  '/api/admin/dashboard/account-setup',
-  '/api/admin/dashboard/account-recover',
+  // NOTE: the /api/admin/dashboard/* paths were removed from this set when the
+  // Admin Dashboard API moved to its own worker (../Admin-Dashboard-Server).
 ]);
 
 /**
@@ -661,35 +634,9 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     case '/api/admin/test-scan-report':
       response = await handleAdminTestScanReport(request, env, ctx); break;
 
-    // — Admin Dashboard (standalone Next.js app) — read/edit/delete users
-    case '/api/admin/dashboard/stats':
-      response = await handleAdminDashboardStats(request, env); break;
-    case '/api/admin/dashboard/users':
-      response = await handleAdminDashboardUsers(request, env); break;
-    case '/api/admin/dashboard/user':
-      response = await handleAdminDashboardUser(request, env); break;
-    case '/api/admin/dashboard/site':
-      response = await handleAdminDashboardSite(request, env); break;
-    case '/api/admin/dashboard/organization':
-      response = await handleAdminDashboardOrganization(request, env); break;
-    case '/api/admin/dashboard/subscription':
-      response = await handleAdminDashboardSubscription(request, env); break;
-    case '/api/admin/dashboard/auth':
-      response = await handleAdminDashboardAuth(request, env); break;
-    case '/api/admin/dashboard/accounts':
-      response = await handleAdminDashboardAccounts(request, env, ctx); break;
-    case '/api/admin/dashboard/account-setup':
-      response = await handleAdminDashboardAccountSetup(request, env); break;
-    case '/api/admin/dashboard/account-recover':
-      response = await handleAdminDashboardRecover(request, env, ctx); break;
-    case '/api/admin/dashboard/audit':
-      response = await handleAdminDashboardAudit(request, env); break;
-    case '/api/admin/dashboard/scans':
-      response = await handleAdminDashboardScans(request, env); break;
-    case '/api/admin/dashboard/sites':
-      response = await handleAdminDashboardSites(request, env); break;
-    case '/api/admin/dashboard/usage':
-      response = await handleAdminDashboardUsage(request, env); break;
+    // The /api/admin/dashboard/* cases were removed with the move to
+    // ../Admin-Dashboard-Server. They now 404 here, which is intended: the
+    // dashboard's WORKER_BASE_URL points at that worker.
 
     case '/api/check-legacy-script':
       response = await handleCheckLegacyScript(request, env); break;
@@ -804,6 +751,31 @@ async function executeScheduledScans(env, ctx) {
                 await markScanLimitNotified(db, scheduledScan.siteId, scanUsage.yearMonth);
               }
             }
+
+            // Raise it for the operator too. Keyed on site + month so a site that
+            // stays over its cap all month produces ONE row, not one per skipped
+            // scan — and it is raised whether or not the customer email went out,
+            // so a site with no owner email still shows up in the dashboard.
+            ctx.waitUntil(
+              createAdminNotification(db, {
+                type: 'limit.scans',
+                severity: 'warning',
+                title: `Scan limit reached — ${site.domain || scheduledScan.siteId}`,
+                message: `${scanUsage.scanCount} of ${scansLimit} scans used this month on the ${plan?.id || 'free'} plan. Scheduled scans are being skipped until the quota resets.`,
+                siteId: scheduledScan.siteId,
+                domain: site.domain || null,
+                organizationId,
+                detail: {
+                  resource: 'scans',
+                  used: scanUsage.scanCount,
+                  limit: scansLimit,
+                  yearMonth: scanUsage.yearMonth,
+                  plan: plan?.id || 'free',
+                  customerEmailed: !alreadyNotified,
+                },
+                dedupeKey: `limit:scans:${scheduledScan.siteId}:${scanUsage.yearMonth}`,
+              }).catch(() => null)
+            );
 
             executed.push({ id: scheduledScan.id, status: 'skipped', reason: 'scan_limit_reached' });
             continue;

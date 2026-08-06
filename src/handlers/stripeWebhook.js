@@ -1,10 +1,11 @@
 ﻿// POST /api/webhooks/stripe - raw body required for signature verification
 //
-// Subscribe to: checkout.session.completed, payment_intent.succeeded, customer.subscription.updated, customer.subscription.deleted, invoice.payment_failed
+// Subscribe to: checkout.session.completed, payment_intent.succeeded, customer.subscription.updated, customer.subscription.deleted, invoice.payment_failed, charge.refunded, refund.created, refund.updated
 //
 //   payment_intent.succeeded  - bulk one-time payment: create license keys, add to queue (cron creates 4 subscriptions at a time)
 //   checkout.session.completed - single: save subscription from session (per-site license); bulk: audit only (licenses enqueued from payment_intent.succeeded)
 //   customer.subscription.updated / .deleted / invoice.payment_failed - sync Subscription table
+//   charge.refunded / refund.created / refund.updated - a refund cancels the subscription and raises an admin-dashboard notification
 
 import {
   ensureSchema,
@@ -30,6 +31,12 @@ import {
   syncSubscriptionDeletedToLegacy,
 } from '../services/syncLegacy.js';
 import { addCustomerToClickUp, wasClickUpTaskCreated, markClickUpTaskCreated } from '../services/clickup.js';
+import { createAdminNotification } from '../services/adminNotifications.js';
+import {
+  classifyTransition,
+  recordPlanTransition,
+  transitionDedupeKey,
+} from '../services/planTransitions.js';
 
 /**
  * ClickUp gets NEW PURCHASES ONLY — never a failed/pending transaction.
@@ -285,6 +292,319 @@ async function handleLegacyWebflowUpgrade(env, db, siteId, newSubId, resolvedPla
   } catch (e) {
     // exception during Webflow script inject
   }
+}
+
+// ---------------------------------------------------------------------------
+// Refunds
+//
+// A refund is the customer getting their money back — the subscription must stop.
+// Stripe does NOT do this for you: refunding a charge leaves the subscription
+// happily active and renewing. So on a FULL refund we cancel the subscription
+// immediately (Stripe + D1 + legacy KV) and raise a notification in the admin
+// dashboard naming the affected site. A PARTIAL refund is left running — it is
+// usually a goodwill credit, not an exit — but still raises a notification so an
+// operator can decide.
+// ---------------------------------------------------------------------------
+
+/** GET a Stripe resource; returns null on any failure so refund handling never throws. */
+async function stripeGet(env, path) {
+  if (!env.STRIPE_SECRET_KEY) return null;
+  try {
+    const res = await fetch(`https://api.stripe.com/v1/${path}`, {
+      headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
+    });
+    const data = await res.json();
+    return data?.error ? null : data;
+  } catch (e) {
+    console.warn('[StripeWebhook] stripeGet failed', path, e?.message);
+    return null;
+  }
+}
+
+/** Stripe fields are sometimes an id string, sometimes an expanded object. */
+function stripeId(v) {
+  if (!v) return null;
+  return typeof v === 'string' ? v : v.id || null;
+}
+
+/**
+ * Subscription id behind an invoice. Older API versions put it on `invoice.subscription`;
+ * from 2025-xx it moved under `invoice.parent.subscription_details.subscription`, so read both.
+ */
+function subscriptionIdFromInvoice(invoice) {
+  return (
+    stripeId(invoice?.subscription) ||
+    stripeId(invoice?.parent?.subscription_details?.subscription) ||
+    null
+  );
+}
+
+function formatMoney(cents, currency) {
+  if (cents == null) return 'an unknown amount';
+  return `${(cents / 100).toFixed(2)} ${String(currency || 'usd').toUpperCase()}`;
+}
+
+/** Cancel a Stripe subscription right now. Already-canceled is treated as success. */
+async function cancelStripeSubscriptionNow(env, stripeSubscriptionId) {
+  if (!stripeSubscriptionId || !env.STRIPE_SECRET_KEY) return { ok: false, reason: 'not_configured' };
+  try {
+    const res = await fetch(
+      `https://api.stripe.com/v1/subscriptions/${encodeURIComponent(stripeSubscriptionId)}`,
+      { method: 'DELETE', headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` } }
+    );
+    const data = await res.json();
+    if (data?.error) {
+      // The refund may have been issued from the Stripe dashboard with "cancel
+      // subscription" ticked, in which case it is already gone — not a failure.
+      const msg = String(data.error.message || '');
+      const alreadyGone = /no such subscription|canceled/i.test(msg);
+      console.warn('[StripeWebhook] refund cancel — Stripe said:', msg);
+      return { ok: alreadyGone, reason: msg };
+    }
+    return { ok: true, status: data?.status || 'canceled' };
+  } catch (e) {
+    console.error('[StripeWebhook] refund cancel failed', e?.message);
+    return { ok: false, reason: e?.message || 'exception' };
+  }
+}
+
+/**
+ * Work out which of our records a refunded charge belongs to: the Stripe
+ * subscription, our Subscription row, and the site/owner behind it.
+ */
+async function resolveRefundContext(env, db, charge) {
+  const customerId = stripeId(charge?.customer);
+
+  // charge → invoice → subscription is the reliable chain for recurring payments.
+  let stripeSubscriptionId = null;
+  const invoiceId = stripeId(charge?.invoice);
+  let invoice = typeof charge?.invoice === 'object' ? charge.invoice : null;
+  if (!invoice && invoiceId) invoice = await stripeGet(env, `invoices/${invoiceId}`);
+  if (invoice) stripeSubscriptionId = subscriptionIdFromInvoice(invoice);
+
+  // Our row: by subscription id, else the customer's most recent live row. A bulk
+  // one-time payment has no invoice at all and simply finds nothing here.
+  let row = stripeSubscriptionId ? await getSubscriptionByStripeId(db, stripeSubscriptionId).catch(() => null) : null;
+  if (!row && customerId) {
+    row = await db
+      .prepare(
+        `SELECT * FROM Subscription
+           WHERE stripeCustomerId = ?1
+           ORDER BY CASE WHEN status IN ('active', 'trialing') THEN 0 ELSE 1 END, updatedAt DESC
+           LIMIT 1`
+      )
+      .bind(customerId)
+      .first()
+      .catch(() => null);
+  }
+  if (!stripeSubscriptionId) {
+    stripeSubscriptionId = row?.stripeSubscriptionId ?? row?.stripesubscriptionid ?? null;
+  }
+
+  const organizationId = row?.organizationId ?? row?.organizationid ?? null;
+  const siteId = row?.siteId ?? row?.siteid ?? null;
+
+  let domain = null;
+  let platform = null;
+  if (siteId) {
+    const site = await db
+      .prepare('SELECT domain, platform FROM Site WHERE id = ?1 LIMIT 1')
+      .bind(siteId)
+      .first()
+      .catch(() => null);
+    domain = site?.domain || null;
+    platform = site?.platform || null;
+  }
+
+  let userEmail = charge?.billing_details?.email || charge?.receipt_email || null;
+  if (organizationId) {
+    const user = await db
+      .prepare(
+        'SELECT u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
+      )
+      .bind(organizationId)
+      .first()
+      .catch(() => null);
+    if (user?.email) userEmail = user.email;
+  }
+  if (!userEmail && customerId) {
+    const cust = await stripeGet(env, `customers/${customerId}`);
+    userEmail = cust?.email || null;
+  }
+
+  return {
+    row,
+    customerId,
+    stripeSubscriptionId,
+    organizationId,
+    siteId,
+    domain,
+    platform,
+    userEmail,
+    planId: row?.planId ?? row?.planid ?? null,
+    interval: row?.interval ?? 'monthly',
+  };
+}
+
+/**
+ * Handle one refunded charge: cancel on a full refund, always record a
+ * PaymentEvent and an admin notification.
+ *
+ * @param {object} charge  the Stripe Charge (must be the refreshed one — its
+ *                         amount_refunded is what decides full vs partial)
+ * @param {object} [refund] the Refund object, when the event carried one
+ */
+async function processRefund(env, db, ctx, { charge, refund, eventId, eventType }) {
+  const chargeId = charge?.id || null;
+  const refundId = refund?.id || charge?.refunds?.data?.[0]?.id || null;
+  const currency = charge?.currency || refund?.currency || 'usd';
+  const chargeAmount = charge?.amount ?? null;
+  const refundedAmount = charge?.amount_refunded ?? refund?.amount ?? null;
+  const isFull =
+    chargeAmount != null && refundedAmount != null
+      ? refundedAmount >= chargeAmount
+      : charge?.refunded === true;
+
+  const ctxRef = await resolveRefundContext(env, db, charge);
+  const {
+    row, customerId, stripeSubscriptionId, organizationId, siteId, domain, platform, userEmail,
+  } = ctxRef;
+
+  console.log('[StripeWebhook] refund —', eventType,
+    '| chargeId:', chargeId, '| refundId:', refundId,
+    '| refunded:', refundedAmount, 'of', chargeAmount,
+    '| full:', isFull, '| subId:', stripeSubscriptionId, '| site:', domain || siteId);
+
+  // --- Cancel, on a full refund only -------------------------------------
+  //
+  // Nothing to cancel when the refund has no subscription behind it — a refunded
+  // bulk one-time payment, or a charge we could not match to a customer. Those
+  // still raise a notification below; they just must not push empty rows into the
+  // legacy DB / KV, which key on the subscription and domain.
+  const cancelling = isFull && !!(stripeSubscriptionId || row?.id);
+  let cancelResult = null;
+  if (cancelling) {
+    if (stripeSubscriptionId) {
+      cancelResult = await cancelStripeSubscriptionNow(env, stripeSubscriptionId);
+    }
+    if (row?.id) {
+      const now = new Date().toISOString();
+      await db
+        .prepare(
+          `UPDATE Subscription
+              SET status = 'canceled', canceledAt = ?1, cancelAtPeriodEnd = 0, updatedAt = ?2
+            WHERE id = ?3`
+        )
+        .bind(now, now, row.id)
+        .run()
+        .catch((e) => console.warn('[StripeWebhook] refund — D1 cancel failed:', e?.message));
+    }
+
+    // Legacy DB + ACTIVE_SITES KV: flips the site inactive so the banner stops
+    // serving, same path a real cancellation takes.
+    if (stripeSubscriptionId || domain) {
+      ctx.waitUntil(
+        syncSubscriptionDeletedToLegacy(env, {
+          email: userEmail,
+          domain,
+          subscriptionId: stripeSubscriptionId,
+          customerId,
+          platform,
+        }).catch((e) => console.warn('[StripeWebhook] refund — legacy sync failed:', e?.message))
+      );
+    }
+
+    if (userEmail) {
+      ctx.waitUntil(
+        (async () => {
+          await capturePostHogEvent(env, userEmail, 'subscription_refunded', {
+            plan: ctxRef.planId,
+            interval: ctxRef.interval,
+            org_id: organizationId,
+            site_id: siteId,
+            amount_refunded: refundedAmount != null ? refundedAmount / 100 : null,
+            currency: String(currency).toUpperCase(),
+            ...(platform ? { platform } : {}),
+          });
+          await identifyPostHogPerson(env, userEmail, {
+            subscription_status: 'canceled',
+            lifecycle_stage: 'refunded',
+            did_refund: true,
+            refunded_at: new Date().toISOString(),
+            ...(platform ? { platform } : {}),
+          });
+        })().catch(() => {})
+      );
+    }
+  }
+
+  // --- Audit trail --------------------------------------------------------
+  await savePaymentEvent(db, {
+    eventType,
+    stripeEventId: eventId,
+    stripeInvoiceId: stripeId(charge?.invoice),
+    subscriptionId: row?.id ?? null,
+    organizationId,
+    amountCents: refundedAmount,
+    failureReason: refund?.reason || charge?.refunds?.data?.[0]?.reason || null,
+    rawPayload: {
+      chargeId,
+      refundId,
+      amountRefunded: refundedAmount,
+      chargeAmount,
+      currency,
+      full: isFull,
+      stripeSubscriptionId,
+      cancelled: cancelling,
+      cancelResult,
+    },
+  }).catch((e) => console.warn('[StripeWebhook] refund — savePaymentEvent failed:', e?.message));
+
+  // --- Admin dashboard notification --------------------------------------
+  const site = domain || siteId || 'an unidentified site';
+  const amountText = formatMoney(refundedAmount, currency);
+  const to = userEmail ? ` to ${userEmail}` : '';
+  await createAdminNotification(db, {
+    type: isFull ? 'refund.full' : 'refund.partial',
+    severity: isFull ? 'critical' : 'warning',
+    title: isFull
+      ? cancelling
+        ? `Refund of ${amountText} — ${site} cancelled`
+        : `Refund of ${amountText} — no subscription matched`
+      : `Partial refund of ${amountText} — ${site}`,
+    message: isFull
+      ? cancelling
+        ? `A full refund was issued${to}. The subscription has been cancelled and the site is no longer served.`
+        : `A full refund was issued${to}, but no subscription could be matched to the charge — nothing was cancelled automatically. Check Stripe and cancel by hand if one is still running.`
+      : `A partial refund of ${amountText}${chargeAmount != null ? ` (of ${formatMoney(chargeAmount, currency)})` : ''} was issued${to}. The subscription is still active — cancel it manually if that is not intended.`,
+    siteId,
+    domain,
+    organizationId,
+    userEmail,
+    subscriptionId: row?.id ?? null,
+    stripeSubscriptionId,
+    stripeCustomerId: customerId,
+    stripeChargeId: chargeId,
+    stripeRefundId: refundId,
+    amountCents: refundedAmount,
+    currency,
+    detail: {
+      eventType,
+      stripeEventId: eventId,
+      chargeAmount,
+      amountRefunded: refundedAmount,
+      reason: refund?.reason || charge?.refunds?.data?.[0]?.reason || null,
+      platform,
+      plan: ctxRef.planId,
+      interval: ctxRef.interval,
+      subscriptionCancelled: cancelling,
+      cancelResult,
+      matchedSubscriptionRow: !!row,
+    },
+    // One row per refund however many times Stripe re-delivers it, and however
+    // many event types (charge.refunded + refund.updated) describe the same money.
+    dedupeKey: refundId ? `refund:${refundId}` : chargeId ? `charge-refund:${chargeId}:${refundedAmount}` : null,
+  });
 }
 
 export async function handleStripeWebhook(request, env, ctx) {
@@ -884,6 +1204,76 @@ export async function handleStripeWebhook(request, env, ctx) {
     // entry points) so a subscriber is added exactly once regardless of which event lands first.
     if (type === 'customer.subscription.created') {
       const sub = event.data.object;
+
+      // --- Plan transition: first purchase / trial start --------------------
+      // This event is the ONLY one a trial reliably fires (see the note above),
+      // and the .updated/.deleted handler below is never reached for it — this
+      // branch returns. Without recording here, the two conversions that matter
+      // most, free → trial and free → paid, would never be logged at all.
+      //
+      // Same status guard as the ClickUp block: the custom-checkout flow creates
+      // subscriptions with payment_behavior=default_incomplete, so every card
+      // entry — including declines and abandoned 3DS — fires this event with
+      // status 'incomplete'. Logging those would invent conversions that never
+      // happened.
+      if (sub.status === 'trialing' || sub.status === 'active') {
+        ctx.waitUntil((async () => {
+          try {
+            const existing = await getSubscriptionByStripeId(db, sub.id).catch(() => null);
+            const orgId = existing?.organizationId ?? existing?.organizationid
+              ?? sub.metadata?.organizationId ?? null;
+            const siteId = existing?.siteId ?? existing?.siteid ?? sub.metadata?.siteId ?? null;
+
+            let tier = sub.metadata?.planId || existing?.planId || existing?.planid || null;
+            const priceId = sub.items?.data?.[0]?.price?.id ?? null;
+            if (!tier || !['basic', 'essential', 'growth'].includes(String(tier).toLowerCase())) {
+              tier = inferTierPlanIdFromStripePriceId(env, priceId) || tier;
+            }
+
+            let email = null;
+            let domain = null;
+            if (orgId) {
+              const u = await db.prepare(
+                'SELECT u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
+              ).bind(orgId).first().catch(() => null);
+              email = u?.email || null;
+            }
+            if (siteId) {
+              const s = await db.prepare('SELECT domain FROM Site WHERE id = ?1 LIMIT 1')
+                .bind(siteId).first().catch(() => null);
+              domain = s?.domain || null;
+            }
+
+            const kind = sub.status === 'trialing' ? 'trial_started' : 'signup_paid';
+            await recordPlanTransition(db, {
+              kind,
+              fromPlan: 'free',
+              toPlan: tier,
+              toInterval: sub.items?.data?.[0]?.plan?.interval === 'year' ? 'yearly' : 'monthly',
+              toAmountCents: sub.items?.data?.[0]?.price?.unit_amount ?? sub.plan?.amount ?? null,
+              currency: sub.currency || 'usd',
+              organizationId: orgId,
+              siteId,
+              domain,
+              userEmail: email,
+              subscriptionId: existing?.id ?? null,
+              stripeSubscriptionId: sub.id,
+              occurredAt: new Date().toISOString(),
+              detail: {
+                eventType: type,
+                stripeEventId: eventId,
+                stripeStatus: sub.status,
+                priceId,
+                trialEnd: sub.trial_end ? new Date(sub.trial_end * 1000).toISOString() : null,
+              },
+              dedupeKey: transitionDedupeKey(kind, sub.id, eventId),
+            });
+          } catch (e) {
+            console.warn('[StripeWebhook] subscription.created transition log failed:', e?.message);
+          }
+        })());
+      }
+
       ctx.waitUntil((async () => {
         try {
           // Only real purchases. The custom-checkout flow creates subscriptions with
@@ -1071,6 +1461,137 @@ export async function handleStripeWebhook(request, env, ctx) {
         organizationId: orgIdFinal,
         rawPayload: { status: sub.status, cancel_at_period_end: sub.cancel_at_period_end },
       });
+
+      // --- Plan transition log ----------------------------------------------
+      // This is the ONLY place both sides of a plan change are known: `existing`
+      // still holds the row as it was before saveSubscription() overwrote it
+      // above, and `sub` carries what Stripe now says. Nothing else in the schema
+      // keeps the previous tier, so if this is not written here the change is
+      // unrecoverable.
+      {
+        const prevStatus = event.data.previous_attributes?.status ?? null;
+        const kind = classifyTransition({
+          fromPlan: existing?.planId ?? existing?.planid ?? 'free',
+          toPlan: planIdFromMeta || existing?.planId || existing?.planid || null,
+          fromInterval: existing?.interval ?? null,
+          toInterval: intervalFromSub,
+          // previous_attributes only carries what CHANGED, so an absent status
+          // means it did not change and the old one equals the new one.
+          fromStatus: prevStatus ?? sub.status,
+          toStatus: type === 'customer.subscription.deleted' ? 'canceled' : sub.status,
+        });
+
+        if (kind) {
+          try {
+            let ptEmail = null;
+            let ptDomain = null;
+            const ptSiteId = existing?.siteId ?? existing?.siteid ?? sub.metadata?.siteId ?? null;
+            if (orgIdFinal) {
+              const u = await db.prepare(
+                'SELECT u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
+              ).bind(orgIdFinal).first();
+              ptEmail = u?.email || null;
+            }
+            if (ptSiteId) {
+              const s = await db.prepare('SELECT domain FROM Site WHERE id = ?1 LIMIT 1').bind(ptSiteId).first();
+              ptDomain = s?.domain || null;
+            }
+
+            await recordPlanTransition(db, {
+              kind,
+              fromPlan: existing?.planId ?? existing?.planid ?? 'free',
+              toPlan: planIdFromMeta || existing?.planId || existing?.planid || null,
+              fromInterval: existing?.interval ?? null,
+              toInterval: intervalFromSub,
+              fromAmountCents: existing?.amountCents ?? existing?.amountcents ?? null,
+              toAmountCents: sub.plan?.amount ?? sub.items?.data?.[0]?.price?.unit_amount ?? null,
+              currency: sub.currency || 'usd',
+              organizationId: orgIdFinal,
+              siteId: ptSiteId,
+              domain: ptDomain,
+              userEmail: ptEmail,
+              subscriptionId: existing?.id ?? null,
+              stripeSubscriptionId: sub.id,
+              occurredAt: new Date().toISOString(),
+              detail: { eventType: type, stripeEventId: eventId, prevStatus, newStatus: sub.status },
+              // Once-only milestones (first purchase, trial start/convert, cancel)
+              // are keyed on the SUBSCRIPTION so they cannot be double-logged by
+              // both this handler and the .created one above. Repeatable changes
+              // (upgrade, downgrade, interval) stay keyed on the event.
+              dedupeKey: transitionDedupeKey(kind, sub.id, eventId),
+            });
+          } catch (e) {
+            console.warn('[StripeWebhook] plan transition log failed:', e?.message);
+          }
+        }
+      }
+
+      // --- Admin dashboard notification: subscription cancelled -------------
+      // Raised here rather than in the refund path because a cancellation does
+      // not have to involve a refund — the customer may simply have cancelled,
+      // or a payment may have failed its way to `unpaid`. The refund handler
+      // raises its own row, and the dedupe keys differ, so a refund-driven
+      // cancellation legitimately produces one of each.
+      if (type === 'customer.subscription.deleted' || sub.status === 'canceled' || sub.status === 'unpaid') {
+        try {
+          let cnEmail = null;
+          let cnDomain = null;
+          const cnSiteId = existing?.siteId ?? existing?.siteid ?? sub.metadata?.siteId ?? null;
+          if (orgIdFinal) {
+            const u = await db.prepare(
+              'SELECT u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
+            ).bind(orgIdFinal).first();
+            cnEmail = u?.email || null;
+          }
+          if (cnSiteId) {
+            const s = await db.prepare('SELECT domain FROM Site WHERE id = ?1 LIMIT 1').bind(cnSiteId).first();
+            cnDomain = s?.domain || null;
+          }
+
+          const cnAmount = sub.plan?.amount ?? sub.items?.data?.[0]?.price?.unit_amount ?? null;
+          const cnCurrency = sub.currency || 'usd';
+          const where = cnDomain || cnSiteId || 'an unidentified site';
+          const unpaid = sub.status === 'unpaid';
+          const atPeriodEnd = !!sub.cancel_at_period_end;
+
+          await createAdminNotification(db, {
+            type: unpaid ? 'subscription.unpaid' : 'subscription.cancelled',
+            // Losing a paying site is worth a look, but it is an expected part of
+            // the lifecycle — unlike a refund, which is money going back out.
+            severity: 'warning',
+            title: unpaid
+              ? `Subscription unpaid — ${where}`
+              : `Subscription cancelled — ${where}`,
+            message: unpaid
+              ? `Stripe marked this subscription unpaid after its retries were exhausted. The site is no longer served.`
+              : `The ${planIdFromMeta || 'paid'} ${intervalFromSub || ''} subscription for ${where} ended${atPeriodEnd ? ' at the end of its billing period' : ''}. The site is no longer served.`,
+            siteId: cnSiteId,
+            domain: cnDomain,
+            organizationId: orgIdFinal,
+            userEmail: cnEmail,
+            subscriptionId: existing?.id ?? null,
+            stripeSubscriptionId: sub.id,
+            stripeCustomerId: typeof sub.customer === 'string' ? sub.customer : (sub.customer?.id || null),
+            amountCents: cnAmount,
+            currency: cnCurrency,
+            detail: {
+              eventType: type,
+              stripeEventId: eventId,
+              stripeStatus: sub.status,
+              cancelAtPeriodEnd: atPeriodEnd,
+              canceledAt,
+              plan: planIdFromMeta,
+              interval: intervalFromSub,
+              matchedSubscriptionRow: !!existing,
+            },
+            // One row per subscription per terminal status, however many times
+            // Stripe re-delivers the event.
+            dedupeKey: `subcancel:${sub.id}:${sub.status}`,
+          });
+        } catch (e) {
+          console.warn('[StripeWebhook] cancellation notification failed:', e?.message);
+        }
+      }
 
       // PostHog: track trial → active conversion + cancellation
       {
@@ -1323,6 +1844,62 @@ export async function handleStripeWebhook(request, env, ctx) {
         }
       }
 
+      return Response.json({ received: true });
+    }
+
+    // Refunds. `charge.refunded` is the primary event; `refund.created` /
+    // `refund.updated` are subscribed to as well because some Stripe API versions
+    // deliver only those for refunds issued from the dashboard. All three go
+    // through processRefund(), which dedupes on the refund id.
+    if (type === 'charge.refunded' || type === 'refund.created' || type === 'refund.updated') {
+      // Stripe re-delivers until we 2xx; one PaymentEvent row per delivered event.
+      const alreadyLogged = await db.prepare(
+        `SELECT id FROM PaymentEvent WHERE stripeEventId = ?1 LIMIT 1`
+      ).bind(eventId).first();
+      if (alreadyLogged) {
+        console.log('[StripeWebhook] refund event already processed —', eventId);
+        return Response.json({ received: true });
+      }
+
+      let charge = null;
+      let refund = null;
+
+      if (type === 'charge.refunded') {
+        charge = event.data.object;
+        refund = charge?.refunds?.data?.[0] || null;
+      } else {
+        refund = event.data.object;
+        // Only a settled refund moves money. A pending or failed one must not
+        // cancel anything — the customer still has the service they paid for.
+        if (refund?.status && refund.status !== 'succeeded') {
+          console.log('[StripeWebhook] refund ignored — status:', refund.status, '| refundId:', refund.id);
+          return Response.json({ received: true });
+        }
+        const chargeId = stripeId(refund?.charge);
+        if (chargeId) charge = await stripeGet(env, `charges/${chargeId}`);
+      }
+
+      // The webhook payload's amount_refunded can lag when several refunds land
+      // together, and full-vs-partial hinges on it — always re-read the charge.
+      if (charge?.id) {
+        const fresh = await stripeGet(env, `charges/${charge.id}`);
+        if (fresh) charge = fresh;
+      }
+
+      // Newer Stripe API versions no longer inline `charge.refunds`, so look the
+      // refund up when the event didn't carry one. Its id is the dedupe key that
+      // keeps charge.refunded and refund.updated from raising two alerts.
+      if (!refund && charge?.id) {
+        const list = await stripeGet(env, `refunds?charge=${encodeURIComponent(charge.id)}&limit=1`);
+        refund = list?.data?.[0] || charge?.refunds?.data?.[0] || null;
+      }
+
+      if (!charge) {
+        console.warn('[StripeWebhook] refund — could not resolve the charge; recording nothing.', type, eventId);
+        return Response.json({ received: true });
+      }
+
+      await processRefund(env, db, ctx, { charge, refund, eventId, eventType: type });
       return Response.json({ received: true });
     }
 

@@ -6,6 +6,7 @@ import {
   getEffectivePlanForOrganization,
   getPageviewUsageForOrganization,
 } from '../services/db.js';
+import { createAdminNotification } from '../services/adminNotifications.js';
 
 export async function handlePageview(request, env) {
   const db = env.CONSENT_WEBAPP;
@@ -113,6 +114,31 @@ export async function handlePageview(request, env) {
   if (organizationId) {
     const orgUsage = await getPageviewUsageForOrganization(db, organizationId);
     overLimit = orgUsage.pageviewCount >= limit;
+
+    // Raise the operator notification ONLY on the request that crosses the line.
+    // This is the hot path — every pageview runs it — so keying off the crossing
+    // means one write per org per month instead of one attempted insert per view
+    // for the rest of the month. Requests that arrive already over the limit
+    // return early above and never reach here.
+    if (overLimit && !preCheckOverLimit) {
+      await createAdminNotification(db, {
+        type: 'limit.pageviews',
+        severity: 'warning',
+        title: `Pageview limit reached — ${siteDomain || siteId}`,
+        message: `${orgUsage.pageviewCount} of ${limit} pageviews used this month. Further pageviews on this organization are no longer recorded until the quota resets.`,
+        siteId,
+        domain: siteDomain || null,
+        organizationId,
+        detail: {
+          resource: 'pageviews',
+          used: orgUsage.pageviewCount,
+          limit,
+          yearMonth: orgUsage.yearMonth,
+        },
+        // Org-scoped, because the pageview allowance is pooled across its sites.
+        dedupeKey: `limit:pageviews:${organizationId}:${orgUsage.yearMonth}`,
+      }).catch(() => null);
+    }
   }
 
   return Response.json(
