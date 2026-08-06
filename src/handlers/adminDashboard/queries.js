@@ -59,12 +59,23 @@ function deriveStatuses(concat) {
   return [...set];
 }
 
-/** "YYYY" / "MM" from a D1 datetime string like "2026-01-15 12:00:00". */
-function yearOf(dt) {
-  return dt ? String(dt).slice(0, 4) : '';
-}
-function monthOf(dt) {
-  return dt ? String(dt).slice(5, 7) : '';
+/**
+ * Distinct banner regulations across a user's sites, from a GROUP_CONCAT of
+ * "banner_type:region_mode" pairs. Derived per pair rather than per column
+ * because GDPR-only and GDPR+CCPA share banner_type='gdpr' and differ only in
+ * region_mode — reading either column alone would mislabel half of them.
+ */
+const REGULATION_ORDER = ['gdpr', 'ccpa', 'both', 'iab'];
+
+function deriveRegulations(concat) {
+  const set = new Set();
+  if (concat) {
+    for (const pair of String(concat).split(',')) {
+      const [bannerType, regionMode] = String(pair).split(':');
+      set.add(deriveRegulation(bannerType, regionMode));
+    }
+  }
+  return [...set].sort((a, b) => REGULATION_ORDER.indexOf(a) - REGULATION_ORDER.indexOf(b));
 }
 
 /** Internal (agency) email domains — these accounts are ours, not customers. */
@@ -90,10 +101,23 @@ export function isInternalOrTest(email) {
 
 export async function listUsers(
   db,
-  { platform = 'all', search = '', plan = 'all', status = 'all', year = '', month = '', audience = 'all', billing = 'all', legacy = 'all' } = {}
+  { platform = 'all', search = '', plan = 'all', status = 'all', from = '', to = '', audience = 'all', billing = 'all', legacy = 'all' } = {}
 ) {
   const where = [];
   const params = [];
+
+  // Signup date window. Applied in SQL so the LIMIT below caps the filtered set
+  // rather than filtering an already-truncated page. Compared as a date prefix
+  // because createdAt is stored both as 'YYYY-MM-DD HH:MM:SS' and as an ISO
+  // string, and slicing works for both.
+  if (YMD.test(String(from))) {
+    where.push('substr(u.createdAt, 1, 10) >= ?');
+    params.push(String(from));
+  }
+  if (YMD.test(String(to))) {
+    where.push('substr(u.createdAt, 1, 10) <= ?');
+    params.push(String(to));
+  }
 
   if (search) {
     // Match on the user (email / name / id) OR any site they own (domain, custom
@@ -127,7 +151,13 @@ export async function listUsers(
         WHERE o.ownerUserId = u.id) AS plans,
       (SELECT GROUP_CONCAT(DISTINCT sub.status)
          FROM Subscription sub JOIN Organization o ON sub.organizationId = o.id
-        WHERE o.ownerUserId = u.id) AS statuses
+        WHERE o.ownerUserId = u.id) AS statuses,
+      -- Pairs joined with ':' so the default ',' separator stays unambiguous;
+      -- GROUP_CONCAT(DISTINCT ...) cannot take a custom separator in SQLite.
+      (SELECT GROUP_CONCAT(DISTINCT COALESCE(NULLIF(s.banner_type, ''), 'gdpr')
+                                    || ':' || COALESCE(NULLIF(s.region_mode, ''), 'gdpr'))
+         FROM Site s JOIN Organization o ON s.organizationId = o.id
+        WHERE o.ownerUserId = u.id) AS bannerTypes
     FROM User u
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
     ORDER BY u.createdAt DESC
@@ -147,6 +177,9 @@ export async function listUsers(
     platforms: derivePlatforms(r.platforms),
     plans: derivePlans(r.plans),
     statuses: deriveStatuses(r.statuses),
+    // Which regulation each of their banners runs under. Still filtered on by
+    // `status` above — the status list stays in the payload for that.
+    regulations: deriveRegulations(r.bannerTypes),
     // Migrated off the old Webflow/Framer system, as opposed to signing up in the
     // current app. Distinct from `internal`, which is about OUR own test accounts.
     isLegacy: Number(r.isLegacy) || 0,
@@ -205,15 +238,6 @@ export async function listUsers(
   const wantedStatuses = wanted(status, (s) => (s === 'cancelled' ? 'canceled' : s));
   if (wantedStatuses.size) {
     mapped = mapped.filter((u) => u.statuses.some((s) => wantedStatuses.has(s)));
-  }
-
-  if (year) {
-    mapped = mapped.filter((u) => yearOf(u.createdAt) === String(year));
-  }
-
-  if (month) {
-    const mm = String(month).padStart(2, '0');
-    mapped = mapped.filter((u) => monthOf(u.createdAt) === mm);
   }
 
   return mapped;
@@ -279,7 +303,7 @@ export async function listSites(
   db,
   {
     search = '', platform = 'all', banner = 'all', regulation = 'all',
-    year = '', month = '', audience = 'all', plan = 'all', legacy = 'all', limit,
+    from = '', to = '', audience = 'all', plan = 'all', legacy = 'all', limit,
   } = {}
 ) {
   const where = [];
@@ -309,15 +333,16 @@ export async function listSites(
     where.push('COALESCE(s.isLegacy, 0) = 0');
   }
 
-  // Sliced from the stored timestamp, matching yearOf()/monthOf(). Applied in
-  // SQL so the LIMIT below caps the filtered set, not the other way round.
-  if (year) {
-    where.push('substr(s.createdAt, 1, 4) = ?');
-    params.push(String(year));
+  // Registration date window, sliced from the stored timestamp so both the
+  // 'YYYY-MM-DD HH:MM:SS' and ISO forms compare correctly. Applied in SQL so the
+  // LIMIT below caps the filtered set, not the other way round.
+  if (YMD.test(String(from))) {
+    where.push('substr(s.createdAt, 1, 10) >= ?');
+    params.push(String(from));
   }
-  if (month) {
-    where.push('substr(s.createdAt, 6, 2) = ?');
-    params.push(String(month).padStart(2, '0'));
+  if (YMD.test(String(to))) {
+    where.push('substr(s.createdAt, 1, 10) <= ?');
+    params.push(String(to));
   }
 
   const cap = Math.min(Math.max(Number(limit) || 500, 1), 2000);
@@ -441,6 +466,62 @@ export function currentYearMonth(date = new Date()) {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
+const YMD = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Last calendar day of the month containing a YYYY-MM-DD, as YYYY-MM-DD. */
+function endOfMonth(ymd) {
+  const [y, m] = String(ymd).split('-').map(Number);
+  // Day 0 of month m (1-based) is the last day of month m, since Date's month
+  // argument is 0-based and therefore m means "the month after".
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return `${y}-${String(m).padStart(2, '0')}-${String(last).padStart(2, '0')}`;
+}
+
+/** Every YYYY-MM a YYYY-MM-DD..YYYY-MM-DD range touches, inclusive. */
+function monthsBetween(from, to) {
+  const out = [];
+  let [y, m] = from.split('-').map(Number);
+  const [ty, tm] = to.split('-').map(Number);
+  while (y < ty || (y === ty && m <= tm)) {
+    out.push(`${y}-${String(m).padStart(2, '0')}`);
+    if (++m > 12) { m = 1; y += 1; }
+  }
+  return out;
+}
+
+/**
+ * Resolves the requested window, defaulting to the whole current month.
+ *
+ * `pageviewsAreWholeMonths` records the honest shape of the answer: pageviews
+ * are only ever stored per month (incrementPageviewUsage bumps one counter per
+ * site per month), so any range that does not start on the 1st and end on the
+ * last day returns MORE pageviews than the dates ask for. The UI says so rather
+ * than quietly reporting a number that does not match the range.
+ *
+ * `limitsApplicable` is stricter still: plan allowances are monthly, so
+ * comparing usage to one only makes sense across exactly one whole month. A
+ * partial month would understate it and a multi-month range would overstate it.
+ */
+function resolveRange(from, to) {
+  const today = new Date();
+  const defFrom = `${currentYearMonth(today)}-01`;
+
+  let start = YMD.test(String(from)) ? String(from) : defFrom;
+  let end = YMD.test(String(to)) ? String(to) : endOfMonth(start);
+  if (end < start) [start, end] = [end, start];
+
+  const months = monthsBetween(start, end);
+  const wholeMonths = start.endsWith('-01') && end === endOfMonth(start.slice(0, 7) + '-01');
+
+  return {
+    from: start,
+    to: end,
+    months,
+    pageviewsAreWholeMonths: !(start.endsWith('-01') && end === endOfMonth(end)),
+    limitsApplicable: wholeMonths && months.length === 1,
+  };
+}
+
 /** tier -> { scans, pageviews } from the Plan table, with the free fallback. */
 async function planAllowances(db) {
   const out = new Map();
@@ -471,13 +552,16 @@ export async function listUsage(
   db,
   {
     search = '', platform = 'all', plan = 'all', legacy = 'all', audience = 'all',
-    state = 'all', month = '', limit,
+    state = 'all', from = '', to = '', limit,
   } = {}
 ) {
-  const yearMonth = /^\d{4}-\d{2}$/.test(String(month)) ? String(month) : currentYearMonth();
+  const range = resolveRange(from, to);
+  const { months, limitsApplicable } = range;
 
   const where = [];
-  const params = [yearMonth, yearMonth];
+  // Scans come from ScanHistory (one row per scan, so any date range is exact);
+  // pageviews from PageviewUsage, which only has month buckets.
+  const params = [range.from, range.to, months[0], months[months.length - 1]];
 
   if (search) {
     where.push(`(s.domain LIKE ? OR s.name LIKE ? OR s.id = ? OR u.email LIKE ? OR o.name LIKE ?)`);
@@ -489,16 +573,20 @@ export async function listUsage(
 
   const cap = Math.min(Math.max(Number(limit) || 1000, 1), 5000);
 
-  // ScanUsage / PageviewUsage are UNIQUE(siteId, yearMonth), so each join adds at
-  // most one row and no fan-out is possible.
+  // Both usage joins are GROUP BY siteId derived tables, so each contributes at
+  // most one row per site and no fan-out is possible.
+  //
+  // substr(createdAt, 1, 10) rather than a range comparison because ScanHistory
+  // holds both 'YYYY-MM-DD HH:MM:SS' (D1's CURRENT_TIMESTAMP) and ISO
+  // 'YYYY-MM-DDTHH:MM:SSZ' values; comparing the date prefix is correct for both.
   const sql = `
     SELECT
       s.id, s.name, s.domain, s.platform, s.isLegacy, s.verified,
       s.scanLimitNotifiedMonth, s.organizationId,
       o.name AS orgName,
       u.id AS ownerId, u.email AS ownerEmail,
-      COALESCE(su.scanCount, 0) AS scansUsed,
-      COALESCE(pu.pageviewCount, 0) AS pageviewsUsed,
+      COALESCE(sc.c, 0) AS scansUsed,
+      COALESCE(pv.c, 0) AS pageviewsUsed,
       (SELECT COALESCE(sub.planId, '') || '|' || COALESCE(sub.status, '')
          FROM Subscription sub
         WHERE sub.organizationId = s.organizationId
@@ -512,8 +600,18 @@ export async function listUsage(
     FROM Site s
     LEFT JOIN Organization o ON s.organizationId = o.id
     LEFT JOIN User u ON o.ownerUserId = u.id
-    LEFT JOIN ScanUsage su ON su.siteId = s.id AND su.yearMonth = ?
-    LEFT JOIN PageviewUsage pu ON pu.siteId = s.id AND pu.yearMonth = ?
+    LEFT JOIN (
+      SELECT siteId, COUNT(*) AS c
+        FROM ScanHistory
+       WHERE substr(createdAt, 1, 10) BETWEEN ? AND ?
+       GROUP BY siteId
+    ) sc ON sc.siteId = s.id
+    LEFT JOIN (
+      SELECT siteId, SUM(pageviewCount) AS c
+        FROM PageviewUsage
+       WHERE yearMonth BETWEEN ? AND ?
+       GROUP BY siteId
+    ) pv ON pv.siteId = s.id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
     LIMIT ${cap}
   `;
@@ -545,18 +643,20 @@ export async function listUsage(
       ownerId: r.ownerId ?? null,
       ownerEmail: r.ownerEmail ?? null,
       plan: planId,
-      yearMonth,
       scansUsed,
-      scansLimit: allow.scans,
-      scansPct: pct(scansUsed, allow.scans),
-      scansOver: allow.scans > 0 && scansUsed >= allow.scans,
       pageviewsUsed,
-      pageviewsLimit: allow.pageviews,
-      pageviewsPct: pct(pageviewsUsed, allow.pageviews),
-      pageviewsOver: allow.pageviews > 0 && pageviewsUsed >= allow.pageviews,
-      // The owner has already had the scan-cap email for the month on screen.
+      // Allowances are monthly, so they are only comparable across exactly one
+      // whole month — otherwise the limit columns are reported as not applicable
+      // rather than shown against a mismatched period.
+      scansLimit: limitsApplicable ? allow.scans : null,
+      scansPct: limitsApplicable ? pct(scansUsed, allow.scans) : null,
+      scansOver: limitsApplicable && allow.scans > 0 && scansUsed >= allow.scans,
+      pageviewsLimit: limitsApplicable ? allow.pageviews : null,
+      pageviewsPct: limitsApplicable ? pct(pageviewsUsed, allow.pageviews) : null,
+      pageviewsOver: limitsApplicable && allow.pageviews > 0 && pageviewsUsed >= allow.pageviews,
+      // The owner already had the scan-cap email for a month this range covers.
       scanLimitNotified: Boolean(
-        r.scanLimitNotifiedMonth && String(r.scanLimitNotifiedMonth) === yearMonth
+        r.scanLimitNotifiedMonth && months.includes(String(r.scanLimitNotifiedMonth))
       ),
       internal: isInternalOrTest(r.ownerEmail),
     };
@@ -607,25 +707,17 @@ export async function listUsage(
     { scans: 0, pageviews: 0, scansOver: 0, pageviewsOver: 0 }
   );
 
-  return { yearMonth, rows: mapped, totals, months: await usageMonths(db) };
-}
-
-/** Months that actually have usage recorded, newest first, for the month picker. */
-async function usageMonths(db) {
-  try {
-    const { results = [] } = await db
-      .prepare(
-        `SELECT yearMonth FROM ScanUsage
-         UNION SELECT yearMonth FROM PageviewUsage
-         ORDER BY yearMonth DESC LIMIT 36`
-      )
-      .all();
-    const months = results.map((r) => r.yearMonth).filter(Boolean);
-    const now = currentYearMonth();
-    return months.includes(now) ? months : [now, ...months];
-  } catch (_) {
-    return [currentYearMonth()];
-  }
+  return {
+    from: range.from,
+    to: range.to,
+    months,
+    // Both flags travel to the client so the page can label exactly what the
+    // numbers mean instead of the operator having to infer it.
+    pageviewsAreWholeMonths: range.pageviewsAreWholeMonths,
+    limitsApplicable,
+    rows: mapped,
+    totals,
+  };
 }
 
 /** Counters + the years that actually contain sites, for the filter bar. */

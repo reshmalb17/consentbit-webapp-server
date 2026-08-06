@@ -22,9 +22,9 @@
 //   DELETE /api/admin/dashboard/site?ids=<id,...>                               admin only
 //   PATCH  /api/admin/dashboard/organization?id=<id>  { name }                  admin only
 //   PATCH  /api/admin/dashboard/subscription?id=<id>  { planId?, status?, ... } admin only
-//   GET    /api/admin/dashboard/sites?search=&platform=&banner=&regulation=&year=&month=&audience=
-//   GET    /api/admin/dashboard/usage?month=&state=&plan=&platform=&legacy=      per-site usage
-//   GET    /api/admin/dashboard/scans?search=&days=&year=&month=&claimed=&env=  cookie-checker activity
+//   GET    /api/admin/dashboard/sites?search=&platform=&banner=&regulation=&from=&to=&audience=
+//   GET    /api/admin/dashboard/usage?from=&to=&state=&plan=&platform=&legacy=   per-site usage
+//   GET    /api/admin/dashboard/scans?search=&from=&to=&claimed=&env=  cookie-checker activity
 //   GET    /api/admin/dashboard/accounts              list logins (no keys ever)
 //   POST   /api/admin/dashboard/accounts              { action: 'create' }      admin only
 //                                                     { action: 'change-key' }  own account only
@@ -253,7 +253,7 @@ export async function handleAdminDashboardAudit(request, env) {
  * GET /api/admin/dashboard/sites — site-level list with the owning user.
  *
  * Read-only, open to viewers. Deleting sites stays on the singular /site route.
- * Filters: search, platform, banner=live|not-live, year, month, audience.
+ * Filters: search, platform, banner=live|not-live, from, to, audience.
  */
 export async function handleAdminDashboardSites(request, env) {
   if (request.method !== 'GET') {
@@ -271,8 +271,8 @@ export async function handleAdminDashboardSites(request, env) {
       platform: url.searchParams.get('platform') || 'all',
       banner: url.searchParams.get('banner') || 'all',
       regulation: url.searchParams.get('regulation') || 'all',
-      year: url.searchParams.get('year') || '',
-      month: url.searchParams.get('month') || '',
+      from: url.searchParams.get('from') || '',
+      to: url.searchParams.get('to') || '',
       audience: url.searchParams.get('audience') || 'all',
       plan: url.searchParams.get('plan') || 'all',
       legacy: url.searchParams.get('legacy') || 'all',
@@ -285,11 +285,11 @@ export async function handleAdminDashboardSites(request, env) {
 }
 
 /**
- * GET /api/admin/dashboard/usage — per-site scan + pageview usage for a month,
+ * GET /api/admin/dashboard/usage — per-site scan + pageview usage for a date range,
  * against each site's plan allowance.
  *
  * Read-only, so viewers may call it: it is consumption data with no key material.
- * Filters: search, platform, plan, legacy, audience, state, month, limit.
+ * Filters: search, platform, plan, legacy, audience, state, from, to, limit.
  */
 export async function handleAdminDashboardUsage(request, env) {
   if (request.method !== 'GET') {
@@ -309,7 +309,8 @@ export async function handleAdminDashboardUsage(request, env) {
       legacy: url.searchParams.get('legacy') || 'all',
       audience: url.searchParams.get('audience') || 'all',
       state: url.searchParams.get('state') || 'all',
-      month: url.searchParams.get('month') || '',
+      from: url.searchParams.get('from') || '',
+      to: url.searchParams.get('to') || '',
       limit: url.searchParams.get('limit') || undefined,
     });
     return Response.json({ ...usage, count: usage.rows.length });
@@ -324,7 +325,7 @@ export async function handleAdminDashboardUsage(request, env) {
  * Reads the scanner's database, not consent-webapp. Open to viewers: it is
  * activity data, and contains no key material.
  *
- * Filters: search (URL/domain/claim email), days, year, month,
+ * Filters: search (URL/domain/claim email), from, to,
  * claimed=claimed|anonymous, env=live|staging, limit.
  */
 export async function handleAdminDashboardScans(request, env) {
@@ -348,9 +349,8 @@ export async function handleAdminDashboardScans(request, env) {
   try {
     const events = await listScanEvents(scannerDb, {
       search: (url.searchParams.get('search') || '').trim() || undefined,
-      days: url.searchParams.get('days') || undefined,
-      year: url.searchParams.get('year') || undefined,
-      month: url.searchParams.get('month') || undefined,
+      from: url.searchParams.get('from') || undefined,
+      to: url.searchParams.get('to') || undefined,
       claimed: url.searchParams.get('claimed') || undefined,
       env: url.searchParams.get('env') || undefined,
       limit: url.searchParams.get('limit') || undefined,
@@ -534,7 +534,7 @@ export async function handleAdminDashboardStats(request, env) {
 
 /**
  * /api/admin/dashboard/users
- *   GET    ?platform=&search=&plan=&status=&year=&month=&audience=&billing=   list
+ *   GET    ?platform=&search=&plan=&status=&from=&to=&audience=&billing=     list
  *   DELETE ?ids=<id,id,…>&confirm=DELETE                             bulk cascade delete, admin only
  *
  * The bulk delete runs the same full cascade as the single-user delete, once per
@@ -626,14 +626,14 @@ export async function handleAdminDashboardUsers(request, env) {
   const search = (url.searchParams.get('search') || '').trim();
   const plan = url.searchParams.get('plan') || 'all';
   const status = url.searchParams.get('status') || 'all';
-  const year = url.searchParams.get('year') || '';
-  const month = url.searchParams.get('month') || '';
+  const from = url.searchParams.get('from') || '';
+  const to = url.searchParams.get('to') || '';
   const audience = url.searchParams.get('audience') || 'all';
   const billing = url.searchParams.get('billing') || 'all';
   const legacy = url.searchParams.get('legacy') || 'all';
 
   try {
-    const users = await listUsers(db, { platform, search, plan, status, year, month, audience, billing, legacy });
+    const users = await listUsers(db, { platform, search, plan, status, from, to, audience, billing, legacy });
     return Response.json({ users, count: users.length });
   } catch (err) {
     return Response.json({ success: false, error: err?.message || 'Failed' }, { status: 500 });
