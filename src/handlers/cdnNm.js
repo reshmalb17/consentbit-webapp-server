@@ -632,7 +632,7 @@ async function _handleCDNScript(request, env, url) {
       "}" +
       "#cb-preferences-banner.cb-banner .cb-brand-mark svg{" +
         "display:block;" +
-        "height:13px;" +
+        "height:9.75px;" +
         "width:auto;" +
       "}" +
       "@media(max-width:660px){" +
@@ -1021,7 +1021,7 @@ ${inlineConfig}
       "#cb-preferences-banner.cb-banner .cb-brand-footer a:hover{opacity:.7;}" +
       "#cb-preferences-banner.cb-banner .cb-brand-credit{font-size:11px !important;font-weight:500 !important;letter-spacing:.02em;line-height:1;white-space:nowrap;color:#A2ABBA !important;}" +
       "#cb-preferences-banner.cb-banner .cb-brand-mark{display:flex;align-items:center;opacity:.85;}" +
-      "#cb-preferences-banner.cb-banner .cb-brand-mark svg{display:block;height:13px;width:auto;}";
+      "#cb-preferences-banner.cb-banner .cb-brand-mark svg{display:block;height:9.75px;width:auto;}";
     SITE.styles && (BASE_CSS = BASE_CSS + "\\n" + SITE.styles);
 
     /** Every entrance-animation class, so we can strip whichever one is currently applied. */
