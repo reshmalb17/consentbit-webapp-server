@@ -6,7 +6,10 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "obfuscate": "node scripts/obfuscate-loader.mjs",
-    "obfuscate:dry": "node scripts/obfuscate-loader.mjs --dry-run"
+    "obfuscate:dry": "node scripts/obfuscate-loader.mjs --dry-run",
+    "minify:cdn": "node scripts/minify-cdn-loader.mjs && node scripts/verify-cdn-minify.mjs",
+    "minify:cdn:dry": "node scripts/minify-cdn-loader.mjs --dry-run",
+    "verify:cdn": "node scripts/verify-cdn-minify.mjs"
   },
   "keywords": [],
   "author": "",

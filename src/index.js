@@ -1,6 +1,6 @@
 // src/index.js
 import { handleSites } from './handlers/sites.js';
-import { handleCDNScript } from './handlers/cdnNm.js';
+import { handleCDNScript } from './handlers/cdnM.js';
 import { handleConsentV2Script } from './handlers/consentv2handler.js';
 import { handleEmbedFloatingLogo } from './handlers/embedFloatingLogo.js';
 import { handleConsent } from './handlers/consent.js';
