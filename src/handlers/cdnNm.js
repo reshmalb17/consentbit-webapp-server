@@ -2431,12 +2431,21 @@ ${inlineConfig}
 
   /**
    * ConsentBit wordmark, inlined rather than fetched: a customer's Content-Security-Policy
-   * can block an external <img>/<use>, and an extra request for a 13px mark is not worth it.
+   * can block an external <img>/<use>, and an extra request for a 9.75px mark is not worth it.
    * Every fill is a fixed brand grey — the mark must render identically on every site,
    * independent of whatever banner colours the customer has configured.
+   *
+   * A function, NOT a var, and deliberately so. boot() is invoked partway up this file
+   * (see the readyState line at the end of injectStyles), and when the script is injected
+   * dynamically — as the Webflow installer does — readyState is already "interactive" or
+   * "complete", so boot() runs SYNCHRONOUSLY, before any statement below it executes.
+   * Anything held in a var down here is still undefined at that point, which is how this
+   * mark once rendered as the literal text "undefined" on exactly those installs. Function
+   * declarations are hoisted and fully defined before the first statement runs, so this
+   * cannot regress no matter where the block sits.
    */
-  var CB_WORDMARK_SVG =
-    '<svg viewBox="0 0 735 90" role="img" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">' +
+  function cbWordmarkSvg() {
+    return '<svg viewBox="0 0 735 90" role="img" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">' +
       '<g fill="#98A2B3">' +
         '<path d="M234.357 89.2656C227.796 89.2656 222.045 87.925 217.107 85.2439C212.238 82.4923 208.464 78.647 205.782 73.7081C203.101 68.7692 201.761 62.9484 201.761 56.2456C201.761 49.5428 203.101 43.722 205.782 38.7831C208.464 33.8442 212.238 30.0342 217.107 27.3531C222.045 24.6014 227.796 23.2256 234.357 23.2256C241.131 23.2256 246.916 24.5661 251.714 27.2472C256.582 29.9284 260.322 33.7384 262.932 38.6772C265.614 43.6161 266.954 49.4722 266.954 56.2456C266.954 62.9484 265.614 68.8045 262.932 73.8139C260.322 78.7528 256.582 82.5628 251.714 85.2439C246.846 87.925 241.06 89.2656 234.357 89.2656ZM234.357 78.8939C240.919 78.8939 245.999 76.9184 249.597 72.9672C253.266 68.9456 255.101 63.3717 255.101 56.2456C255.101 49.0489 253.266 43.475 249.597 39.5239C245.999 35.5728 240.919 33.5972 234.357 33.5972C227.866 33.5972 222.786 35.6081 219.117 39.6298C215.449 43.5809 213.614 49.1195 213.614 56.2456C213.614 63.3717 215.449 68.9456 219.117 72.9672C222.786 76.9184 227.866 78.8939 234.357 78.8939Z"/>' +
         '<path d="M158.471 89.3708C149.793 89.3708 142.208 87.5717 135.717 83.9733C129.297 80.3044 124.322 75.1539 120.795 68.5217C117.267 61.8894 115.503 54.0931 115.503 45.1325C115.503 36.1719 117.267 28.4108 120.795 21.8492C124.322 15.2169 129.297 10.1017 135.717 6.50333C142.208 2.83444 149.793 1 158.471 1C165.103 1 170.96 2.09361 176.04 4.28083C181.19 6.3975 185.423 9.53722 188.74 13.7C192.056 17.7922 194.313 22.7664 195.513 28.6225H183.236C181.966 23.1897 179.179 18.9917 174.875 16.0283C170.642 13.065 165.174 11.5833 158.471 11.5833C148.805 11.5833 141.22 14.5819 135.717 20.5792C130.214 26.5764 127.462 34.7608 127.462 45.1325C127.462 55.5747 130.214 63.7944 135.717 69.7917C141.22 75.7183 148.805 78.6817 158.471 78.6817C165.174 78.6817 170.642 77.2353 174.875 74.3425C179.179 71.3792 181.966 67.1811 183.236 61.7483H195.513C194.313 67.5339 192.056 72.5081 188.74 76.6708C185.423 80.7631 181.19 83.9028 176.04 86.09C170.96 88.2772 165.103 89.3708 158.471 89.3708Z"/>' +
@@ -2453,6 +2462,7 @@ ${inlineConfig}
       '<path d="M32.7604 87.4506C32.0233 88.1831 30.8281 88.1831 30.0909 87.4506L8.45288 65.9485C-2.81763 54.7488 -2.81763 36.5904 8.45288 25.3907C8.97709 24.8698 9.827 24.8698 10.3512 25.3907L51.4471 66.2285C52.1843 66.961 52.1843 68.1487 51.4471 68.8813L32.7604 87.4506Z" fill="#B4BCC8"/>' +
       '<path d="M35.3829 43.3719C34.8671 42.8423 34.8732 41.9897 35.3966 41.4677L76.4272 0.544909C77.1632 -0.189157 78.3479 -0.180458 79.0733 0.564338L97.4615 19.4444C98.1869 20.1891 98.1783 21.388 97.4423 22.1221L75.8387 43.669C64.5861 54.892 46.4734 54.759 35.3829 43.3719Z" fill="#8C95A3"/>' +
     '</svg>';
+  }
 
   /**
    * "Powered by ConsentBit" strip, pinned to the bottom edge of the preferences panel.
@@ -2475,7 +2485,7 @@ ${inlineConfig}
 
     var mark = document.createElement("span");
     mark.className = "cb-brand-mark";
-    mark.innerHTML = CB_WORDMARK_SVG;
+    mark.innerHTML = cbWordmarkSvg();
     link.appendChild(mark);
 
     brandFooter.appendChild(link);
