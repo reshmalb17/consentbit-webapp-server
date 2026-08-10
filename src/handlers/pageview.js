@@ -2,6 +2,7 @@
 import {
   ensureSchema,
   incrementPageviewUsage,
+  incrementBlockedPageviewUsage,
   getSiteById,
   getEffectivePlanForOrganization,
   getPageviewUsageForOrganization,
@@ -97,6 +98,10 @@ export async function handlePageview(request, env) {
   }
 
   if (preCheckOverLimit) {
+    // Behaviour is unchanged — the view is still NOT counted against the plan, and the
+    // response is the same as before. We only tally it separately so we can see how much
+    // traffic a site is actually doing past its quota. Never let this break the request.
+    await incrementBlockedPageviewUsage(db, siteId).catch(() => null);
     return Response.json(
       { success: true, overLimit: true, pageviewCount: limit },
       { status: 200 },

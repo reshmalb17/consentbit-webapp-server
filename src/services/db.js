@@ -113,6 +113,35 @@ export async function ensureSchema(db) {
     await db.prepare(`ALTER TABLE Site ADD COLUMN version TEXT`).run();
   } catch (_) {}
 
+  // ── Post-cancellation script presence ──────────────────────────────────────
+  // Once a subscription's paid period lapses we re-check whether the ConsentBit
+  // script is still in the site's <head>, so an operator can see who removed it
+  // and who is still serving it unpaid. See services/subscriptionEndSweep.js.
+  //
+  // These are deliberately SEPARATE from verified / verified_at. Those record
+  // that the script was once installed — history that must not be rewritten, and
+  // that the banner=live filter and the version/loader logic both key off.
+  try {
+    // 'present' | 'removed' | 'unknown' (never checked, or checks inconclusive).
+    await db.prepare(`ALTER TABLE Site ADD COLUMN scriptStatus TEXT`).run();
+  } catch (_) {}
+
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN scriptCheckedAt DATETIME`).run();
+  } catch (_) {}
+
+  try {
+    // First time we concluded the script was gone. Left alone afterwards.
+    await db.prepare(`ALTER TABLE Site ADD COLUMN scriptRemovedAt DATETIME`).run();
+  } catch (_) {}
+
+  try {
+    // CONSECUTIVE unreachable checks (timeout / non-2xx). Reset to 0 whenever a
+    // page loads. A site that merely blocks our fetcher looks identical to one
+    // that was taken down, so removal is only concluded after several in a row.
+    await db.prepare(`ALTER TABLE Site ADD COLUMN scriptCheckFailures INTEGER DEFAULT 0`).run();
+  } catch (_) {}
+
   // Create Script table if it doesn't exist
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS Script (
@@ -473,6 +502,13 @@ export async function ensureSchema(db) {
     await db.prepare(`ALTER TABLE Subscription ADD COLUMN stripeItemId TEXT`).run();
   } catch (e) {}
   try {
+    // When the paid period actually LAPSED — distinct from canceledAt, which is
+    // when the customer pressed cancel. Between the two they are still entitled
+    // to the banner. Stamped once by services/subscriptionEndSweep.js, and its
+    // NULL-ness is what stops that sweep re-processing the same subscription.
+    await db.prepare(`ALTER TABLE Subscription ADD COLUMN endedAt DATETIME`).run();
+  } catch (e) {}
+  try {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_sub_migratedSubId ON Subscription(migratedSubId)`).run();
   } catch (e) {}
 
@@ -504,6 +540,9 @@ export async function ensureSchema(db) {
       siteId TEXT NOT NULL,
       yearMonth TEXT NOT NULL,
       pageviewCount INTEGER NOT NULL DEFAULT 0,
+      blockedPageviewCount INTEGER NOT NULL DEFAULT 0,
+      dailyCounts TEXT,
+      dailyBlockedCounts TEXT,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(siteId, yearMonth)
@@ -541,11 +580,43 @@ export async function ensureSchema(db) {
       siteId TEXT NOT NULL,
       yearMonth TEXT NOT NULL,
       pageviewCount INTEGER NOT NULL DEFAULT 0,
+      blockedPageviewCount INTEGER NOT NULL DEFAULT 0,
+      dailyCounts TEXT,
+      dailyBlockedCounts TEXT,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(siteId, yearMonth)
     )
   `).run();
+
+  // Pageviews that arrived AFTER the org blew its monthly quota. Tracked separately
+  // so pageviewCount keeps its "billable / counts against the plan" meaning — billing,
+  // the metered Stripe report and the limit gate all read pageviewCount and must not
+  // see over-quota traffic. This column is internal reporting only.
+  try {
+    await db.prepare(`ALTER TABLE PageviewUsage ADD COLUMN blockedPageviewCount INTEGER NOT NULL DEFAULT 0`).run();
+  } catch (e) {}
+
+  // Per-day breakdown of the two counters above, as JSON keyed month -> day -> count:
+  //   {"2026-08": {"01": 412, "02": 388}}
+  // The month key is redundant with the yearMonth column, but it makes each blob
+  // self-describing when rows are dumped or merged across months.
+  //
+  // Deliberately a JSON column on the EXISTING monthly row rather than a separate
+  // daily table: the row is already written on every pageview, so this rides along
+  // on that same UPDATE and costs no extra row writes on the hottest path in the
+  // system. Keying the row by (siteId, yearMonth) also caps each blob at 31 keys and
+  // rolls it over for free — a single all-months blob per site would be re-serialised
+  // in full on every view, which is write amplification that grows without bound.
+  //
+  // Both are nullable with no default: rows written before this shipped have no daily
+  // history and must stay distinguishable from a month that genuinely saw no traffic.
+  try {
+    await db.prepare(`ALTER TABLE PageviewUsage ADD COLUMN dailyCounts TEXT`).run();
+  } catch (e) {}
+  try {
+    await db.prepare(`ALTER TABLE PageviewUsage ADD COLUMN dailyBlockedCounts TEXT`).run();
+  } catch (e) {}
 
   // ScanUsage: monthly scan counts per site (counter table — avoids COUNT(*) on ScanHistory)
   await db.prepare(`
@@ -1666,6 +1737,50 @@ export async function ensureDefaultPlans(db) {
 }
 
 // --- Pageview helpers ---
+
+/**
+ * Bump one day inside a month->day->count JSON column: {"2026-08": {"11": 412}}.
+ *
+ * Deliberately a separate statement that runs AFTER the counter writes below, and is
+ * always called with .catch(): the monthly counters feed billing, the limit gate and
+ * the Stripe metered report, so nothing about the daily breakdown may change how they
+ * behave or be able to fail them. If this statement errors the pageview is still
+ * counted exactly as it was before daily tracking existed — only the chart loses a bar.
+ * Callers guarantee the row exists before this runs.
+ *
+ * The increment happens inside SQLite rather than by reading the JSON into JS and
+ * writing it back: this runs on every pageview, so a read-modify-write would let two
+ * concurrent views on the same site read the same count and both write count+1,
+ * silently losing traffic.
+ *
+ * Nested json_set because json_set will NOT create a missing intermediate object — it
+ * returns the input unchanged instead, which would silently drop every day. The inner
+ * call guarantees $."<month>" exists (preserving it when it already does), so rows
+ * written before these columns shipped heal themselves on their next pageview and no
+ * backfill pass is needed. That matters because ensureSchema runs on every request, so
+ * a migration UPDATE there would rewrite the whole table continuously.
+ *
+ * References to `col` on the right-hand side read the row's pre-UPDATE value.
+ */
+function bumpDailyJson(db, col, id, yearMonth, day) {
+  return db
+    .prepare(
+      `UPDATE PageviewUsage
+          SET ${col} = json_set(
+                json_set(
+                  COALESCE(${col}, '{}'),
+                  '$."' || ?2 || '"',
+                  json(COALESCE(json_extract(${col}, '$."' || ?2 || '"'), '{}'))
+                ),
+                '$."' || ?2 || '"."' || ?3 || '"',
+                COALESCE(json_extract(${col}, '$."' || ?2 || '"."' || ?3 || '"'), 0) + 1
+              )
+        WHERE id = ?1`
+    )
+    .bind(id, yearMonth, day)
+    .run();
+}
+
 export async function incrementPageviewUsage(db, siteId, date = new Date()) {
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, '0');
@@ -1691,6 +1806,10 @@ export async function incrementPageviewUsage(db, siteId, date = new Date()) {
     .bind(id, now)
     .run();
 
+  // Additive only — see bumpDailyJson. The counter above is already committed.
+  await bumpDailyJson(db, 'dailyCounts', id, yearMonth, String(date.getUTCDate()).padStart(2, '0'))
+    .catch(() => null);
+
   const row = await db
     .prepare(
       `SELECT pageviewCount FROM PageviewUsage WHERE id = ?1`
@@ -1705,24 +1824,74 @@ export async function incrementPageviewUsage(db, siteId, date = new Date()) {
   };
 }
 
-/** Total pageview count for an organization for a given month (default current month). */
+/**
+ * Record a pageview that was REFUSED because the organization is over its monthly
+ * quota. Deliberately a separate counter from pageviewCount: everything that bills
+ * or gates reads pageviewCount, so this must not inflate it. Internal reporting only.
+ *
+ * Single upsert rather than the insert/update/select of incrementPageviewUsage —
+ * this fires on every pageview for the rest of the month once an org is over, so it
+ * stays one write, and nothing needs the resulting value back.
+ */
+export async function incrementBlockedPageviewUsage(db, siteId, date = new Date()) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const yearMonth = `${year}-${month}`;
+  const id = `pv_${siteId}_${yearMonth}`;
+  const now = date.toISOString();
+
+  await db
+    .prepare(
+      `INSERT INTO PageviewUsage (id, siteId, yearMonth, pageviewCount, blockedPageviewCount, createdAt, updatedAt)
+       VALUES (?1, ?2, ?3, 0, 1, ?4, ?4)
+       ON CONFLICT(siteId, yearMonth) DO UPDATE SET
+         blockedPageviewCount = blockedPageviewCount + 1,
+         updatedAt = ?4`
+    )
+    .bind(id, siteId, yearMonth, now)
+    .run();
+
+  // Additive only — see bumpDailyJson. Kept per-day as well as in the running total
+  // because a chart drawn from dailyCounts alone flatlines to zero the moment a site
+  // hits its cap, so the busiest sites would look dead for the rest of the month.
+  // Charting dailyCounts + dailyBlockedCounts shows real traffic, with the seam
+  // between them marking the day the allowance ran out.
+  await bumpDailyJson(db, 'dailyBlockedCounts', id, yearMonth, String(date.getUTCDate()).padStart(2, '0'))
+    .catch(() => null);
+
+  return { siteId, yearMonth };
+}
+
+/**
+ * Total pageview count for an organization for a given month (default current month).
+ * pageviewCount is the billable/quota figure (capped by the limit gate); blockedPageviewCount
+ * is the over-quota traffic we refused to count. Real traffic = the two added together.
+ */
 export async function getPageviewUsageForOrganization(db, organizationId, date = new Date()) {
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, '0');
   const yearMonth = `${year}-${month}`;
   const sitesRes = await db.prepare('SELECT id FROM Site WHERE organizationId = ?1').bind(organizationId).all();
   const siteIds = (sitesRes.results || []).map((r) => r.id).filter(Boolean);
-  if (siteIds.length === 0) return { yearMonth, pageviewCount: 0, siteCount: 0 };
+  if (siteIds.length === 0) {
+    return { yearMonth, pageviewCount: 0, blockedPageviewCount: 0, totalPageviewCount: 0, siteCount: 0 };
+  }
   const placeholders = siteIds.map(() => '?').join(',');
   const sumRes = await db
     .prepare(
-      `SELECT COALESCE(SUM(pageviewCount), 0) AS total FROM PageviewUsage WHERE siteId IN (${placeholders}) AND yearMonth = ?`
+      `SELECT COALESCE(SUM(pageviewCount), 0) AS total,
+              COALESCE(SUM(blockedPageviewCount), 0) AS blocked
+         FROM PageviewUsage WHERE siteId IN (${placeholders}) AND yearMonth = ?`
     )
     .bind(...siteIds, yearMonth)
     .first();
+  const pageviewCount = Number(sumRes?.total ?? 0);
+  const blockedPageviewCount = Number(sumRes?.blocked ?? 0);
   return {
     yearMonth,
-    pageviewCount: Number(sumRes?.total ?? 0),
+    pageviewCount,
+    blockedPageviewCount,
+    totalPageviewCount: pageviewCount + blockedPageviewCount,
     siteCount: siteIds.length,
   };
 }
@@ -1732,16 +1901,22 @@ export async function getPageviewUsageForSite(db, siteId, date = new Date()) {
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, '0');
   const yearMonth = `${year}-${month}`;
-  if (!siteId) return { yearMonth, pageviewCount: 0 };
+  if (!siteId) return { yearMonth, pageviewCount: 0, blockedPageviewCount: 0, totalPageviewCount: 0 };
   const row = await db
     .prepare(
-      `SELECT COALESCE(SUM(pageviewCount), 0) AS total FROM PageviewUsage WHERE siteId = ?1 AND yearMonth = ?2`
+      `SELECT COALESCE(SUM(pageviewCount), 0) AS total,
+              COALESCE(SUM(blockedPageviewCount), 0) AS blocked
+         FROM PageviewUsage WHERE siteId = ?1 AND yearMonth = ?2`
     )
     .bind(siteId, yearMonth)
     .first();
+  const pageviewCount = Number(row?.total ?? 0);
+  const blockedPageviewCount = Number(row?.blocked ?? 0);
   return {
     yearMonth,
-    pageviewCount: Number(row?.total ?? 0),
+    pageviewCount,
+    blockedPageviewCount,
+    totalPageviewCount: pageviewCount + blockedPageviewCount,
   };
 }
 

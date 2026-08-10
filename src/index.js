@@ -99,6 +99,7 @@ import { handlePaymentSubscription } from './handlers/paymentSubscription.js';
 import { handleWebflowBilling, handleWebflowCancelSubscription, handleWebflowSwitchInterval } from './handlers/webflowBilling.js';
 import { handleWebflowBillings, handleWebflowCancelSubscriptions, handleWebflowSwitchIntervals } from './handlers/webflowBillingWf.js';
 import { createAdminNotification } from './services/adminNotifications.js';
+import { processSubscriptionEndSweep } from './services/subscriptionEndSweep.js';
 import { requireConsentSession, requireConsentPdfAccess } from './middleware/consentAccess.js';
 import { requireActiveSubscriptionForConsentReport } from './services/subscriptionGate.js';
 import { handleFramerBilling, handleFramerCancelSubscription, handleFramerSwitchInterval } from './handlers/framerBilling.js';
@@ -980,6 +981,10 @@ export default {
         processSubscriptionQueue(env),
         reportStripeMeteredUsage(env),
         processFinalPaymentReminders(env, ctx),
+        // Stamps Subscription.endedAt when a paid period lapses, then re-checks
+        // whether those sites still carry the ConsentBit script. Self-limiting:
+        // a few sites per tick, each looked at no more than daily.
+        processSubscriptionEndSweep(env),
       ])
     );
   },

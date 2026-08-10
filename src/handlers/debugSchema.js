@@ -29,7 +29,7 @@ export async function handleDebugSchema(request, env) {
   let pageviewSample = [];
   try {
     const pvResult = await db.prepare(
-      `SELECT id, siteId, yearMonth, pageviewCount, updatedAt FROM PageviewUsage ORDER BY updatedAt DESC LIMIT 20`
+      `SELECT id, siteId, yearMonth, pageviewCount, blockedPageviewCount, updatedAt FROM PageviewUsage ORDER BY updatedAt DESC LIMIT 20`
     ).all();
     pageviewSample = pvResult.results || [];
   } catch (e) {

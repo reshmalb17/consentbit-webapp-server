@@ -1100,6 +1100,7 @@ __export(db_exports, {
   getWebflowOAuthTokenBySite: () => getWebflowOAuthTokenBySite,
   getWebflowOAuthTokenByUser: () => getWebflowOAuthTokenByUser,
   hashPassword: () => hashPassword,
+  incrementBlockedPageviewUsage: () => incrementBlockedPageviewUsage,
   incrementEmailVerificationAttempts: () => incrementEmailVerificationAttempts,
   incrementOwnershipTransferAttempts: () => incrementOwnershipTransferAttempts,
   incrementPageviewUsage: () => incrementPageviewUsage,
@@ -1232,6 +1233,22 @@ async function ensureSchema(db) {
   }
   try {
     await db.prepare(`ALTER TABLE Site ADD COLUMN version TEXT`).run();
+  } catch (_) {
+  }
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN scriptStatus TEXT`).run();
+  } catch (_) {
+  }
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN scriptCheckedAt DATETIME`).run();
+  } catch (_) {
+  }
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN scriptRemovedAt DATETIME`).run();
+  } catch (_) {
+  }
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN scriptCheckFailures INTEGER DEFAULT 0`).run();
   } catch (_) {
   }
   await db.prepare(`
@@ -1570,6 +1587,10 @@ async function ensureSchema(db) {
   } catch (e) {
   }
   try {
+    await db.prepare(`ALTER TABLE Subscription ADD COLUMN endedAt DATETIME`).run();
+  } catch (e) {
+  }
+  try {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_sub_migratedSubId ON Subscription(migratedSubId)`).run();
   } catch (e) {
   }
@@ -1598,6 +1619,7 @@ async function ensureSchema(db) {
       siteId TEXT NOT NULL,
       yearMonth TEXT NOT NULL,
       pageviewCount INTEGER NOT NULL DEFAULT 0,
+      blockedPageviewCount INTEGER NOT NULL DEFAULT 0,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(siteId, yearMonth)
@@ -1632,11 +1654,16 @@ async function ensureSchema(db) {
       siteId TEXT NOT NULL,
       yearMonth TEXT NOT NULL,
       pageviewCount INTEGER NOT NULL DEFAULT 0,
+      blockedPageviewCount INTEGER NOT NULL DEFAULT 0,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(siteId, yearMonth)
     )
   `).run();
+  try {
+    await db.prepare(`ALTER TABLE PageviewUsage ADD COLUMN blockedPageviewCount INTEGER NOT NULL DEFAULT 0`).run();
+  } catch (e) {
+  }
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS ScanUsage (
       id TEXT PRIMARY KEY,
@@ -2555,20 +2582,43 @@ async function incrementPageviewUsage(db, siteId, date = /* @__PURE__ */ new Dat
     pageviewCount: row?.pageviewCount ?? 0
   };
 }
+async function incrementBlockedPageviewUsage(db, siteId, date = /* @__PURE__ */ new Date()) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const yearMonth = `${year}-${month}`;
+  const id = `pv_${siteId}_${yearMonth}`;
+  const now = date.toISOString();
+  await db.prepare(
+    `INSERT INTO PageviewUsage (id, siteId, yearMonth, pageviewCount, blockedPageviewCount, createdAt, updatedAt)
+       VALUES (?1, ?2, ?3, 0, 1, ?4, ?4)
+       ON CONFLICT(siteId, yearMonth) DO UPDATE SET
+         blockedPageviewCount = blockedPageviewCount + 1,
+         updatedAt = ?4`
+  ).bind(id, siteId, yearMonth, now).run();
+  return { siteId, yearMonth };
+}
 async function getPageviewUsageForOrganization(db, organizationId, date = /* @__PURE__ */ new Date()) {
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
   const yearMonth = `${year}-${month}`;
   const sitesRes = await db.prepare("SELECT id FROM Site WHERE organizationId = ?1").bind(organizationId).all();
   const siteIds = (sitesRes.results || []).map((r) => r.id).filter(Boolean);
-  if (siteIds.length === 0) return { yearMonth, pageviewCount: 0, siteCount: 0 };
-  const placeholders2 = siteIds.map(() => "?").join(",");
+  if (siteIds.length === 0) {
+    return { yearMonth, pageviewCount: 0, blockedPageviewCount: 0, totalPageviewCount: 0, siteCount: 0 };
+  }
+  const placeholders = siteIds.map(() => "?").join(",");
   const sumRes = await db.prepare(
-    `SELECT COALESCE(SUM(pageviewCount), 0) AS total FROM PageviewUsage WHERE siteId IN (${placeholders2}) AND yearMonth = ?`
+    `SELECT COALESCE(SUM(pageviewCount), 0) AS total,
+              COALESCE(SUM(blockedPageviewCount), 0) AS blocked
+         FROM PageviewUsage WHERE siteId IN (${placeholders}) AND yearMonth = ?`
   ).bind(...siteIds, yearMonth).first();
+  const pageviewCount = Number(sumRes?.total ?? 0);
+  const blockedPageviewCount = Number(sumRes?.blocked ?? 0);
   return {
     yearMonth,
-    pageviewCount: Number(sumRes?.total ?? 0),
+    pageviewCount,
+    blockedPageviewCount,
+    totalPageviewCount: pageviewCount + blockedPageviewCount,
     siteCount: siteIds.length
   };
 }
@@ -2576,13 +2626,19 @@ async function getPageviewUsageForSite(db, siteId, date = /* @__PURE__ */ new Da
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
   const yearMonth = `${year}-${month}`;
-  if (!siteId) return { yearMonth, pageviewCount: 0 };
+  if (!siteId) return { yearMonth, pageviewCount: 0, blockedPageviewCount: 0, totalPageviewCount: 0 };
   const row = await db.prepare(
-    `SELECT COALESCE(SUM(pageviewCount), 0) AS total FROM PageviewUsage WHERE siteId = ?1 AND yearMonth = ?2`
+    `SELECT COALESCE(SUM(pageviewCount), 0) AS total,
+              COALESCE(SUM(blockedPageviewCount), 0) AS blocked
+         FROM PageviewUsage WHERE siteId = ?1 AND yearMonth = ?2`
   ).bind(siteId, yearMonth).first();
+  const pageviewCount = Number(row?.total ?? 0);
+  const blockedPageviewCount = Number(row?.blocked ?? 0);
   return {
     yearMonth,
-    pageviewCount: Number(row?.total ?? 0)
+    pageviewCount,
+    blockedPageviewCount,
+    totalPageviewCount: pageviewCount + blockedPageviewCount
   };
 }
 async function getPlanById(db, planId) {
@@ -2695,8 +2751,8 @@ async function getScanUsageForOrganization(db, organizationId, date = /* @__PURE
   const sitesRes = await db.prepare("SELECT id FROM Site WHERE organizationId = ?1").bind(organizationId).all();
   const siteIds = (sitesRes.results || []).map((r) => r.id).filter(Boolean);
   if (siteIds.length === 0) return { yearMonth, scanCount: 0 };
-  const placeholders2 = siteIds.map(() => "?").join(",");
-  const sumRes = await db.prepare(`SELECT COALESCE(SUM(scanCount), 0) AS total FROM ScanUsage WHERE siteId IN (${placeholders2}) AND yearMonth = ?`).bind(...siteIds, yearMonth).first();
+  const placeholders = siteIds.map(() => "?").join(",");
+  const sumRes = await db.prepare(`SELECT COALESCE(SUM(scanCount), 0) AS total FROM ScanUsage WHERE siteId IN (${placeholders}) AND yearMonth = ?`).bind(...siteIds, yearMonth).first();
   return { yearMonth, scanCount: Number(sumRes?.total ?? 0) };
 }
 async function getScanUsageForSite(db, siteId, date = /* @__PURE__ */ new Date()) {
@@ -2784,9 +2840,9 @@ async function markTrialUsed(db, siteId) {
 }
 async function getSubscriptionsBySiteIds(db, siteIds) {
   if (!siteIds || siteIds.length === 0) return {};
-  const placeholders2 = siteIds.map((_, i) => `?${i + 1}`).join(", ");
+  const placeholders = siteIds.map((_, i) => `?${i + 1}`).join(", ");
   const { results } = await db.prepare(
-    `SELECT * FROM Subscription WHERE siteId IN (${placeholders2}) AND status IN ('active', 'trialing', 'canceled') ORDER BY updatedAt DESC`
+    `SELECT * FROM Subscription WHERE siteId IN (${placeholders}) AND status IN ('active', 'trialing', 'canceled') ORDER BY updatedAt DESC`
   ).bind(...siteIds).all();
   const rows = results || [];
   const now = Date.now();
@@ -2895,7 +2951,7 @@ async function claimPaymentFailureEmail(db, { invoiceId, reminderNumber, recipie
   ).bind(invoiceId, reminderNumber, recipientEmail || null, recipientName || null, (/* @__PURE__ */ new Date()).toISOString()).run();
   return Number(res?.meta?.changes ?? 0) > 0;
 }
-async function getPendingFinalPaymentReminders(db, cutoffIso2, limit = 20) {
+async function getPendingFinalPaymentReminders(db, cutoffIso, limit = 20) {
   const { results } = await db.prepare(
     `SELECT s2.invoiceId AS invoiceId, s2.recipientEmail AS recipientEmail, s2.recipientName AS recipientName
          FROM SentPaymentFailureEmail s2
@@ -2907,7 +2963,7 @@ async function getPendingFinalPaymentReminders(db, cutoffIso2, limit = 20) {
           AND s2.createdAt <= ?1
         ORDER BY s2.createdAt
         LIMIT ?2`
-  ).bind(cutoffIso2, limit).all();
+  ).bind(cutoffIso, limit).all();
   return results || [];
 }
 async function savePaymentEvent(db, data) {
@@ -3172,10 +3228,10 @@ function fromHex(hex) {
 }
 async function hashPassword(plainPassword) {
   const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
-  const enc2 = new TextEncoder();
+  const enc = new TextEncoder();
   const key = await crypto.subtle.importKey(
     "raw",
-    enc2.encode(plainPassword),
+    enc.encode(plainPassword),
     "PBKDF2",
     false,
     ["deriveBits"]
@@ -3196,10 +3252,10 @@ async function verifyPassword(plainPassword, storedSaltHash) {
   const [saltHex, hashHex] = storedSaltHash.split(":");
   if (!saltHex || !hashHex) return false;
   const salt = fromHex(saltHex);
-  const enc2 = new TextEncoder();
+  const enc = new TextEncoder();
   const key = await crypto.subtle.importKey(
     "raw",
-    enc2.encode(plainPassword),
+    enc.encode(plainPassword),
     "PBKDF2",
     false,
     ["deriveBits"]
@@ -4048,6 +4104,7 @@ var init_db = __esm({
     __name(incrementPromoRedemption, "incrementPromoRedemption");
     __name(ensureDefaultPlans, "ensureDefaultPlans");
     __name(incrementPageviewUsage, "incrementPageviewUsage");
+    __name(incrementBlockedPageviewUsage, "incrementBlockedPageviewUsage");
     __name(getPageviewUsageForOrganization, "getPageviewUsageForOrganization");
     __name(getPageviewUsageForSite, "getPageviewUsageForSite");
     __name(getPlanById, "getPlanById");
@@ -5266,7 +5323,7 @@ async function handleSites(request, env2) {
 }
 __name(handleSites, "handleSites");
 
-// src/handlers/cdnNm.js
+// src/handlers/cdnM.js
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
@@ -5395,6 +5452,31 @@ const BASE_URL = "https://test-cmp.pages.dev/";
 // Google Additional Consent (AC) toggle \u2014 baked from the isGAC build argument.
 const IS_GAC = ${isGoogleAC};
 window.__cbIsGAC = IS_GAC;
+
+/**
+ * ConsentBit wordmark for the "Powered by" strip on the preference modal. Inlined
+ * rather than fetched: a publisher's Content-Security-Policy can block an external
+ * image, and an extra request for a 13px mark is not worth it. Every fill is a fixed
+ * brand grey \u2014 the mark must render identically on every site, independent of whatever
+ * banner colours the publisher has configured.
+ */
+const CB_WORDMARK_SVG = '<svg viewBox="0 0 735 90" role="img" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">'
+  + '<g fill="#98A2B3">'
+  + '<path d="M234.357 89.2656C227.796 89.2656 222.045 87.925 217.107 85.2439C212.238 82.4923 208.464 78.647 205.782 73.7081C203.101 68.7692 201.761 62.9484 201.761 56.2456C201.761 49.5428 203.101 43.722 205.782 38.7831C208.464 33.8442 212.238 30.0342 217.107 27.3531C222.045 24.6014 227.796 23.2256 234.357 23.2256C241.131 23.2256 246.916 24.5661 251.714 27.2472C256.582 29.9284 260.322 33.7384 262.932 38.6772C265.614 43.6161 266.954 49.4722 266.954 56.2456C266.954 62.9484 265.614 68.8045 262.932 73.8139C260.322 78.7528 256.582 82.5628 251.714 85.2439C246.846 87.925 241.06 89.2656 234.357 89.2656ZM234.357 78.8939C240.919 78.8939 245.999 76.9184 249.597 72.9672C253.266 68.9456 255.101 63.3717 255.101 56.2456C255.101 49.0489 253.266 43.475 249.597 39.5239C245.999 35.5728 240.919 33.5972 234.357 33.5972C227.866 33.5972 222.786 35.6081 219.117 39.6298C215.449 43.5809 213.614 49.1195 213.614 56.2456C213.614 63.3717 215.449 68.9456 219.117 72.9672C222.786 76.9184 227.866 78.8939 234.357 78.8939Z"/>'
+  + '<path d="M158.471 89.3708C149.793 89.3708 142.208 87.5717 135.717 83.9733C129.297 80.3044 124.322 75.1539 120.795 68.5217C117.267 61.8894 115.503 54.0931 115.503 45.1325C115.503 36.1719 117.267 28.4108 120.795 21.8492C124.322 15.2169 129.297 10.1017 135.717 6.50333C142.208 2.83444 149.793 1 158.471 1C165.103 1 170.96 2.09361 176.04 4.28083C181.19 6.3975 185.423 9.53722 188.74 13.7C192.056 17.7922 194.313 22.7664 195.513 28.6225H183.236C181.966 23.1897 179.179 18.9917 174.875 16.0283C170.642 13.065 165.174 11.5833 158.471 11.5833C148.805 11.5833 141.22 14.5819 135.717 20.5792C130.214 26.5764 127.462 34.7608 127.462 45.1325C127.462 55.5747 130.214 63.7944 135.717 69.7917C141.22 75.7183 148.805 78.6817 158.471 78.6817C165.174 78.6817 170.642 77.2353 174.875 74.3425C179.179 71.3792 181.966 67.1811 183.236 61.7483H195.513C194.313 67.5339 192.056 72.5081 188.74 76.6708C185.423 80.7631 181.19 83.9028 176.04 86.09C170.96 88.2772 165.103 89.3708 158.471 89.3708Z"/>'
+  + '<path d="M372.231 89.2656C363.412 89.2656 356.462 87.4311 351.382 83.7623C346.302 80.0934 343.515 74.9781 343.021 68.4164H354.769C355.263 72.297 356.956 75.1545 359.849 76.9889C362.742 78.8234 367.01 79.7406 372.655 79.7406C382.533 79.7406 387.471 76.6361 387.471 70.4272C387.471 67.8872 386.695 65.947 385.143 64.6064C383.661 63.1953 381.121 62.1722 377.523 61.5372L363.659 58.9973C351.876 56.81 345.985 51.2009 345.985 42.1697C345.985 36.3136 348.207 31.6923 352.652 28.3056C357.097 24.9189 363.165 23.2256 370.856 23.2256C378.828 23.2256 385.143 24.9542 389.8 28.4114C394.527 31.8686 397.208 36.737 397.843 43.0164H386.307C385.602 39.4886 383.944 36.8781 381.333 35.1847C378.793 33.4914 375.195 32.6448 370.538 32.6448C366.234 32.6448 362.883 33.3856 360.484 34.8673C358.156 36.3489 356.991 38.5009 356.991 41.3231C356.991 43.5103 357.732 45.2389 359.214 46.5089C360.766 47.7084 363.236 48.6256 366.622 49.2606L380.486 51.9064C386.695 53.0353 391.246 55.0461 394.139 57.9389C397.032 60.8317 398.478 64.7122 398.478 69.5806C398.478 75.7895 396.22 80.6225 391.705 84.0798C387.189 87.537 380.698 89.2656 372.231 89.2656Z"/>'
+  + '<path d="M437.465 89.2656C430.833 89.2656 425.083 87.925 420.215 85.2439C415.346 82.4923 411.572 78.6117 408.89 73.6022C406.28 68.5928 404.975 62.7367 404.975 56.0339C404.975 49.3311 406.28 43.5456 408.89 38.6772C411.572 33.7384 415.311 29.9284 420.109 27.2472C424.907 24.5661 430.516 23.2256 436.936 23.2256C443.075 23.2256 448.366 24.4603 452.811 26.9297C457.327 29.3992 460.819 32.8917 463.289 37.4073C465.758 41.9228 466.993 47.285 466.993 53.4939V58.2564H416.405C416.757 64.8886 418.768 70.0745 422.437 73.8139C426.177 77.4828 431.151 79.3172 437.36 79.3172C441.663 79.3172 445.297 78.4353 448.26 76.6714C451.224 74.837 453.27 72.1559 454.399 68.6281H466.464C464.912 75.1897 461.56 80.2697 456.41 83.8681C451.33 87.4664 445.015 89.2656 437.465 89.2656ZM416.828 49.5781H455.563C454.998 44.357 453.058 40.3 449.742 37.4073C446.497 34.5145 442.193 33.0681 436.83 33.0681C431.539 33.0681 427.129 34.5145 423.601 37.4073C420.073 40.3 417.816 44.357 416.828 49.5781Z"/>'
+  + '<path d="M564.448 87.9953C561.061 87.9953 558.415 87.1486 556.51 85.4553C554.676 83.6914 553.759 81.0809 553.759 77.6236V33.597H541.905V24.4953H553.864V7.99512H565.506V24.4953H582.122V33.597H565.612V78.682H583.815V87.9953H564.448Z"/>'
+  + '<path d="M672 88V35H687V88H672Z"/>'
+  + '<path d="M671 23V8H687V23H671Z"/>'
+  + '<path d="M716.594 87.9955C712.693 87.9955 709.652 87.0038 707.47 85.0205C705.355 83.0372 704.297 80.0291 704.297 75.9963L704.297 35.4985H693.785V23.9951H704.396L704.53 7.99512L718.875 7.99512L718.874 23.9951H735V35.4985H719.073L719.073 76.393H734.642V87.9955H716.594Z"/>'
+  + '<path d="M283.197 33.4209H287.594C289.814 29.8402 292.857 27.1189 296.725 25.2568C300.592 23.3231 305.14 22.3565 310.368 22.3564C318.676 22.3564 325.229 24.7554 330.027 29.5537C334.826 34.2805 337.226 40.6188 337.226 48.5684V87.9951H325.193V50.6104C325.193 44.8093 323.618 40.4045 320.467 37.3965C317.387 34.3885 312.839 32.8838 306.823 32.8838C300.879 32.8838 296.331 34.3885 293.18 37.3965C290.029 40.4045 288.453 44.8093 288.453 50.6104V87.9951H276.421V36.2266H267.972V21H283.197V33.4209Z"/>'
+  + '<path d="M486 34.2314H489.33C491.517 30.7038 494.516 28.0229 498.326 26.1885C502.136 24.2835 506.617 23.3311 511.768 23.3311C519.952 23.3311 526.408 25.6947 531.135 30.4219C535.862 35.0785 538.226 41.3227 538.226 49.1543V87.9951H526.372V51.165C526.372 45.4501 524.82 41.1108 521.716 38.1475C518.682 35.1841 514.201 33.7031 508.274 33.7031C502.419 33.7032 497.938 35.1843 494.834 38.1475C491.73 41.1108 490.177 45.4501 490.177 51.165V87.9951H478.324V36.9951H470V20.9951H486V34.2314Z"/>'
+  + '<path d="M631.386 7.66992C636.211 7.66997 640.376 8.52936 643.88 10.248C647.45 11.9008 650.26 14.2815 652.31 17.3887C654.359 20.4297 655.384 23.9999 655.384 28.0986C655.384 32.2635 653.684 36.2398 652 38.9951C649.075 43.7811 645.5 44.7578 645.627 44.7578L648.988 45.1553C651.963 45.8164 654.673 47.0394 657.119 48.8242C659.631 50.6092 661.615 52.8569 663.069 55.5674C664.59 58.2779 665.351 61.4843 665.351 65.1865C665.351 69.7482 664.226 73.7478 661.979 77.1855C659.797 80.5572 656.723 83.2019 652.756 85.1191C648.855 87.0363 644.326 87.9951 639.17 87.9951H596.826V21H611.999V40.2959H629.303C632.807 40.2959 635.484 39.4691 637.335 37.8164C639.252 36.0975 640.211 33.6844 640.211 30.5771C640.211 27.3378 639.252 24.892 637.335 23.2393C635.484 21.5866 632.807 20.7598 629.303 20.7598H612V7.66992H631.386ZM611.999 74.9053H636.394C640.823 74.9053 644.227 73.9463 646.607 72.0293C648.987 70.046 650.178 67.2031 650.178 63.501C650.178 59.8649 648.987 57.1206 646.607 55.2695C644.228 53.3526 640.856 52.3946 636.493 52.3945H611.999V74.9053Z"/>'
+  + '</g>'
+  + '<path d="M32.7604 87.4506C32.0233 88.1831 30.8281 88.1831 30.0909 87.4506L8.45288 65.9485C-2.81763 54.7488 -2.81763 36.5904 8.45288 25.3907C8.97709 24.8698 9.827 24.8698 10.3512 25.3907L51.4471 66.2285C52.1843 66.961 52.1843 68.1487 51.4471 68.8813L32.7604 87.4506Z" fill="#B4BCC8"/>'
+  + '<path d="M35.3829 43.3719C34.8671 42.8423 34.8732 41.9897 35.3966 41.4677L76.4272 0.544909C77.1632 -0.189157 78.3479 -0.180458 79.0733 0.564338L97.4615 19.4444C98.1869 20.1891 98.1783 21.388 97.4423 22.1221L75.8387 43.669C64.5861 54.892 46.4734 54.759 35.3829 43.3719Z" fill="#8C95A3"/>'
+  + '</svg>';
 
 function loadScriptOnce(src, onload) {
   const existing = document.querySelector('script[src="' + src + '"]');
@@ -5632,7 +5714,16 @@ function injectStyles() {
 .cb-btn{padding:9px 20px;border-radius:\${brBtn};font-size:13px;font-weight:\${s.fontWeight};cursor:pointer;transition:opacity .2s;border:2px solid;white-space:nowrap}
 .cb-btn-reject{background-color:\${s.buttonColor};color:\${s.buttonTextColor};border-color:\${s.buttonColor}}
 .cb-btn-preferences{background-color:\${s.SecButtonColor};color:\${s.SecButtonTextColor};border-color:\${s.SecButtonColor}}
+.cb-brand-footer{box-sizing:border-box;height:44px;max-height:50px;padding:0 22px;display:flex;align-items:center;justify-content:flex-end;gap:8px;background:#F7F8FA!important;background-color:#F7F8FA!important;border-top:1px solid #EFF1F4!important;border-radius:0 0 \${br} \${br}}
+.cb-brand-footer a{display:inline-flex;align-items:center;gap:7px;text-decoration:none!important;background:transparent!important;color:#A2ABBA!important;border-radius:6px;padding:4px 6px;margin-right:-6px;transition:opacity .15s ease}
+.cb-brand-footer a:hover{opacity:.7}
+.cb-brand-credit{font-size:11px!important;font-weight:500!important;letter-spacing:.02em;line-height:1;white-space:nowrap;color:#A2ABBA!important}
+.cb-brand-mark{display:flex;align-items:center;opacity:.85}
+.cb-brand-mark svg{display:block;height:9.75px;width:auto}
 @media(max-width:768px){.consentBit-type-box-bottom-left,.consentBit-type-box-bottom-right{left:10px;right:10px;max-width:calc(100% - 20px)}.consentBit-type-box-bottom-left,.consentBit-type-box-bottom-right{bottom:10px}.consentBit-consent-bar{padding:18px}.consentBit-title{font-size:16px}.consentBit-notice-btn-wrapper,.cb-prefrence-btn-wrapper{flex-direction:column}.consentBit-btn,.cb-btn{width:100%}.consentBit-type-banner .consentBit-notice,.consentBit-type-banner .consentBit-notice-group{flex-direction:column}.cb-iab-navbar{flex-direction:column}.cb-switch-wrapper{flex-direction:column;align-items:flex-start;gap:6px}.cb-switch-separator{border-right:none;padding-right:0;padding-bottom:6px;border-bottom:1px solid #ddd}}
+@media(max-width:768px){.cb-brand-footer{padding:0 16px}}
+/* max-height twice is deliberate: vh is the fallback for browsers without dvh */
+@media(max-width:768px){.consentBit-consent-container{max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}}
 \`;
   const style = document.createElement('style');
   style.id = 'consentbit-inline-styles';
@@ -5727,6 +5818,12 @@ function injectHTML() {
           <button aria-label="Save My Preferences" class="cb-btn cb-btn-preferences" id="cbSaveBtn">Save My Preferences</button>
 
         </div>
+      <div class="cb-brand-footer">
+        <a href="https://consentbit.com" target="_blank" rel="noopener noreferrer" aria-label="Powered by ConsentBit">
+          <span class="cb-brand-credit">Powered by</span>
+          <span class="cb-brand-mark">\${CB_WORDMARK_SVG}</span>
+        </a>
+      </div>
     </div>
   </div>
 </div>\`;
@@ -6013,12 +6110,50 @@ function isCategoryAllowed(category) {
 }
 
 /**
+ * Microsoft Clarity tag hosts. Clarity is governed by a consent SIGNAL, not by this
+ * blocker: Microsoft's CMP integration guide requires the tag to load regardless of
+ * consent status, and with consent denied Clarity runs cookieless on its own (no
+ * _clck / _clsk / MUID). Hard-blocking it would leave it with no signal at all.
+ */
+function cbIsClarityUrl(u) {
+  var s = typeof u === 'string' ? u.toLowerCase() : '';
+  if (!s) return false;
+  var cfg = (typeof window !== 'undefined' && window.__CONSENT_SITE__) || {};
+  if (cfg.clarityConsentMode === false) return false;
+  return s.indexOf('clarity.ms') !== -1 || s.indexOf('clarity.microsoft.com') !== -1;
+}
+
+/**
+ * Signal the visitor's decision to Microsoft Clarity's Consent API v2.
+ *   analytics_Storage \u2014 analytics purposes; gates _clck / _clsk
+ *   ad_Storage        \u2014 advertising purposes; gates MUID
+ * Key names are case-sensitive (capital S); values must be lowercase. Granular choices
+ * are respected \u2014 analytics-only consent must not grant ad_Storage. Deduped on
+ * __cbClaritySignal because Microsoft asks CMPs to avoid redundant state changes.
+ */
+function cbClarityConsent(categories) {
+  try {
+    var cfg = (typeof window !== 'undefined' && window.__CONSENT_SITE__) || {};
+    if (cfg.clarityConsentMode === false) return;
+    var cats = categories || {};
+    var ad = cats.marketing ? 'granted' : 'denied';
+    var an = cats.analytics ? 'granted' : 'denied';
+    var sg = ad + '|' + an;
+    if (window.__cbClaritySignal === sg) return;
+    window.__cbClaritySignal = sg;
+    window.clarity = window.clarity || function () { (window.clarity.q = window.clarity.q || []).push(arguments); };
+    window.clarity('consentv2', { source: (cfg.clarityCmpId || 'consentbit'), ad_Storage: ad, analytics_Storage: an });
+  } catch (e) {}
+}
+
+/**
  * Decide whether a script URL should be blocked given current consent state.
  */
 function shouldBlockScript(url, el) {
   if (__cbInternalCreate) return false;
   var u = typeof url === 'string' ? url.toLowerCase() : '';
   if (u && (u.indexOf('consentbit') !== -1 || u.indexOf('consentv2') !== -1 || u.indexOf('tcfmanager') !== -1)) return false;
+  if (cbIsClarityUrl(u)) return false;
 
   var cats = resolveScriptCategories(url, el);
   if (!cats || cats.length === 0) return false; // unmanaged \u2192 allow
@@ -6229,6 +6364,12 @@ function releaseBlockedScripts() {
 // Install blocker immediately \u2014 don't wait for DOMContentLoaded
 installConsentScriptBlocker();
 initConsentDependencies();
+
+// Signal the stored decision (or default-denied) to Microsoft Clarity as early as
+// possible, queueing it if clarity.js has not loaded yet. isCategoryAllowed() already
+// understands every storage format we support, so one call covers first visits,
+// returning visitors, and the accept-all shortcut alike.
+cbClarityConsent({ analytics: isCategoryAllowed('analytics'), marketing: isCategoryAllowed('advertisement') });
 
 // \u2500\u2500\u2500 Banner Entrance Animation (server-baked override) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 // Injects a <style> with the chosen entrance animation (fade-in / slide-up /
@@ -7255,6 +7396,13 @@ window.__cbConsentState = {
 };
 // console.log('[ConsentBit][LoadPrefs] __cbConsentState restored:', JSON.stringify(window.__cbConsentState));
 
+// Returning visitor: replay their stored decision to Clarity. Deduped, so this is a
+// no-op when the install-time signal above already sent the same values.
+cbClarityConsent({
+  analytics: !!(preferences.cookieCategories && preferences.cookieCategories.analytics && preferences.cookieCategories.analytics.enabled),
+  marketing: !!(preferences.cookieCategories && preferences.cookieCategories.advertisement && preferences.cookieCategories.advertisement.enabled)
+});
+
 // Release scripts whose categories are now consented to (CDN-style)
 releaseBlockedScripts();
     // Load vendors (will be loaded when vendor tab is opened)
@@ -7402,6 +7550,10 @@ function openModal() {
 // this the IAB banner creates no Consent row. status: 'given' (accept) |
 // 'rejected' (reject) | 'partial' (save preferences). Mirrors the standard loader re().
 function cbRecordIabConsent(status, categories) {
+  // Signal Clarity first: this is the single funnel every accept / reject / save passes
+  // through, and it must not depend on the backend POST below (which returns early when
+  // the site is unconfigured).
+  cbClarityConsent(categories);
   try {
     var cfg = (typeof window !== 'undefined' && window.__CONSENT_SITE__) || {};
     var siteId = cfg.id || null;
@@ -8278,12 +8430,12 @@ __name(getLoaderIabScript, "getLoaderIabScript");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 function getWebflowSetupScript() {
-  return `(function(){window.__CB_WEBFLOW_MODE__=true;(function(){try{var a=window.__CONSENT_SITE__||{};var b=(a.bannerType||'gdpr').toLowerCase();var c=b==='ccpa';var d=null;var e=false;var hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}/* GPC: honor navigator.globalPrivacyControl as a CCPA opt-out on first visit (no stored choice), BEFORE gtag default + script-block decision below. Stored choice wins. */try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);if(!c){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else{window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}window.__cbConsentDefaultSet=true;var f=c?e:true;var g=a.scriptBlockProviders||[];var h=a.customCookieRules||[];var j=[{domain:'google-analytics.com',category:'analytics'},{domain:'googletagmanager.com',category:'analytics'},{domain:'gtag/js',category:'analytics'},{domain:'gtm.js',category:'analytics'},{domain:'hotjar.com',category:'analytics'},{domain:'clarity.ms',category:'analytics'},{domain:'scorecardresearch.com',category:'analytics'},{domain:'quantserve.com',category:'analytics'},{domain:'facebook.com',category:'marketing'},{domain:'facebook.net',category:'marketing'},{domain:'fbcdn.net',category:'marketing'},{domain:'doubleclick.net',category:'marketing'},{domain:'googleadservices.com',category:'marketing'},{domain:'googlesyndication.com',category:'marketing'},{domain:'bing.com',category:'marketing'},{domain:'bat.bing.com',category:'marketing'},{domain:'twitter.com',category:'marketing'},{domain:'analytics.twitter.com',category:'marketing'},{domain:'t.co',category:'marketing'},{domain:'linkedin.com',category:'marketing'},{domain:'ads.linkedin.com',category:'marketing'},{domain:'pinterest.com',category:'marketing'},{domain:'ct.pinterest.com',category:'marketing'},{domain:'tiktok.com',category:'marketing'},{domain:'analytics.tiktok.com',category:'marketing'},{domain:'outbrain.com',category:'marketing'},{domain:'taboola.com',category:'marketing'},{domain:'criteo.com',category:'marketing'},{domain:'criteo.net',category:'marketing'},{domain:'zemanta.com',category:'marketing'},{domain:'adroll.com',category:'marketing'},{domain:'d.adroll.com',category:'marketing'},{domain:'smartlook.com',category:'analytics'},{domain:'smartlookcloud.com',category:'analytics'},{domain:'rec.smartlook.com',category:'analytics'},{domain:'posthog.com',category:'analytics'},{domain:'app.posthog.com',category:'analytics'},{domain:'eu.posthog.com',category:'analytics'},{domain:'matomo.cloud',category:'analytics'},{domain:'matomo.js',category:'analytics'},{domain:'piwik.js',category:'analytics'},{domain:'piwik.php',category:'analytics'}];function k(z){var lo=(z||'').trim().toLowerCase();return lo==='necessary'||lo==='essential';}function m(z){var lo=z.trim().toLowerCase();if(lo==='advertising'||lo==='advertisement')return'marketing';if(lo==='functional'||lo==='performance'||lo==='personalization')return'preferences';return lo;}function n(u){if(!u)return null;var lo=u.toLowerCase();for(var bi=0;bi<j.length;bi++){if(lo.indexOf(j[bi].domain)!==-1)return j[bi].category;}for(var ki=0;ki<g.length;ki++){try{if(g[ki]&&g[ki].pattern&&new RegExp(g[ki].pattern,'i').test(u))return(g[ki].categories&&g[ki].categories[0])||'analytics';}catch(_){}}for(var li=0;li<h.length;li++){try{if(h[li]&&h[li].scriptUrlPattern&&new RegExp(h[li].scriptUrlPattern,'i').test(u))return h[li].category||'analytics';}catch(_){}}return null;}function o(el){if(!f)return;if(!el||el.nodeName!=='SCRIPT')return;var u=(el.getAttribute&&el.getAttribute('src'))||'';if(u.indexOf('consentbit')!==-1||u.indexOf('consent.js')!==-1)return;if(el.getAttribute&&el.getAttribute('type')==='text/plain')return;var t=el.getAttribute&&el.getAttribute('data-category');if(t){var cl=t.split(',').map(function(z){return z.trim().toLowerCase();});if(cl.every(k))return;if(!c&&d){if(cl.every(function(z){return k(z)||!!d[m(z)];}))return;}if(u){el.setAttribute('data-cb-blocked-src',u);el.removeAttribute('src');}el.setAttribute('type','text/plain');}else if(u){var r2=n(u);if(!r2)return;if(k(r2))return;if(!c&&d&&!!d[m(r2)])return;el.setAttribute('data-cb-blocked-src',u);el.setAttribute('data-category',r2);el.removeAttribute('src');el.setAttribute('type','text/plain');}}var p=document.createElement.bind(document);document.createElement=function(tag){var el=p(tag);if(typeof tag==='string'&&tag.toLowerCase()==='script'){var sv='';try{Object.defineProperty(el,'src',{configurable:true,enumerable:true,get:function(){return sv;},set:function(val){sv=val;if(!f){el.setAttribute('src',val);return;}var t=el.getAttribute('data-category');var r2=n(val);var blk=false;if(t){var cl=t.split(',').map(function(z){return z.trim().toLowerCase();});if(!cl.every(k)){blk=!(!c&&d&&cl.every(function(z){return k(z)||!!d[m(z)];}));}}else if(r2&&!k(r2)){blk=!(!c&&d&&!!d[m(r2)]);}if(blk){el.setAttribute('data-cb-blocked-src',val);if(!t&&r2)el.setAttribute('data-category',r2);el.setAttribute('type','text/plain');}else{el.setAttribute('src',val);}}});}catch(_){}}return el;};var q=new MutationObserver(function(ms){ms.forEach(function(mu){mu.addedNodes.forEach(o);});});q.observe(document.documentElement,{childList:true,subtree:true});function r(){q.disconnect();document.querySelectorAll('script[type="text/plain"]').forEach(function(el){var u=el.getAttribute('src')||'';if(u&&!el.getAttribute('data-cb-blocked-src')){el.setAttribute('data-cb-blocked-src',u);if(!el.getAttribute('data-category')){var t=n(u);if(t)el.setAttribute('data-category',t);else{var t2=el.getAttribute('data-consentbit-category')||el.getAttribute('data-category-cb');if(t2)el.setAttribute('data-category',t2.trim().toLowerCase());}}}if(!u&&!el.getAttribute('data-cb-inline-blocked')){el.setAttribute('data-cb-inline-blocked','1');if(!el.getAttribute('data-category')){var t2=el.getAttribute('data-consentbit-category')||el.getAttribute('data-category-cb');if(t2)el.setAttribute('data-category',t2.trim().toLowerCase());}}});}document.readyState==='loading'?document.addEventListener('DOMContentLoaded',r,{once:true}):r();document.addEventListener('consentUpdated',function(ev){var cats=(ev&&ev.detail)||{};if(c){var dns2=!!(cats.doNotSell||(cats.ccpa&&cats.ccpa.doNotSell));e=dns2;window.gtag&&window.gtag('consent','update',{ad_storage:dns2?'denied':'granted',analytics_storage:dns2?'denied':'granted',ad_user_data:dns2?'denied':'granted',ad_personalization:dns2?'denied':'granted',functionality_storage:dns2?'denied':'granted',personalization_storage:dns2?'denied':'granted'});if(dns2&&!f){f=true;document.querySelectorAll('script[data-cb-blocked-src]').forEach(o);return;}if(!dns2)f=false;}else{d={analytics:!!cats.analytics,marketing:!!cats.marketing,preferences:!!cats.preferences,essential:true};}function s(t){if(c)return cats.doNotSell===false;if(!t)return!!(cats.analytics||cats.marketing||cats.preferences);var dca=t.split(',').map(function(z){return z.trim().toLowerCase();});return dca.every(function(z){if(z==='necessary'||z==='essential')return true;if(z==='analytics')return!!cats.analytics;if(z==='marketing'||z==='advertising'||z==='advertisement')return!!cats.marketing;if(z==='preferences'||z==='functional'||z==='performance'||z==='personalization')return!!cats.preferences;return true;});}var bl=document.querySelectorAll('script[type="text/plain"][data-cb-blocked-src],script[type="text/plain"][data-cb-inline-blocked]');for(var ii=0;ii<bl.length;ii++){var s2=bl[ii];var bsrc=s2.getAttribute('data-cb-blocked-src')||'';var dc=s2.getAttribute('data-category')||'';var ok=s(dc);if(ok){try{var ns2=p('script');if(bsrc){ns2.src=bsrc;if(s2.hasAttribute('async'))ns2.async=true;if(s2.hasAttribute('defer'))ns2.defer=true;var at2=s2.attributes;for(var ai=0;ai<at2.length;ai++){var an2=at2[ai].name;if(an2!=='src'&&an2!=='type'&&an2!=='data-cb-blocked-src'&&an2!=='data-cb-inline-blocked')ns2.setAttribute(an2,at2[ai].value);}ns2.setAttribute('data-cb-released-src',bsrc);s2.parentNode?s2.parentNode.replaceChild(ns2,s2):document.head.appendChild(ns2);}else{var ic=s2.textContent||s2.innerHTML||'';var nl=String.fromCharCode(10);var ls=ic.split(nl);var si=0;while(si<ls.length&&si<10){var lt=ls[si].trim();if(lt.length===0||(lt.charAt(0)==='/'&&lt.charAt(1)==='/'))si++;else break;}var fc=(si<ls.length?ls.slice(si).join(nl):'').trim().charAt(0);if(fc!=='{'&&fc!=='['){ns2.textContent=ic;var at3=s2.attributes;for(var aj=0;aj<at3.length;aj++){var an3=at3[aj].name;if(an3!=='type'&&an3!=='data-cb-inline-blocked')ns2.setAttribute(an3,at3[aj].value);}ns2.setAttribute('data-cb-released-inline','1');s2.parentNode&&s2.parentNode.replaceChild(ns2,s2);}}}catch(_){}}}var rl=document.querySelectorAll('script[data-cb-released-src],script[data-cb-released-inline]');for(var ri=0;ri<rl.length;ri++){var rs=rl[ri];var rdc=rs.getAttribute('data-category')||'';var rok=s(rdc);if(!rok){try{var rb=p('script');rb.setAttribute('type','text/plain');if(rdc)rb.setAttribute('data-category',rdc);var rIsInline=rs.hasAttribute('data-cb-released-inline');if(rIsInline){rb.textContent=rs.textContent||rs.innerHTML||'';rb.setAttribute('data-cb-inline-blocked','1');}else{var rSrc=rs.getAttribute('data-cb-released-src')||'';rb.setAttribute('data-cb-blocked-src',rSrc);if(rs.hasAttribute('async'))rb.setAttribute('async','');if(rs.hasAttribute('defer'))rb.setAttribute('defer','');}rs.parentNode&&rs.parentNode.replaceChild(rb,rs);}catch(_){}}}});
+  return `(function(){window.__CB_WEBFLOW_MODE__=true;(function(){try{var a=window.__CONSENT_SITE__||{};var b=(a.bannerType||'gdpr').toLowerCase();var c=b==='ccpa';var d=null;var e=false;var hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}/* GPC: honor navigator.globalPrivacyControl as a CCPA opt-out on first visit (no stored choice), BEFORE gtag default + script-block decision below. Stored choice wins. */try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}/* Microsoft Clarity Consent API v2. Emitted before the Google Consent Mode work below: Microsoft wants the signal as early as possible, and this IIFE has a single catch, so a throw in the gtag section would otherwise skip it. __cbCl() dedupes on the same __cbClaritySignal fingerprint the standard loader uses, and is reused by the consentUpdated listener at the bottom. Clarity's tag is deliberately NOT blocked (see the o()/src-setter skips) \u2014 denied consent makes Clarity run cookieless on its own. */try{if(a.clarityConsentMode!==false){window.clarity=window.clarity||function(){(window.clarity.q=window.clarity.q||[]).push(arguments);};window.__cbCl=function(ad,an){try{var sg=ad+'|'+an;if(window.__cbClaritySignal===sg)return;window.__cbClaritySignal=sg;window.clarity('consentv2',{source:(a.clarityCmpId||'consentbit'),ad_Storage:ad,analytics_Storage:an});}catch(_){}};window.__cbCl(c?(e?'denied':'granted'):(d&&d.marketing?'granted':'denied'),c?(e?'denied':'granted'):(d&&d.analytics?'granted':'denied'));}}catch(_){}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);if(!c){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else{window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}window.__cbConsentDefaultSet=true;var f=c?e:true;var g=a.scriptBlockProviders||[];var h=a.customCookieRules||[];var j=[{domain:'google-analytics.com',category:'analytics'},{domain:'googletagmanager.com',category:'analytics'},{domain:'gtag/js',category:'analytics'},{domain:'gtm.js',category:'analytics'},{domain:'hotjar.com',category:'analytics'},{domain:'clarity.ms',category:'analytics'},{domain:'scorecardresearch.com',category:'analytics'},{domain:'quantserve.com',category:'analytics'},{domain:'facebook.com',category:'marketing'},{domain:'facebook.net',category:'marketing'},{domain:'fbcdn.net',category:'marketing'},{domain:'doubleclick.net',category:'marketing'},{domain:'googleadservices.com',category:'marketing'},{domain:'googlesyndication.com',category:'marketing'},{domain:'bing.com',category:'marketing'},{domain:'bat.bing.com',category:'marketing'},{domain:'twitter.com',category:'marketing'},{domain:'analytics.twitter.com',category:'marketing'},{domain:'t.co',category:'marketing'},{domain:'linkedin.com',category:'marketing'},{domain:'ads.linkedin.com',category:'marketing'},{domain:'pinterest.com',category:'marketing'},{domain:'ct.pinterest.com',category:'marketing'},{domain:'tiktok.com',category:'marketing'},{domain:'analytics.tiktok.com',category:'marketing'},{domain:'outbrain.com',category:'marketing'},{domain:'taboola.com',category:'marketing'},{domain:'criteo.com',category:'marketing'},{domain:'criteo.net',category:'marketing'},{domain:'zemanta.com',category:'marketing'},{domain:'adroll.com',category:'marketing'},{domain:'d.adroll.com',category:'marketing'},{domain:'smartlook.com',category:'analytics'},{domain:'smartlookcloud.com',category:'analytics'},{domain:'rec.smartlook.com',category:'analytics'},{domain:'posthog.com',category:'analytics'},{domain:'app.posthog.com',category:'analytics'},{domain:'eu.posthog.com',category:'analytics'},{domain:'matomo.cloud',category:'analytics'},{domain:'matomo.js',category:'analytics'},{domain:'piwik.js',category:'analytics'},{domain:'piwik.php',category:'analytics'}];function k(z){var lo=(z||'').trim().toLowerCase();return lo==='necessary'||lo==='essential';}function m(z){var lo=z.trim().toLowerCase();if(lo==='advertising'||lo==='advertisement')return'marketing';if(lo==='functional'||lo==='performance'||lo==='personalization')return'preferences';return lo;}function n(u){if(!u)return null;var lo=u.toLowerCase();for(var bi=0;bi<j.length;bi++){if(lo.indexOf(j[bi].domain)!==-1)return j[bi].category;}for(var ki=0;ki<g.length;ki++){try{if(g[ki]&&g[ki].pattern&&new RegExp(g[ki].pattern,'i').test(u))return(g[ki].categories&&g[ki].categories[0])||'analytics';}catch(_){}}for(var li=0;li<h.length;li++){try{if(h[li]&&h[li].scriptUrlPattern&&new RegExp(h[li].scriptUrlPattern,'i').test(u))return h[li].category||'analytics';}catch(_){}}return null;}function o(el){if(!f)return;if(!el||el.nodeName!=='SCRIPT')return;var u=(el.getAttribute&&el.getAttribute('src'))||'';if(u.indexOf('consentbit')!==-1||u.indexOf('consent.js')!==-1)return;if(a.clarityConsentMode!==false&&(u.indexOf('clarity.ms')!==-1||u.indexOf('clarity.microsoft.com')!==-1))return;if(el.getAttribute&&el.getAttribute('type')==='text/plain')return;var t=el.getAttribute&&el.getAttribute('data-category');if(t){var cl=t.split(',').map(function(z){return z.trim().toLowerCase();});if(cl.every(k))return;if(!c&&d){if(cl.every(function(z){return k(z)||!!d[m(z)];}))return;}if(u){el.setAttribute('data-cb-blocked-src',u);el.removeAttribute('src');}el.setAttribute('type','text/plain');}else if(u){var r2=n(u);if(!r2)return;if(k(r2))return;if(!c&&d&&!!d[m(r2)])return;el.setAttribute('data-cb-blocked-src',u);el.setAttribute('data-category',r2);el.removeAttribute('src');el.setAttribute('type','text/plain');}}var p=document.createElement.bind(document);document.createElement=function(tag){var el=p(tag);if(typeof tag==='string'&&tag.toLowerCase()==='script'){var sv='';try{Object.defineProperty(el,'src',{configurable:true,enumerable:true,get:function(){return sv;},set:function(val){sv=val;if(!f){el.setAttribute('src',val);return;}if(a.clarityConsentMode!==false&&typeof val==='string'&&(val.indexOf('clarity.ms')!==-1||val.indexOf('clarity.microsoft.com')!==-1)){el.setAttribute('src',val);return;}var t=el.getAttribute('data-category');var r2=n(val);var blk=false;if(t){var cl=t.split(',').map(function(z){return z.trim().toLowerCase();});if(!cl.every(k)){blk=!(!c&&d&&cl.every(function(z){return k(z)||!!d[m(z)];}));}}else if(r2&&!k(r2)){blk=!(!c&&d&&!!d[m(r2)]);}if(blk){el.setAttribute('data-cb-blocked-src',val);if(!t&&r2)el.setAttribute('data-category',r2);el.setAttribute('type','text/plain');}else{el.setAttribute('src',val);}}});}catch(_){}}return el;};var q=new MutationObserver(function(ms){ms.forEach(function(mu){mu.addedNodes.forEach(o);});});q.observe(document.documentElement,{childList:true,subtree:true});function r(){q.disconnect();document.querySelectorAll('script[type="text/plain"]').forEach(function(el){var u=el.getAttribute('src')||'';if(u&&!el.getAttribute('data-cb-blocked-src')){el.setAttribute('data-cb-blocked-src',u);if(!el.getAttribute('data-category')){var t=n(u);if(t)el.setAttribute('data-category',t);else{var t2=el.getAttribute('data-consentbit-category')||el.getAttribute('data-category-cb');if(t2)el.setAttribute('data-category',t2.trim().toLowerCase());}}}if(!u&&!el.getAttribute('data-cb-inline-blocked')){el.setAttribute('data-cb-inline-blocked','1');if(!el.getAttribute('data-category')){var t2=el.getAttribute('data-consentbit-category')||el.getAttribute('data-category-cb');if(t2)el.setAttribute('data-category',t2.trim().toLowerCase());}}});}document.readyState==='loading'?document.addEventListener('DOMContentLoaded',r,{once:true}):r();document.addEventListener('consentUpdated',function(ev){var cats=(ev&&ev.detail)||{};if(c){var dns2=!!(cats.doNotSell||(cats.ccpa&&cats.ccpa.doNotSell));e=dns2;try{window.__cbCl&&window.__cbCl(dns2?'denied':'granted',dns2?'denied':'granted');}catch(_){}window.gtag&&window.gtag('consent','update',{ad_storage:dns2?'denied':'granted',analytics_storage:dns2?'denied':'granted',ad_user_data:dns2?'denied':'granted',ad_personalization:dns2?'denied':'granted',functionality_storage:dns2?'denied':'granted',personalization_storage:dns2?'denied':'granted'});if(dns2&&!f){f=true;document.querySelectorAll('script[data-cb-blocked-src]').forEach(o);return;}if(!dns2)f=false;}else{d={analytics:!!cats.analytics,marketing:!!cats.marketing,preferences:!!cats.preferences,essential:true};try{window.__cbCl&&window.__cbCl(cats.marketing?'granted':'denied',cats.analytics?'granted':'denied');}catch(_){}}function s(t){if(c)return cats.doNotSell===false;if(!t)return!!(cats.analytics||cats.marketing||cats.preferences);var dca=t.split(',').map(function(z){return z.trim().toLowerCase();});return dca.every(function(z){if(z==='necessary'||z==='essential')return true;if(z==='analytics')return!!cats.analytics;if(z==='marketing'||z==='advertising'||z==='advertisement')return!!cats.marketing;if(z==='preferences'||z==='functional'||z==='performance'||z==='personalization')return!!cats.preferences;return true;});}var bl=document.querySelectorAll('script[type="text/plain"][data-cb-blocked-src],script[type="text/plain"][data-cb-inline-blocked]');for(var ii=0;ii<bl.length;ii++){var s2=bl[ii];var bsrc=s2.getAttribute('data-cb-blocked-src')||'';var dc=s2.getAttribute('data-category')||'';var ok=s(dc);if(ok){try{var ns2=p('script');if(bsrc){ns2.src=bsrc;if(s2.hasAttribute('async'))ns2.async=true;if(s2.hasAttribute('defer'))ns2.defer=true;var at2=s2.attributes;for(var ai=0;ai<at2.length;ai++){var an2=at2[ai].name;if(an2!=='src'&&an2!=='type'&&an2!=='data-cb-blocked-src'&&an2!=='data-cb-inline-blocked')ns2.setAttribute(an2,at2[ai].value);}ns2.setAttribute('data-cb-released-src',bsrc);s2.parentNode?s2.parentNode.replaceChild(ns2,s2):document.head.appendChild(ns2);}else{var ic=s2.textContent||s2.innerHTML||'';var nl=String.fromCharCode(10);var ls=ic.split(nl);var si=0;while(si<ls.length&&si<10){var lt=ls[si].trim();if(lt.length===0||(lt.charAt(0)==='/'&&lt.charAt(1)==='/'))si++;else break;}var fc=(si<ls.length?ls.slice(si).join(nl):'').trim().charAt(0);if(fc!=='{'&&fc!=='['){ns2.textContent=ic;var at3=s2.attributes;for(var aj=0;aj<at3.length;aj++){var an3=at3[aj].name;if(an3!=='type'&&an3!=='data-cb-inline-blocked')ns2.setAttribute(an3,at3[aj].value);}ns2.setAttribute('data-cb-released-inline','1');s2.parentNode&&s2.parentNode.replaceChild(ns2,s2);}}}catch(_){}}}var rl=document.querySelectorAll('script[data-cb-released-src],script[data-cb-released-inline]');for(var ri=0;ri<rl.length;ri++){var rs=rl[ri];var rdc=rs.getAttribute('data-category')||'';var rok=s(rdc);if(!rok){try{var rb=p('script');rb.setAttribute('type','text/plain');if(rdc)rb.setAttribute('data-category',rdc);var rIsInline=rs.hasAttribute('data-cb-released-inline');if(rIsInline){rb.textContent=rs.textContent||rs.innerHTML||'';rb.setAttribute('data-cb-inline-blocked','1');}else{var rSrc=rs.getAttribute('data-cb-released-src')||'';rb.setAttribute('data-cb-blocked-src',rSrc);if(rs.hasAttribute('async'))rb.setAttribute('async','');if(rs.hasAttribute('defer'))rb.setAttribute('defer','');}rs.parentNode&&rs.parentNode.replaceChild(rb,rs);}catch(_){}}}});
 }catch(_){}})();}());`;
 }
 __name(getWebflowSetupScript, "getWebflowSetupScript");
 
-// src/handlers/cdnNm.js
+// src/handlers/cdnM.js
 async function handleCDNScript(request, env2, url) {
   try {
     return await _handleCDNScript(request, env2, url);
@@ -8589,7 +8741,7 @@ async function _handleCDNScript(request, env2, url) {
       var ccpaWidthPx = Math.max(baseWidthPx, 600);
       initialSize = "width:" + ccpaWidthPx + "px!important;min-width:360px;max-width:min(" + ccpaWidthPx + "px,96vw)!important;max-height:min(80vh,660px);overflow:hidden;";
     }
-    customStyles = ".cb-banner{border:none !important;}#cb-initial-banner.cb-banner{" + initialSize + "background-color:" + bgColor + "!important;color:" + textColor + ";position:fixed!important;" + positionStyles + "padding:" + (layoutVisual === "banner" ? "28px 48px" : boxPadding) + "!important;border:1px solid #e2e8f0;" + initialRadius + "box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;align-items:stretch;font-family:" + fontFamilyCss + ";font-size:14px!important;line-height:1.5!important;font-weight:" + fontWeightStr + ";}#cb-initial-banner.cb-banner .cb-banner-body{flex:0 1 auto;min-width:0;min-height:0;overflow-y:auto;}#cb-initial-banner.cb-banner #cb-close-initial-btn,#cb-initial-banner.cb-banner [consentbit='close']{position:absolute!important;top:8px!important;right:20px!important;width:10px!important;height:10px!important;cursor:pointer!important;background:transparent!important;border:none!important;padding:0!important;z-index:10!important;display:" + (closeButtonEnabled ? "block" : "none") + "!important;}#cb-preferences-banner.cb-banner{width:600px;max-width:94vw;max-height:min(88vh,640px);min-height:0;overflow:hidden;background-color:" + bgColor + ";color:" + textColor + ";position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);padding:28px;border:1px solid #e2e8f0;border-radius:" + bannerRadius + ";box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;font-family:" + fontFamilyCss + ";font-size:14px!important;line-height:1.5!important;font-weight:" + fontWeightStr + ";}#cb-preferences-banner.cb-banner .cb-banner-body{flex:1 1 auto;min-height:0;overflow-y:auto;}.cb-banner h3{margin:0 0 8px;font-size:16px!important;line-height:1.4!important;font-weight:600;font-family:inherit;color:" + headingColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-weight:600!important;font-family:inherit!important;color:" + headingColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner .cb-banner-body h3,#cb-preferences-banner.cb-banner .cb-banner-body h3{padding-right:0!important;}.cb-gdpr-cat-label{color:" + headingColor + ";}#cb-preferences-banner.cb-banner .cb-gdpr-cat-label ~ div > span{color:" + textColor + "!important;}.cb-banner p{margin:0 0 12px;font-size:14px!important;line-height:1.5!important;color:" + textColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-gdpr-cat-desc{color:" + textColor + ";text-align:" + textAlign + "!important;opacity:0.92;width:100%;}.cb-banner button{padding:6px 12px;border-radius:" + buttonRadius + ";cursor:pointer;font-size:14px;font-weight:600;border:1px solid #e2e8f0;transition:opacity 0.2s;}.cb-banner button#cb-accept-all-btn{background-color:" + acceptBg + ";color:" + acceptTx + ";}.cb-banner button#cb-reject-all-btn{background-color:" + rejectBg + ";color:" + rejectTx + ";}.cb-banner button#cb-preferences-btn,.cb-banner button#cb-ccpa-donotsell-link{background-color:" + custBg + ";color:" + custTx + ";}.cb-banner button#cb-prefs-reject-btn{background-color:" + rejectBg + ";color:" + rejectTx + ";}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer{display:flex!important;flex-direction:row!important;gap:10px!important;width:100%!important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button{flex:1 1 0!important;width:0!important;min-width:0!important;white-space:nowrap!important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{background-color:" + acceptBg + ";color:" + acceptTx + ";}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-save-prefs-btn{background-color:" + saveBg + ";color:" + saveTx + ";}#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{background-color:" + saveBg + ";color:" + saveTx + ";}#cb-preferences-banner.cb-banner .cb-banner-footer button{padding:10px 36px!important;}#cb-initial-banner.cb-banner .cb-banner-footer{display:flex;flex-wrap:nowrap;gap:8px;justify-content:" + footerJustify + "!important;flex-shrink:0;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 0;min-width:" + perBtnPx + "px;white-space:nowrap;overflow:visible;text-overflow:clip;}" + (layoutVisual === "banner" ? "#cb-initial-banner.cb-banner{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-body{flex:1 1 auto!important;min-width:0!important;overflow-y:visible!important;padding:0!important;margin:0!important;}#cb-initial-banner.cb-banner .cb-banner-footer{position:relative!important;flex:0 0 auto!important;flex-wrap:nowrap!important;justify-content:" + bannerFooterJustify + "!important;padding:0!important;margin:0!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto!important;width:auto!important;min-width:" + perBtnPx + "px!important;max-width:none!important;white-space:nowrap!important;overflow:visible!important;text-overflow:clip!important;}@media(max-width:660px){#cb-initial-banner.cb-banner{left:0!important;right:0!important;}}" : "") + "#cb-initial-banner.cb-banner #cb-preferences-btn{background:" + custBg + "!important;color:" + custTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-reject-all-btn{background:" + rejectBg + "!important;color:" + rejectTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-accept-all-btn{background:" + acceptBg + "!important;color:" + acceptTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}.cb-gdpr-accordion{background-color:" + bgColor + ";}.cb-banner-footer{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex:0 0 auto;}@media(max-width:660px){#cb-initial-banner.cb-banner{width:100vw!important;max-width:100vw!important;min-width:0!important;left:0!important;right:0!important;bottom:0!important;transform:none!important;border-radius:0!important;border-left:none!important;border-right:none!important;border-bottom:none!important;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}#cb-preferences-banner.cb-banner{width:calc(100vw - 32px)!important;max-width:calc(100vw - 32px)!important;padding:20px!important;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-preferences-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}}";
+    customStyles = ".cb-banner{border:none !important;}#cb-initial-banner.cb-banner{" + initialSize + "background-color:" + bgColor + "!important;color:" + textColor + ";position:fixed!important;" + positionStyles + "padding:" + (layoutVisual === "banner" ? "28px 48px" : boxPadding) + "!important;border:1px solid #e2e8f0;" + initialRadius + "box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;align-items:stretch;font-family:" + fontFamilyCss + ";font-size:14px!important;line-height:1.5!important;font-weight:" + fontWeightStr + ";}#cb-initial-banner.cb-banner .cb-banner-body{flex:0 1 auto;min-width:0;min-height:0;overflow-y:auto;}#cb-initial-banner.cb-banner #cb-close-initial-btn,#cb-initial-banner.cb-banner [consentbit='close']{position:absolute!important;top:8px!important;right:20px!important;width:10px!important;height:10px!important;cursor:pointer!important;background:transparent!important;border:none!important;padding:0!important;z-index:10!important;display:" + (closeButtonEnabled ? "block" : "none") + "!important;}#cb-preferences-banner.cb-banner{width:600px;max-width:94vw;max-height:min(88vh,640px);min-height:0;overflow:hidden;background-color:" + bgColor + ";color:" + textColor + ";position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);padding:28px;border:1px solid #e2e8f0;border-radius:" + bannerRadius + ";box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;font-family:" + fontFamilyCss + ";font-size:14px!important;line-height:1.5!important;font-weight:" + fontWeightStr + ";}#cb-preferences-banner.cb-banner .cb-banner-body{flex:1 1 auto;min-height:0;overflow-y:auto;}.cb-banner h3{margin:0 0 8px;font-size:16px!important;line-height:1.4!important;font-weight:600;font-family:inherit;color:" + headingColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-weight:600!important;font-family:inherit!important;color:" + headingColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner .cb-banner-body h3,#cb-preferences-banner.cb-banner .cb-banner-body h3{padding-right:0!important;}.cb-gdpr-cat-label{color:" + headingColor + ";}#cb-preferences-banner.cb-banner .cb-gdpr-cat-label ~ div > span{color:" + textColor + "!important;}.cb-banner p{margin:0 0 12px;font-size:14px!important;line-height:1.5!important;color:" + textColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-gdpr-cat-desc{color:" + textColor + ";text-align:" + textAlign + "!important;opacity:0.92;width:100%;}.cb-banner button{padding:6px 12px;border-radius:" + buttonRadius + ";cursor:pointer;font-size:14px;font-weight:600;border:1px solid #e2e8f0;transition:opacity 0.2s;}.cb-banner button#cb-accept-all-btn{background-color:" + acceptBg + ";color:" + acceptTx + ";}.cb-banner button#cb-reject-all-btn{background-color:" + rejectBg + ";color:" + rejectTx + ";}.cb-banner button#cb-preferences-btn,.cb-banner button#cb-ccpa-donotsell-link{background-color:" + custBg + ";color:" + custTx + ";}.cb-banner button#cb-prefs-reject-btn{background-color:" + rejectBg + ";color:" + rejectTx + ";}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer{display:flex!important;flex-direction:row!important;gap:10px!important;width:100%!important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button{flex:1 1 0!important;width:0!important;min-width:0!important;white-space:nowrap!important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{background-color:" + acceptBg + ";color:" + acceptTx + ";}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-save-prefs-btn{background-color:" + saveBg + ";color:" + saveTx + ";}#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{background-color:" + saveBg + ";color:" + saveTx + ";}#cb-preferences-banner.cb-banner .cb-banner-footer button{padding:10px 36px!important;}#cb-initial-banner.cb-banner .cb-banner-footer{display:flex;flex-wrap:nowrap;gap:8px;justify-content:" + footerJustify + "!important;flex-shrink:0;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 0;min-width:" + perBtnPx + "px;white-space:nowrap;overflow:visible;text-overflow:clip;}" + (layoutVisual === "banner" ? "#cb-initial-banner.cb-banner{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-body{flex:1 1 auto!important;min-width:0!important;overflow-y:visible!important;padding:0!important;margin:0!important;}#cb-initial-banner.cb-banner .cb-banner-footer{position:relative!important;flex:0 0 auto!important;flex-wrap:nowrap!important;justify-content:" + bannerFooterJustify + "!important;padding:0!important;margin:0!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto!important;width:auto!important;min-width:" + perBtnPx + "px!important;max-width:none!important;white-space:nowrap!important;overflow:visible!important;text-overflow:clip!important;}@media(max-width:660px){#cb-initial-banner.cb-banner{left:0!important;right:0!important;}}" : "") + "#cb-initial-banner.cb-banner #cb-preferences-btn{background:" + custBg + "!important;color:" + custTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-reject-all-btn{background:" + rejectBg + "!important;color:" + rejectTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-accept-all-btn{background:" + acceptBg + "!important;color:" + acceptTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}.cb-gdpr-accordion{background-color:" + bgColor + ";}.cb-banner-footer{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex:0 0 auto;}#cb-preferences-banner.cb-banner .cb-brand-footer{flex:0 0 auto;box-sizing:border-box;height:44px;max-height:50px;width:calc(100% + 56px);margin:20px -28px -28px;padding:0 20px;display:flex;align-items:center;justify-content:flex-end;gap:8px;background:#F7F8FA!important;background-color:#F7F8FA!important;border-top:1px solid #EFF1F4!important;}#cb-preferences-banner.cb-banner .cb-brand-footer a{display:inline-flex!important;align-items:center;gap:7px;text-decoration:none!important;border-radius:6px;padding:4px 6px;margin-right:-6px;background:transparent!important;color:#A2ABBA!important;font-weight:500!important;transition:opacity .15s ease;}#cb-preferences-banner.cb-banner .cb-brand-footer a:hover{opacity:.7;}#cb-preferences-banner.cb-banner .cb-brand-credit{font-size:11px!important;font-weight:500!important;letter-spacing:.02em;line-height:1;white-space:nowrap;color:#A2ABBA!important;}#cb-preferences-banner.cb-banner .cb-brand-mark{display:flex;align-items:center;opacity:.85;}#cb-preferences-banner.cb-banner .cb-brand-mark svg{display:block;height:9.75px;width:auto;}@media(max-width:660px){#cb-initial-banner.cb-banner{width:100vw!important;max-width:100vw!important;min-width:0!important;left:0!important;right:0!important;bottom:0!important;transform:none!important;border-radius:0!important;border-left:none!important;border-right:none!important;border-bottom:none!important;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}#cb-preferences-banner.cb-banner{width:calc(100vw - 32px)!important;max-width:calc(100vw - 32px)!important;padding:20px!important;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-preferences-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}#cb-preferences-banner.cb-banner .cb-brand-footer{width:calc(100% + 40px)!important;margin:16px -20px -20px!important;padding:0 16px!important;}}";
   }
   function jsonForInlineScript(value) {
     try {
@@ -8644,6 +8796,15 @@ async function _handleCDNScript(request, env2, url) {
     bannerEnabled,
     apiBase,
     gaId: GA_ID,
+    // Microsoft Clarity Consent API v2.
+    //   clarityCmpId — the partner "source" identifier Microsoft issues to a CMP (request
+    //     it from clarity-cmp@microsoft.com). Until one is assigned we send our own name,
+    //     which Clarity accepts but cannot attribute to a listed partner.
+    //   clarityConsentMode — escape hatch. Off means Clarity's tag is hard-blocked like
+    //     any other analytics script instead of being consent-gated. Defaults on; no DB
+    //     column is required for that default to hold.
+    clarityCmpId: resolvedSite.clarityCmpId || "consentbit",
+    clarityConsentMode: resolvedSite.clarityConsentMode !== 0 && resolvedSite.clarityConsentMode !== false,
     platform: resolvedSite.platform || null,
     styles: customStyles || null,
     customization: customization ? {
@@ -8708,2525 +8869,7 @@ async function _handleCDNScript(request, env2, url) {
   const translationsVar = "var TRANSLATIONS = " + jsonForInlineScript(translationsForScript) + ";";
   const loader = `
 ${inlineConfig}
-! function () {
-  // Idempotency guard: if this banner script ends up embedded/executed TWICE on a page
-  // (e.g. a leftover legacy install + the current one), only the FIRST copy initialises.
-  // Without this, both copies bind the banner's click handlers and a single Accept/Reject
-  // fires the /api/consent POST twice \u2192 duplicate consent-log rows.
-  if (window.__cbBannerInit) return;
-  window.__cbBannerInit = true;
-  var SITE = window.__CONSENT_SITE__ || {};
-  var domainAllowed = true;
-
-  // Client-side domain guard: this script only runs on the registered domain.
-  // Webflow-hosted sites and *.webflow.io staging domains are exempt.
-  ! function () {
-    var expectedDomain = SITE.registeredDomain;
-    if (expectedDomain) try {
-      var currentHost = window.location.hostname.replace(/^www./, "").toLowerCase();
-      if (currentHost !== expectedDomain && SITE.platform !== 'webflow' && !currentHost.endsWith('.webflow.io')) {
-        window.__CONSENT_SITE__ = null;
-        domainAllowed = false
-      }
-    } catch (err) {}
-  }();
-
-  if (domainAllowed) {
-    var floatingLogoUrl = SITE.floatingLogoUrl || "";
-    var floatingLogoFallbackUrl = SITE.floatingLogoFallbackUrl || "";
-    var siteId = SITE.id || null;
-    var bannerType = SITE.bannerType || "gdpr";
-    var bannerEnabled = false !== SITE.bannerEnabled;
-    var apiBase = SITE.apiBase;
-    var gaMeasurementId = SITE.gaId || null;
-    var customization = SITE.customization || null;
-    var pendingScan = true === SITE.pendingScan;
-    var bannerLayoutVisual = customization && customization.bannerLayoutVisual || "box";
-    var privacyPolicyUrl = customization ? customization.privacyPolicyUrl : null;
-    var stopScroll = !!customization && customization.stopScroll;
-    var animationEnabled = !customization || false !== customization.animationEnabled;
-    var entranceAnimation = customization && customization.bannerEntranceAnimation || "fade-in";
-    var preferencePosition = customization && customization.preferencePosition || "center";
-    var centerAnimationDirection = customization && customization.centerAnimationDirection || "fade";
-    var configuredLanguage = customization && customization.language || "en";
-    var autoDetectLanguage = !!customization && true === customization.autoDetectLanguage;
-    ${translationsVar}
-    var BUTTON_TEXT_KEYS = ["customise", "rejectAll", "acceptAll", "save", "back", "doNotSell", "saveMyPreferences", "confirmChoice", "cancel", "optOutPreference"];
-
-    // Character caps applied to translated copy so a long translation cannot break the layout.
-    var MAX_TITLE_LEN = 30,
-      MAX_DESCRIPTION_LEN = 320,
-      MAX_BUTTON_LEN = 20,
-      MAX_LINK_LEN = 30,
-      MAX_LONG_TEXT_LEN = 200;
-    var FLOATING_LOGO_SIZE_PX = 56;
-
-    var STORAGE_KEY = "consentbit_" + siteId;
-    var cookieExpirationDays = void 0 !== customization && customization && null != customization.cookieExpirationDays ? Math.max(1, Math.min(365, Number(customization.cookieExpirationDays) || 30)) : 30;
-    var consentState = loadConsentState();
-    // --- GPC (Global Privacy Control) gate -------------------------------------
-    // Honor navigator.globalPrivacyControl as a CCPA "Do Not Sell/Share" opt-out.
-    // MUST run here \u2014 before the script blocker (shouldBlockScript/isCategoryAllowed)
-    // and boot() read consentState \u2014 so non-essential scripts are blocked from first
-    // paint. Scoped to CCPA; first visit only: a stored choice always wins, so a user
-    // who opted back in is never overridden. navigator.globalPrivacyControl is
-    // browser-set and synchronous, so no async/geo wait is needed (the banner type is
-    // already resolved server-side).
-    try {
-      if (navigator.globalPrivacyControl === true && "ccpa" === bannerType && (!consentState || !consentState.accepted)) {
-        consentState = {
-          accepted: true,
-          timestamp: (new Date).toISOString(),
-          ccpa: {
-            doNotSell: true
-          },
-          gpc: true
-        };
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(consentState))
-        } catch (err) {}
-        postConsentToApi(consentState, {
-          status: "rejected",
-          consentMethod: "gpc"
-        })
-      }
-    } catch (err) {}
-    // ---------------------------------------------------------------------------
-
-    var PREFS_STORAGE_KEY = "consentbit_prefs_" + (siteId || "");
-    var PAGEVIEW_LIMIT_KEY = "cb_pv_over_limit_" + (siteId || "");
-
-    /** Scripts deferred until consent allows them (see flushQueuedScripts). */
-    var queuedScripts = [];
-    /** Re-entrancy guard: true while we inject a script ourselves, so the blocker ignores it. */
-    var isInjectingScript = false;
-    /** Original document.createElement, captured before we patch it. */
-    var nativeCreateElement = null;
-
-    /** URL-pattern \u2192 category rules shipped by the worker. */
-    var scriptBlockProviders = SITE.scriptBlockProviders || [];
-    /** URL-pattern \u2192 category rules defined by the site owner in the dashboard. */
-    var customCookieRules = SITE.customCookieRules || [];
-
-    /** Fallback domain \u2192 category map, used for iframes and for scripts no rule matched. */
-    var KNOWN_TRACKER_DOMAINS = [{
-      domain: "facebook.com",
-      category: "marketing"
-    }, {
-      domain: "facebook.net",
-      category: "marketing"
-    }, {
-      domain: "adroll.com",
-      category: "marketing"
-    }, {
-      domain: "doubleclick.net",
-      category: "marketing"
-    }, {
-      domain: "googleadservices.com",
-      category: "marketing"
-    }, {
-      domain: "bing.com",
-      category: "marketing"
-    }, {
-      domain: "bat.bing.com",
-      category: "marketing"
-    }, {
-      domain: "twitter.com",
-      category: "marketing"
-    }, {
-      domain: "analytics.twitter.com",
-      category: "marketing"
-    }, {
-      domain: "t.co",
-      category: "marketing"
-    }, {
-      domain: "linkedin.com",
-      category: "marketing"
-    }, {
-      domain: "ads.linkedin.com",
-      category: "marketing"
-    }, {
-      domain: "pinterest.com",
-      category: "marketing"
-    }, {
-      domain: "ct.pinterest.com",
-      category: "marketing"
-    }, {
-      domain: "tiktok.com",
-      category: "marketing"
-    }, {
-      domain: "analytics.tiktok.com",
-      category: "marketing"
-    }, {
-      domain: "hotjar.com",
-      category: "analytics"
-    }, {
-      domain: "clarity.ms",
-      category: "analytics"
-    }, {
-      domain: "scorecardresearch.com",
-      category: "analytics"
-    }, {
-      domain: "outbrain.com",
-      category: "marketing"
-    }, {
-      domain: "taboola.com",
-      category: "marketing"
-    }, {
-      domain: "criteo.com",
-      category: "marketing"
-    }, {
-      domain: "criteo.net",
-      category: "marketing"
-    }, {
-      domain: "quantserve.com",
-      category: "analytics"
-    }, {
-      domain: "zemanta.com",
-      category: "marketing"
-    }];
-    /** Baseline stylesheet for both banners; the dashboard's custom CSS is appended below. */
-    var BASE_CSS = ".cb-banner,.cb-banner *{box-sizing:border-box;}#cb-initial-banner.cb-banner{width:440px;min-width:280px;max-width:min(440px,92vw);max-height:min(80vh,420px);min-height:0;overflow:hidden;overflow-x:hidden;background-color:#ffffff;color:#334155;position:fixed;bottom:32px;left:32px;right:auto;padding:16px;border:1px solid #e2e8f0;border-radius:0.375rem;box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:inline-flex;flex-direction:column;align-items:stretch;font-family:Montserrat,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px!important;line-height:1.5!important;}#cb-initial-banner.cb-banner .cb-banner-body{flex:0 1 auto;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;}#cb-preferences-banner.cb-banner{width:540px;max-width:92vw;max-height:min(85vh,580px);min-height:0;overflow:hidden;overflow-x:hidden;background-color:#ffffff;color:#334155;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);padding:20px;border:1px solid #e2e8f0;border-radius:0.375rem;box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;font-family:Montserrat,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px!important;line-height:1.5!important;}#cb-preferences-banner.cb-banner .cb-banner-body{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;}#cb-preferences-banner.cb-banner.prefs-left{left:32px;right:auto;top:50%;transform:translateY(-50%);}#cb-preferences-banner.cb-banner.prefs-right{right:32px;left:auto;top:50%;transform:translateY(-50%);}#cb-preferences-banner.cb-banner.prefs-center{left:50%;top:50%;transform:translate(-50%,-50%);}.cb-banner-body{overflow-y:auto;overflow-x:hidden;margin-bottom:12px;}.cb-banner h3{margin:0 0 8px;font-size:16px!important;line-height:1.4!important;font-weight:600;color:#0f172a;word-break:break-word;overflow-wrap:anywhere;max-width:100%;}#cb-initial-banner.cb-banner h3{font-size:16px!important;font-weight:600;color:rgba(0,0,0,0.8);padding-right:36px;}#cb-initial-banner.cb-banner .cb-banner-body > p{color:rgba(0,0,0,0.8);}.cb-gdpr-accordion{margin-top:4px;margin-bottom:4px;}.cb-gdpr-cat-label{color:#0f172a;}.cb-gdpr-cat-desc{color:#64748b;}.cb-banner p{margin:0 0 12px;font-size:14px!important;line-height:1.5!important;color:#334155;word-break:break-word;overflow-wrap:anywhere;max-width:100%;}.cb-banner-footer{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;align-items:center;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex:0 0 auto;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-wrap:wrap;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 auto;min-width:80px;}" + (customization && "banner" === customization.bannerLayoutVisual ? "#cb-initial-banner.cb-banner .cb-banner-footer{flex-wrap:nowrap;justify-content:flex-end;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto;width:auto;min-width:80px;max-width:140px;}" : "") + ".cb-banner button{padding:12px 32px;border-radius:0.375rem;cursor:pointer;font-size:14px;font-weight:600;border:1px solid #e2e8f0;transition:opacity 0.2s;white-space:normal;word-break:break-word;min-width:0;text-align:center;}@media (max-width:660px){#cb-initial-banner.cb-banner{width:100vw!important;max-width:100vw!important;left:0!important;right:0!important;bottom:0!important;transform:none!important;border-radius:0!important;border-left:none!important;border-right:none!important;border-bottom:none!important;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}#cb-preferences-banner.cb-banner{width:calc(100vw - 32px)!important;max-width:calc(100vw - 32px)!important;padding:20px!important;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-preferences-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}}@media (max-width:350px){#cb-initial-banner.cb-banner,#cb-preferences-banner.cb-banner{font-size:12px!important;}#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-size:13px!important;}#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,.cb-gdpr-cat-desc{font-size:12px!important;}#cb-initial-banner.cb-banner .cb-banner-footer button,#cb-preferences-banner.cb-banner .cb-banner-footer button{font-size:12px!important;padding:10px 16px!important;}}.cb-banner button:hover:not(.cb-pref-toggle-track){opacity:0.8;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track{display:block !important;width:40px !important;min-width:40px !important;height:22px !important;padding:0 !important;margin:0 !important;border:none !important;border-radius:11px !important;background:#d1d5db !important;box-shadow:none !important;flex-shrink:0 !important;position:relative !important;overflow:visible !important;box-sizing:border-box !important;cursor:pointer !important;appearance:none !important;-webkit-appearance:none !important;font-size:0 !important;line-height:0 !important;opacity:1 !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track[aria-checked='true']{background:#22c55e !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track::after{content:'' !important;position:absolute !important;top:2px !important;left:2px !important;width:18px !important;height:18px !important;border-radius:50% !important;background:#ffffff !important;box-shadow:0 1px 3px rgba(0,0,0,.2) !important;pointer-events:none !important;transition:left .15s ease !important;z-index:2 !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track[aria-checked='true']::after{left:20px !important;}.cb-banner button#cb-accept-all-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}.cb-banner button#cb-reject-all-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}.cb-banner button#cb-preferences-btn,.cb-banner button#cb-ccpa-donotsell-link{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}.cb-banner button#cb-prefs-reject-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}.cb-banner label{display:block;margin-bottom:6px;font-size:11px;}.cb-banner input[type='checkbox']{margin-right:6px;}.cb-banner a{color:#007aff !important;text-decoration:underline !important;font-size:inherit !important;display:inline !important;font-weight:inherit !important;white-space:normal;}@keyframes slideInFromLeft{from{transform:translateX(-100%);opacity:0;}to{transform:translateX(0);opacity:1;}}@keyframes slideInFromRight{from{transform:translateX(100%);opacity:0;}to{transform:translateX(0);opacity:1;}}@keyframes slideInFromTop{from{transform:translateY(-100%);opacity:0;}to{transform:translateY(0);opacity:1;}}@keyframes slideInFromBottom{from{transform:translateY(100%);opacity:0;}to{transform:translateY(0);opacity:1;}}@keyframes fadeIn{from{opacity:0;}to{opacity:1;}}@keyframes prefsSlideInFromLeft{from{transform:translate(-120%,-50%);opacity:0;}to{transform:translate(0,-50%);opacity:1;}}@keyframes prefsSlideInFromRight{from{transform:translate(120%,-50%);opacity:0;}to{transform:translate(0,-50%);opacity:1;}}@keyframes prefsSlideCenterFromBottom{from{transform:translate(-50%,calc(-50% + 28px));opacity:0;}to{transform:translate(-50%,-50%);opacity:1;}}@keyframes prefsSlideCenterFromTop{from{transform:translate(-50%,calc(-50% - 28px));opacity:0;}to{transform:translate(-50%,-50%);opacity:1;}}@keyframes zoomIn{from{transform:scale(0.85);opacity:0;}to{transform:scale(1);opacity:1;}}@keyframes cbInitialCenterSlideFromBottom{from{transform:translate(-50%,100%);opacity:0;}to{transform:translate(-50%,0);opacity:1;}}@keyframes cbInitialCenterSlideFromTop{from{transform:translate(-50%,-100%);opacity:0;}to{transform:translate(-50%,0);opacity:1;}}@keyframes cbInitialCenterZoomIn{from{transform:translateX(-50%) scale(0.85);opacity:0;}to{transform:translateX(-50%) scale(1);opacity:1;}}.cb-banner-animate-initial-center-bottom{animation:cbInitialCenterSlideFromBottom 0.35s ease-out;}.cb-banner-animate-initial-center-top{animation:cbInitialCenterSlideFromTop 0.35s ease-out;}.cb-banner-animate-initial-center-zoom{animation:cbInitialCenterZoomIn 0.3s ease-out;}@keyframes prefsZoomIn{from{transform:translate(-50%,-50%) scale(0.85);opacity:0;}to{transform:translate(-50%,-50%) scale(1);opacity:1;}}.cb-banner-animate-left{animation:slideInFromLeft 0.4s ease-out;}.cb-banner-animate-right{animation:slideInFromRight 0.4s ease-out;}.cb-banner-animate-top{animation:slideInFromTop 0.4s ease-out;}.cb-banner-animate-bottom{animation:slideInFromBottom 0.4s ease-out;}.cb-banner-animate-fade{animation:fadeIn 0.3s ease-out;}.cb-banner-animate-prefs-left{animation:prefsSlideInFromLeft 0.4s ease-out;}.cb-banner-animate-prefs-right{animation:prefsSlideInFromRight 0.4s ease-out;}.cb-banner-animate-center-top{animation:prefsSlideCenterFromTop 0.35s ease-out;}.cb-banner-animate-center-bottom{animation:prefsSlideCenterFromBottom 0.35s ease-out;}.cb-banner-animate-zoom-in{animation:zoomIn 0.3s ease-out;}.cb-banner-animate-prefs-zoom-in{animation:prefsZoomIn 0.3s ease-out;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-save-prefs-btn{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}#cb-initial-banner.cb-banner .cb-banner-footer{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;flex-shrink:0;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 auto;min-width:80px;}#cb-initial-banner.cb-banner #cb-preferences-btn{background:#ffffff!important;color:#334155!important;border:1px solid #334155!important;font-size:13px!important;padding:10px 12px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-reject-all-btn,#cb-initial-banner.cb-banner #cb-accept-all-btn{background:#007aff!important;color:#ffffff!important;border-color:#007aff!important;font-size:13px!important;padding:10px 12px!important;font-weight:600!important;}#cb-floating-trigger{position:fixed;z-index:2147483646!important;width:56px;height:56px;border:none;border-radius:9999px;background:transparent;cursor:pointer;padding:0;box-shadow:none;}#cb-floating-trigger img,#cb-floating-trigger svg{display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;}";
-    SITE.styles && (BASE_CSS = BASE_CSS + "\\n" + SITE.styles);
-
-    /** Every entrance-animation class, so we can strip whichever one is currently applied. */
-    var ANIMATION_CLASSES = "cb-banner-animate-left cb-banner-animate-right cb-banner-animate-top cb-banner-animate-bottom cb-banner-animate-fade cb-banner-animate-prefs-left cb-banner-animate-prefs-right cb-banner-animate-center-top cb-banner-animate-center-bottom cb-banner-animate-zoom-in cb-banner-animate-prefs-zoom-in";
-
-    installScriptBlocker();
-    "complete" === document.readyState || "interactive" === document.readyState ? boot() : window.addEventListener("DOMContentLoaded", boot)
-  }
-
-  /** Language to render in: the visitor's browser language when auto-detect is on, else the configured one. */
-  function getActiveLanguage() {
-    if (autoDetectLanguage) {
-      var browserLang = (navigator.language || navigator.userLanguage || "en").split("-")[0].toLowerCase();
-      return TRANSLATIONS[browserLang] ? browserLang : "en"
-    }
-    return configuredLanguage
-  }
-
-  /** Translate a key, falling back to English and then to a hard-coded default for title/description. */
-  function translate(key) {
-    var lang = getActiveLanguage();
-    var bundle = TRANSLATIONS[lang] || TRANSLATIONS.en;
-    var value = null != bundle[key] ? bundle[key] : null != TRANSLATIONS.en[key] ? TRANSLATIONS.en[key] : "";
-    return "" === value && "title" === key ? "We value your privacy" : "" === value && "description" === key ? "We use cookies to provide you with the best possible experience. They also allow us to analyze user behavior in order to constantly improve the website for you." : value
-  }
-
-  /** Translate a button label. Anything over 80 chars is not a real label \u2014 fall back to English. */
-  function translateButton(key) {
-    var lang = getActiveLanguage();
-    var value = (TRANSLATIONS[lang] || TRANSLATIONS.en)[key];
-    value && value.length > 80 && (value = TRANSLATIONS.en[key] || key);
-    return value || TRANSLATIONS.en[key] || key
-  }
-
-  function truncate(value, maxLength) {
-    var text = null == value ? "" : String(value);
-    return text.length > maxLength ? text.slice(0, maxLength) : text
-  }
-
-  function translateTruncated(key, maxLength) {
-    return truncate(translate(key), maxLength)
-  }
-
-  /**
-   * Feature flags live in TRANSLATIONS.config, with the per-language bundle as a
-   * legacy fallback. All four default to enabled when unset or unparseable.
-   */
-  function isCookiePolicyLinkEnabled() {
-    try {
-      var lang = getActiveLanguage();
-      var config = TRANSLATIONS.config || {};
-      var value = config.cookiePolicyLinkEnabled != null ? config.cookiePolicyLinkEnabled : (TRANSLATIONS[lang] || TRANSLATIONS.en || {}).cookiePolicyLinkEnabled;
-      return false !== value && "0" !== value && "false" !== String(value).toLowerCase()
-    } catch (err) {
-      return true
-    }
-  }
-
-  function isCloseButtonEnabled() {
-    try {
-      var lang = getActiveLanguage();
-      var config = TRANSLATIONS.config || {};
-      var value = config.closeButtonEnabled != null ? config.closeButtonEnabled : (TRANSLATIONS[lang] || TRANSLATIONS.en || {}).closeButtonEnabled;
-      return true === value || 1 === value || false !== value && "0" !== value && "false" !== String(value).toLowerCase()
-    } catch (err) {
-      return true
-    }
-  }
-
-  function isRejectButtonEnabled() {
-    try {
-      var lang = getActiveLanguage();
-      var config = TRANSLATIONS.config || {};
-      var value = config.rejectButtonEnabled != null ? config.rejectButtonEnabled : (TRANSLATIONS[lang] || TRANSLATIONS.en || {}).rejectButtonEnabled;
-      return true === value || 1 === value || false !== value && "0" !== value && "false" !== String(value).toLowerCase()
-    } catch (err) {
-      return true
-    }
-  }
-
-  function isCustomizeButtonEnabled() {
-    try {
-      var lang = getActiveLanguage();
-      var config = TRANSLATIONS.config || {};
-      var value = config.customizeButtonEnabled != null ? config.customizeButtonEnabled : (TRANSLATIONS[lang] || TRANSLATIONS.en || {}).customizeButtonEnabled;
-      return true === value || 1 === value || false !== value && "0" !== value && "false" !== String(value).toLowerCase()
-    } catch (err) {
-      return true
-    }
-  }
-
-  /** Collapse the dashboard's position values (incl. legacy spellings) to one of three corners. */
-  function normalizeBannerPosition(raw) {
-    var position = String(raw || "bottom-left").trim().toLowerCase().replace(/_/g, "-");
-    return "bottom-right" === position || "right" === position ? "bottom-right" : "bottom" === position || "bottom-center" === position ? "bottom" : "bottom-left"
-  }
-
-  /**
-   * Reserve space for the floating logo so it never overlaps the banner.
-   * A corner box gets a margin; a full-width bar gets padding on the logo's side.
-   */
-  function applyFloatingLogoOffset(bannerEl) {
-    if (bannerEl) {
-      bannerEl.style.marginLeft = "";
-      bannerEl.style.marginRight = "";
-      bannerEl.style.paddingLeft = "";
-      bannerEl.style.paddingRight = "";
-      if (isFloatingLogoEnabled()) {
-        var layout = bannerLayoutVisual || "box";
-        var position = normalizeBannerPosition(customization && customization.position);
-        var logoSide = getFloatingLogoPosition();
-        var offset = "56px";
-        "banner" !== layout ? "left" === logoSide ? "bottom-center" !== layout && "popup" !== layout && "bottom" !== position || (bannerEl.style.marginLeft = offset) : "bottom-center" !== layout && "popup" !== layout && "bottom" !== position || (bannerEl.style.marginRight = offset) : "left" === logoSide ? bannerEl.style.paddingLeft = offset : bannerEl.style.paddingRight = offset
-      }
-    }
-  }
-
-  /**
-   * Position the initial banner for the current layout, corner setting and viewport.
-   * Returns true when the banner ended up horizontally centered \u2014 the caller uses that
-   * to pick the matching entrance animation (centered banners animate differently).
-   */
-  function positionInitialBanner(bannerEl) {
-    if (!bannerEl) return false;
-    var layout = bannerLayoutVisual || "box";
-    var position = normalizeBannerPosition(customization && customization.position);
-    bannerEl.style.left = "";
-    bannerEl.style.right = "";
-    bannerEl.style.top = "";
-    bannerEl.style.bottom = "";
-    bannerEl.style.transform = "";
-    bannerEl.style.width = "";
-    bannerEl.style.maxWidth = "";
-    bannerEl.style.marginLeft = "";
-    bannerEl.style.marginRight = "";
-    bannerEl.style.paddingLeft = "";
-    bannerEl.style.paddingRight = "";
-
-    // Full-width bar pinned to the bottom edge.
-    if ("banner" === layout) {
-      bannerEl.style.left = "0";
-      bannerEl.style.right = "0";
-      bannerEl.style.bottom = "0";
-      bannerEl.style.transform = "none";
-      bannerEl.style.width = "100%";
-      bannerEl.style.maxWidth = "none";
-      bannerEl.setAttribute("data-cb-initial-centered", "0");
-      applyFloatingLogoOffset(bannerEl);
-      return false
-    }
-
-    // Mobile: always edge-to-edge along the bottom, regardless of the configured corner.
-    if (window.innerWidth <= 660) {
-      bannerEl.style.setProperty("left", "0", "important");
-      bannerEl.style.setProperty("right", "0", "important");
-      bannerEl.style.setProperty("bottom", "0", "important");
-      bannerEl.style.setProperty("transform", "none", "important");
-      bannerEl.style.setProperty("width", "100vw", "important");
-      bannerEl.style.setProperty("max-width", "100vw", "important");
-      bannerEl.style.setProperty("min-width", "0", "important");
-      bannerEl.style.setProperty("border-radius", "0", "important");
-      bannerEl.style.setProperty("border-left", "none", "important");
-      bannerEl.style.setProperty("border-right", "none", "important");
-      bannerEl.style.setProperty("border-bottom", "none", "important");
-      bannerEl.setAttribute("data-cb-initial-centered", "0");
-      return false
-    }
-
-    // Centered card above the bottom edge.
-    if ("bottom-center" === layout || "popup" === layout || "bottom" === position) {
-      bannerEl.style.bottom = "32px";
-      bannerEl.style.left = "50%";
-      bannerEl.style.transform = "translateX(-50%)";
-      bannerEl.setAttribute("data-cb-initial-centered", "1");
-      applyFloatingLogoOffset(bannerEl);
-      return true
-    }
-
-    // Corner card.
-    bannerEl.style.bottom = "32px";
-    "bottom-right" === position ? bannerEl.style.right = "32px" : bannerEl.style.left = "32px";
-    bannerEl.style.transform = "none";
-    bannerEl.setAttribute("data-cb-initial-centered", "0");
-    applyFloatingLogoOffset(bannerEl);
-    return false
-  }
-
-  /** Strip the fragment, query and path so only the host part of a bare URL remains. */
-  function extractHostname(value) {
-    var host = value;
-    var cut = host.indexOf("#");
-    cut >= 0 && (host = host.slice(0, cut));
-    (cut = host.indexOf("?")) >= 0 && (host = host.slice(0, cut));
-    (cut = host.indexOf("/")) >= 0 && (host = host.slice(0, cut));
-    return host.trim()
-  }
-
-  /** True when the string ends in a known file extension \u2014 i.e. it is a filename, not a hostname. */
-  function looksLikeFilename(value) {
-    var dot = value.lastIndexOf(".");
-    if (dot < 0) return false;
-    var ext = value.slice(dot).toLowerCase();
-    return ".js" === ext || ".mjs" === ext || ".css" === ext || ".png" === ext || ".jpg" === ext || ".jpeg" === ext || ".gif" === ext || ".svg" === ext || ".webp" === ext || ".pdf" === ext || ".json" === ext || ".xml" === ext || ".ico" === ext || ".woff" === ext || ".woff2" === ext
-  }
-
-  /**
-   * Turn whatever the site owner typed into the privacy-policy field into a usable href:
-   * absolute URLs and mailto:/tel: pass through, protocol-relative gets https:, relative
-   * paths resolve against the page, and a bare "example.com/privacy" gets https:// prefixed.
-   */
-  function normalizeUrl(raw) {
-    if (!raw || "string" != typeof raw) return "";
-    var url = raw.trim();
-    if (!url) return "";
-    var lower = url.toLowerCase();
-    if (0 === lower.indexOf("mailto:") || 0 === lower.indexOf("tel:")) return url;
-    if (0 === lower.indexOf("http://") || 0 === lower.indexOf("https://")) return url;
-    if (0 === url.indexOf("//")) return "https:" + url;
-    if ("/" === url.charAt(0) || 0 === url.indexOf("./") || 0 === url.indexOf("../")) {
-      try {
-        if ("undefined" != typeof window && window.location) return new URL(url, window.location.href).href
-      } catch (err) {}
-      return url
-    }
-    var host = extractHostname(url);
-    if (host.indexOf(".") > 0 && !looksLikeFilename(host)) {
-      for (; url.length > 0 && "/" === url.charAt(0);) url = url.slice(1);
-      return "https://" + url
-    }
-    try {
-      if ("undefined" != typeof window && window.location) return new URL(url, window.location.href).href
-    } catch (err) {}
-    return url
-  }
-
-  /**
-   * Point an anchor at an external URL. The capture-phase handler opens the link
-   * itself so a host page that swallows clicks inside the banner cannot break it.
-   */
-  function bindExternalLink(anchorEl, rawUrl) {
-    var href = normalizeUrl(rawUrl);
-    if (href) {
-      anchorEl.href = href;
-      anchorEl.target = "_blank";
-      anchorEl.rel = "noopener noreferrer";
-      anchorEl.addEventListener("click", function (event) {
-        event.stopPropagation && event.stopPropagation();
-        event.preventDefault && event.preventDefault();
-        try {
-          window.open(href, "_blank", "noopener,noreferrer")
-        } catch (err) {}
-      }, true)
-    }
-  }
-
-  /**
-   * Read the stored consent decision. An expired decision (past expiresAt, or older
-   * than cookieExpirationDays when no expiresAt was stored) counts as no decision,
-   * so the banner comes back.
-   */
-  function loadConsentState() {
-    try {
-      var stored = localStorage.getItem(STORAGE_KEY);
-      var state = stored ? JSON.parse(stored) : {
-        accepted: false,
-        timestamp: null
-      };
-      if (!state || !state.accepted) return state || {
-        accepted: false,
-        timestamp: null
-      };
-      var now = Date.now();
-      var lifetimeMs = 24 * cookieExpirationDays * 60 * 60 * 1000;
-      var expiresAt = state.expiresAt ? new Date(state.expiresAt).getTime() : state.timestamp ? new Date(state.timestamp).getTime() + lifetimeMs : 0;
-      return expiresAt > 0 && now > expiresAt ? {
-        accepted: false,
-        timestamp: null
-      } : state
-    } catch (err) {
-      return {
-        accepted: false,
-        timestamp: null
-      }
-    }
-  }
-
-  /** Persist a decision, clear the "dismissed" marker, and release any scripts it now allows. */
-  function saveConsentState(state) {
-    try {
-      var lifetimeMs = 24 * cookieExpirationDays * 60 * 60 * 1000;
-      state.expiresAt = state.expiresAt || new Date(Date.now() + lifetimeMs).toISOString();
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-      localStorage.removeItem(STORAGE_KEY + "_closed")
-    } catch (err) {
-    }
-    consentState = state;
-    try {
-      unblockAllowedScripts()
-    } catch (err) {
-    }
-  }
-
-  /** Remember the toggle states so the preferences panel reopens pre-filled. */
-  function savePreferenceCategories(categories) {
-    try {
-      var toStore = {
-        analytics: !!categories.analytics,
-        preferences: !!categories.preferences,
-        marketing: !!categories.marketing
-      };
-      var encoded = btoa(JSON.stringify(toStore));
-      localStorage.setItem(PREFS_STORAGE_KEY, encoded)
-    } catch (err) {
-    }
-  }
-
-  function loadPreferenceCategories() {
-    try {
-      var encoded = localStorage.getItem(PREFS_STORAGE_KEY);
-      if (!encoded) return null;
-      var decoded = JSON.parse(atob(encoded));
-      return decoded && "object" == typeof decoded ? {
-        analytics: !!decoded.analytics,
-        preferences: !!decoded.preferences,
-        marketing: !!decoded.marketing
-      } : null
-    } catch (err) {
-      return null
-    }
-  }
-
-  /** Fire-and-forget the consent decision to the API for the audit log. */
-  function postConsentToApi(state, options) {
-    if (siteId && apiBase) {
-      options = options || {};
-      var expiresAt = state && state.expiresAt || options.expiresAt || new Date(Date.now() + 24 * cookieExpirationDays * 60 * 60 * 1000).toISOString();
-      var payload = {
-        siteId: siteId,
-        regulation: "gdpr" === bannerType ? "gdpr" : "ccpa",
-        bannerType: bannerType,
-        consentMethod: options.consentMethod || "banner",
-        status: options.status || "given",
-        expiresAt: expiresAt,
-        consent: state
-      };
-      try {
-        fetch(apiBase + "/api/consent", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(payload)
-        }).catch(function (err) {
-        })
-      } catch (err) {
-      }
-    }
-  }
-
-  /** True when this site already blew its monthly pageview quota (cached per calendar month). */
-  function isPageviewOverLimit() {
-    try {
-      var stored = localStorage.getItem(PAGEVIEW_LIMIT_KEY);
-      if (!stored) return false;
-      var record = JSON.parse(stored);
-      var now = new Date;
-      var yearMonth = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
-      return record.yearMonth === yearMonth && true === record.overLimit
-    } catch (err) {
-      return false
-    }
-  }
-
-  function markPageviewOverLimit(yearMonth) {
-    try {
-      localStorage.setItem(PAGEVIEW_LIMIT_KEY, JSON.stringify({
-        overLimit: true,
-        yearMonth: yearMonth
-      }))
-    } catch (err) {}
-  }
-
-  /** Report a pageview, and cache an over-limit response so we stop reporting this month. */
-  function recordPageview() {
-    if (siteId && apiBase && !isPageviewOverLimit()) try {
-      var payload = {
-        siteId: siteId,
-        pageUrl: "undefined" != typeof window && window.location ? window.location.href : null
-      };
-      fetch(apiBase + "/api/pageview", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(payload),
-        keepalive: true
-      }).then(function (response) {
-        return response.json()
-      }).then(function (result) {
-        if (result && result.overLimit) {
-          var now = new Date;
-          markPageviewOverLimit(result.yearMonth || now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0"))
-        }
-      }).catch(function (err) {
-      })
-    } catch (err) {
-    }
-  }
-
-  /** All cookies currently set on the page, as raw "name=value" strings. */
-  function getCookieList() {
-    try {
-      var raw = "undefined" != typeof document && document.cookie ? document.cookie : "";
-      return raw ? raw.split(";").map(function (cookie) {
-        return cookie.trim()
-      }).filter(Boolean) : []
-    } catch (err) {
-      return []
-    }
-  }
-
-  /** Every third-party script src on the page (our own scripts excluded). */
-  function getThirdPartyScriptSrcs() {
-    try {
-      var srcs = [];
-      var scripts = document.getElementsByTagName("script");
-      for (var i = 0; i < scripts.length; i++) {
-        var src = scripts[i].src;
-        src && -1 === src.indexOf("consentbit") && -1 === src.indexOf("client_data") && srcs.push(src)
-      }
-      return srcs
-    } catch (err) {
-      return []
-    }
-  }
-
-  /** Best-effort category for a script URL, by well-known vendor host. */
-  function guessScriptCategory(src) {
-    try {
-      var host = new URL(src).hostname;
-      return -1 !== host.indexOf("google-analytics.com") || -1 !== src.indexOf("gtag/js") || -1 !== host.indexOf("googletagmanager.com") ? "analytics" : -1 !== host.indexOf("facebook.com") || -1 !== host.indexOf("fbcdn.net") || -1 !== host.indexOf("doubleclick.net") || 0 === host.indexOf("ads.") ? "marketing" : -1 !== host.indexOf("hotjar.com") || -1 !== host.indexOf("intercom.io") || -1 !== host.indexOf("fullstory.com") ? "behavioral" : "uncategorized"
-    } catch (err) {
-      return "uncategorized"
-    }
-  }
-
-  /** Script elements with a src, de-duplicated by URL. */
-  function getUniqueScriptElements() {
-    var seenSrcs = {};
-    var unique = [];
-    var scripts = document.scripts;
-    for (var i = 0; i < scripts.length; i++) {
-      var script = scripts[i];
-      if (script.src && !seenSrcs[script.src]) {
-        seenSrcs[script.src] = true;
-        unique.push(script)
-      }
-    }
-    return unique
-  }
-
-  /**
-   * Any Google tag host whose behaviour Consent Mode governs \u2014 analytics (GA/GTM) AND
-   * advertising (Ads, AdSense, Ad Manager). A site may run ads with no analytics tag at
-   * all, so the advertising hosts must be here or such a site gets no consent signal.
-   */
-  function isGoogleTagUrl(src) {
-    if (!src || "string" != typeof src) return false;
-    var lower = src.toLowerCase();
-    return -1 !== lower.indexOf("googletagmanager.com/gtag/js") ||
-      -1 !== lower.indexOf("googletagmanager.com/gtm.js") ||
-      -1 !== lower.indexOf("google-analytics.com") ||
-      -1 !== lower.indexOf("googlesyndication.com") ||
-      -1 !== lower.indexOf("googleadservices.com") ||
-      -1 !== lower.indexOf("googletagservices.com") ||
-      -1 !== lower.indexOf("securepubads.g.doubleclick.net")
-  }
-
-  /** True when the page carries a Google tag \u2014 including one we have already blocked. */
-  function hasGoogleTagScript() {
-    var scripts = document.scripts;
-    for (var i = 0; i < scripts.length; i++) {
-      var script = scripts[i];
-      var src = script.src || script.getAttribute("data-cb-blocked-src") || "";
-      if (isGoogleTagUrl(src)) return true
-    }
-    // Ad tags are often bootstrapped inline rather than by <script src>.
-    return !!(window.adsbygoogle || window.googletag)
-  }
-
-  /**
-   * Guarantee window.dataLayer + window.gtag exist so Consent Mode commands can always
-   * be queued, even when no Google tag has loaded yet. Pushes are inert until a tag
-   * consumes them and are replayed in order when one arrives \u2014 which is why the CMP
-   * must never condition its signalling on detecting a tag first.
-   */
-  function ensureGtag() {
-    window.dataLayer = window.dataLayer || [];
-    if (!window.gtag) window.gtag = function () {
-      dataLayer.push(arguments)
-    };
-    return window.gtag
-  }
-
-  /**
-   * Consent Mode companion flags. Both must be set before any Google tag fires.
-   *   ads_data_redaction \u2014 while ad_storage is denied, strip ad click identifiers from
-   *     outgoing requests so no user-level ad data leaves the page.
-   *   url_passthrough \u2014 carry gclid/dclid/wbraid across navigations in the URL, so
-   *     conversions still attribute for users who declined cookies.
-   * Idempotent: repeat calls just re-push the same value.
-   */
-  function setConsentModeFlags() {
-    var g = ensureGtag();
-    g("set", "ads_data_redaction", true);
-    g("set", "url_passthrough", true)
-  }
-
-  /**
-   * Publish the consent decision to the dataLayer as a NAMED event, so a Google Tag
-   * Manager container can fire tags from it (Custom Event trigger on
-   * "consentbit_consent_update", with Data Layer Variables reading the flat keys below).
-   *
-   * gtag("consent","update") alone is not enough for GTM: it updates the built-in
-   * consent state but raises no event, so a container has nothing to trigger on.
-   *
-   * MUST be called AFTER the gtag consent update, so any tag this event fires already
-   * sees the new consent state. Keys are prefixed to avoid colliding with the host
-   * page's own dataLayer variables.
-   */
-  function pushConsentDataLayerEvent(categories, source) {
-    try {
-      var cats = categories || {};
-      window.dataLayer = window.dataLayer || [];
-      window.dataLayer.push({
-        event: "consentbit_consent_update",
-        consentbit_regulation: bannerType,
-        consentbit_source: String(source || "banner").replace(/[[]]/g, "").toLowerCase(),
-        consentbit_essential: true,
-        consentbit_analytics: !!cats.analytics,
-        consentbit_marketing: !!cats.marketing,
-        consentbit_preferences: !!cats.preferences
-      })
-    } catch (err) {}
-  }
-
-  /** Categories that require consent. Anything else ("essential", "uncategorized") is never blocked. */
-  function isBlockableCategory(category) {
-    return "analytics" === category || "marketing" === category || "behavioral" === category || "advertisement" === category || "functional" === category || "performance" === category
-  }
-
-  function isGoogleAnalyticsUrl(src) {
-    if (!src || "string" != typeof src) return false;
-    var lower = src.toLowerCase();
-    return -1 !== lower.indexOf("googletagmanager.com/gtag/js") || -1 !== lower.indexOf("googletagmanager.com/gtm.js") || -1 !== lower.indexOf("google-analytics.com")
-  }
-
-  /**
-   * Has the visitor allowed this category?
-   * Under CCPA (opt-out) everything is allowed until they choose "Do Not Sell".
-   * Under GDPR (opt-in) nothing beyond "essential" is allowed until they consent.
-   */
-  function isCategoryAllowed(category) {
-    var normalized = category;
-    "behavioral" === normalized && (normalized = "analytics");
-    if ("essential" === normalized) return true;
-    if ("ccpa" === bannerType) {
-      return !(consentState && consentState.accepted && consentState.ccpa && consentState.ccpa.doNotSell && isBlockableCategory(normalized))
-    }
-    if (!consentState || !consentState.accepted) return false;
-    var categories = consentState.categories || {};
-    return "analytics" === normalized ? !!categories.analytics : "marketing" === normalized || "advertisement" === normalized ? !!categories.marketing : "preferences" !== normalized && "functional" !== normalized && "performance" !== normalized || !!categories.preferences
-  }
-
-  /** True only when EVERY category in a comma-separated list is allowed. */
-  function areCategoriesAllowed(categoryList) {
-    if (!categoryList) return false;
-    var parts = String(categoryList).split(",");
-    for (var i = 0; i < parts.length; i++) {
-      var category = String(parts[i] || "").toLowerCase().trim();
-      if (!category) continue;
-      if ("personalization" === category) category = "preferences";
-      if (!isCategoryAllowed(category)) return false
-    }
-    return true
-  }
-
-  /**
-   * Map a category name from any vendor's vocabulary (CookieYes, GTM, our own) onto
-   * one of our four buckets. Returns null when nothing matches.
-   */
-  function mapToKnownCategories(raw) {
-    if (!raw) return null;
-    var category = String(raw).toLowerCase().trim();
-    if ("analytics" === category || "marketing" === category || "behavioral" === category || "preferences" === category || "essential" === category) return ["essential" === category ? "essential" : category];
-    return category.indexOf("necessary") >= 0 || category.indexOf("essential") >= 0 ? ["essential"] : category.indexOf("functional") >= 0 || category.indexOf("preference") >= 0 ? ["preferences"] : category.indexOf("analytics") >= 0 || category.indexOf("performance") >= 0 || category.indexOf("statistics") >= 0 ? ["analytics"] : category.indexOf("advertisement") >= 0 || category.indexOf("marketing") >= 0 || category.indexOf("ads") >= 0 || category.indexOf("social") >= 0 ? ["marketing"] : category.indexOf("other") >= 0 ? ["analytics"] : null
-  }
-
-  /**
-   * Work out which consent categories a script belongs to. Explicit markup on the
-   * element wins (our own data-consentbit* attributes, then CookieYes'); otherwise we
-   * match the URL against the worker-supplied provider rules and then the site owner's
-   * custom rules. An empty array means "unknown" \u2014 and unknown scripts are never blocked.
-   */
-  function resolveScriptCategories(src, scriptEl) {
-    if (scriptEl && scriptEl.getAttribute) {
-      var tagged = mapToKnownCategories(scriptEl.getAttribute("data-consentbit"));
-      if (tagged) return tagged;
-
-      // In Webflow mode the data-category attribute belongs to Webflow, so we only read our own.
-      var categoryAttr = scriptEl.getAttribute("data-consentbit-category");
-      if (!categoryAttr && !window.__CB_WEBFLOW_MODE__) categoryAttr = scriptEl.getAttribute("data-category");
-      if (categoryAttr) {
-        var resolved = [];
-        var declared = String(categoryAttr).split(",");
-        for (var i = 0; i < declared.length; i++) {
-          var name = String(declared[i] || "").toLowerCase().trim();
-          if (!name) continue;
-          var mapped = mapToKnownCategories("personalization" === name ? "preferences" : name);
-          if (mapped)
-            for (var j = 0; j < mapped.length; j++)
-              if (resolved.indexOf(mapped[j]) === -1) resolved.push(mapped[j]);
-        }
-        if (resolved.length) return resolved
-      }
-
-      var cookieYes = mapToKnownCategories(scriptEl.getAttribute("data-cookieyes"));
-      if (cookieYes) return cookieYes
-    }
-
-    if (src && scriptBlockProviders.length)
-      for (var p = 0; p < scriptBlockProviders.length; p++) {
-        var provider = scriptBlockProviders[p];
-        if (provider && provider.pattern) try {
-          if (new RegExp(provider.pattern, "i").test(src)) return provider.categories && provider.categories.length ? provider.categories.slice() : ["analytics"]
-        } catch (err) {}
-      }
-
-    if (src && customCookieRules.length)
-      for (var c = 0; c < customCookieRules.length; c++) {
-        var rule = customCookieRules[c];
-        if (rule && rule.scriptUrlPattern) try {
-          if (new RegExp(rule.scriptUrlPattern, "i").test(src)) return [rule.category || "uncategorized"]
-        } catch (err) {}
-      }
-
-    return []
-  }
-
-  /**
-   * Should this script be prevented from running right now?
-   * Note the GA/GTM exemption: Google tags are allowed to load and are gated by
-   * Google Consent Mode instead of being hard-blocked.
-   */
-  function shouldBlockScript(src, scriptEl) {
-    if (isInjectingScript) return false;
-    if (!src || "string" != typeof src) return false;
-    var lower = src.toLowerCase();
-    if (-1 !== lower.indexOf("consentbit") || -1 !== lower.indexOf("client_data")) return false;
-    var categories = resolveScriptCategories(src, scriptEl);
-    if (!categories || 0 === categories.length) return false;
-    if ("ccpa" === bannerType) return !!(consentState && consentState.accepted && consentState.ccpa && consentState.ccpa.doNotSell);
-    for (var i = 0; i < categories.length; i++) {
-      var category = categories[i];
-      if (isBlockableCategory(category) && !("analytics" === category && isGoogleAnalyticsUrl(src) || isCategoryAllowed(category))) return true
-    }
-    return false
-  }
-
-  /** Sniff an untagged inline script for a known tracking pixel's call signature. */
-  function detectInlineScriptCategory(content) {
-    if (!content || typeof content !== "string") return null;
-    if (content.indexOf("fbq(") >= 0 || content.indexOf("fbq (") >= 0 || content.indexOf("connect.facebook.net") >= 0) return "marketing";
-    if (content.indexOf("ttq(") >= 0 || content.indexOf("ttq (") >= 0 || content.indexOf("analytics.tiktok.com") >= 0) return "marketing";
-    if (content.indexOf("pintrk(") >= 0 || content.indexOf("pintrk (") >= 0 || content.indexOf("ct.pinterest.com") >= 0) return "marketing";
-    if (content.indexOf("twq(") >= 0 || content.indexOf("twq (") >= 0 || content.indexOf("ads-twitter.com") >= 0) return "marketing";
-    if (content.indexOf("_linkedin_partner_id") >= 0 || content.indexOf("lintrk(") >= 0 || content.indexOf("lintrk (") >= 0) return "marketing";
-    if (content.indexOf("bat.bing.com") >= 0) return "marketing";
-    if (content.indexOf("hotjar.com") >= 0) return "analytics";
-    if (content.indexOf("window.clarity") >= 0) return "analytics";
-    return null;
-  }
-
-  /**
-   * Neutralise a script element in place.
-   * External: stash the src in data-cb-blocked-src and set an unknown type, so the
-   * browser never fetches it. Inline: stash the source on the element and blank the
-   * body. Both are restored later by unblockAllowedScripts().
-   */
-  function blockScriptElement(scriptEl) {
-    if (scriptEl && "SCRIPT" === scriptEl.nodeName && (!scriptEl.getAttribute || "javascript/blocked" !== scriptEl.getAttribute("type"))) {
-      var src = scriptEl.getAttribute && scriptEl.getAttribute("src") || scriptEl.src || "";
-      if (src) {
-        if (shouldBlockScript(src, scriptEl)) try {
-          scriptEl.setAttribute("data-cb-blocked-src", src);
-          scriptEl.setAttribute("type", "javascript/blocked");
-          scriptEl.removeAttribute("src")
-        } catch (err) {}
-      } else {
-        var inlineCategory = (scriptEl.getAttribute && (scriptEl.getAttribute("data-consentbit-category") || (!window.__CB_WEBFLOW_MODE__ && scriptEl.getAttribute("data-category")))) || detectInlineScriptCategory(scriptEl.textContent || "");
-        if (inlineCategory && !isCategoryAllowed(inlineCategory)) try {
-          scriptEl.__ci = scriptEl.textContent || "";
-          // Go through the native setter: our own patched one would re-block instead of clearing.
-          var textContentDescriptor = Object.getOwnPropertyDescriptor(Node.prototype, "textContent");
-          textContentDescriptor && textContentDescriptor.set ? textContentDescriptor.set.call(scriptEl, "") : (scriptEl.textContent = "");
-          scriptEl.setAttribute("type", "javascript/blocked");
-          scriptEl.setAttribute("data-cb-inline", "1");
-        } catch(err) {}
-      }
-    }
-  }
-
-  /**
-   * Intercept a freshly created <script> before anything is assigned to it, so a
-   * blocked src/textContent never reaches the DOM in the first place. Assigning
-   * assigning type on a blocked script cannot un-block it either.
-   */
-  function patchScriptElement(scriptEl) {
-    if (scriptEl && !scriptEl.__cp) {
-      scriptEl.__cp = true;
-      try {
-        Object.defineProperty(scriptEl, "src", {
-          configurable: true,
-          enumerable: true,
-          get: function () {
-            return scriptEl.getAttribute("src") || ""
-          },
-          set: function (value) {
-            if (shouldBlockScript(value, scriptEl)) {
-              scriptEl.setAttribute("data-cb-blocked-src", value);
-              scriptEl.setAttribute("type", "javascript/blocked");
-              scriptEl.removeAttribute("src")
-            } else scriptEl.setAttribute("src", value)
-          }
-        })
-      } catch (err) {}
-      try {
-        Object.defineProperty(scriptEl, "type", {
-          configurable: true,
-          enumerable: true,
-          get: function () {
-            return scriptEl.getAttribute("type") || ""
-          },
-          set: function (value) {
-            var type = value;
-            shouldBlockScript(scriptEl.getAttribute("src") || scriptEl.src || "", scriptEl) && (type = "javascript/blocked");
-            scriptEl.setAttribute("type", type)
-          }
-        })
-      } catch (err) {}
-      try {
-        var textContentDescriptor = Object.getOwnPropertyDescriptor(Node.prototype, "textContent");
-        if (textContentDescriptor && textContentDescriptor.set) {
-          var nativeTextContentSetter = textContentDescriptor.set;
-          Object.defineProperty(scriptEl, "textContent", {
-            configurable: true,
-            get: function() { return textContentDescriptor.get ? textContentDescriptor.get.call(scriptEl) : ""; },
-            set: function(value) {
-              var category = (scriptEl.getAttribute && (scriptEl.getAttribute("data-consentbit-category") || (!window.__CB_WEBFLOW_MODE__ && scriptEl.getAttribute("data-category")))) || detectInlineScriptCategory(value);
-              if (category && !isCategoryAllowed(category)) {
-                scriptEl.__ci = value;
-                scriptEl.setAttribute("type", "javascript/blocked");
-                scriptEl.setAttribute("data-cb-inline", "1");
-              } else {
-                nativeTextContentSetter.call(scriptEl, value);
-              }
-            }
-          });
-        }
-      } catch (err) {}
-    }
-  }
-
-  /** Block a newly inserted node \u2014 the script itself, or any scripts inside a subtree. */
-  function scanNodeForScripts(node) {
-    if (node && 1 === node.nodeType)
-      if ("SCRIPT" !== node.nodeName) {
-        if (node.querySelectorAll) {
-          var scripts = node.querySelectorAll("script[src]");
-          for (var i = 0; i < scripts.length; i++) blockScriptElement(scripts[i])
-        }
-      } else blockScriptElement(node)
-  }
-
-  /**
-   * Re-run every blocked script that the current consent now allows.
-   * Three kinds are restored: external scripts we neutralised (data-cb-blocked-src),
-   * scripts the site author parked as type="text/plain" with a category attribute, and
-   * inline scripts whose source we stashed on the element.
-   *
-   * A blocked script cannot simply be re-enabled in place \u2014 the browser will not
-   * re-evaluate an existing element \u2014 so each one is rebuilt as a fresh <script> and
-   * swapped in. isInjectingScript suppresses the blocker while we do that.
-   *
-   * In Webflow mode script blocking is owned by the Webflow setup script, so we just
-   * broadcast the new consent and let it react.
-   */
-  function unblockAllowedScripts(categoriesOverride) {
-    if (window.__CB_WEBFLOW_MODE__) dispatchWebflowConsent(categoriesOverride || (consentState && consentState.categories) || {
-      analytics: true,
-      marketing: true,
-      preferences: true,
-      essential: true
-    });
-    else {
-      // 1. External scripts we blocked earlier.
-      var blockedScripts = document.querySelectorAll('script[type="javascript/blocked"][data-cb-blocked-src]');
-      for (var i = 0; i < blockedScripts.length; i++) {
-        var blocked = blockedScripts[i];
-        var blockedSrc = blocked.getAttribute("data-cb-blocked-src");
-        if (blockedSrc)
-          if (!shouldBlockScript(blockedSrc, blocked)) {
-            isInjectingScript = true;
-            try {
-              var revived = document.createElement("script");
-              revived.async = blocked.hasAttribute("async");
-              revived.defer = blocked.hasAttribute("defer");
-              revived.crossOrigin = blocked.crossOrigin || "";
-              revived.integrity = blocked.integrity || "";
-              revived.referrerPolicy = blocked.referrerPolicy || "";
-              blocked.id && (revived.id = blocked.id);
-              revived.src = blockedSrc;
-              var attrs = blocked.attributes;
-              for (var a = 0; a < attrs.length; a++) {
-                var attrName = attrs[a].name;
-                "src" !== attrName && "type" !== attrName && "data-cb-blocked-src" !== attrName && revived.setAttribute(attrName, attrs[a].value)
-              }
-              blocked.parentNode ? blocked.parentNode.replaceChild(revived, blocked) : document.head.appendChild(revived);
-            } catch (err) {
-            } finally {
-              isInjectingScript = false
-            }
-          }
-      }
-
-      // 2. Scripts the site author parked as type="text/plain" with a category attribute.
-      var parkedScripts = document.querySelectorAll('script[type="text/plain"][data-consentbit-category],script[type="text/plain"][data-category]');
-      for (var p = 0; p < parkedScripts.length; p++) {
-        var parked = parkedScripts[p];
-        var parkedCategories = parked.getAttribute("data-consentbit-category") || parked.getAttribute("data-category");
-        if (parkedCategories && areCategoriesAllowed(parkedCategories)) {
-          isInjectingScript = true;
-          try {
-            var activated = document.createElement("script");
-            activated.async = parked.hasAttribute("async");
-            activated.defer = parked.hasAttribute("defer");
-            var parkedSrc = parked.getAttribute("src") || "";
-            if (parkedSrc) activated.src = parkedSrc;
-            else activated.textContent = parked.textContent;
-            var parkedAttrs = parked.attributes;
-            for (var pa = 0; pa < parkedAttrs.length; pa++) {
-              var parkedAttrName = parkedAttrs[pa].name;
-              if (parkedAttrName !== "type" && parkedAttrName !== "src" && parkedAttrName !== "data-consentbit-category" && parkedAttrName !== "data-category") activated.setAttribute(parkedAttrName, parkedAttrs[pa].value);
-            }
-            parked.parentNode ? parked.parentNode.replaceChild(activated, parked) : document.head.appendChild(activated);
-          } catch(err) {
-          } finally {
-            isInjectingScript = false;
-          }
-        }
-      }
-
-      // 3. Inline scripts we emptied \u2014 their source is stashed on the element as __ci.
-      var blockedInline = document.querySelectorAll('script[type="javascript/blocked"][data-cb-inline="1"]');
-      for (var b = 0; b < blockedInline.length; b++) {
-        var inlineEl = blockedInline[b];
-        var inlineSource = inlineEl.__ci || "";
-        var inlineCategories = (inlineEl.getAttribute && (inlineEl.getAttribute("data-consentbit-category") || inlineEl.getAttribute("data-category"))) || detectInlineScriptCategory(inlineSource);
-        if (inlineCategories && areCategoriesAllowed(inlineCategories)) {
-          isInjectingScript = true;
-          try {
-            var revivedInline = document.createElement("script");
-            if (inlineSource) revivedInline.textContent = inlineSource;
-            inlineEl.parentNode ? inlineEl.parentNode.replaceChild(revivedInline, inlineEl) : document.head.appendChild(revivedInline);
-          } catch(err) {
-          } finally {
-            isInjectingScript = false;
-          }
-        }
-      }
-    }
-  }
-
-  /**
-   * Expire a cookie. We cannot know which domain/path it was set on, so we blanket-expire
-   * it across every plausible combination (bare host, dot-prefixed, www, root path, current path).
-   */
-  function deleteCookie(name) {
-    var host = window.location.hostname;
-    var bareHost = host.indexOf("www.") === 0 ? host.slice(4) : host;
-    var domains = [null, host, "." + host, bareHost, "." + bareHost, "www." + bareHost, ".www." + bareHost];
-    var paths = ["/", window.location.pathname];
-    var expiredDate = "Thu, 01 Jan 1970 00:00:00 GMT";
-    for (var d = 0; d < domains.length; d++)
-      for (var p = 0; p < paths.length; p++) {
-        var cookieValue = name + "=; expires=" + expiredDate + "; path=" + paths[p];
-        if (domains[d]) cookieValue += "; domain=" + domains[d];
-        try { document.cookie = cookieValue; } catch(err) {}
-      }
-  }
-
-  /** Resolve a cookie-name pattern (exact, or a "_ga_*" prefix wildcard) against the cookies actually set. */
-  function matchCookieNames(pattern) {
-    var starIndex = pattern.indexOf("*");
-    var prefix = starIndex >= 0 ? pattern.slice(0, starIndex) : null;
-    var allNames = document.cookie.split(";").map(function(cookie) { return cookie.trim().split("=")[0]; });
-    return prefix ? allNames.filter(function(cookieName) { return cookieName.startsWith(prefix); }) : (allNames.indexOf(pattern) >= 0 ? [pattern] : []);
-  }
-
-  /** Cookies known to be dropped by the trackers in each category. */
-  var COOKIE_PATTERNS_BY_CATEGORY = {
-    analytics: ["_ga", "_ga_*", "_gid", "_gat", "_gat_*", "_gac_*", "_hjid", "_hjSessionUser_*", "_hjSession_*", "_hjAbsoluteSessionInProgress", "_clck", "_clsk"],
-    marketing: ["_fbp", "_fbc", "_gcl_au", "_gcl_ls", "_gcl_aw", "_ttp", "tt_webid_v2", "_pin_unauth", "_pinterest_ct_ua", "li_sugr", "bcookie", "bscookie", "lidc", "_uetsid", "_uetvid", "IDE", "test_cookie", "fr"],
-    preferences: []
-  };
-
-  /**
-   * Clear cookies already dropped by categories the visitor just declined \u2014 blocking the
-   * script only stops future writes, so anything set before the decision must be removed.
-   */
-  function deleteCookiesForCategories(deniedCategories) {
-    for (var category in COOKIE_PATTERNS_BY_CATEGORY) {
-      if (deniedCategories.indexOf(category) >= 0) {
-        var patterns = COOKIE_PATTERNS_BY_CATEGORY[category];
-        for (var p = 0; p < patterns.length; p++) {
-          var names = matchCookieNames(patterns[p]);
-          for (var n = 0; n < names.length; n++) deleteCookie(names[n]);
-        }
-      }
-    }
-    // Plus any cookie the site owner declared in the dashboard.
-    for (var r = 0; r < customCookieRules.length; r++) {
-      var rule = customCookieRules[r];
-      if (!rule || !rule.category || deniedCategories.indexOf(rule.category) < 0) continue;
-      if (rule.name) deleteCookie(rule.name);
-    }
-  }
-
-  /** Category for an iframe URL, by known tracker domain and then by the owner's custom rules. */
-  function categoryForIframeUrl(src) {
-    if (!src || "string" != typeof src) return null;
-    var lower = src.toLowerCase();
-    if (0 !== lower.indexOf("http")) return null;
-    for (var i = 0; i < KNOWN_TRACKER_DOMAINS.length; i++)
-      if (-1 !== lower.indexOf(KNOWN_TRACKER_DOMAINS[i].domain)) return KNOWN_TRACKER_DOMAINS[i].category;
-    for (var r = 0; r < customCookieRules.length; r++) {
-      var rule = customCookieRules[r];
-      if (rule && rule.scriptUrlPattern) try {
-        if (new RegExp(rule.scriptUrlPattern, "i").test(src)) return rule.category || "marketing"
-      } catch (err) {}
-    }
-    return null
-  }
-
-  /** Unlike scripts, tracking iframes get no GA/GTM exemption \u2014 they are blocked outright. */
-  function shouldBlockIframe(src) {
-    if (!src || "string" != typeof src) return false;
-    var lower = src.toLowerCase();
-    if (-1 !== lower.indexOf("consentbit") || -1 !== lower.indexOf("client_data")) return false;
-    var category = categoryForIframeUrl(src);
-    return !(!category || !isBlockableCategory(category) || ("ccpa" === bannerType ? !(consentState && consentState.accepted && consentState.ccpa && consentState.ccpa.doNotSell) : consentState && consentState.accepted && isCategoryAllowed(category)))
-  }
-
-  /** Intercept src assignment on a freshly created iframe, same idea as patchScriptElement. */
-  function patchIframeElement(iframeEl) {
-    if (iframeEl && !iframeEl.__ip) {
-      iframeEl.__ip = true;
-      try {
-        Object.defineProperty(iframeEl, "src", {
-          configurable: true,
-          enumerable: true,
-          get: function () {
-            return iframeEl.getAttribute("src") || ""
-          },
-          set: function (value) {
-            if (shouldBlockIframe(value)) {
-              iframeEl.setAttribute("data-cb-blocked-src", value);
-              iframeEl.removeAttribute("src")
-            } else iframeEl.setAttribute("src", value)
-          }
-        })
-      } catch (err) {}
-    }
-  }
-
-  /** Publish consent to the Webflow setup script, which owns script gating in Webflow mode. */
-  function dispatchWebflowConsent(categories) {
-    if (window.__CB_WEBFLOW_MODE__) {
-      var detail = categories || {};
-      window.userConsent = detail;
-      try {
-        document.dispatchEvent(new CustomEvent("consentUpdated", {
-          detail: detail,
-          bubbles: true
-        }))
-      } catch (err) {}
-    }
-  }
-
-  /**
-   * Install the script blocker: patch document.createElement so new script/iframe
-   * elements are intercepted at birth, and watch the DOM for scripts inserted by
-   * other means (parsed markup, innerHTML, a late src assignment).
-   * Skipped in Webflow mode, where the Webflow setup script does this instead.
-   */
-  function installScriptBlocker() {
-    if (!window.__CB_WEBFLOW_MODE__ && !window.__ce) {
-      window.__ce = true;
-      try {
-        nativeCreateElement = document.createElement.bind(document)
-      } catch (err) {
-        nativeCreateElement = document.createElement
-      }
-      document.createElement = function (tagName) {
-        var element = nativeCreateElement(tagName);
-        var tag = String(tagName || "").toLowerCase();
-        "script" === tag ? patchScriptElement(element) : tag === "iframe" && patchIframeElement(element);
-        return element
-      };
-
-      var observer = new MutationObserver(function (mutations) {
-        for (var m = 0; m < mutations.length; m++) {
-          var mutation = mutations[m];
-          if ("childList" === mutation.type) {
-            var added = mutation.addedNodes;
-            for (var n = 0; n < added.length; n++) scanNodeForScripts(added[n])
-          } else "attributes" === mutation.type && "src" === mutation.attributeName && mutation.target && "SCRIPT" === mutation.target.nodeName && blockScriptElement(mutation.target)
-        }
-      });
-      try {
-        observer.observe(document.documentElement, {
-          childList: true,
-          subtree: true,
-          attributes: true,
-          attributeFilter: ["src"]
-        })
-      } catch (err) {
-        // Older browsers reject attributeFilter without attributes \u2014 fall back to childList only.
-        observer.observe(document.documentElement, {
-          childList: true,
-          subtree: true
-        })
-      }
-      window.__cm = observer
-    }
-  }
-
-  /**
-   * One-off sweep over the scripts already in the document at boot, blocking any that
-   * consent does not currently allow. Google tags are left alone (Consent Mode gates
-   * them instead), as is anything already blocked or in a non-blockable category.
-   */
-  function blockExistingScripts() {
-    if (window.__CB_WEBFLOW_MODE__) try {
-      document.dispatchEvent(new CustomEvent("cbBlockScripts", {
-        detail: {},
-        bubbles: true
-      }))
-    } catch (err) {} else {
-      var scripts = getUniqueScriptElements();
-      for (var i = 0; i < scripts.length; i++) {
-        var script = scripts[i];
-        var src = script.src;
-        if ("javascript/blocked" !== script.getAttribute("type")) {
-          var categories = resolveScriptCategories(src, script);
-          var category = categories.length > 0 ? categories[0] : "uncategorized";
-          if (isBlockableCategory(category))
-            if ("analytics" === category && gaMeasurementId && isGoogleAnalyticsUrl(src)) {
-              // We manage this GA tag through Consent Mode \u2014 leave it loading.
-            } else if (isCategoryAllowed(category)) {
-              // Consent already granted for this category.
-            } else try {
-              script.setAttribute("data-cb-blocked-src", src);
-              script.setAttribute("type", "javascript/blocked");
-              script.removeAttribute("src");
-            } catch (err) {
-            }
-        }
-      }
-    }
-  }
-
-  /** Replay scripts held in the queue whose categories are now allowed; keep the rest queued. */
-  function flushQueuedScripts() {
-    if (queuedScripts.length) {
-      var stillBlocked = [];
-      isInjectingScript = true;
-      try {
-        for (var i = 0; i < queuedScripts.length; i++) {
-          var queued = queuedScripts[i];
-          var categories = queued.cats || (queued.category ? [queued.category] : []);
-          if (0 === categories.length || categories.every(function (category) {
-              return !isBlockableCategory(category) || isCategoryAllowed(category)
-            })) {
-            var script = document.createElement("script");
-            script.src = queued.src;
-            var attrs = queued.attrs;
-            for (var attrName in attrs) Object.prototype.hasOwnProperty.call(attrs, attrName) && "src" !== attrName && script.setAttribute(attrName, attrs[attrName]);
-            document.head.appendChild(script)
-          } else stillBlocked.push(queued)
-        }
-      } finally {
-        isInjectingScript = false
-      }
-      queuedScripts = stillBlocked
-    }
-  }
-
-  /**
-   * Load the site's GA tag ourselves (when the dashboard supplied a measurement ID and
-   * the page does not already carry one) and push an all-denied Consent Mode default.
-   * The actual consent state is applied right after, by updateGoogleConsentMode().
-   */
-  function bootstrapGoogleAnalytics() {
-    if (gaMeasurementId) {
-      isInjectingScript = true;
-      try {
-        var alreadyPresent = false;
-        var scripts = document.scripts;
-        for (var i = 0; i < scripts.length; i++) {
-          var src = scripts[i].src || "";
-          if (-1 !== src.indexOf("googletagmanager.com/gtag/js") || -1 !== src.indexOf("googletagmanager.com/gtm.js") || -1 !== src.indexOf("google-analytics.com")) {
-            alreadyPresent = true;
-            break
-          }
-        }
-        if (!alreadyPresent) {
-          var gaScript = document.createElement("script");
-          gaScript.async = true;
-          gaScript.src = "https://www.googletagmanager.com/gtag/js?id=" + gaMeasurementId;
-          document.head.appendChild(gaScript)
-        }
-        window.dataLayer = window.dataLayer || [];
-
-        function gtag() {
-          dataLayer.push(arguments)
-        }
-        window.gtag = gtag;
-        setConsentModeFlags();
-        gtag("consent", "default", {
-          analytics_storage: "denied",
-          ad_storage: "denied",
-          ad_user_data: "denied",
-          ad_personalization: "denied",
-          functionality_storage: "denied",
-          personalization_storage: "denied",
-          security_storage: "granted",
-          wait_for_update: 500
-        });
-        gtag("js", new Date);
-        gtag("config", gaMeasurementId, {
-          anonymize_ip: true
-        });
-        gtag("event", "page_view", {
-          page_path: window.location.pathname,
-          page_title: document.title || ""
-        })
-      } finally {
-        isInjectingScript = false
-      }
-    }
-  }
-
-  /**
-   * Push the visitor's category choices to Google Consent Mode.
-   * gtag may not exist yet (the tag is still loading), so poll for up to 2s.
-   */
-  function updateGoogleConsentMode(categories, source) {
-    var consentUpdate = {
-      analytics_storage: categories.analytics ? "granted" : "denied",
-      ad_storage: categories.marketing ? "granted" : "denied",
-      ad_user_data: categories.marketing ? "granted" : "denied",
-      ad_personalization: categories.marketing ? "granted" : "denied",
-      functionality_storage: categories.preferences ? "granted" : "denied",
-      personalization_storage: categories.preferences ? "granted" : "denied"
-    };
-    // Always signal \u2014 never gate on tag detection. A tag that loads later replays the
-    // queued dataLayer commands, so an early push is correct and a skipped push is not.
-    ensureGtag()("consent", "update", consentUpdate);
-    pushConsentDataLayerEvent(categories, source)
-  }
-
-  // CCPA consent mode: opt-out model \u2014 storage is granted unless the user opted out
-  // ("Do Not Sell/Share"). Mirrors updateGoogleConsentMode() but keyed off a single
-  // doNotSell flag rather than per-category toggles.
-  function updateGoogleConsentModeCcpa(doNotSell) {
-    // Every signal is declared explicitly. An omitted signal is treated by Google as
-    // unset (i.e. unconstrained), so functionality_storage / personalization_storage
-    // must be sent even under an opt-out regime \u2014 they track doNotSell for consistency
-    // with analytics_storage, which this codebase already denies on opt-out.
-    var consentUpdate = {
-      analytics_storage: doNotSell ? "denied" : "granted",
-      ad_storage: doNotSell ? "denied" : "granted",
-      ad_user_data: doNotSell ? "denied" : "granted",
-      ad_personalization: doNotSell ? "denied" : "granted",
-      functionality_storage: doNotSell ? "denied" : "granted",
-      personalization_storage: doNotSell ? "denied" : "granted"
-    };
-    ensureGtag()("consent", "update", consentUpdate);
-    // CCPA has no per-category model \u2014 project the single opt-out onto the same
-    // category keys so one GTM trigger works for both regulations, and expose the
-    // raw flag as well for containers that need to branch on it.
-    var ccpaCats = {
-      analytics: !doNotSell,
-      marketing: !doNotSell,
-      preferences: !doNotSell
-    };
-    pushConsentDataLayerEvent(ccpaCats, "ccpa");
-    try {
-      window.dataLayer.push({
-        consentbit_do_not_sell: !!doNotSell
-      })
-    } catch (err) {}
-  }
-
-  /**
-   * Pick a legible foreground (near-black or white) for the given background colour,
-   * using the ITU-R BT.601 luma formula. Accepts 3- or 6-digit hex.
-   */
-  function contrastingTextColor(backgroundColor) {
-    var hex = String(backgroundColor).replace("#", "");
-    if (3 === hex.length) hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
-    var red = parseInt(hex.substr(0, 2), 16) || 0;
-    var green = parseInt(hex.substr(2, 2), 16) || 0;
-    var blue = parseInt(hex.substr(4, 2), 16) || 0;
-    return (0.299 * red + 0.587 * green + 0.114 * blue) > 128 ? "#0f172a" : "#ffffff";
-  }
-
-  /**
-   * Build the stylesheet: BASE_CSS first, then the dashboard's colour/typography
-   * overrides layered on top. Runs once \u2014 a #cb-styles element means we already did.
-   */
-  function injectStyles() {
-    if (!document.getElementById("cb-styles")) {
-      var saveAndCancelButtonCss = "#cb-preferences-banner .cb-banner-footer button#cb-save-prefs-btn{background-color:" + (customization && customization.saveButtonBg ? String(customization.saveButtonBg) : "#ffffff") + " !important;color:" + (customization && customization.saveButtonText ? String(customization.saveButtonText) : "#334155") + " !important;border-color:#e2e8f0 !important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{background-color:" + (customization && customization.acceptButtonBg ? String(customization.acceptButtonBg) : "#ffffff") + " !important;color:" + (customization && customization.acceptButtonText ? String(customization.acceptButtonText) : "#334155") + " !important;border-color:" + (customization && customization.acceptButtonBg ? String(customization.acceptButtonBg) : "#e2e8f0") + " !important;}";
-
-      var backgroundCss = "";
-      if (customization && customization.backgroundColor) {
-        var backgroundColor = String(customization.backgroundColor);
-        backgroundCss = "#cb-initial-banner.cb-banner,#cb-preferences-banner.cb-banner{background-color:" + backgroundColor + " !important;}.cb-gdpr-accordion{background-color:" + backgroundColor + " !important;}"
-      }
-
-      var headingCss = "";
-      if (customization && customization.headingColor) {
-        var headingColor = String(customization.headingColor);
-        headingCss = "#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{color:" + headingColor + " !important;}.cb-gdpr-cat-label{color:" + headingColor + " !important;}"
-      }
-
-      var textCss = "";
-      if (customization && customization.textColor) {
-        textCss = "#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-gdpr-cat-desc{color:" + String(customization.textColor) + " !important;}"
-      }
-
-      var fontWeightCss = "";
-      if (customization && customization.bannerFontWeight) {
-        var fontWeight = String(customization.bannerFontWeight);
-        fontWeightCss = "#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-weight:" + fontWeight + " !important;}.cb-gdpr-cat-label{font-weight:" + fontWeight + " !important;}.cb-gdpr-cat-desc{font-weight:" + fontWeight + " !important;}.cb-banner p{font-weight:" + fontWeight + " !important;}"
-      }
-
-      // Leave room for the close button in the preferences heading (CCPA has no such offset).
-      var prefsHeadingCss = "#cb-preferences-banner.cb-banner h3{padding-right:36px !important;}#cb-preferences-banner.cb-banner.cb-ccpa-prefs h3{padding-right:0 !important;padding-top:16px !important;margin-bottom:14px !important;}#cb-preferences-banner.cb-banner.cb-ccpa-prefs .cb-banner-body>p{margin-bottom:16px !important;}";
-      var prefsScrollbarCss = "#cb-preferences-banner.cb-banner .cb-banner-body{padding-right:4px;}#cb-preferences-banner.cb-banner .cb-gdpr-accordion > div{margin-right:2px;}";
-
-      if (!document.getElementById("cb-font-montserrat")) {
-        var fontLink = document.createElement("link");
-        fontLink.id = "cb-font-montserrat";
-        fontLink.rel = "stylesheet";
-        fontLink.href = "https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap";
-        document.head.appendChild(fontLink)
-      }
-
-      var acceptButtonCss = "";
-      if (customization && customization.acceptButtonBg) {
-        var acceptBg = String(customization.acceptButtonBg);
-        var acceptText = customization.acceptButtonText ? String(customization.acceptButtonText) : "#ffffff";
-        acceptButtonCss = ".cb-banner button#cb-accept-all-btn{background-color:" + acceptBg + " !important;color:" + acceptText + " !important;}#cb-initial-banner.cb-banner #cb-accept-all-btn{background:" + acceptBg + " !important;color:" + acceptText + " !important;}"
-      }
-
-      // Reject deliberately reuses the accept colours \u2014 the two buttons are styled identically.
-      var rejectButtonCss = "";
-      if (customization && customization.acceptButtonBg) {
-        var rejectBg = String(customization.acceptButtonBg);
-        var rejectText = customization.acceptButtonText ? String(customization.acceptButtonText) : "#ffffff";
-        rejectButtonCss = ".cb-banner button#cb-reject-all-btn{background-color:" + rejectBg + " !important;color:" + rejectText + " !important;}#cb-initial-banner.cb-banner #cb-reject-all-btn{background:" + rejectBg + " !important;color:" + rejectText + " !important;}.cb-banner button#cb-prefs-reject-btn{background-color:" + rejectBg + " !important;color:" + rejectText + " !important;}"
-      }
-
-      var styleEl = document.createElement("style");
-      styleEl.id = "cb-styles";
-      styleEl.type = "text/css";
-
-      var closeButtonCss = "";
-      if (customization && customization.backgroundColor) {
-        closeButtonCss = "#cb-close-initial-btn,#cb-close-prefs-btn{color:" + contrastingTextColor(customization.backgroundColor) + " !important;}"
-      }
-
-      styleEl.appendChild(document.createTextNode(BASE_CSS + "\\n" + saveAndCancelButtonCss + "\\n" + backgroundCss + "\\n" + headingCss + "\\n" + textCss + "\\n" + fontWeightCss + "\\n" + prefsHeadingCss + "\\n" + prefsScrollbarCss + "\\n" + acceptButtonCss + "\\n" + rejectButtonCss + "\\n" + closeButtonCss));
-      document.head.appendChild(styleEl)
-    }
-  }
-
-  /** Close (\xD7) button for the initial banner. */
-  function appendCloseButton(container, buttonId) {
-    if (isCloseButtonEnabled()) {
-      var closeBtn = document.createElement("button");
-      closeBtn.type = "button";
-      closeBtn.id = buttonId;
-      closeBtn.setAttribute("aria-label", "Close");
-      closeBtn.textContent = "\xD7";
-      var color = "#0f172a";
-      if (customization && customization.backgroundColor) {
-        color = contrastingTextColor(customization.backgroundColor);
-      }
-      closeBtn.style.cssText = "position:absolute;top:8px;right:24px;width:32px;height:32px;margin:0;padding:0;border:0;border-radius:6px;background:transparent;cursor:pointer;z-index:10;line-height:1;font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-size:22px;font-weight:400;color:" + color + ";opacity:0.75;";
-      container.appendChild(closeBtn)
-    }
-  }
-
-  /** Close (\xD7) button for the preferences panel \u2014 same as above, nudged 6px further in. */
-  function appendPrefsCloseButton(container) {
-    if (isCloseButtonEnabled()) {
-      var closeBtn = document.createElement("button");
-      closeBtn.type = "button";
-      closeBtn.id = "cb-close-prefs-btn";
-      closeBtn.setAttribute("aria-label", "Close");
-      closeBtn.textContent = "\xD7";
-      var color = "#0f172a";
-      if (customization && customization.backgroundColor) {
-        color = contrastingTextColor(customization.backgroundColor);
-      }
-      closeBtn.style.cssText = "position:absolute;top:8px;right:30px;width:32px;height:32px;margin:0;padding:0;border:0;border-radius:6px;background:transparent;cursor:pointer;z-index:10;line-height:1;font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-size:22px;font-weight:400;color:" + color + ";opacity:0.75;";
-      container.appendChild(closeBtn)
-    }
-  }
-
-  /** Entrance-animation class for the initial banner, given whether it sits centered. */
-  function getInitialBannerAnimationClass(isCentered) {
-    return isCentered
-      ? "slide-up" === entranceAnimation ? "cb-banner-animate-initial-center-bottom" : "slide-down" === entranceAnimation ? "cb-banner-animate-initial-center-top" : "zoom-in" === entranceAnimation ? "cb-banner-animate-initial-center-zoom" : "cb-banner-animate-fade"
-      : "slide-up" === entranceAnimation ? "cb-banner-animate-bottom" : "slide-down" === entranceAnimation ? "cb-banner-animate-top" : "zoom-in" === entranceAnimation ? "cb-banner-animate-zoom-in" : "cb-banner-animate-fade";
-  }
-
-  /**
-   * Build both banners (initial + preferences) and attach them to the page.
-   * The CCPA variant is a single "Do Not Sell" opt-out; the GDPR variant is the
-   * accept/reject/customise flow with a per-category accordion. Handlers are wired
-   * up separately, in initBannerUi().
-   */
-  function buildBanners() {
-    if (!document.getElementById("cb-initial-banner"))
-      if (document.body) {
-        var isCcpa = "ccpa" === bannerType;
-        var wrapper = document.createElement("div");
-
-        if (isCcpa) {
-          // ---- CCPA initial banner ------------------------------------------------
-          var initialBanner = document.createElement("div");
-          initialBanner.className = "cb-banner";
-          initialBanner.id = "cb-initial-banner";
-          initialBanner.style.display = "none";
-
-          var initialBody = document.createElement("div");
-          initialBody.className = "cb-banner-body";
-
-          var initialHeading = document.createElement("h3");
-          initialHeading.textContent = translateTruncated("title", MAX_TITLE_LEN);
-          initialBody.appendChild(initialHeading);
-
-          var initialText = document.createElement("p");
-          var descriptionText = truncate(translate("description"), MAX_DESCRIPTION_LEN);
-          if (privacyPolicyUrl && isCookiePolicyLinkEnabled()) {
-            initialText.appendChild(document.createTextNode(descriptionText + " "));
-            var policyLink = document.createElement("a");
-            policyLink.textContent = translateTruncated("privacyPolicy", MAX_LINK_LEN);
-            policyLink.style.cssText = "color:#007aff;text-decoration:underline;cursor:pointer;";
-            bindExternalLink(policyLink, privacyPolicyUrl);
-            initialText.appendChild(policyLink);
-            initialText.appendChild(document.createTextNode("."))
-          } else initialText.textContent = descriptionText;
-          initialBody.appendChild(initialText);
-
-          // "Do Not Sell My Personal Information" \u2014 opens the preferences panel.
-          var doNotSellRow = document.createElement("p");
-          doNotSellRow.style.marginTop = "20px";
-          doNotSellRow.style.marginBottom = "0";
-          var doNotSellLink = document.createElement("button");
-          doNotSellLink.id = "cb-ccpa-donotsell-link";
-          doNotSellLink.type = "button";
-          doNotSellLink.textContent = translate("doNotSell");
-          doNotSellLink.style.cssText = "background:none;border:none;padding:0;margin:0;color:#007aff;text-decoration:underline;cursor:pointer;font:inherit;text-align:left;display:inline;";
-          doNotSellRow.appendChild(doNotSellLink);
-          initialBody.appendChild(doNotSellRow);
-
-          initialBanner.appendChild(initialBody);
-          appendCloseButton(initialBanner, "cb-close-initial-btn");
-          wrapper.appendChild(initialBanner);
-
-          // ---- CCPA preferences panel ---------------------------------------------
-          var prefsBanner = document.createElement("div");
-          prefsBanner.className = "cb-banner cb-ccpa-prefs";
-          prefsBanner.id = "cb-preferences-banner";
-          prefsBanner.style.display = "none";
-          "left" === preferencePosition ? prefsBanner.classList.add("prefs-left") : "right" === preferencePosition ? prefsBanner.classList.add("prefs-right") : prefsBanner.classList.add("prefs-center");
-
-          var prefsBody = document.createElement("div");
-          prefsBody.className = "cb-banner-body";
-
-          var prefsHeading = document.createElement("h3");
-          prefsHeading.textContent = translate("optOutPreference");
-          prefsBody.appendChild(prefsHeading);
-
-          var prefsText = document.createElement("p");
-          // Strip any trailing "More info." \u2014 we render our own policy link instead.
-          var optOutIntro = (translate("ccpaOptOutPreferenceIntro") || translate("ccpaOptOut") || "").replace(/s*More info.?s*$/i, "").trim();
-          if (privacyPolicyUrl && isCookiePolicyLinkEnabled()) {
-            prefsText.appendChild(document.createTextNode(optOutIntro + " "));
-            var prefsPolicyLink = document.createElement("a");
-            prefsPolicyLink.textContent = translate("privacyPolicy");
-            prefsPolicyLink.style.cssText = "color:#007aff;text-decoration:underline;cursor:pointer;";
-            bindExternalLink(prefsPolicyLink, privacyPolicyUrl);
-            prefsText.appendChild(prefsPolicyLink);
-            prefsText.appendChild(document.createTextNode("."))
-          } else prefsText.textContent = optOutIntro;
-          prefsText.style.lineHeight = "1.45";
-          prefsBody.appendChild(prefsText);
-
-          var optOutLabel = document.createElement("label");
-          optOutLabel.style.cssText = "display:flex;align-items:flex-start;gap:12px;margin-top:20px;cursor:pointer;";
-          var optOutText = document.createElement("span");
-          optOutText.style.cssText = "flex:1;line-height:1.45;";
-          optOutText.textContent = translate("doNotSell");
-          var optOutCheckbox = document.createElement("input");
-          optOutCheckbox.type = "checkbox";
-          optOutCheckbox.id = "cb-ccpa-optout";
-          optOutCheckbox.style.cssText = "flex-shrink:0;margin-top:2px;";
-          optOutCheckbox.checked = !!(consentState && consentState.accepted && consentState.ccpa && consentState.ccpa.doNotSell);
-          optOutLabel.appendChild(optOutCheckbox);
-          optOutLabel.appendChild(optOutText);
-          prefsBody.appendChild(optOutLabel);
-          prefsBanner.appendChild(prefsBody);
-
-          var prefsFooter = document.createElement("div");
-          prefsFooter.className = "cb-banner-footer";
-          var cancelBtn = document.createElement("button");
-          cancelBtn.id = "cb-cancel-prefs-btn";
-          cancelBtn.textContent = translateButton("cancel");
-          prefsFooter.appendChild(cancelBtn);
-          var saveBtn = document.createElement("button");
-          saveBtn.id = "cb-save-prefs-btn";
-          saveBtn.textContent = translate("saveMyPreferences") || translate("save");
-          prefsFooter.appendChild(saveBtn);
-          prefsBanner.appendChild(prefsFooter);
-
-          appendPrefsCloseButton(prefsBanner);
-          wrapper.appendChild(prefsBanner)
-        } else {
-          /**
-           * One collapsible category row: expand/collapse chevron, label, on/off toggle
-           * (or an "Always Active" badge for essential) and a description. Expanding a row
-           * collapses its siblings, so only one is ever open.
-           *
-           * The visible toggle is a <button role="switch"> mirroring a hidden checkbox \u2014
-           * the checkbox is what the save handler reads, the button is what gets styled.
-           */
-          var buildCategoryRow = function (options) {
-            var row = document.createElement("div");
-            row.style.borderBottom = "1px solid #e5e7eb";
-
-            var header = document.createElement("div");
-            header.style.cssText = "display:flex;align-items:center;gap:14px;padding:12px 14px;min-height:44px;";
-
-            var expandBtn = document.createElement("button");
-            expandBtn.type = "button";
-            expandBtn.setAttribute("aria-expanded", "false");
-            expandBtn.textContent = "+";
-            expandBtn.style.cssText = "flex-shrink:0;width:22px;height:22px;padding:0;border:1px solid #e5e7eb;border-radius:4px;background:#f3f4f6;color:#111827;font-size:14px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;";
-
-            var label = document.createElement("span");
-            label.className = "cb-gdpr-cat-label";
-            label.style.cssText = "flex:1;font-size:11px;font-weight:600;";
-            label.textContent = options.labelText;
-
-            header.appendChild(expandBtn);
-            header.appendChild(label);
-
-            var control = document.createElement("div");
-            control.style.flexShrink = "0";
-            if (options.alwaysActive) {
-              var alwaysActiveBadge = document.createElement("span");
-              alwaysActiveBadge.style.cssText = "font-size:11px;font-weight:600;color:#374151;";
-              alwaysActiveBadge.textContent = translateTruncated("alwaysActive", 20);
-              control.appendChild(alwaysActiveBadge)
-            } else {
-              var checkbox = document.createElement("input");
-              checkbox.type = "checkbox";
-              checkbox.id = options.checkboxId;
-              options.defaultChecked && (checkbox.checked = true);
-              checkbox.style.cssText = "position:absolute;opacity:0;width:0;height:0;margin:0;pointer-events:none;";
-
-              var toggle = document.createElement("button");
-              toggle.type = "button";
-              toggle.className = "cb-pref-toggle-track";
-              toggle.setAttribute("role", "switch");
-              toggle.setAttribute("aria-label", options.labelText);
-              var syncToggleState = function () {
-                toggle.setAttribute("aria-checked", checkbox.checked ? "true" : "false")
-              };
-              toggle.addEventListener("click", function () {
-                checkbox.checked = !checkbox.checked;
-                syncToggleState()
-              });
-              syncToggleState();
-
-              control.appendChild(checkbox);
-              control.appendChild(toggle)
-            }
-            header.appendChild(control);
-
-            // Description: animated open/closed via a 0fr \u2192 1fr grid row.
-            var description = document.createElement("div");
-            description.className = "cb-gdpr-cat-desc";
-            description.style.cssText = "display:grid;grid-template-rows:0fr;opacity:0;font-size:13px;line-height:1.5;transition:grid-template-rows .3s ease,opacity .25s ease;";
-            var descriptionInner = document.createElement("div");
-            descriptionInner.style.cssText = "overflow:hidden;min-height:0;padding:0 12px 12px 44px;";
-            descriptionInner.textContent = options.descText;
-            description.appendChild(descriptionInner);
-
-            var expand = function (el) {
-              el.style.gridTemplateRows = "1fr";
-              el.style.opacity = ""
-            };
-            var collapse = function (el) {
-              el.style.gridTemplateRows = "0fr";
-              el.style.opacity = "0"
-            };
-
-            expandBtn.addEventListener("click", function () {
-              var shouldExpand = "true" !== expandBtn.getAttribute("aria-expanded");
-
-              // Accordion behaviour: close every other row first.
-              var accordion = row.parentNode;
-              if (accordion) {
-                var rows = accordion.children;
-                for (var i = 0; i < rows.length; i++) {
-                  var otherDescription = rows[i].querySelector(".cb-gdpr-cat-desc");
-                  var otherButton = rows[i].querySelector("button[aria-expanded]");
-                  if (otherDescription && otherDescription !== description) {
-                    collapse(otherDescription);
-                    if (otherButton) {
-                      otherButton.textContent = "+";
-                      otherButton.setAttribute("aria-expanded", "false")
-                    }
-                  }
-                }
-              }
-
-              shouldExpand ? expand(description) : collapse(description);
-              expandBtn.textContent = shouldExpand ? "\u2212" : "+";
-              expandBtn.setAttribute("aria-expanded", shouldExpand ? "true" : "false")
-            });
-
-            row.appendChild(header);
-            row.appendChild(description);
-            return row
-          };
-
-          // ---- GDPR initial banner ------------------------------------------------
-          var gdprInitialBanner = document.createElement("div");
-          gdprInitialBanner.className = "cb-banner";
-          gdprInitialBanner.id = "cb-initial-banner";
-          gdprInitialBanner.style.display = "none";
-
-          var gdprInitialBody = document.createElement("div");
-          gdprInitialBody.className = "cb-banner-body";
-
-          var gdprHeading = document.createElement("h3");
-          gdprHeading.textContent = translate("title");
-          gdprInitialBody.appendChild(gdprHeading);
-
-          var gdprText = document.createElement("p");
-          var gdprDescription = translate("description");
-          if (privacyPolicyUrl && isCookiePolicyLinkEnabled()) {
-            gdprText.appendChild(document.createTextNode(gdprDescription + " "));
-            var gdprPolicyLink = document.createElement("a");
-            gdprPolicyLink.textContent = translate("privacyPolicy");
-            gdprPolicyLink.style.cssText = "color:#007aff;text-decoration:underline;cursor:pointer;";
-            bindExternalLink(gdprPolicyLink, privacyPolicyUrl);
-            gdprText.appendChild(gdprPolicyLink);
-            gdprText.appendChild(document.createTextNode("."))
-          } else gdprText.textContent = gdprDescription;
-          gdprInitialBody.appendChild(gdprText);
-          gdprInitialBanner.appendChild(gdprInitialBody);
-
-          // Reject and Customise are individually switchable from the dashboard; Accept always shows.
-          var initialFooter = document.createElement("div");
-          initialFooter.className = "cb-banner-footer";
-
-          var customiseBtn = document.createElement("button");
-          customiseBtn.id = "cb-preferences-btn";
-          customiseBtn.textContent = truncate(translateButton("customise"), MAX_BUTTON_LEN);
-          isCustomizeButtonEnabled() && initialFooter.appendChild(customiseBtn);
-
-          var rejectAllBtn = document.createElement("button");
-          rejectAllBtn.id = "cb-reject-all-btn";
-          rejectAllBtn.textContent = truncate(translateButton("rejectAll"), MAX_BUTTON_LEN);
-          isRejectButtonEnabled() && initialFooter.appendChild(rejectAllBtn);
-
-          var acceptAllBtn = document.createElement("button");
-          acceptAllBtn.id = "cb-accept-all-btn";
-          acceptAllBtn.textContent = truncate(translateButton("acceptAll"), MAX_BUTTON_LEN);
-          initialFooter.appendChild(acceptAllBtn);
-
-          gdprInitialBanner.appendChild(initialFooter);
-          appendCloseButton(gdprInitialBanner, "cb-close-initial-btn");
-          wrapper.appendChild(gdprInitialBanner);
-
-          // ---- GDPR preferences panel ---------------------------------------------
-          var gdprPrefsBanner = document.createElement("div");
-          gdprPrefsBanner.className = "cb-banner";
-          gdprPrefsBanner.id = "cb-preferences-banner";
-          gdprPrefsBanner.style.display = "none";
-          "left" === preferencePosition ? gdprPrefsBanner.classList.add("prefs-left") : "right" === preferencePosition ? gdprPrefsBanner.classList.add("prefs-right") : gdprPrefsBanner.classList.add("prefs-center");
-
-          var gdprPrefsBody = document.createElement("div");
-          gdprPrefsBody.className = "cb-banner-body";
-
-          var gdprPrefsHeading = document.createElement("h3");
-          gdprPrefsHeading.textContent = translateTruncated("cookiePreferences", MAX_TITLE_LEN);
-          gdprPrefsBody.appendChild(gdprPrefsHeading);
-
-          var gdprPrefsText = document.createElement("p");
-          var managePreferencesText = (truncate(translate("managePreferences"), MAX_DESCRIPTION_LEN) || "").replace(/s*More info.?s*$/i, "").trim();
-          if (privacyPolicyUrl && isCookiePolicyLinkEnabled()) {
-            gdprPrefsText.appendChild(document.createTextNode(managePreferencesText + " "));
-            var gdprPrefsPolicyLink = document.createElement("a");
-            gdprPrefsPolicyLink.textContent = translateTruncated("privacyPolicy", MAX_LINK_LEN);
-            gdprPrefsPolicyLink.style.cssText = "color:#007aff;text-decoration:underline;cursor:pointer;";
-            bindExternalLink(gdprPrefsPolicyLink, privacyPolicyUrl);
-            gdprPrefsText.appendChild(gdprPrefsPolicyLink);
-            gdprPrefsText.appendChild(document.createTextNode("."))
-          } else gdprPrefsText.textContent = managePreferencesText;
-          gdprPrefsBody.appendChild(gdprPrefsText);
-
-          var accordion = document.createElement("div");
-          accordion.className = "cb-gdpr-accordion";
-          accordion.style.cssText = "border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin-bottom:4px;";
-
-          var essentialLabel = translateTruncated("strictlyNecessary", 20) || translateTruncated("essential", 20);
-          accordion.appendChild(buildCategoryRow({
-            labelText: essentialLabel,
-            alwaysActive: true,
-            descText: translateTruncated("essentialDescription", 300)
-          }));
-
-          // Pre-fill the toggles from the last saved choice.
-          var savedCategories = loadPreferenceCategories() || consentState && consentState.accepted && consentState.categories || {};
-          accordion.appendChild(buildCategoryRow({
-            labelText: translateTruncated("marketing", 20),
-            checkboxId: "cb-pref-marketing",
-            defaultChecked: !!savedCategories.marketing,
-            descText: translateTruncated("marketingDescription", 300)
-          }));
-          accordion.appendChild(buildCategoryRow({
-            labelText: translateTruncated("analytics", 20),
-            checkboxId: "cb-pref-analytics",
-            defaultChecked: !!savedCategories.analytics,
-            descText: translateTruncated("analyticsDescription", 300)
-          }));
-          accordion.appendChild(buildCategoryRow({
-            labelText: translateTruncated("preferences", 20),
-            checkboxId: "cb-pref-preferences",
-            defaultChecked: !!savedCategories.preferences,
-            descText: translateTruncated("preferencesDescription", 300)
-          }));
-          accordion.lastChild && (accordion.lastChild.style.borderBottom = "none");
-
-          gdprPrefsBody.appendChild(accordion);
-          gdprPrefsBanner.appendChild(gdprPrefsBody);
-
-          var gdprPrefsFooter = document.createElement("div");
-          gdprPrefsFooter.className = "cb-banner-footer";
-          var prefsRejectBtn = document.createElement("button");
-          prefsRejectBtn.id = "cb-prefs-reject-btn";
-          prefsRejectBtn.textContent = truncate(translateButton("rejectAll"), MAX_BUTTON_LEN);
-          gdprPrefsFooter.appendChild(prefsRejectBtn);
-          var prefsSaveBtn = document.createElement("button");
-          prefsSaveBtn.id = "cb-save-prefs-btn";
-          prefsSaveBtn.textContent = truncate(translateButton("saveMyPreferences") || translateButton("save"), MAX_BUTTON_LEN);
-          gdprPrefsFooter.appendChild(prefsSaveBtn);
-          gdprPrefsBanner.appendChild(gdprPrefsFooter);
-
-          appendPrefsCloseButton(gdprPrefsBanner);
-          wrapper.appendChild(gdprPrefsBanner)
-        }
-
-        document.body.appendChild(wrapper);
-        stopScroll && (document.body.style.overflow = "hidden");
-
-        // Re-position the banner on resize (desktop corner \u2194 mobile full-width).
-        if (!window.__cbResizeInit) {
-          window.__cbResizeInit = true;
-          window.addEventListener("resize", function() {
-            var visibleBanner = document.getElementById("cb-initial-banner");
-            if (visibleBanner && visibleBanner.style.display !== "none" && visibleBanner.style.visibility !== "hidden") positionInitialBanner(visibleBanner);
-          });
-        }
-
-        var builtBanner = document.getElementById("cb-initial-banner");
-        if (builtBanner) {
-          var isCentered = positionInitialBanner(builtBanner);
-          builtBanner.style.display = "flex";
-          builtBanner.style.visibility = "visible";
-          builtBanner.style.opacity = "1";
-          if (animationEnabled) {
-            builtBanner.classList.add(getInitialBannerAnimationClass(isCentered))
-          }
-        }
-      } else {
-        // document.body does not exist yet \u2014 try again shortly.
-        setTimeout(buildBanners, 100)
-      }
-  }
-
-  /** Undo the scroll lock applied while the banner was open. */
-  function restoreBodyScroll() {
-    stopScroll && (document.body.style.overflow = "")
-  }
-
-  /** The floating logo is off when the dashboard hides it, and on by default otherwise. */
-  function isFloatingLogoEnabled() {
-    try {
-      if (customization && false === customization.showBannerLogo) return false;
-      if (customization && 0 === customization.showBannerLogo) return false;
-      var lang = getActiveLanguage();
-      var config = TRANSLATIONS.config || {};
-      var value = config.floatingButtonEnabled != null ? config.floatingButtonEnabled : (TRANSLATIONS[lang] || TRANSLATIONS.en || {}).floatingButtonEnabled;
-      return false !== value && "0" !== value && "false" !== String(value).toLowerCase()
-    } catch (err) {
-      return true
-    }
-  }
-
-  // Should the banner stay closed (suppressed) on this page load? The user dismissed it
-  // via the close (X) button WITHOUT consenting (consentState.accepted stays false, so
-  // non-essential scripts remain blocked the whole time).
-  //   - Floating logo ENABLED: stay closed indefinitely \u2014 the logo is the reopen path,
-  //     so the banner never auto-returns.
-  //   - Floating logo DISABLED: stay closed for 24h, then re-show so the visitor still
-  //     has a way to consent (no dead-end when there's no logo to reopen with).
-  function wasBannerDismissed() {
-    try {
-      var dismissedAt = parseInt(localStorage.getItem(STORAGE_KEY + "_closed") || "0", 10);
-      if (!dismissedAt) return false;
-      if (isFloatingLogoEnabled()) return true;
-      if (Date.now() - dismissedAt < 86400000) return true;
-      localStorage.removeItem(STORAGE_KEY + "_closed");
-      return false
-    } catch (err) {
-      return false
-    }
-  }
-
-  /** Which side the floating logo sits on. Defaults to left. */
-  function getFloatingLogoPosition() {
-    try {
-      if (customization && customization.bannerLogoPosition) return "right" === customization.bannerLogoPosition ? "right" : "left";
-      var lang = getActiveLanguage();
-      var config = TRANSLATIONS.config || {};
-      var value = config.floatingButtonPosition != null ? config.floatingButtonPosition : (TRANSLATIONS[lang] || TRANSLATIONS.en || {}).floatingButtonPosition;
-      return "right" === value ? "right" : "left"
-    } catch (err) {
-      return "left"
-    }
-  }
-
-  /** Inline SVG cookie icon \u2014 used when the hosted logo image cannot be loaded. */
-  function createFallbackLogoSvg() {
-    var SVG_NS = "http://www.w3.org/2000/svg";
-    var svg = document.createElementNS(SVG_NS, "svg");
-    svg.setAttribute("xmlns", SVG_NS);
-    svg.setAttribute("viewBox", "0 0 40 40");
-    svg.setAttribute("width", "44");
-    svg.setAttribute("height", "44");
-    svg.setAttribute("aria-hidden", "true");
-    svg.setAttribute("focusable", "false");
-    svg.style.cssText = "display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;";
-
-    var background = document.createElementNS(SVG_NS, "circle");
-    background.setAttribute("cx", "20");
-    background.setAttribute("cy", "20");
-    background.setAttribute("r", "18");
-    background.setAttribute("fill", "#007aff");
-    svg.appendChild(background);
-
-    // The three "chocolate chips".
-    var chips = [{
-      cx: "14",
-      cy: "14",
-      r: "2.2"
-    }, {
-      cx: "24",
-      cy: "18",
-      r: "2.5"
-    }, {
-      cx: "17",
-      cy: "25",
-      r: "2"
-    }];
-    for (var i = 0; i < chips.length; i++) {
-      var chip = document.createElementNS(SVG_NS, "circle");
-      chip.setAttribute("cx", chips[i].cx);
-      chip.setAttribute("cy", chips[i].cy);
-      chip.setAttribute("r", chips[i].r);
-      chip.setAttribute("fill", "#ffffff");
-      svg.appendChild(chip)
-    }
-    return svg
-  }
-
-  /** Recover our own origin from this script's own <script src>, when the config omitted it. */
-  function detectScriptOrigin() {
-    try {
-      var scripts = document.getElementsByTagName("script");
-      for (var i = scripts.length - 1; i >= 0; i--) {
-        var src = scripts[i].src || "";
-        if (-1 !== src.indexOf("/consentbit/") || -1 !== src.indexOf("/client_data/")) return new URL(src).origin
-      }
-    } catch (err) {}
-    return ""
-  }
-
-  /**
-   * The persistent floating button that reopens the banner.
-   * Image loading degrades in two steps: primary URL \u2192 fallback URL \u2192 inline SVG.
-   */
-  function createFloatingTrigger() {
-    if (!document.getElementById("cb-floating-trigger") && isFloatingLogoEnabled()) {
-      var side = getFloatingLogoPosition();
-      var primaryUrl = floatingLogoUrl || "";
-      var fallbackUrl = floatingLogoFallbackUrl || "";
-      if (!primaryUrl) {
-        var origin = detectScriptOrigin();
-        if (origin) {
-          primaryUrl = origin + "/embed/floating-logo.svg";
-          fallbackUrl || (fallbackUrl = primaryUrl)
-        }
-      }
-
-      var trigger = document.createElement("button");
-      trigger.id = "cb-floating-trigger";
-      trigger.type = "button";
-      trigger.setAttribute("aria-label", translate("cookiePreferences"));
-      trigger.style.cssText = "position:fixed;bottom:28px;" + ("right" === side ? "right:16px;" : "left:16px;") + "z-index:2147483646;width:56px;height:56px;border:none;border-radius:9999px;background:transparent;cursor:pointer;padding:0;box-shadow:none;";
-
-      if (primaryUrl) {
-        var logoImg = document.createElement("img");
-        logoImg.alt = "";
-        logoImg.src = primaryUrl;
-        logoImg.setAttribute("width", "44");
-        logoImg.setAttribute("height", "44");
-        logoImg.draggable = false;
-        logoImg.style.cssText = "display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;";
-
-        var triedFallback = false;
-        logoImg.addEventListener("error", function onLogoError() {
-          if (triedFallback || !fallbackUrl || primaryUrl === fallbackUrl) {
-            logoImg.removeEventListener("error", onLogoError);
-            logoImg.parentNode && logoImg.parentNode.replaceChild(createFallbackLogoSvg(), logoImg)
-          } else {
-            triedFallback = true;
-            logoImg.src = fallbackUrl
-          }
-        });
-        trigger.appendChild(logoImg)
-      } else trigger.appendChild(createFallbackLogoSvg());
-
-      document.body.appendChild(trigger)
-    }
-  }
-
-  /** Entrance-animation class for the preferences panel, given where it is anchored. */
-  function getPreferencesAnimationClass() {
-    if (!animationEnabled) return "";
-    return "left" === preferencePosition ? "zoom-in" === entranceAnimation ? "cb-banner-animate-prefs-zoom-in" : "cb-banner-animate-prefs-left" : "right" === preferencePosition ? "zoom-in" === entranceAnimation ? "cb-banner-animate-prefs-zoom-in" : "cb-banner-animate-prefs-right" : "slide-up" === entranceAnimation ? "cb-banner-animate-center-bottom" : "slide-down" === entranceAnimation ? "cb-banner-animate-center-top" : "zoom-in" === entranceAnimation ? "cb-banner-animate-prefs-zoom-in" : "cb-banner-animate-fade"
-  }
-
-  /** Strip every entrance-animation class, so the next show can re-trigger one. */
-  function removeAnimationClasses(el) {
-    if (el) {
-      var classes = ANIMATION_CLASSES.split(" ");
-      for (var i = 0; i < classes.length; i++) classes[i] && el.classList.remove(classes[i])
-    }
-  }
-
-  /**
-   * Render the banners and wire up every control.
-   * Once a choice is made the flow is always the same: record it, delete cookies for
-   * the declined categories, unblock the scripts now allowed, push the state to Google
-   * Consent Mode, broadcast to Webflow, then dismiss the UI.
-   */
-  function initBannerUi() {
-    injectStyles();
-    buildBanners();
-    createFloatingTrigger();
-
-    var initialBanner = document.getElementById("cb-initial-banner");
-    var prefsBanner = document.getElementById("cb-preferences-banner");
-    var customiseBtn = document.getElementById("cb-preferences-btn");
-    var acceptAllBtn = document.getElementById("cb-accept-all-btn");
-    var rejectAllBtn = document.getElementById("cb-reject-all-btn");
-    var prefsRejectBtn = document.getElementById("cb-prefs-reject-btn");
-    var cancelPrefsBtn = document.getElementById("cb-cancel-prefs-btn");
-    var savePrefsBtn = document.getElementById("cb-save-prefs-btn");
-    var doNotSellLink = document.getElementById("cb-ccpa-donotsell-link");
-    var isCcpa = "ccpa" === bannerType;
-
-    /** Hide both banners and bring the floating trigger back. */
-    function dismissBanners() {
-      if (initialBanner) {
-        initialBanner.style.setProperty("display", "none", "important");
-        initialBanner.classList.remove("cb-banner-animate-left", "cb-banner-animate-right", "cb-banner-animate-top", "cb-banner-animate-bottom", "cb-banner-animate-fade")
-      }
-      if (prefsBanner) {
-        prefsBanner.style.display = "none";
-        removeAnimationClasses(prefsBanner)
-      }
-      var trigger = document.getElementById("cb-floating-trigger");
-      trigger && (trigger.style.display = "flex");
-      restoreBodyScroll()
-    }
-
-    /** Show the initial banner (from the floating trigger, or from Cancel in the CCPA panel). */
-    function showInitialBanner() {
-      if (initialBanner) {
-        if (prefsBanner) {
-          prefsBanner.style.display = "none";
-          removeAnimationClasses(prefsBanner)
-        }
-        var isCentered = positionInitialBanner(initialBanner);
-        initialBanner.style.setProperty("display", "flex", "important");
-        initialBanner.style.setProperty("visibility", "visible", "important");
-        initialBanner.style.setProperty("opacity", "1", "important");
-        initialBanner.classList.remove("cb-banner-animate-left", "cb-banner-animate-right", "cb-banner-animate-top", "cb-banner-animate-bottom", "cb-banner-animate-fade", "cb-banner-animate-zoom-in");
-        if (animationEnabled) {
-          initialBanner.classList.add(getInitialBannerAnimationClass(isCentered))
-        }
-        stopScroll && (document.body.style.overflow = "hidden")
-      }
-    }
-
-    /** Open the preferences panel and hide the initial banner + trigger. */
-    function showPreferencesBanner() {
-      initialBanner.style.display = "none";
-      var trigger = document.getElementById("cb-floating-trigger");
-      trigger && (trigger.style.display = "none");
-      prefsBanner.style.display = "flex";
-      prefsBanner.style.visibility = "visible";
-      prefsBanner.style.opacity = "1";
-      removeAnimationClasses(prefsBanner);
-      var animationClass = getPreferencesAnimationClass();
-      animationClass && prefsBanner.classList.add(animationClass)
-    }
-
-    var floatingTrigger = document.getElementById("cb-floating-trigger");
-    floatingTrigger && floatingTrigger.addEventListener("click", function (event) {
-      event && event.preventDefault && event.preventDefault();
-      event && event.stopPropagation && event.stopPropagation();
-      showInitialBanner()
-    });
-
-    // Customise \u2192 open the preferences panel, toggles pre-filled from the saved choice.
-    customiseBtn && customiseBtn.addEventListener("click", function () {
-      if (initialBanner && prefsBanner) {
-        if (!isCcpa) {
-          var savedCategories = loadPreferenceCategories() || consentState && consentState.categories || {};
-          var setToggle = function (checkboxId, checked) {
-            var checkbox = document.getElementById(checkboxId);
-            if (checkbox) {
-              checkbox.checked = !!checked;
-              var toggle = checkbox.parentNode && checkbox.parentNode.querySelector("button.cb-pref-toggle-track");
-              toggle && toggle.setAttribute("aria-checked", checkbox.checked ? "true" : "false")
-            }
-          };
-          setToggle("cb-pref-analytics", savedCategories.analytics);
-          setToggle("cb-pref-preferences", savedCategories.preferences);
-          setToggle("cb-pref-marketing", savedCategories.marketing)
-        }
-        initialBanner.classList.remove("cb-banner-animate-left", "cb-banner-animate-right", "cb-banner-animate-top", "cb-banner-animate-bottom", "cb-banner-animate-fade");
-        showPreferencesBanner()
-      }
-    });
-
-    // Reject All, from inside the preferences panel.
-    prefsRejectBtn && prefsRejectBtn.addEventListener("click", function () {
-      var state = {
-        accepted: true,
-        timestamp: (new Date).toISOString(),
-        categories: {
-          essential: true,
-          analytics: false,
-          preferences: false,
-          marketing: false
-        }
-      };
-      deleteCookiesForCategories(["analytics", "marketing", "preferences"]);
-      saveConsentState(state);
-      postConsentToApi(state, {
-        status: "rejected"
-      });
-      savePreferenceCategories(state.categories);
-      updateGoogleConsentMode(state.categories, "[PrefsReject]");
-      dispatchWebflowConsent(state.categories);
-      dismissBanners()
-    });
-
-    // Close (\xD7) on either banner: dismiss WITHOUT consenting. Scripts stay blocked and
-    // the timestamp lets wasBannerDismissed() keep it closed on the next page load.
-    var closeInitialBtn = document.getElementById("cb-close-initial-btn");
-    var closePrefsBtn = document.getElementById("cb-close-prefs-btn");
-    closeInitialBtn && closeInitialBtn.addEventListener("click", function () {
-      try { localStorage.setItem(STORAGE_KEY + "_closed", String(Date.now())) } catch (err) {}
-      dismissBanners()
-    });
-    closePrefsBtn && closePrefsBtn.addEventListener("click", function () {
-      try { localStorage.setItem(STORAGE_KEY + "_closed", String(Date.now())) } catch (err) {}
-      dismissBanners()
-    });
-
-    // CCPA: the "Do Not Sell" link opens the opt-out panel.
-    isCcpa && doNotSellLink && doNotSellLink.addEventListener("click", function () {
-      if (initialBanner && prefsBanner) {
-        showPreferencesBanner()
-      }
-    });
-
-    // CCPA: Cancel returns to the initial banner.
-    cancelPrefsBtn && cancelPrefsBtn.addEventListener("click", function () {
-      showInitialBanner()
-    });
-
-    // Reject All, from the initial banner. Under CCPA this button is not a consent
-    // action (that regime is opt-out), so it only dismisses.
-    rejectAllBtn && rejectAllBtn.addEventListener("click", function () {
-      if (!isCcpa) {
-        var state = {
-          accepted: true,
-          timestamp: (new Date).toISOString(),
-          categories: {
-            essential: true,
-            analytics: false,
-            preferences: false,
-            marketing: false
-          }
-        };
-        deleteCookiesForCategories(["analytics", "marketing", "preferences"]);
-        saveConsentState(state);
-        postConsentToApi(state, {
-          status: "rejected"
-        });
-        savePreferenceCategories(state.categories);
-        updateGoogleConsentMode(state.categories, "[Reject]");
-        dispatchWebflowConsent(state.categories)
-      }
-      dismissBanners()
-    });
-
-    // Accept All. Under CCPA that means "do not opt out"; under GDPR it grants every category.
-    acceptAllBtn && acceptAllBtn.addEventListener("click", function () {
-      if (isCcpa) {
-        var ccpaState = {
-          accepted: true,
-          timestamp: (new Date).toISOString(),
-          ccpa: {
-            doNotSell: false
-          }
-        };
-        saveConsentState(ccpaState);
-        postConsentToApi(ccpaState, {
-          status: "given"
-        });
-        unblockAllowedScripts({
-          analytics: true,
-          marketing: true,
-          preferences: true,
-          essential: true
-        });
-        updateGoogleConsentModeCcpa(false)
-      } else {
-        var gdprState = {
-          accepted: true,
-          timestamp: (new Date).toISOString(),
-          categories: {
-            essential: true,
-            analytics: true,
-            preferences: true,
-            marketing: true
-          }
-        };
-        saveConsentState(gdprState);
-        postConsentToApi(gdprState, {
-          status: "given"
-        });
-        savePreferenceCategories(gdprState.categories);
-        unblockAllowedScripts(gdprState.categories);
-        updateGoogleConsentMode(gdprState.categories, "[Accept]")
-      }
-      dismissBanners()
-    });
-
-    // Save: CCPA reads the single opt-out checkbox; GDPR reads the three category toggles.
-    savePrefsBtn && savePrefsBtn.addEventListener("click", function () {
-      if (isCcpa) {
-        var optOutCheckbox = document.getElementById("cb-ccpa-optout");
-        var doNotSell = !(!optOutCheckbox || !optOutCheckbox.checked);
-        var ccpaState = {
-          accepted: true,
-          timestamp: (new Date).toISOString(),
-          ccpa: {
-            doNotSell: doNotSell
-          }
-        };
-        saveConsentState(ccpaState);
-        postConsentToApi(ccpaState, {
-          status: doNotSell ? "rejected" : "given"
-        });
-        doNotSell || unblockAllowedScripts({
-          analytics: true,
-          marketing: true,
-          preferences: true,
-          essential: true
-        });
-        updateGoogleConsentModeCcpa(doNotSell)
-      } else {
-        var analyticsCheckbox = document.getElementById("cb-pref-analytics");
-        var preferencesCheckbox = document.getElementById("cb-pref-preferences");
-        var marketingCheckbox = document.getElementById("cb-pref-marketing");
-        var gdprState = {
-          accepted: true,
-          timestamp: (new Date).toISOString(),
-          categories: {
-            essential: true,
-            analytics: !(!analyticsCheckbox || !analyticsCheckbox.checked),
-            preferences: !(!preferencesCheckbox || !preferencesCheckbox.checked),
-            marketing: !(!marketingCheckbox || !marketingCheckbox.checked)
-          }
-        };
-
-        var deniedCategories = [];
-        if (!gdprState.categories.analytics) deniedCategories.push("analytics");
-        if (!gdprState.categories.marketing) deniedCategories.push("marketing");
-        if (!gdprState.categories.preferences) deniedCategories.push("preferences");
-        if (deniedCategories.length) deleteCookiesForCategories(deniedCategories);
-
-        saveConsentState(gdprState);
-        postConsentToApi(gdprState, {
-          status: "partial"
-        });
-        savePreferenceCategories(gdprState.categories);
-        unblockAllowedScripts(gdprState.categories);
-        updateGoogleConsentMode(gdprState.categories, "[Save]");
-        dispatchWebflowConsent(gdprState.categories)
-      }
-      dismissBanners()
-    })
-  }
-
-  /** Render the UI and show the initial banner straight away (no floating trigger). */
-  function showBannerNow() {
-    initBannerUi();
-    var initialBanner = document.getElementById("cb-initial-banner");
-    if (initialBanner) {
-      initialBanner.style.display = "flex";
-      initialBanner.style.visibility = "visible";
-      initialBanner.style.opacity = "1";
-    }
-    var trigger = document.getElementById("cb-floating-trigger");
-    if (trigger) trigger.style.display = "none";
-  }
-
-  /**
-   * Entry point, once the DOM is ready.
-   * 1. Apply the stored consent to Google Consent Mode (and block scripts under GDPR).
-   * 2. Decide what UI to show: nothing, the floating trigger only, or the banner.
-   * 3. Report the pageview and start listening for the site's own "open banner" triggers.
-   */
-  function boot() {
-    if ("gdpr" === bannerType) {
-      blockExistingScripts();
-      // consentModeBootstrap (served ahead of this script on the standard path) may
-      // already have pushed the default \u2014 do not overwrite it with a stale one.
-      if (!window.__cbConsentDefaultSet) {
-        setConsentModeFlags();
-        ensureGtag()("consent", "default", {
-          analytics_storage: "denied",
-          ad_storage: "denied",
-          ad_user_data: "denied",
-          ad_personalization: "denied",
-          functionality_storage: "denied",
-          personalization_storage: "denied",
-          security_storage: "granted",
-          wait_for_update: 500
-        });
-        window.__cbConsentDefaultSet = true
-      }
-      consentState.accepted ? updateGoogleConsentMode(consentState.categories || {}, "[Reload]") : gaMeasurementId && bootstrapGoogleAnalytics()
-    } else if ("ccpa" === bannerType) {
-      // CCPA is an opt-out regime: storage defaults to granted unless the user opted
-      // out. We still push an all-denied default first (consent-mode best practice),
-      // load GA when we manage it, then immediately update to the actual opt-out state.
-      if (!window.__cbConsentDefaultSet) {
-        setConsentModeFlags();
-        ensureGtag()("consent", "default", {
-          analytics_storage: "denied",
-          ad_storage: "denied",
-          ad_user_data: "denied",
-          ad_personalization: "denied",
-          functionality_storage: "denied",
-          personalization_storage: "denied",
-          security_storage: "granted",
-          wait_for_update: 500
-        });
-        window.__cbConsentDefaultSet = true
-      }
-      gaMeasurementId && bootstrapGoogleAnalytics();
-      updateGoogleConsentModeCcpa(!!(consentState && consentState.accepted && consentState.ccpa && consentState.ccpa.doNotSell))
-    }
-
-    if (!window.__CB_WEBFLOW_MODE__) {
-      if (bannerEnabled)
-        if (consentState.accepted || wasBannerDismissed()) {
-          // Already decided (or dismissed): build the UI but keep it hidden behind the trigger.
-          initBannerUi();
-          var trigger = document.getElementById("cb-floating-trigger");
-          trigger && (trigger.style.display = "flex");
-          var hiddenBanner = document.getElementById("cb-initial-banner");
-          if (hiddenBanner) {
-            hiddenBanner.style.setProperty("display", "none", "important");
-            hiddenBanner.style.setProperty("visibility", "hidden", "important");
-          }
-        } else showBannerNow();
-    } else {
-      // Webflow mode: the UI is always built, then shown or hidden explicitly.
-      initBannerUi();
-      if (consentState.accepted || wasBannerDismissed()) {
-        var wfInitialBanner = document.getElementById("cb-initial-banner");
-        if (wfInitialBanner) {
-          wfInitialBanner.style.setProperty("display", "none", "important");
-          wfInitialBanner.style.setProperty("visibility", "hidden", "important");
-        }
-        var wfPrefsBanner = document.getElementById("cb-preferences-banner");
-        if (wfPrefsBanner) {
-          wfPrefsBanner.style.setProperty("display", "none", "important");
-        }
-        var wfTrigger = document.getElementById("cb-floating-trigger");
-        if (wfTrigger) wfTrigger.style.display = "flex";
-      } else if (bannerEnabled) {
-        var wfBannerToShow = document.getElementById("cb-initial-banner");
-        if (wfBannerToShow) {
-          wfBannerToShow.style.display = "flex";
-          wfBannerToShow.style.setProperty("visibility", "visible", "important");
-          wfBannerToShow.style.setProperty("opacity", "1", "important");
-        }
-        var wfTriggerToHide = document.getElementById("cb-floating-trigger");
-        if (wfTriggerToHide) wfTriggerToHide.style.display = "none";
-      } else {
-        // bannerEnabled === false (region-suppressed, e.g. CCPA banner for a non-US
-        // visitor): show NO consent UI at all \u2014 hide both the banner AND the floating
-        // trigger. CCPA does not apply outside the US, so no surface is presented.
-        var wfSuppressedBanner = document.getElementById("cb-initial-banner");
-        if (wfSuppressedBanner) {
-          wfSuppressedBanner.style.setProperty("display", "none", "important");
-          wfSuppressedBanner.style.setProperty("visibility", "hidden", "important");
-        }
-        var wfSuppressedTrigger = document.getElementById("cb-floating-trigger");
-        if (wfSuppressedTrigger) wfSuppressedTrigger.style.setProperty("display", "none", "important");
-      }
-    }
-
-    try {
-      recordPageview()
-    } catch (err) {
-    }
-
-    /**
-     * Let the site re-open the banner from its own markup, via a capture-phase click
-     * listener so it works no matter what the host page does with the event:
-     *   data-consentbit-trigger \u2014 clear the stored consent, then show the banner
-     *   data-consentbit-banner  \u2014 just show the banner, keeping the stored consent
-     */
-    function bindConsentTriggers() {
-      document.addEventListener("click", function (event) {
-        var element = event.target;
-        for (; element && element !== document.body;) {
-          var isReset = element.hasAttribute && element.hasAttribute("data-consentbit-trigger");
-          var isShowOnly = element.hasAttribute && element.hasAttribute("data-consentbit-banner");
-          if (isReset || isShowOnly) {
-            event.preventDefault();
-            event.stopPropagation();
-            if (isReset) {
-              try {
-                localStorage.removeItem(STORAGE_KEY);
-                localStorage.removeItem(STORAGE_KEY + "_closed");
-                consentState = {
-                  accepted: false,
-                  timestamp: null
-                }
-              } catch (err) {
-              }
-            }
-            var banner = document.getElementById("cb-initial-banner");
-            if (banner) {
-              banner.style.display = "flex";
-              banner.style.visibility = "visible";
-              banner.style.opacity = "1";
-              stopScroll && (document.body.style.overflow = "hidden");
-              var trigger = document.getElementById("cb-floating-trigger");
-              if (trigger) trigger.style.display = "none";
-              banner.scrollIntoView({
-                behavior: "smooth",
-                block: "start"
-              })
-            } else {
-              // Banner was never built (e.g. bannerEnabled false) \u2014 build it now.
-              showBannerNow();
-              setTimeout(function () {
-                var builtBanner = document.getElementById("cb-initial-banner");
-                builtBanner && builtBanner.scrollIntoView({
-                  behavior: "smooth",
-                  block: "start"
-                })
-              }, 100)
-            }
-            return false
-          }
-          element = element.parentElement
-        }
-      }, true)
-    }
-    "loading" === document.readyState ? document.addEventListener("DOMContentLoaded", bindConsentTriggers) : bindConsentTriggers()
-  }
-}();
+!function(){if(!window.__cbBannerInit){window.__cbBannerInit=!0;var e=window.__CONSENT_SITE__||{};var t=!0;!function(){var n=e.registeredDomain;if(n)try{var r=window.location.hostname.replace(/^www./,"").toLowerCase();if(r!==n&&"webflow"!==e.platform&&!r.endsWith(".webflow.io")){window.__CONSENT_SITE__=null;t=!1}}catch(e){}}();if(t){var n=e.floatingLogoUrl||"";var r=e.floatingLogoFallbackUrl||"";var a=e.id||null;var i=e.bannerType||"gdpr";var o=!1!==e.bannerEnabled;var c=e.apiBase;var s=e.gaId||null;var l=!1!==e.clarityConsentMode;var d=e.clarityCmpId||"consentbit";var p=e.customization||null;var b=!0===e.pendingScan;var f=p&&p.bannerLayoutVisual||"box";var m=p?p.privacyPolicyUrl:null;var g=!!p&&p.stopScroll;var u=!p||!1!==p.animationEnabled;var y=p&&p.bannerEntranceAnimation||"fade-in";var v=p&&p.preferencePosition||"center";var h=p&&p.centerAnimationDirection||"fade";var x=p&&p.language||"en";var C=!!p&&!0===p.autoDetectLanguage;${translationsVar}var w=["customise","rejectAll","acceptAll","save","back","doNotSell","saveMyPreferences","confirmChoice","cancel","optOutPreference"];var k=30,_=320,E=20,S=30,O=200;var B=56;var L="consentbit_"+a;var A=void 0!==p&&p&&null!=p.cookieExpirationDays?Math.max(1,Math.min(365,Number(p.cookieExpirationDays)||30)):30;var I=ie();try{if(!(!0!==navigator.globalPrivacyControl||"ccpa"!==i||I&&I.accepted)){I={accepted:!0,timestamp:(new Date).toISOString(),ccpa:{doNotSell:!0},gpc:!0};try{localStorage.setItem(L,JSON.stringify(I))}catch(e){}le(I,{status:"rejected",consentMethod:"gpc"})}}catch(e){}var H="consentbit_prefs_"+(a||"");var T="cb_pv_over_limit_"+(a||"");var P=[];var z=!1;var N=null;var j=e.scriptBlockProviders||[];var M=e.customCookieRules||[];var V=[{domain:"facebook.com",category:"marketing"},{domain:"facebook.net",category:"marketing"},{domain:"adroll.com",category:"marketing"},{domain:"doubleclick.net",category:"marketing"},{domain:"googleadservices.com",category:"marketing"},{domain:"bing.com",category:"marketing"},{domain:"bat.bing.com",category:"marketing"},{domain:"twitter.com",category:"marketing"},{domain:"analytics.twitter.com",category:"marketing"},{domain:"t.co",category:"marketing"},{domain:"linkedin.com",category:"marketing"},{domain:"ads.linkedin.com",category:"marketing"},{domain:"pinterest.com",category:"marketing"},{domain:"ct.pinterest.com",category:"marketing"},{domain:"tiktok.com",category:"marketing"},{domain:"analytics.tiktok.com",category:"marketing"},{domain:"hotjar.com",category:"analytics"},{domain:"clarity.ms",category:"analytics"},{domain:"scorecardresearch.com",category:"analytics"},{domain:"outbrain.com",category:"marketing"},{domain:"taboola.com",category:"marketing"},{domain:"criteo.com",category:"marketing"},{domain:"criteo.net",category:"marketing"},{domain:"quantserve.com",category:"analytics"},{domain:"zemanta.com",category:"marketing"}];var D=".cb-banner,.cb-banner *{box-sizing:border-box;}#cb-initial-banner.cb-banner{width:440px;min-width:280px;max-width:min(440px,92vw);max-height:min(80vh,420px);min-height:0;overflow:hidden;overflow-x:hidden;background-color:#ffffff;color:#334155;position:fixed;bottom:32px;left:32px;right:auto;padding:16px;border:1px solid #e2e8f0;border-radius:0.375rem;box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:inline-flex;flex-direction:column;align-items:stretch;font-family:Montserrat,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px!important;line-height:1.5!important;}#cb-initial-banner.cb-banner .cb-banner-body{flex:0 1 auto;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;}#cb-preferences-banner.cb-banner{width:540px;max-width:92vw;max-height:min(85vh,580px);min-height:0;overflow:hidden;overflow-x:hidden;background-color:#ffffff;color:#334155;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);padding:20px;border:1px solid #e2e8f0;border-radius:0.375rem;box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;font-family:Montserrat,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px!important;line-height:1.5!important;}#cb-preferences-banner.cb-banner .cb-banner-body{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;}#cb-preferences-banner.cb-banner.prefs-left{left:32px;right:auto;top:50%;transform:translateY(-50%);}#cb-preferences-banner.cb-banner.prefs-right{right:32px;left:auto;top:50%;transform:translateY(-50%);}#cb-preferences-banner.cb-banner.prefs-center{left:50%;top:50%;transform:translate(-50%,-50%);}.cb-banner-body{overflow-y:auto;overflow-x:hidden;margin-bottom:12px;}.cb-banner h3{margin:0 0 8px;font-size:16px!important;line-height:1.4!important;font-weight:600;color:#0f172a;word-break:break-word;overflow-wrap:anywhere;max-width:100%;}#cb-initial-banner.cb-banner h3{font-size:16px!important;font-weight:600;color:rgba(0,0,0,0.8);padding-right:36px;}#cb-initial-banner.cb-banner .cb-banner-body > p{color:rgba(0,0,0,0.8);}.cb-gdpr-accordion{margin-top:4px;margin-bottom:4px;}.cb-gdpr-cat-label{color:#0f172a;}.cb-gdpr-cat-desc{color:#64748b;}.cb-banner p{margin:0 0 12px;font-size:14px!important;line-height:1.5!important;color:#334155;word-break:break-word;overflow-wrap:anywhere;max-width:100%;}.cb-banner-footer{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;align-items:center;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex:0 0 auto;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-wrap:wrap;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 auto;min-width:80px;}"+(p&&"banner"===p.bannerLayoutVisual?"#cb-initial-banner.cb-banner .cb-banner-footer{flex-wrap:nowrap;justify-content:flex-end;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto;width:auto;min-width:80px;max-width:140px;}":"")+".cb-banner button{padding:12px 32px;border-radius:0.375rem;cursor:pointer;font-size:14px;font-weight:600;border:1px solid #e2e8f0;transition:opacity 0.2s;white-space:normal;word-break:break-word;min-width:0;text-align:center;}@media (max-width:660px){#cb-initial-banner.cb-banner{width:100vw!important;max-width:100vw!important;left:0!important;right:0!important;bottom:0!important;transform:none!important;border-radius:0!important;border-left:none!important;border-right:none!important;border-bottom:none!important;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}#cb-preferences-banner.cb-banner{width:calc(100vw - 32px)!important;max-width:calc(100vw - 32px)!important;padding:20px!important;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-preferences-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}}@media (max-width:350px){#cb-initial-banner.cb-banner,#cb-preferences-banner.cb-banner{font-size:12px!important;}#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-size:13px!important;}#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,.cb-gdpr-cat-desc{font-size:12px!important;}#cb-initial-banner.cb-banner .cb-banner-footer button,#cb-preferences-banner.cb-banner .cb-banner-footer button{font-size:12px!important;padding:10px 16px!important;}}.cb-banner button:hover:not(.cb-pref-toggle-track){opacity:0.8;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track{display:block !important;width:40px !important;min-width:40px !important;height:22px !important;padding:0 !important;margin:0 !important;border:none !important;border-radius:11px !important;background:#d1d5db !important;box-shadow:none !important;flex-shrink:0 !important;position:relative !important;overflow:visible !important;box-sizing:border-box !important;cursor:pointer !important;appearance:none !important;-webkit-appearance:none !important;font-size:0 !important;line-height:0 !important;opacity:1 !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track[aria-checked='true']{background:#22c55e !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track::after{content:'' !important;position:absolute !important;top:2px !important;left:2px !important;width:18px !important;height:18px !important;border-radius:50% !important;background:#ffffff !important;box-shadow:0 1px 3px rgba(0,0,0,.2) !important;pointer-events:none !important;transition:left .15s ease !important;z-index:2 !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track[aria-checked='true']::after{left:20px !important;}.cb-banner button#cb-accept-all-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}.cb-banner button#cb-reject-all-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}.cb-banner button#cb-preferences-btn,.cb-banner button#cb-ccpa-donotsell-link{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}.cb-banner button#cb-prefs-reject-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}.cb-banner label{display:block;margin-bottom:6px;font-size:11px;}.cb-banner input[type='checkbox']{margin-right:6px;}.cb-banner a{color:#007aff !important;text-decoration:underline !important;font-size:inherit !important;display:inline !important;font-weight:inherit !important;white-space:normal;}@keyframes slideInFromLeft{from{transform:translateX(-100%);opacity:0;}to{transform:translateX(0);opacity:1;}}@keyframes slideInFromRight{from{transform:translateX(100%);opacity:0;}to{transform:translateX(0);opacity:1;}}@keyframes slideInFromTop{from{transform:translateY(-100%);opacity:0;}to{transform:translateY(0);opacity:1;}}@keyframes slideInFromBottom{from{transform:translateY(100%);opacity:0;}to{transform:translateY(0);opacity:1;}}@keyframes fadeIn{from{opacity:0;}to{opacity:1;}}@keyframes prefsSlideInFromLeft{from{transform:translate(-120%,-50%);opacity:0;}to{transform:translate(0,-50%);opacity:1;}}@keyframes prefsSlideInFromRight{from{transform:translate(120%,-50%);opacity:0;}to{transform:translate(0,-50%);opacity:1;}}@keyframes prefsSlideCenterFromBottom{from{transform:translate(-50%,calc(-50% + 28px));opacity:0;}to{transform:translate(-50%,-50%);opacity:1;}}@keyframes prefsSlideCenterFromTop{from{transform:translate(-50%,calc(-50% - 28px));opacity:0;}to{transform:translate(-50%,-50%);opacity:1;}}@keyframes zoomIn{from{transform:scale(0.85);opacity:0;}to{transform:scale(1);opacity:1;}}@keyframes cbInitialCenterSlideFromBottom{from{transform:translate(-50%,100%);opacity:0;}to{transform:translate(-50%,0);opacity:1;}}@keyframes cbInitialCenterSlideFromTop{from{transform:translate(-50%,-100%);opacity:0;}to{transform:translate(-50%,0);opacity:1;}}@keyframes cbInitialCenterZoomIn{from{transform:translateX(-50%) scale(0.85);opacity:0;}to{transform:translateX(-50%) scale(1);opacity:1;}}.cb-banner-animate-initial-center-bottom{animation:cbInitialCenterSlideFromBottom 0.35s ease-out;}.cb-banner-animate-initial-center-top{animation:cbInitialCenterSlideFromTop 0.35s ease-out;}.cb-banner-animate-initial-center-zoom{animation:cbInitialCenterZoomIn 0.3s ease-out;}@keyframes prefsZoomIn{from{transform:translate(-50%,-50%) scale(0.85);opacity:0;}to{transform:translate(-50%,-50%) scale(1);opacity:1;}}.cb-banner-animate-left{animation:slideInFromLeft 0.4s ease-out;}.cb-banner-animate-right{animation:slideInFromRight 0.4s ease-out;}.cb-banner-animate-top{animation:slideInFromTop 0.4s ease-out;}.cb-banner-animate-bottom{animation:slideInFromBottom 0.4s ease-out;}.cb-banner-animate-fade{animation:fadeIn 0.3s ease-out;}.cb-banner-animate-prefs-left{animation:prefsSlideInFromLeft 0.4s ease-out;}.cb-banner-animate-prefs-right{animation:prefsSlideInFromRight 0.4s ease-out;}.cb-banner-animate-center-top{animation:prefsSlideCenterFromTop 0.35s ease-out;}.cb-banner-animate-center-bottom{animation:prefsSlideCenterFromBottom 0.35s ease-out;}.cb-banner-animate-zoom-in{animation:zoomIn 0.3s ease-out;}.cb-banner-animate-prefs-zoom-in{animation:prefsZoomIn 0.3s ease-out;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-save-prefs-btn{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}#cb-initial-banner.cb-banner .cb-banner-footer{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;flex-shrink:0;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 auto;min-width:80px;}#cb-initial-banner.cb-banner #cb-preferences-btn{background:#ffffff!important;color:#334155!important;border:1px solid #334155!important;font-size:13px!important;padding:10px 12px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-reject-all-btn,#cb-initial-banner.cb-banner #cb-accept-all-btn{background:#007aff!important;color:#ffffff!important;border-color:#007aff!important;font-size:13px!important;padding:10px 12px!important;font-weight:600!important;}#cb-floating-trigger{position:fixed;z-index:2147483646!important;width:56px;height:56px;border:none;border-radius:9999px;background:transparent;cursor:pointer;padding:0;box-shadow:none;}#cb-floating-trigger img,#cb-floating-trigger svg{display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;}#cb-preferences-banner.cb-banner .cb-brand-footer{flex:0 0 auto;box-sizing:border-box;height:44px;max-height:50px;width:calc(100% + 40px);margin:16px -20px -20px;padding:0 16px;display:flex;align-items:center;justify-content:flex-end;gap:8px;background:#F7F8FA !important;background-color:#F7F8FA !important;border-top:1px solid #EFF1F4 !important;}#cb-preferences-banner.cb-banner .cb-brand-footer a{display:inline-flex !important;align-items:center;gap:7px;text-decoration:none !important;background:transparent !important;color:#A2ABBA !important;font-weight:500 !important;border-radius:6px;padding:4px 6px;margin-right:-6px;transition:opacity .15s ease;}#cb-preferences-banner.cb-banner .cb-brand-footer a:hover{opacity:.7;}#cb-preferences-banner.cb-banner .cb-brand-credit{font-size:11px !important;font-weight:500 !important;letter-spacing:.02em;line-height:1;white-space:nowrap;color:#A2ABBA !important;}#cb-preferences-banner.cb-banner .cb-brand-mark{display:flex;align-items:center;opacity:.85;}#cb-preferences-banner.cb-banner .cb-brand-mark svg{display:block;height:9.75px;width:auto;}";e.styles&&(D=D+"\\n"+e.styles);var F="cb-banner-animate-left cb-banner-animate-right cb-banner-animate-top cb-banner-animate-bottom cb-banner-animate-fade cb-banner-animate-prefs-left cb-banner-animate-prefs-right cb-banner-animate-center-top cb-banner-animate-center-bottom cb-banner-animate-zoom-in cb-banner-animate-prefs-zoom-in";Ue();"complete"===document.readyState||"interactive"===document.readyState?ut():window.addEventListener("DOMContentLoaded",ut)}var Z={analytics:["_ga","_ga_*","_gid","_gat","_gat_*","_gac_*","_hjid","_hjSessionUser_*","_hjSession_*","_hjAbsoluteSessionInProgress","_clck","_clsk"],marketing:["_fbp","_fbc","_gcl_au","_gcl_ls","_gcl_aw","_ttp","tt_webid_v2","_pin_unauth","_pinterest_ct_ua","li_sugr","bcookie","bscookie","lidc","_uetsid","_uetvid","IDE","test_cookie","fr"],preferences:[]}}function R(){if(C){var e=(navigator.language||navigator.userLanguage||"en").split("-")[0].toLowerCase();return TRANSLATIONS[e]?e:"en"}return x}function W(e){var t=R();var n=TRANSLATIONS[t]||TRANSLATIONS.en;var r=null!=n[e]?n[e]:null!=TRANSLATIONS.en[e]?TRANSLATIONS.en[e]:"";return""===r&&"title"===e?"We value your privacy":""===r&&"description"===e?"We use cookies to provide you with the best possible experience. They also allow us to analyze user behavior in order to constantly improve the website for you.":r}function U(e){var t=R();var n=(TRANSLATIONS[t]||TRANSLATIONS.en)[e];n&&n.length>80&&(n=TRANSLATIONS.en[e]||e);return n||TRANSLATIONS.en[e]||e}function q(e,t){var n=null==e?"":String(e);return n.length>t?n.slice(0,t):n}function J(e,t){return q(W(e),t)}function Y(){try{var e=R();var t=TRANSLATIONS.config||{};var n=null!=t.cookiePolicyLinkEnabled?t.cookiePolicyLinkEnabled:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).cookiePolicyLinkEnabled;return!1!==n&&"0"!==n&&"false"!==String(n).toLowerCase()}catch(e){return!0}}function X(){try{var e=R();var t=TRANSLATIONS.config||{};var n=null!=t.closeButtonEnabled?t.closeButtonEnabled:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).closeButtonEnabled;return!0===n||1===n||!1!==n&&"0"!==n&&"false"!==String(n).toLowerCase()}catch(e){return!0}}function $(){try{var e=R();var t=TRANSLATIONS.config||{};var n=null!=t.rejectButtonEnabled?t.rejectButtonEnabled:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).rejectButtonEnabled;return!0===n||1===n||!1!==n&&"0"!==n&&"false"!==String(n).toLowerCase()}catch(e){return!0}}function G(){try{var e=R();var t=TRANSLATIONS.config||{};var n=null!=t.customizeButtonEnabled?t.customizeButtonEnabled:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).customizeButtonEnabled;return!0===n||1===n||!1!==n&&"0"!==n&&"false"!==String(n).toLowerCase()}catch(e){return!0}}function K(e){var t=String(e||"bottom-left").trim().toLowerCase().replace(/_/g,"-");return"bottom-right"===t||"right"===t?"bottom-right":"bottom"===t||"bottom-center"===t?"bottom":"bottom-left"}function Q(e){if(e){e.style.marginLeft="";e.style.marginRight="";e.style.paddingLeft="";e.style.paddingRight="";if(ot()){var t=f||"box";var n=K(p&&p.position);var r=st();var a="56px";"banner"!==t?"left"===r?"bottom-center"!==t&&"popup"!==t&&"bottom"!==n||(e.style.marginLeft=a):"bottom-center"!==t&&"popup"!==t&&"bottom"!==n||(e.style.marginRight=a):"left"===r?e.style.paddingLeft=a:e.style.paddingRight=a}}}function ee(e){if(!e)return!1;var t=f||"box";var n=K(p&&p.position);e.style.left="";e.style.right="";e.style.top="";e.style.bottom="";e.style.transform="";e.style.width="";e.style.maxWidth="";e.style.marginLeft="";e.style.marginRight="";e.style.paddingLeft="";e.style.paddingRight="";if("banner"===t){e.style.left="0";e.style.right="0";e.style.bottom="0";e.style.transform="none";e.style.width="100%";e.style.maxWidth="none";e.setAttribute("data-cb-initial-centered","0");Q(e);return!1}if(window.innerWidth<=660){e.style.setProperty("left","0","important");e.style.setProperty("right","0","important");e.style.setProperty("bottom","0","important");e.style.setProperty("transform","none","important");e.style.setProperty("width","100vw","important");e.style.setProperty("max-width","100vw","important");e.style.setProperty("min-width","0","important");e.style.setProperty("border-radius","0","important");e.style.setProperty("border-left","none","important");e.style.setProperty("border-right","none","important");e.style.setProperty("border-bottom","none","important");e.setAttribute("data-cb-initial-centered","0");return!1}if("bottom-center"===t||"popup"===t||"bottom"===n){e.style.bottom="32px";e.style.left="50%";e.style.transform="translateX(-50%)";e.setAttribute("data-cb-initial-centered","1");Q(e);return!0}e.style.bottom="32px";"bottom-right"===n?e.style.right="32px":e.style.left="32px";e.style.transform="none";e.setAttribute("data-cb-initial-centered","0");Q(e);return!1}function te(e){var t=e;var n=t.indexOf("#");n>=0&&(t=t.slice(0,n));(n=t.indexOf("?"))>=0&&(t=t.slice(0,n));(n=t.indexOf("/"))>=0&&(t=t.slice(0,n));return t.trim()}function ne(e){var t=e.lastIndexOf(".");if(t<0)return!1;var n=e.slice(t).toLowerCase();return".js"===n||".mjs"===n||".css"===n||".png"===n||".jpg"===n||".jpeg"===n||".gif"===n||".svg"===n||".webp"===n||".pdf"===n||".json"===n||".xml"===n||".ico"===n||".woff"===n||".woff2"===n}function re(e){if(!e||"string"!=typeof e)return"";var t=e.trim();if(!t)return"";var n=t.toLowerCase();if(0===n.indexOf("mailto:")||0===n.indexOf("tel:"))return t;if(0===n.indexOf("http://")||0===n.indexOf("https://"))return t;if(0===t.indexOf("//"))return"https:"+t;if("/"===t.charAt(0)||0===t.indexOf("./")||0===t.indexOf("../")){try{if("undefined"!=typeof window&&window.location)return new URL(t,window.location.href).href}catch(e){}return t}var r=te(t);if(r.indexOf(".")>0&&!ne(r)){for(;t.length>0&&"/"===t.charAt(0);)t=t.slice(1);return"https://"+t}try{if("undefined"!=typeof window&&window.location)return new URL(t,window.location.href).href}catch(e){}return t}function ae(e,t){var n=re(t);if(n){e.href=n;e.target="_blank";e.rel="noopener noreferrer";e.addEventListener("click",function(e){e.stopPropagation&&e.stopPropagation();e.preventDefault&&e.preventDefault();try{window.open(n,"_blank","noopener,noreferrer")}catch(e){}},!0)}}function ie(){try{var e=localStorage.getItem(L);var t=e?JSON.parse(e):{accepted:!1,timestamp:null};if(!t||!t.accepted)return t||{accepted:!1,timestamp:null};var n=Date.now();var r=24*A*60*60*1e3;var a=t.expiresAt?new Date(t.expiresAt).getTime():t.timestamp?new Date(t.timestamp).getTime()+r:0;return a>0&&n>a?{accepted:!1,timestamp:null}:t}catch(e){return{accepted:!1,timestamp:null}}}function oe(e){try{var t=24*A*60*60*1e3;e.expiresAt=e.expiresAt||new Date(Date.now()+t).toISOString();localStorage.setItem(L,JSON.stringify(e));localStorage.removeItem(L+"_closed")}catch(e){}I=e;try{je()}catch(e){}}function ce(e){try{var t={analytics:!!e.analytics,preferences:!!e.preferences,marketing:!!e.marketing};var n=btoa(JSON.stringify(t));localStorage.setItem(H,n)}catch(e){}}function se(){try{var e=localStorage.getItem(H);if(!e)return null;var t=JSON.parse(atob(e));return t&&"object"==typeof t?{analytics:!!t.analytics,preferences:!!t.preferences,marketing:!!t.marketing}:null}catch(e){return null}}function le(e,t){if(a&&c){t=t||{};var n=e&&e.expiresAt||t.expiresAt||new Date(Date.now()+24*A*60*60*1e3).toISOString();var r={siteId:a,regulation:"gdpr"===i?"gdpr":"ccpa",bannerType:i,consentMethod:t.consentMethod||"banner",status:t.status||"given",expiresAt:n,consent:e};try{fetch(c+"/api/consent",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(r)}).catch(function(e){})}catch(e){}}}function de(){try{var e=localStorage.getItem(T);if(!e)return!1;var t=JSON.parse(e);var n=new Date;var r=n.getFullYear()+"-"+String(n.getMonth()+1).padStart(2,"0");return t.yearMonth===r&&!0===t.overLimit}catch(e){return!1}}function pe(e){try{localStorage.setItem(T,JSON.stringify({overLimit:!0,yearMonth:e}))}catch(e){}}function be(){if(a&&c&&!de())try{var e={siteId:a,pageUrl:"undefined"!=typeof window&&window.location?window.location.href:null};fetch(c+"/api/pageview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(e),keepalive:!0}).then(function(e){return e.json()}).then(function(e){if(e&&e.overLimit){var t=new Date;pe(e.yearMonth||t.getFullYear()+"-"+String(t.getMonth()+1).padStart(2,"0"))}}).catch(function(e){})}catch(e){}}function fe(){try{var e="undefined"!=typeof document&&document.cookie?document.cookie:"";return e?e.split(";").map(function(e){return e.trim()}).filter(Boolean):[]}catch(e){return[]}}function me(){try{var e=[];var t=document.getElementsByTagName("script");for(var n=0;n<t.length;n++){var r=t[n].src;r&&-1===r.indexOf("consentbit")&&-1===r.indexOf("client_data")&&e.push(r)}return e}catch(e){return[]}}function ge(e){try{var t=new URL(e).hostname;return-1!==t.indexOf("google-analytics.com")||-1!==e.indexOf("gtag/js")||-1!==t.indexOf("googletagmanager.com")?"analytics":-1!==t.indexOf("facebook.com")||-1!==t.indexOf("fbcdn.net")||-1!==t.indexOf("doubleclick.net")||0===t.indexOf("ads.")?"marketing":-1!==t.indexOf("hotjar.com")||-1!==t.indexOf("intercom.io")||-1!==t.indexOf("fullstory.com")?"behavioral":"uncategorized"}catch(e){return"uncategorized"}}function ue(){var e={};var t=[];var n=document.scripts;for(var r=0;r<n.length;r++){var a=n[r];if(a.src&&!e[a.src]){e[a.src]=!0;t.push(a)}}return t}function ye(e){if(!e||"string"!=typeof e)return!1;var t=e.toLowerCase();return-1!==t.indexOf("googletagmanager.com/gtag/js")||-1!==t.indexOf("googletagmanager.com/gtm.js")||-1!==t.indexOf("google-analytics.com")||-1!==t.indexOf("googlesyndication.com")||-1!==t.indexOf("googleadservices.com")||-1!==t.indexOf("googletagservices.com")||-1!==t.indexOf("securepubads.g.doubleclick.net")}function ve(){var e=document.scripts;for(var t=0;t<e.length;t++){var n=e[t];var r;if(ye(n.src||n.getAttribute("data-cb-blocked-src")||""))return!0}return!(!window.adsbygoogle&&!window.googletag)}function he(){window.dataLayer=window.dataLayer||[];window.gtag||(window.gtag=function(){dataLayer.push(arguments)});return window.gtag}function xe(){var e=he();e("set","ads_data_redaction",!0);e("set","url_passthrough",!0)}function Ce(e){if(!e||"string"!=typeof e)return!1;var t=e.toLowerCase();return-1!==t.indexOf("clarity.ms")||-1!==t.indexOf("clarity.microsoft.com")}function we(e,t){return!("analytics"!==e||!Oe(t))||l&&Ce(t)}function ke(){window.clarity||(window.clarity=function(){(window.clarity.q=window.clarity.q||[]).push(arguments)});return window.clarity}function _e(e){if(l)try{var t=e||{};var n=t.marketing?"granted":"denied";var r=t.analytics?"granted":"denied";var a=n+"|"+r;if(window.__cbClaritySignal===a)return;window.__cbClaritySignal=a;ke()("consentv2",{source:d,ad_Storage:n,analytics_Storage:r})}catch(e){}}function Ee(e,t){try{var n=e||{};window.dataLayer=window.dataLayer||[];window.dataLayer.push({event:"consentbit_consent_update",consentbit_regulation:i,consentbit_source:String(t||"banner").replace(/[[]]/g,"").toLowerCase(),consentbit_essential:!0,consentbit_analytics:!!n.analytics,consentbit_marketing:!!n.marketing,consentbit_preferences:!!n.preferences})}catch(e){}}function Se(e){return"analytics"===e||"marketing"===e||"behavioral"===e||"advertisement"===e||"functional"===e||"performance"===e}function Oe(e){if(!e||"string"!=typeof e)return!1;var t=e.toLowerCase();return-1!==t.indexOf("googletagmanager.com/gtag/js")||-1!==t.indexOf("googletagmanager.com/gtm.js")||-1!==t.indexOf("google-analytics.com")}function Be(e){var t=e;"behavioral"===t&&(t="analytics");if("essential"===t)return!0;if("ccpa"===i)return!(I&&I.accepted&&I.ccpa&&I.ccpa.doNotSell&&Se(t));if(!I||!I.accepted)return!1;var n=I.categories||{};return"analytics"===t?!!n.analytics:"marketing"===t||"advertisement"===t?!!n.marketing:"preferences"!==t&&"functional"!==t&&"performance"!==t||!!n.preferences}function Le(e){if(!e)return!1;var t=String(e).split(",");for(var n=0;n<t.length;n++){var r=String(t[n]||"").toLowerCase().trim();if(r){"personalization"===r&&(r="preferences");if(!Be(r))return!1}}return!0}function Ae(e){if(!e)return null;var t=String(e).toLowerCase().trim();return"analytics"===t||"marketing"===t||"behavioral"===t||"preferences"===t||"essential"===t?["essential"===t?"essential":t]:t.indexOf("necessary")>=0||t.indexOf("essential")>=0?["essential"]:t.indexOf("functional")>=0||t.indexOf("preference")>=0?["preferences"]:t.indexOf("analytics")>=0||t.indexOf("performance")>=0||t.indexOf("statistics")>=0?["analytics"]:t.indexOf("advertisement")>=0||t.indexOf("marketing")>=0||t.indexOf("ads")>=0||t.indexOf("social")>=0?["marketing"]:t.indexOf("other")>=0?["analytics"]:null}function Ie(e,t){if(t&&t.getAttribute){var n=Ae(t.getAttribute("data-consentbit"));if(n)return n;var r=t.getAttribute("data-consentbit-category");r||window.__CB_WEBFLOW_MODE__||(r=t.getAttribute("data-category"));if(r){var a=[];var i=String(r).split(",");for(var o=0;o<i.length;o++){var c=String(i[o]||"").toLowerCase().trim();if(c){var s=Ae("personalization"===c?"preferences":c);if(s)for(var l=0;l<s.length;l++)-1===a.indexOf(s[l])&&a.push(s[l])}}if(a.length)return a}var d=Ae(t.getAttribute("data-cookieyes"));if(d)return d}if(e&&j.length)for(var p=0;p<j.length;p++){var b=j[p];if(b&&b.pattern)try{if(new RegExp(b.pattern,"i").test(e))return b.categories&&b.categories.length?b.categories.slice():["analytics"]}catch(e){}}if(e&&M.length)for(var f=0;f<M.length;f++){var m=M[f];if(m&&m.scriptUrlPattern)try{if(new RegExp(m.scriptUrlPattern,"i").test(e))return[m.category||"uncategorized"]}catch(e){}}return[]}function He(e,t){if(z)return!1;if(!e||"string"!=typeof e)return!1;var n=e.toLowerCase();if(-1!==n.indexOf("consentbit")||-1!==n.indexOf("client_data"))return!1;var r=Ie(e,t);if(!r||0===r.length)return!1;if("ccpa"===i)return!!(I&&I.accepted&&I.ccpa&&I.ccpa.doNotSell);for(var a=0;a<r.length;a++){var o=r[a];if(Se(o)&&!we(o,e)&&!Be(o))return!0}return!1}function Te(e){return e&&"string"==typeof e?e.indexOf("fbq(")>=0||e.indexOf("fbq (")>=0||e.indexOf("connect.facebook.net")>=0||e.indexOf("ttq(")>=0||e.indexOf("ttq (")>=0||e.indexOf("analytics.tiktok.com")>=0||e.indexOf("pintrk(")>=0||e.indexOf("pintrk (")>=0||e.indexOf("ct.pinterest.com")>=0||e.indexOf("twq(")>=0||e.indexOf("twq (")>=0||e.indexOf("ads-twitter.com")>=0||e.indexOf("_linkedin_partner_id")>=0||e.indexOf("lintrk(")>=0||e.indexOf("lintrk (")>=0||e.indexOf("bat.bing.com")>=0?"marketing":e.indexOf("hotjar.com")>=0?"analytics":e.indexOf("window.clarity")>=0||e.indexOf("clarity.ms")>=0?l?null:"analytics":null:null}function Pe(e){if(e&&"SCRIPT"===e.nodeName&&(!e.getAttribute||"javascript/blocked"!==e.getAttribute("type"))){var t=e.getAttribute&&e.getAttribute("src")||e.src||"";if(t){if(He(t,e))try{e.setAttribute("data-cb-blocked-src",t);e.setAttribute("type","javascript/blocked");e.removeAttribute("src")}catch(e){}}else{var n=e.getAttribute&&(e.getAttribute("data-consentbit-category")||!window.__CB_WEBFLOW_MODE__&&e.getAttribute("data-category"))||Te(e.textContent||"");if(n&&!Be(n))try{e.__ci=e.textContent||"";var r=Object.getOwnPropertyDescriptor(Node.prototype,"textContent");r&&r.set?r.set.call(e,""):e.textContent="";e.setAttribute("type","javascript/blocked");e.setAttribute("data-cb-inline","1")}catch(e){}}}}function ze(e){if(e&&!e.__cp){e.__cp=!0;try{Object.defineProperty(e,"src",{configurable:!0,enumerable:!0,get:function(){return e.getAttribute("src")||""},set:function(t){if(He(t,e)){e.setAttribute("data-cb-blocked-src",t);e.setAttribute("type","javascript/blocked");e.removeAttribute("src")}else e.setAttribute("src",t)}})}catch(e){}try{Object.defineProperty(e,"type",{configurable:!0,enumerable:!0,get:function(){return e.getAttribute("type")||""},set:function(t){var n=t;He(e.getAttribute("src")||e.src||"",e)&&(n="javascript/blocked");e.setAttribute("type",n)}})}catch(e){}try{var t=Object.getOwnPropertyDescriptor(Node.prototype,"textContent");if(t&&t.set){var n=t.set;Object.defineProperty(e,"textContent",{configurable:!0,get:function(){return t.get?t.get.call(e):""},set:function(t){var r=e.getAttribute&&(e.getAttribute("data-consentbit-category")||!window.__CB_WEBFLOW_MODE__&&e.getAttribute("data-category"))||Te(t);if(r&&!Be(r)){e.__ci=t;e.setAttribute("type","javascript/blocked");e.setAttribute("data-cb-inline","1")}else n.call(e,t)}})}}catch(e){}}}function Ne(e){if(e&&1===e.nodeType)if("SCRIPT"!==e.nodeName){if(e.querySelectorAll){var t=e.querySelectorAll("script[src]");for(var n=0;n<t.length;n++)Pe(t[n])}}else Pe(e)}function je(e){if(window.__CB_WEBFLOW_MODE__)We(e||I&&I.categories||{analytics:!0,marketing:!0,preferences:!0,essential:!0});else{var t=document.querySelectorAll('script[type="javascript/blocked"][data-cb-blocked-src]');for(var n=0;n<t.length;n++){var r=t[n];var a=r.getAttribute("data-cb-blocked-src");if(a&&!He(a,r)){z=!0;try{var i=document.createElement("script");i.async=r.hasAttribute("async");i.defer=r.hasAttribute("defer");i.crossOrigin=r.crossOrigin||"";i.integrity=r.integrity||"";i.referrerPolicy=r.referrerPolicy||"";r.id&&(i.id=r.id);i.src=a;var o=r.attributes;for(var c=0;c<o.length;c++){var s=o[c].name;"src"!==s&&"type"!==s&&"data-cb-blocked-src"!==s&&i.setAttribute(s,o[c].value)}r.parentNode?r.parentNode.replaceChild(i,r):document.head.appendChild(i)}catch(e){}finally{z=!1}}}var l=document.querySelectorAll('script[type="text/plain"][data-consentbit-category],script[type="text/plain"][data-category]');for(var d=0;d<l.length;d++){var p=l[d];var b=p.getAttribute("data-consentbit-category")||p.getAttribute("data-category");if(b&&Le(b)){z=!0;try{var f=document.createElement("script");f.async=p.hasAttribute("async");f.defer=p.hasAttribute("defer");var m=p.getAttribute("src")||"";m?f.src=m:f.textContent=p.textContent;var g=p.attributes;for(var u=0;u<g.length;u++){var y=g[u].name;"type"!==y&&"src"!==y&&"data-consentbit-category"!==y&&"data-category"!==y&&f.setAttribute(y,g[u].value)}p.parentNode?p.parentNode.replaceChild(f,p):document.head.appendChild(f)}catch(e){}finally{z=!1}}}var v=document.querySelectorAll('script[type="javascript/blocked"][data-cb-inline="1"]');for(var h=0;h<v.length;h++){var x=v[h];var C=x.__ci||"";var w=x.getAttribute&&(x.getAttribute("data-consentbit-category")||x.getAttribute("data-category"))||Te(C);if(w&&Le(w)){z=!0;try{var k=document.createElement("script");C&&(k.textContent=C);x.parentNode?x.parentNode.replaceChild(k,x):document.head.appendChild(k)}catch(e){}finally{z=!1}}}}}function Me(e){var t=window.location.hostname;var n=0===t.indexOf("www.")?t.slice(4):t;var r=[null,t,"."+t,n,"."+n,"www."+n,".www."+n];var a=["/",window.location.pathname];var i="Thu, 01 Jan 1970 00:00:00 GMT";for(var o=0;o<r.length;o++)for(var c=0;c<a.length;c++){var s=e+"=; expires="+i+"; path="+a[c];r[o]&&(s+="; domain="+r[o]);try{document.cookie=s}catch(e){}}}function Ve(e){var t=e.indexOf("*");var n=t>=0?e.slice(0,t):null;var r=document.cookie.split(";").map(function(e){return e.trim().split("=")[0]});return n?r.filter(function(e){return e.startsWith(n)}):r.indexOf(e)>=0?[e]:[]}function De(e){for(var t in Z)if(e.indexOf(t)>=0){var n=Z[t];for(var r=0;r<n.length;r++){var a=Ve(n[r]);for(var i=0;i<a.length;i++)Me(a[i])}}for(var o=0;o<M.length;o++){var c=M[o];!c||!c.category||e.indexOf(c.category)<0||c.name&&Me(c.name)}}function Fe(e){if(!e||"string"!=typeof e)return null;var t=e.toLowerCase();if(0!==t.indexOf("http"))return null;for(var n=0;n<V.length;n++)if(-1!==t.indexOf(V[n].domain))return V[n].category;for(var r=0;r<M.length;r++){var a=M[r];if(a&&a.scriptUrlPattern)try{if(new RegExp(a.scriptUrlPattern,"i").test(e))return a.category||"marketing"}catch(e){}}return null}function Ze(e){if(!e||"string"!=typeof e)return!1;var t=e.toLowerCase();if(-1!==t.indexOf("consentbit")||-1!==t.indexOf("client_data"))return!1;var n=Fe(e);return!(!n||!Se(n)||("ccpa"===i?!(I&&I.accepted&&I.ccpa&&I.ccpa.doNotSell):I&&I.accepted&&Be(n)))}function Re(e){if(e&&!e.__ip){e.__ip=!0;try{Object.defineProperty(e,"src",{configurable:!0,enumerable:!0,get:function(){return e.getAttribute("src")||""},set:function(t){if(Ze(t)){e.setAttribute("data-cb-blocked-src",t);e.removeAttribute("src")}else e.setAttribute("src",t)}})}catch(e){}}}function We(e){if(window.__CB_WEBFLOW_MODE__){var t=e||{};window.userConsent=t;try{document.dispatchEvent(new CustomEvent("consentUpdated",{detail:t,bubbles:!0}))}catch(e){}}}function Ue(){if(!window.__CB_WEBFLOW_MODE__&&!window.__ce){window.__ce=!0;try{N=document.createElement.bind(document)}catch(e){N=document.createElement}document.createElement=function(e){var t=N(e);var n=String(e||"").toLowerCase();"script"===n?ze(t):"iframe"===n&&Re(t);return t};var e=new MutationObserver(function(e){for(var t=0;t<e.length;t++){var n=e[t];if("childList"===n.type){var r=n.addedNodes;for(var a=0;a<r.length;a++)Ne(r[a])}else"attributes"===n.type&&"src"===n.attributeName&&n.target&&"SCRIPT"===n.target.nodeName&&Pe(n.target)}});try{e.observe(document.documentElement,{childList:!0,subtree:!0,attributes:!0,attributeFilter:["src"]})}catch(t){e.observe(document.documentElement,{childList:!0,subtree:!0})}window.__cm=e}}function qe(){if(window.__CB_WEBFLOW_MODE__)try{document.dispatchEvent(new CustomEvent("cbBlockScripts",{detail:{},bubbles:!0}))}catch(e){}else{var e=ue();for(var t=0;t<e.length;t++){var n=e[t];var r=n.src;if("javascript/blocked"!==n.getAttribute("type")){var a=Ie(r,n);var i=a.length>0?a[0]:"uncategorized";if(Se(i))if("analytics"===i&&s&&Oe(r));else if(l&&Ce(r));else if(Be(i));else try{n.setAttribute("data-cb-blocked-src",r);n.setAttribute("type","javascript/blocked");n.removeAttribute("src")}catch(e){}}}}}function Je(){if(P.length){var e=[];z=!0;try{for(var t=0;t<P.length;t++){var n=P[t];var r=n.cats||(n.category?[n.category]:[]);if(0===r.length||r.every(function(e){return!Se(e)||Be(e)})){var a=document.createElement("script");a.src=n.src;var i=n.attrs;for(var o in i)Object.prototype.hasOwnProperty.call(i,o)&&"src"!==o&&a.setAttribute(o,i[o]);document.head.appendChild(a)}else e.push(n)}}finally{z=!1}P=e}}function Ye(){if(s){z=!0;try{var e=!1;var t=document.scripts;for(var n=0;n<t.length;n++){var r=t[n].src||"";if(-1!==r.indexOf("googletagmanager.com/gtag/js")||-1!==r.indexOf("googletagmanager.com/gtm.js")||-1!==r.indexOf("google-analytics.com")){e=!0;break}}if(!e){var a=document.createElement("script");a.async=!0;a.src="https://www.googletagmanager.com/gtag/js?id="+s;document.head.appendChild(a)}window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)}window.gtag=gtag;xe();gtag("consent","default",{analytics_storage:"denied",ad_storage:"denied",ad_user_data:"denied",ad_personalization:"denied",functionality_storage:"denied",personalization_storage:"denied",security_storage:"granted",wait_for_update:500});gtag("js",new Date);gtag("config",s,{anonymize_ip:!0});gtag("event","page_view",{page_path:window.location.pathname,page_title:document.title||""})}finally{z=!1}}}function Xe(e,t){var n={analytics_storage:e.analytics?"granted":"denied",ad_storage:e.marketing?"granted":"denied",ad_user_data:e.marketing?"granted":"denied",ad_personalization:e.marketing?"granted":"denied",functionality_storage:e.preferences?"granted":"denied",personalization_storage:e.preferences?"granted":"denied"};he()("consent","update",n);_e(e);Ee(e,t)}function $e(e){var t={analytics_storage:e?"denied":"granted",ad_storage:e?"denied":"granted",ad_user_data:e?"denied":"granted",ad_personalization:e?"denied":"granted",functionality_storage:e?"denied":"granted",personalization_storage:e?"denied":"granted"};he()("consent","update",t);var n={analytics:!e,marketing:!e,preferences:!e};_e(n);Ee(n,"ccpa");try{window.dataLayer.push({consentbit_do_not_sell:!!e})}catch(e){}}function Ge(e){var t=String(e).replace("#","");3===t.length&&(t=t[0]+t[0]+t[1]+t[1]+t[2]+t[2]);var n;var r;var a;return.299*(parseInt(t.substr(0,2),16)||0)+.587*(parseInt(t.substr(2,2),16)||0)+.114*(parseInt(t.substr(4,2),16)||0)>128?"#0f172a":"#ffffff"}function Ke(){if(!document.getElementById("cb-styles")){var e="#cb-preferences-banner .cb-banner-footer button#cb-save-prefs-btn{background-color:"+(p&&p.saveButtonBg?String(p.saveButtonBg):"#ffffff")+" !important;color:"+(p&&p.saveButtonText?String(p.saveButtonText):"#334155")+" !important;border-color:#e2e8f0 !important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{background-color:"+(p&&p.acceptButtonBg?String(p.acceptButtonBg):"#ffffff")+" !important;color:"+(p&&p.acceptButtonText?String(p.acceptButtonText):"#334155")+" !important;border-color:"+(p&&p.acceptButtonBg?String(p.acceptButtonBg):"#e2e8f0")+" !important;}";var t="";if(p&&p.backgroundColor){var n=String(p.backgroundColor);t="#cb-initial-banner.cb-banner,#cb-preferences-banner.cb-banner{background-color:"+n+" !important;}.cb-gdpr-accordion{background-color:"+n+" !important;}"}var r="";if(p&&p.headingColor){var a=String(p.headingColor);r="#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{color:"+a+" !important;}.cb-gdpr-cat-label{color:"+a+" !important;}"}var i="";p&&p.textColor&&(i="#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-gdpr-cat-desc{color:"+String(p.textColor)+" !important;}");var o="";if(p&&p.bannerFontWeight){var c=String(p.bannerFontWeight);o="#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-weight:"+c+" !important;}.cb-gdpr-cat-label{font-weight:"+c+" !important;}.cb-gdpr-cat-desc{font-weight:"+c+" !important;}.cb-banner p{font-weight:"+c+" !important;}"}var s="#cb-preferences-banner.cb-banner h3{padding-right:36px !important;}#cb-preferences-banner.cb-banner.cb-ccpa-prefs h3{padding-right:0 !important;padding-top:16px !important;margin-bottom:14px !important;}#cb-preferences-banner.cb-banner.cb-ccpa-prefs .cb-banner-body>p{margin-bottom:16px !important;}";var l="#cb-preferences-banner.cb-banner .cb-banner-body{padding-right:4px;}#cb-preferences-banner.cb-banner .cb-gdpr-accordion > div{margin-right:2px;}";if(!document.getElementById("cb-font-montserrat")){var d=document.createElement("link");d.id="cb-font-montserrat";d.rel="stylesheet";d.href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap";document.head.appendChild(d)}var b="";if(p&&p.acceptButtonBg){var f=String(p.acceptButtonBg);var m=p.acceptButtonText?String(p.acceptButtonText):"#ffffff";b=".cb-banner button#cb-accept-all-btn{background-color:"+f+" !important;color:"+m+" !important;}#cb-initial-banner.cb-banner #cb-accept-all-btn{background:"+f+" !important;color:"+m+" !important;}"}var g="";if(p&&p.acceptButtonBg){var u=String(p.acceptButtonBg);var y=p.acceptButtonText?String(p.acceptButtonText):"#ffffff";g=".cb-banner button#cb-reject-all-btn{background-color:"+u+" !important;color:"+y+" !important;}#cb-initial-banner.cb-banner #cb-reject-all-btn{background:"+u+" !important;color:"+y+" !important;}.cb-banner button#cb-prefs-reject-btn{background-color:"+u+" !important;color:"+y+" !important;}"}var v=document.createElement("style");v.id="cb-styles";v.type="text/css";var h="";p&&p.backgroundColor&&(h="#cb-close-initial-btn,#cb-close-prefs-btn{color:"+Ge(p.backgroundColor)+" !important;}");v.appendChild(document.createTextNode(D+"\\n"+e+"\\n"+t+"\\n"+r+"\\n"+i+"\\n"+o+"\\n"+s+"\\n"+l+"\\n"+b+"\\n"+g+"\\n"+h));document.head.appendChild(v)}}function Qe(e,t){if(X()){var n=document.createElement("button");n.type="button";n.id=t;n.setAttribute("aria-label","Close");n.textContent="\xD7";var r="#0f172a";p&&p.backgroundColor&&(r=Ge(p.backgroundColor));n.style.cssText="position:absolute;top:8px;right:24px;width:32px;height:32px;margin:0;padding:0;border:0;border-radius:6px;background:transparent;cursor:pointer;z-index:10;line-height:1;font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-size:22px;font-weight:400;color:"+r+";opacity:0.75;";e.appendChild(n)}}function et(e){if(X()){var t=document.createElement("button");t.type="button";t.id="cb-close-prefs-btn";t.setAttribute("aria-label","Close");t.textContent="\xD7";var n="#0f172a";p&&p.backgroundColor&&(n=Ge(p.backgroundColor));t.style.cssText="position:absolute;top:8px;right:30px;width:32px;height:32px;margin:0;padding:0;border:0;border-radius:6px;background:transparent;cursor:pointer;z-index:10;line-height:1;font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-size:22px;font-weight:400;color:"+n+";opacity:0.75;";e.appendChild(t)}}function tt(){return'<svg viewBox="0 0 735 90" role="img" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg"><g fill="#98A2B3"><path d="M234.357 89.2656C227.796 89.2656 222.045 87.925 217.107 85.2439C212.238 82.4923 208.464 78.647 205.782 73.7081C203.101 68.7692 201.761 62.9484 201.761 56.2456C201.761 49.5428 203.101 43.722 205.782 38.7831C208.464 33.8442 212.238 30.0342 217.107 27.3531C222.045 24.6014 227.796 23.2256 234.357 23.2256C241.131 23.2256 246.916 24.5661 251.714 27.2472C256.582 29.9284 260.322 33.7384 262.932 38.6772C265.614 43.6161 266.954 49.4722 266.954 56.2456C266.954 62.9484 265.614 68.8045 262.932 73.8139C260.322 78.7528 256.582 82.5628 251.714 85.2439C246.846 87.925 241.06 89.2656 234.357 89.2656ZM234.357 78.8939C240.919 78.8939 245.999 76.9184 249.597 72.9672C253.266 68.9456 255.101 63.3717 255.101 56.2456C255.101 49.0489 253.266 43.475 249.597 39.5239C245.999 35.5728 240.919 33.5972 234.357 33.5972C227.866 33.5972 222.786 35.6081 219.117 39.6298C215.449 43.5809 213.614 49.1195 213.614 56.2456C213.614 63.3717 215.449 68.9456 219.117 72.9672C222.786 76.9184 227.866 78.8939 234.357 78.8939Z"/><path d="M158.471 89.3708C149.793 89.3708 142.208 87.5717 135.717 83.9733C129.297 80.3044 124.322 75.1539 120.795 68.5217C117.267 61.8894 115.503 54.0931 115.503 45.1325C115.503 36.1719 117.267 28.4108 120.795 21.8492C124.322 15.2169 129.297 10.1017 135.717 6.50333C142.208 2.83444 149.793 1 158.471 1C165.103 1 170.96 2.09361 176.04 4.28083C181.19 6.3975 185.423 9.53722 188.74 13.7C192.056 17.7922 194.313 22.7664 195.513 28.6225H183.236C181.966 23.1897 179.179 18.9917 174.875 16.0283C170.642 13.065 165.174 11.5833 158.471 11.5833C148.805 11.5833 141.22 14.5819 135.717 20.5792C130.214 26.5764 127.462 34.7608 127.462 45.1325C127.462 55.5747 130.214 63.7944 135.717 69.7917C141.22 75.7183 148.805 78.6817 158.471 78.6817C165.174 78.6817 170.642 77.2353 174.875 74.3425C179.179 71.3792 181.966 67.1811 183.236 61.7483H195.513C194.313 67.5339 192.056 72.5081 188.74 76.6708C185.423 80.7631 181.19 83.9028 176.04 86.09C170.96 88.2772 165.103 89.3708 158.471 89.3708Z"/><path d="M372.231 89.2656C363.412 89.2656 356.462 87.4311 351.382 83.7623C346.302 80.0934 343.515 74.9781 343.021 68.4164H354.769C355.263 72.297 356.956 75.1545 359.849 76.9889C362.742 78.8234 367.01 79.7406 372.655 79.7406C382.533 79.7406 387.471 76.6361 387.471 70.4272C387.471 67.8872 386.695 65.947 385.143 64.6064C383.661 63.1953 381.121 62.1722 377.523 61.5372L363.659 58.9973C351.876 56.81 345.985 51.2009 345.985 42.1697C345.985 36.3136 348.207 31.6923 352.652 28.3056C357.097 24.9189 363.165 23.2256 370.856 23.2256C378.828 23.2256 385.143 24.9542 389.8 28.4114C394.527 31.8686 397.208 36.737 397.843 43.0164H386.307C385.602 39.4886 383.944 36.8781 381.333 35.1847C378.793 33.4914 375.195 32.6448 370.538 32.6448C366.234 32.6448 362.883 33.3856 360.484 34.8673C358.156 36.3489 356.991 38.5009 356.991 41.3231C356.991 43.5103 357.732 45.2389 359.214 46.5089C360.766 47.7084 363.236 48.6256 366.622 49.2606L380.486 51.9064C386.695 53.0353 391.246 55.0461 394.139 57.9389C397.032 60.8317 398.478 64.7122 398.478 69.5806C398.478 75.7895 396.22 80.6225 391.705 84.0798C387.189 87.537 380.698 89.2656 372.231 89.2656Z"/><path d="M437.465 89.2656C430.833 89.2656 425.083 87.925 420.215 85.2439C415.346 82.4923 411.572 78.6117 408.89 73.6022C406.28 68.5928 404.975 62.7367 404.975 56.0339C404.975 49.3311 406.28 43.5456 408.89 38.6772C411.572 33.7384 415.311 29.9284 420.109 27.2472C424.907 24.5661 430.516 23.2256 436.936 23.2256C443.075 23.2256 448.366 24.4603 452.811 26.9297C457.327 29.3992 460.819 32.8917 463.289 37.4073C465.758 41.9228 466.993 47.285 466.993 53.4939V58.2564H416.405C416.757 64.8886 418.768 70.0745 422.437 73.8139C426.177 77.4828 431.151 79.3172 437.36 79.3172C441.663 79.3172 445.297 78.4353 448.26 76.6714C451.224 74.837 453.27 72.1559 454.399 68.6281H466.464C464.912 75.1897 461.56 80.2697 456.41 83.8681C451.33 87.4664 445.015 89.2656 437.465 89.2656ZM416.828 49.5781H455.563C454.998 44.357 453.058 40.3 449.742 37.4073C446.497 34.5145 442.193 33.0681 436.83 33.0681C431.539 33.0681 427.129 34.5145 423.601 37.4073C420.073 40.3 417.816 44.357 416.828 49.5781Z"/><path d="M564.448 87.9953C561.061 87.9953 558.415 87.1486 556.51 85.4553C554.676 83.6914 553.759 81.0809 553.759 77.6236V33.597H541.905V24.4953H553.864V7.99512H565.506V24.4953H582.122V33.597H565.612V78.682H583.815V87.9953H564.448Z"/><path d="M672 88V35H687V88H672Z"/><path d="M671 23V8H687V23H671Z"/><path d="M716.594 87.9955C712.693 87.9955 709.652 87.0038 707.47 85.0205C705.355 83.0372 704.297 80.0291 704.297 75.9963L704.297 35.4985H693.785V23.9951H704.396L704.53 7.99512L718.875 7.99512L718.874 23.9951H735V35.4985H719.073L719.073 76.393H734.642V87.9955H716.594Z"/><path d="M283.197 33.4209H287.594C289.814 29.8402 292.857 27.1189 296.725 25.2568C300.592 23.3231 305.14 22.3565 310.368 22.3564C318.676 22.3564 325.229 24.7554 330.027 29.5537C334.826 34.2805 337.226 40.6188 337.226 48.5684V87.9951H325.193V50.6104C325.193 44.8093 323.618 40.4045 320.467 37.3965C317.387 34.3885 312.839 32.8838 306.823 32.8838C300.879 32.8838 296.331 34.3885 293.18 37.3965C290.029 40.4045 288.453 44.8093 288.453 50.6104V87.9951H276.421V36.2266H267.972V21H283.197V33.4209Z"/><path d="M486 34.2314H489.33C491.517 30.7038 494.516 28.0229 498.326 26.1885C502.136 24.2835 506.617 23.3311 511.768 23.3311C519.952 23.3311 526.408 25.6947 531.135 30.4219C535.862 35.0785 538.226 41.3227 538.226 49.1543V87.9951H526.372V51.165C526.372 45.4501 524.82 41.1108 521.716 38.1475C518.682 35.1841 514.201 33.7031 508.274 33.7031C502.419 33.7032 497.938 35.1843 494.834 38.1475C491.73 41.1108 490.177 45.4501 490.177 51.165V87.9951H478.324V36.9951H470V20.9951H486V34.2314Z"/><path d="M631.386 7.66992C636.211 7.66997 640.376 8.52936 643.88 10.248C647.45 11.9008 650.26 14.2815 652.31 17.3887C654.359 20.4297 655.384 23.9999 655.384 28.0986C655.384 32.2635 653.684 36.2398 652 38.9951C649.075 43.7811 645.5 44.7578 645.627 44.7578L648.988 45.1553C651.963 45.8164 654.673 47.0394 657.119 48.8242C659.631 50.6092 661.615 52.8569 663.069 55.5674C664.59 58.2779 665.351 61.4843 665.351 65.1865C665.351 69.7482 664.226 73.7478 661.979 77.1855C659.797 80.5572 656.723 83.2019 652.756 85.1191C648.855 87.0363 644.326 87.9951 639.17 87.9951H596.826V21H611.999V40.2959H629.303C632.807 40.2959 635.484 39.4691 637.335 37.8164C639.252 36.0975 640.211 33.6844 640.211 30.5771C640.211 27.3378 639.252 24.892 637.335 23.2393C635.484 21.5866 632.807 20.7598 629.303 20.7598H612V7.66992H631.386ZM611.999 74.9053H636.394C640.823 74.9053 644.227 73.9463 646.607 72.0293C648.987 70.046 650.178 67.2031 650.178 63.501C650.178 59.8649 648.987 57.1206 646.607 55.2695C644.228 53.3526 640.856 52.3946 636.493 52.3945H611.999V74.9053Z"/></g><path d="M32.7604 87.4506C32.0233 88.1831 30.8281 88.1831 30.0909 87.4506L8.45288 65.9485C-2.81763 54.7488 -2.81763 36.5904 8.45288 25.3907C8.97709 24.8698 9.827 24.8698 10.3512 25.3907L51.4471 66.2285C52.1843 66.961 52.1843 68.1487 51.4471 68.8813L32.7604 87.4506Z" fill="#B4BCC8"/><path d="M35.3829 43.3719C34.8671 42.8423 34.8732 41.9897 35.3966 41.4677L76.4272 0.544909C77.1632 -0.189157 78.3479 -0.180458 79.0733 0.564338L97.4615 19.4444C98.1869 20.1891 98.1783 21.388 97.4423 22.1221L75.8387 43.669C64.5861 54.892 46.4734 54.759 35.3829 43.3719Z" fill="#8C95A3"/></svg>'}function nt(e){var t=document.createElement("div");t.className="cb-brand-footer";var n=document.createElement("a");n.href="https://consentbit.com";n.target="_blank";n.rel="noopener noreferrer";n.setAttribute("aria-label","Powered by ConsentBit");var r=document.createElement("span");r.className="cb-brand-credit";r.textContent="Powered by";n.appendChild(r);var a=document.createElement("span");a.className="cb-brand-mark";a.innerHTML='<svg viewBox="0 0 735 90" role="img" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg"><g fill="#98A2B3"><path d="M234.357 89.2656C227.796 89.2656 222.045 87.925 217.107 85.2439C212.238 82.4923 208.464 78.647 205.782 73.7081C203.101 68.7692 201.761 62.9484 201.761 56.2456C201.761 49.5428 203.101 43.722 205.782 38.7831C208.464 33.8442 212.238 30.0342 217.107 27.3531C222.045 24.6014 227.796 23.2256 234.357 23.2256C241.131 23.2256 246.916 24.5661 251.714 27.2472C256.582 29.9284 260.322 33.7384 262.932 38.6772C265.614 43.6161 266.954 49.4722 266.954 56.2456C266.954 62.9484 265.614 68.8045 262.932 73.8139C260.322 78.7528 256.582 82.5628 251.714 85.2439C246.846 87.925 241.06 89.2656 234.357 89.2656ZM234.357 78.8939C240.919 78.8939 245.999 76.9184 249.597 72.9672C253.266 68.9456 255.101 63.3717 255.101 56.2456C255.101 49.0489 253.266 43.475 249.597 39.5239C245.999 35.5728 240.919 33.5972 234.357 33.5972C227.866 33.5972 222.786 35.6081 219.117 39.6298C215.449 43.5809 213.614 49.1195 213.614 56.2456C213.614 63.3717 215.449 68.9456 219.117 72.9672C222.786 76.9184 227.866 78.8939 234.357 78.8939Z"/><path d="M158.471 89.3708C149.793 89.3708 142.208 87.5717 135.717 83.9733C129.297 80.3044 124.322 75.1539 120.795 68.5217C117.267 61.8894 115.503 54.0931 115.503 45.1325C115.503 36.1719 117.267 28.4108 120.795 21.8492C124.322 15.2169 129.297 10.1017 135.717 6.50333C142.208 2.83444 149.793 1 158.471 1C165.103 1 170.96 2.09361 176.04 4.28083C181.19 6.3975 185.423 9.53722 188.74 13.7C192.056 17.7922 194.313 22.7664 195.513 28.6225H183.236C181.966 23.1897 179.179 18.9917 174.875 16.0283C170.642 13.065 165.174 11.5833 158.471 11.5833C148.805 11.5833 141.22 14.5819 135.717 20.5792C130.214 26.5764 127.462 34.7608 127.462 45.1325C127.462 55.5747 130.214 63.7944 135.717 69.7917C141.22 75.7183 148.805 78.6817 158.471 78.6817C165.174 78.6817 170.642 77.2353 174.875 74.3425C179.179 71.3792 181.966 67.1811 183.236 61.7483H195.513C194.313 67.5339 192.056 72.5081 188.74 76.6708C185.423 80.7631 181.19 83.9028 176.04 86.09C170.96 88.2772 165.103 89.3708 158.471 89.3708Z"/><path d="M372.231 89.2656C363.412 89.2656 356.462 87.4311 351.382 83.7623C346.302 80.0934 343.515 74.9781 343.021 68.4164H354.769C355.263 72.297 356.956 75.1545 359.849 76.9889C362.742 78.8234 367.01 79.7406 372.655 79.7406C382.533 79.7406 387.471 76.6361 387.471 70.4272C387.471 67.8872 386.695 65.947 385.143 64.6064C383.661 63.1953 381.121 62.1722 377.523 61.5372L363.659 58.9973C351.876 56.81 345.985 51.2009 345.985 42.1697C345.985 36.3136 348.207 31.6923 352.652 28.3056C357.097 24.9189 363.165 23.2256 370.856 23.2256C378.828 23.2256 385.143 24.9542 389.8 28.4114C394.527 31.8686 397.208 36.737 397.843 43.0164H386.307C385.602 39.4886 383.944 36.8781 381.333 35.1847C378.793 33.4914 375.195 32.6448 370.538 32.6448C366.234 32.6448 362.883 33.3856 360.484 34.8673C358.156 36.3489 356.991 38.5009 356.991 41.3231C356.991 43.5103 357.732 45.2389 359.214 46.5089C360.766 47.7084 363.236 48.6256 366.622 49.2606L380.486 51.9064C386.695 53.0353 391.246 55.0461 394.139 57.9389C397.032 60.8317 398.478 64.7122 398.478 69.5806C398.478 75.7895 396.22 80.6225 391.705 84.0798C387.189 87.537 380.698 89.2656 372.231 89.2656Z"/><path d="M437.465 89.2656C430.833 89.2656 425.083 87.925 420.215 85.2439C415.346 82.4923 411.572 78.6117 408.89 73.6022C406.28 68.5928 404.975 62.7367 404.975 56.0339C404.975 49.3311 406.28 43.5456 408.89 38.6772C411.572 33.7384 415.311 29.9284 420.109 27.2472C424.907 24.5661 430.516 23.2256 436.936 23.2256C443.075 23.2256 448.366 24.4603 452.811 26.9297C457.327 29.3992 460.819 32.8917 463.289 37.4073C465.758 41.9228 466.993 47.285 466.993 53.4939V58.2564H416.405C416.757 64.8886 418.768 70.0745 422.437 73.8139C426.177 77.4828 431.151 79.3172 437.36 79.3172C441.663 79.3172 445.297 78.4353 448.26 76.6714C451.224 74.837 453.27 72.1559 454.399 68.6281H466.464C464.912 75.1897 461.56 80.2697 456.41 83.8681C451.33 87.4664 445.015 89.2656 437.465 89.2656ZM416.828 49.5781H455.563C454.998 44.357 453.058 40.3 449.742 37.4073C446.497 34.5145 442.193 33.0681 436.83 33.0681C431.539 33.0681 427.129 34.5145 423.601 37.4073C420.073 40.3 417.816 44.357 416.828 49.5781Z"/><path d="M564.448 87.9953C561.061 87.9953 558.415 87.1486 556.51 85.4553C554.676 83.6914 553.759 81.0809 553.759 77.6236V33.597H541.905V24.4953H553.864V7.99512H565.506V24.4953H582.122V33.597H565.612V78.682H583.815V87.9953H564.448Z"/><path d="M672 88V35H687V88H672Z"/><path d="M671 23V8H687V23H671Z"/><path d="M716.594 87.9955C712.693 87.9955 709.652 87.0038 707.47 85.0205C705.355 83.0372 704.297 80.0291 704.297 75.9963L704.297 35.4985H693.785V23.9951H704.396L704.53 7.99512L718.875 7.99512L718.874 23.9951H735V35.4985H719.073L719.073 76.393H734.642V87.9955H716.594Z"/><path d="M283.197 33.4209H287.594C289.814 29.8402 292.857 27.1189 296.725 25.2568C300.592 23.3231 305.14 22.3565 310.368 22.3564C318.676 22.3564 325.229 24.7554 330.027 29.5537C334.826 34.2805 337.226 40.6188 337.226 48.5684V87.9951H325.193V50.6104C325.193 44.8093 323.618 40.4045 320.467 37.3965C317.387 34.3885 312.839 32.8838 306.823 32.8838C300.879 32.8838 296.331 34.3885 293.18 37.3965C290.029 40.4045 288.453 44.8093 288.453 50.6104V87.9951H276.421V36.2266H267.972V21H283.197V33.4209Z"/><path d="M486 34.2314H489.33C491.517 30.7038 494.516 28.0229 498.326 26.1885C502.136 24.2835 506.617 23.3311 511.768 23.3311C519.952 23.3311 526.408 25.6947 531.135 30.4219C535.862 35.0785 538.226 41.3227 538.226 49.1543V87.9951H526.372V51.165C526.372 45.4501 524.82 41.1108 521.716 38.1475C518.682 35.1841 514.201 33.7031 508.274 33.7031C502.419 33.7032 497.938 35.1843 494.834 38.1475C491.73 41.1108 490.177 45.4501 490.177 51.165V87.9951H478.324V36.9951H470V20.9951H486V34.2314Z"/><path d="M631.386 7.66992C636.211 7.66997 640.376 8.52936 643.88 10.248C647.45 11.9008 650.26 14.2815 652.31 17.3887C654.359 20.4297 655.384 23.9999 655.384 28.0986C655.384 32.2635 653.684 36.2398 652 38.9951C649.075 43.7811 645.5 44.7578 645.627 44.7578L648.988 45.1553C651.963 45.8164 654.673 47.0394 657.119 48.8242C659.631 50.6092 661.615 52.8569 663.069 55.5674C664.59 58.2779 665.351 61.4843 665.351 65.1865C665.351 69.7482 664.226 73.7478 661.979 77.1855C659.797 80.5572 656.723 83.2019 652.756 85.1191C648.855 87.0363 644.326 87.9951 639.17 87.9951H596.826V21H611.999V40.2959H629.303C632.807 40.2959 635.484 39.4691 637.335 37.8164C639.252 36.0975 640.211 33.6844 640.211 30.5771C640.211 27.3378 639.252 24.892 637.335 23.2393C635.484 21.5866 632.807 20.7598 629.303 20.7598H612V7.66992H631.386ZM611.999 74.9053H636.394C640.823 74.9053 644.227 73.9463 646.607 72.0293C648.987 70.046 650.178 67.2031 650.178 63.501C650.178 59.8649 648.987 57.1206 646.607 55.2695C644.228 53.3526 640.856 52.3946 636.493 52.3945H611.999V74.9053Z"/></g><path d="M32.7604 87.4506C32.0233 88.1831 30.8281 88.1831 30.0909 87.4506L8.45288 65.9485C-2.81763 54.7488 -2.81763 36.5904 8.45288 25.3907C8.97709 24.8698 9.827 24.8698 10.3512 25.3907L51.4471 66.2285C52.1843 66.961 52.1843 68.1487 51.4471 68.8813L32.7604 87.4506Z" fill="#B4BCC8"/><path d="M35.3829 43.3719C34.8671 42.8423 34.8732 41.9897 35.3966 41.4677L76.4272 0.544909C77.1632 -0.189157 78.3479 -0.180458 79.0733 0.564338L97.4615 19.4444C98.1869 20.1891 98.1783 21.388 97.4423 22.1221L75.8387 43.669C64.5861 54.892 46.4734 54.759 35.3829 43.3719Z" fill="#8C95A3"/></svg>';n.appendChild(a);t.appendChild(n);e.appendChild(t)}function rt(e){return e?"slide-up"===y?"cb-banner-animate-initial-center-bottom":"slide-down"===y?"cb-banner-animate-initial-center-top":"zoom-in"===y?"cb-banner-animate-initial-center-zoom":"cb-banner-animate-fade":"slide-up"===y?"cb-banner-animate-bottom":"slide-down"===y?"cb-banner-animate-top":"zoom-in"===y?"cb-banner-animate-zoom-in":"cb-banner-animate-fade"}function at(){if(!document.getElementById("cb-initial-banner"))if(document.body){var e="ccpa"===i;var t=document.createElement("div");if(e){var n=document.createElement("div");n.className="cb-banner";n.id="cb-initial-banner";n.style.display="none";var r=document.createElement("div");r.className="cb-banner-body";var a=document.createElement("h3");a.textContent=J("title",k);r.appendChild(a);var o=document.createElement("p");var c=q(W("description"),_);if(m&&Y()){o.appendChild(document.createTextNode(c+" "));var s=document.createElement("a");s.textContent=J("privacyPolicy",S);s.style.cssText="color:#007aff;text-decoration:underline;cursor:pointer;";ae(s,m);o.appendChild(s);o.appendChild(document.createTextNode("."))}else o.textContent=c;r.appendChild(o);var l=document.createElement("p");l.style.marginTop="20px";l.style.marginBottom="0";var d=document.createElement("button");d.id="cb-ccpa-donotsell-link";d.type="button";d.textContent=W("doNotSell");d.style.cssText="background:none;border:none;padding:0;margin:0;color:#007aff;text-decoration:underline;cursor:pointer;font:inherit;text-align:left;display:inline;";l.appendChild(d);r.appendChild(l);n.appendChild(r);Qe(n,"cb-close-initial-btn");t.appendChild(n);var p=document.createElement("div");p.className="cb-banner cb-ccpa-prefs";p.id="cb-preferences-banner";p.style.display="none";"left"===v?p.classList.add("prefs-left"):"right"===v?p.classList.add("prefs-right"):p.classList.add("prefs-center");var b=document.createElement("div");b.className="cb-banner-body";var f=document.createElement("h3");f.textContent=W("optOutPreference");b.appendChild(f);var y=document.createElement("p");var h=(W("ccpaOptOutPreferenceIntro")||W("ccpaOptOut")||"").replace(/s*More info.?s*$/i,"").trim();if(m&&Y()){y.appendChild(document.createTextNode(h+" "));var x=document.createElement("a");x.textContent=W("privacyPolicy");x.style.cssText="color:#007aff;text-decoration:underline;cursor:pointer;";ae(x,m);y.appendChild(x);y.appendChild(document.createTextNode("."))}else y.textContent=h;y.style.lineHeight="1.45";b.appendChild(y);var C=document.createElement("label");C.style.cssText="display:flex;align-items:flex-start;gap:12px;margin-top:20px;cursor:pointer;";var w=document.createElement("span");w.style.cssText="flex:1;line-height:1.45;";w.textContent=W("doNotSell");var O=document.createElement("input");O.type="checkbox";O.id="cb-ccpa-optout";O.style.cssText="flex-shrink:0;margin-top:2px;";O.checked=!!(I&&I.accepted&&I.ccpa&&I.ccpa.doNotSell);C.appendChild(O);C.appendChild(w);b.appendChild(C);p.appendChild(b);var B=document.createElement("div");B.className="cb-banner-footer";var L=document.createElement("button");L.id="cb-cancel-prefs-btn";L.textContent=U("cancel");B.appendChild(L);var A=document.createElement("button");A.id="cb-save-prefs-btn";A.textContent=W("saveMyPreferences")||W("save");B.appendChild(A);p.appendChild(B);nt(p);et(p);t.appendChild(p)}else{var H=function(e){var t=document.createElement("div");t.style.borderBottom="1px solid #e5e7eb";var n=document.createElement("div");n.style.cssText="display:flex;align-items:center;gap:14px;padding:12px 14px;min-height:44px;";var r=document.createElement("button");r.type="button";r.setAttribute("aria-expanded","false");r.textContent="+";r.style.cssText="flex-shrink:0;width:22px;height:22px;padding:0;border:1px solid #e5e7eb;border-radius:4px;background:#f3f4f6;color:#111827;font-size:14px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;";var a=document.createElement("span");a.className="cb-gdpr-cat-label";a.style.cssText="flex:1;font-size:11px;font-weight:600;";a.textContent=e.labelText;n.appendChild(r);n.appendChild(a);var i=document.createElement("div");i.style.flexShrink="0";if(e.alwaysActive){var o=document.createElement("span");o.style.cssText="font-size:11px;font-weight:600;color:#374151;";o.textContent=J("alwaysActive",20);i.appendChild(o)}else{var c=document.createElement("input");c.type="checkbox";c.id=e.checkboxId;e.defaultChecked&&(c.checked=!0);c.style.cssText="position:absolute;opacity:0;width:0;height:0;margin:0;pointer-events:none;";var s=document.createElement("button");s.type="button";s.className="cb-pref-toggle-track";s.setAttribute("role","switch");s.setAttribute("aria-label",e.labelText);var l=function(){s.setAttribute("aria-checked",c.checked?"true":"false")};s.addEventListener("click",function(){c.checked=!c.checked;l()});l();i.appendChild(c);i.appendChild(s)}n.appendChild(i);var d=document.createElement("div");d.className="cb-gdpr-cat-desc";d.style.cssText="display:grid;grid-template-rows:0fr;opacity:0;font-size:13px;line-height:1.5;transition:grid-template-rows .3s ease,opacity .25s ease;";var p=document.createElement("div");p.style.cssText="overflow:hidden;min-height:0;padding:0 12px 12px 44px;";p.textContent=e.descText;d.appendChild(p);var b=function(e){e.style.gridTemplateRows="1fr";e.style.opacity=""};var f=function(e){e.style.gridTemplateRows="0fr";e.style.opacity="0"};r.addEventListener("click",function(){var e="true"!==r.getAttribute("aria-expanded");var n=t.parentNode;if(n){var a=n.children;for(var i=0;i<a.length;i++){var o=a[i].querySelector(".cb-gdpr-cat-desc");var c=a[i].querySelector("button[aria-expanded]");if(o&&o!==d){f(o);if(c){c.textContent="+";c.setAttribute("aria-expanded","false")}}}}e?b(d):f(d);r.textContent=e?"\u2212":"+";r.setAttribute("aria-expanded",e?"true":"false")});t.appendChild(n);t.appendChild(d);return t};var T=document.createElement("div");T.className="cb-banner";T.id="cb-initial-banner";T.style.display="none";var P=document.createElement("div");P.className="cb-banner-body";var z=document.createElement("h3");z.textContent=W("title");P.appendChild(z);var N=document.createElement("p");var j=W("description");if(m&&Y()){N.appendChild(document.createTextNode(j+" "));var M=document.createElement("a");M.textContent=W("privacyPolicy");M.style.cssText="color:#007aff;text-decoration:underline;cursor:pointer;";ae(M,m);N.appendChild(M);N.appendChild(document.createTextNode("."))}else N.textContent=j;P.appendChild(N);T.appendChild(P);var V=document.createElement("div");V.className="cb-banner-footer";var D=document.createElement("button");D.id="cb-preferences-btn";D.textContent=q(U("customise"),E);G()&&V.appendChild(D);var F=document.createElement("button");F.id="cb-reject-all-btn";F.textContent=q(U("rejectAll"),E);$()&&V.appendChild(F);var Z=document.createElement("button");Z.id="cb-accept-all-btn";Z.textContent=q(U("acceptAll"),E);V.appendChild(Z);T.appendChild(V);Qe(T,"cb-close-initial-btn");t.appendChild(T);var R=document.createElement("div");R.className="cb-banner";R.id="cb-preferences-banner";R.style.display="none";"left"===v?R.classList.add("prefs-left"):"right"===v?R.classList.add("prefs-right"):R.classList.add("prefs-center");var X=document.createElement("div");X.className="cb-banner-body";var K=document.createElement("h3");K.textContent=J("cookiePreferences",k);X.appendChild(K);var Q=document.createElement("p");var te=(q(W("managePreferences"),_)||"").replace(/s*More info.?s*$/i,"").trim();if(m&&Y()){Q.appendChild(document.createTextNode(te+" "));var ne=document.createElement("a");ne.textContent=J("privacyPolicy",S);ne.style.cssText="color:#007aff;text-decoration:underline;cursor:pointer;";ae(ne,m);Q.appendChild(ne);Q.appendChild(document.createTextNode("."))}else Q.textContent=te;X.appendChild(Q);var re=document.createElement("div");re.className="cb-gdpr-accordion";re.style.cssText="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin-bottom:4px;";var ie=J("strictlyNecessary",20)||J("essential",20);re.appendChild(H({labelText:ie,alwaysActive:!0,descText:J("essentialDescription",300)}));var oe=se()||I&&I.accepted&&I.categories||{};re.appendChild(H({labelText:J("marketing",20),checkboxId:"cb-pref-marketing",defaultChecked:!!oe.marketing,descText:J("marketingDescription",300)}));re.appendChild(H({labelText:J("analytics",20),checkboxId:"cb-pref-analytics",defaultChecked:!!oe.analytics,descText:J("analyticsDescription",300)}));re.appendChild(H({labelText:J("preferences",20),checkboxId:"cb-pref-preferences",defaultChecked:!!oe.preferences,descText:J("preferencesDescription",300)}));re.lastChild&&(re.lastChild.style.borderBottom="none");X.appendChild(re);R.appendChild(X);var ce=document.createElement("div");ce.className="cb-banner-footer";var le=document.createElement("button");le.id="cb-prefs-reject-btn";le.textContent=q(U("rejectAll"),E);ce.appendChild(le);var de=document.createElement("button");de.id="cb-save-prefs-btn";de.textContent=q(U("saveMyPreferences")||U("save"),E);ce.appendChild(de);R.appendChild(ce);nt(R);et(R);t.appendChild(R)}document.body.appendChild(t);g&&(document.body.style.overflow="hidden");if(!window.__cbResizeInit){window.__cbResizeInit=!0;window.addEventListener("resize",function(){var e=document.getElementById("cb-initial-banner");e&&"none"!==e.style.display&&"hidden"!==e.style.visibility&&ee(e)})}var pe=document.getElementById("cb-initial-banner");if(pe){var be=ee(pe);pe.style.display="flex";pe.style.visibility="visible";pe.style.opacity="1";u&&pe.classList.add(rt(be))}}else setTimeout(at,100)}function it(){g&&(document.body.style.overflow="")}function ot(){try{if(p&&!1===p.showBannerLogo)return!1;if(p&&0===p.showBannerLogo)return!1;var e=R();var t=TRANSLATIONS.config||{};var n=null!=t.floatingButtonEnabled?t.floatingButtonEnabled:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).floatingButtonEnabled;return!1!==n&&"0"!==n&&"false"!==String(n).toLowerCase()}catch(e){return!0}}function ct(){try{var e=parseInt(localStorage.getItem(L+"_closed")||"0",10);if(!e)return!1;if(ot())return!0;if(Date.now()-e<864e5)return!0;localStorage.removeItem(L+"_closed");return!1}catch(e){return!1}}function st(){try{if(p&&p.bannerLogoPosition)return"right"===p.bannerLogoPosition?"right":"left";var e=R();var t=TRANSLATIONS.config||{};var n;return"right"===(null!=t.floatingButtonPosition?t.floatingButtonPosition:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).floatingButtonPosition)?"right":"left"}catch(e){return"left"}}function lt(){var e="http://www.w3.org/2000/svg";var t=document.createElementNS(e,"svg");t.setAttribute("xmlns",e);t.setAttribute("viewBox","0 0 40 40");t.setAttribute("width","44");t.setAttribute("height","44");t.setAttribute("aria-hidden","true");t.setAttribute("focusable","false");t.style.cssText="display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;";var n=document.createElementNS(e,"circle");n.setAttribute("cx","20");n.setAttribute("cy","20");n.setAttribute("r","18");n.setAttribute("fill","#007aff");t.appendChild(n);var r=[{cx:"14",cy:"14",r:"2.2"},{cx:"24",cy:"18",r:"2.5"},{cx:"17",cy:"25",r:"2"}];for(var a=0;a<r.length;a++){var i=document.createElementNS(e,"circle");i.setAttribute("cx",r[a].cx);i.setAttribute("cy",r[a].cy);i.setAttribute("r",r[a].r);i.setAttribute("fill","#ffffff");t.appendChild(i)}return t}function dt(){try{var e=document.getElementsByTagName("script");for(var t=e.length-1;t>=0;t--){var n=e[t].src||"";if(-1!==n.indexOf("/consentbit/")||-1!==n.indexOf("/client_data/"))return new URL(n).origin}}catch(e){}return""}function pt(){if(!document.getElementById("cb-floating-trigger")&&ot()){var e=st();var t=n||"";var a=r||"";if(!t){var i=dt();if(i){t=i+"/embed/floating-logo.svg";a||(a=t)}}var o=document.createElement("button");o.id="cb-floating-trigger";o.type="button";o.setAttribute("aria-label",W("cookiePreferences"));o.style.cssText="position:fixed;bottom:28px;"+("right"===e?"right:16px;":"left:16px;")+"z-index:2147483646;width:56px;height:56px;border:none;border-radius:9999px;background:transparent;cursor:pointer;padding:0;box-shadow:none;";if(t){var c=document.createElement("img");c.alt="";c.src=t;c.setAttribute("width","44");c.setAttribute("height","44");c.draggable=!1;c.style.cssText="display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;";var s=!1;c.addEventListener("error",function e(){if(s||!a||t===a){c.removeEventListener("error",e);c.parentNode&&c.parentNode.replaceChild(lt(),c)}else{s=!0;c.src=a}});o.appendChild(c)}else o.appendChild(lt());document.body.appendChild(o)}}function bt(){return u?"left"===v?"zoom-in"===y?"cb-banner-animate-prefs-zoom-in":"cb-banner-animate-prefs-left":"right"===v?"zoom-in"===y?"cb-banner-animate-prefs-zoom-in":"cb-banner-animate-prefs-right":"slide-up"===y?"cb-banner-animate-center-bottom":"slide-down"===y?"cb-banner-animate-center-top":"zoom-in"===y?"cb-banner-animate-prefs-zoom-in":"cb-banner-animate-fade":""}function ft(e){if(e){var t=F.split(" ");for(var n=0;n<t.length;n++)t[n]&&e.classList.remove(t[n])}}function mt(){Ke();at();pt();var e=document.getElementById("cb-initial-banner");var t=document.getElementById("cb-preferences-banner");var n=document.getElementById("cb-preferences-btn");var r=document.getElementById("cb-accept-all-btn");var a=document.getElementById("cb-reject-all-btn");var o=document.getElementById("cb-prefs-reject-btn");var c=document.getElementById("cb-cancel-prefs-btn");var s=document.getElementById("cb-save-prefs-btn");var l=document.getElementById("cb-ccpa-donotsell-link");var d="ccpa"===i;function p(){if(e){e.style.setProperty("display","none","important");e.classList.remove("cb-banner-animate-left","cb-banner-animate-right","cb-banner-animate-top","cb-banner-animate-bottom","cb-banner-animate-fade")}if(t){t.style.display="none";ft(t)}var n=document.getElementById("cb-floating-trigger");n&&(n.style.display="flex");it()}function b(){if(e){if(t){t.style.display="none";ft(t)}var n=ee(e);e.style.setProperty("display","flex","important");e.style.setProperty("visibility","visible","important");e.style.setProperty("opacity","1","important");e.classList.remove("cb-banner-animate-left","cb-banner-animate-right","cb-banner-animate-top","cb-banner-animate-bottom","cb-banner-animate-fade","cb-banner-animate-zoom-in");u&&e.classList.add(rt(n));g&&(document.body.style.overflow="hidden")}}function f(){e.style.display="none";var n=document.getElementById("cb-floating-trigger");n&&(n.style.display="none");t.style.display="flex";t.style.visibility="visible";t.style.opacity="1";ft(t);var r=bt();r&&t.classList.add(r)}var m=document.getElementById("cb-floating-trigger");m&&m.addEventListener("click",function(e){e&&e.preventDefault&&e.preventDefault();e&&e.stopPropagation&&e.stopPropagation();b()});n&&n.addEventListener("click",function(){if(e&&t){if(!d){var n=se()||I&&I.categories||{};var r=function(e,t){var n=document.getElementById(e);if(n){n.checked=!!t;var r=n.parentNode&&n.parentNode.querySelector("button.cb-pref-toggle-track");r&&r.setAttribute("aria-checked",n.checked?"true":"false")}};r("cb-pref-analytics",n.analytics);r("cb-pref-preferences",n.preferences);r("cb-pref-marketing",n.marketing)}e.classList.remove("cb-banner-animate-left","cb-banner-animate-right","cb-banner-animate-top","cb-banner-animate-bottom","cb-banner-animate-fade");f()}});o&&o.addEventListener("click",function(){var e={accepted:!0,timestamp:(new Date).toISOString(),categories:{essential:!0,analytics:!1,preferences:!1,marketing:!1}};De(["analytics","marketing","preferences"]);oe(e);le(e,{status:"rejected"});ce(e.categories);Xe(e.categories,"[PrefsReject]");We(e.categories);p()});var y=document.getElementById("cb-close-initial-btn");var v=document.getElementById("cb-close-prefs-btn");y&&y.addEventListener("click",function(){try{localStorage.setItem(L+"_closed",String(Date.now()))}catch(e){}p()});v&&v.addEventListener("click",function(){try{localStorage.setItem(L+"_closed",String(Date.now()))}catch(e){}p()});d&&l&&l.addEventListener("click",function(){e&&t&&f()});c&&c.addEventListener("click",function(){b()});a&&a.addEventListener("click",function(){if(!d){var e={accepted:!0,timestamp:(new Date).toISOString(),categories:{essential:!0,analytics:!1,preferences:!1,marketing:!1}};De(["analytics","marketing","preferences"]);oe(e);le(e,{status:"rejected"});ce(e.categories);Xe(e.categories,"[Reject]");We(e.categories)}p()});r&&r.addEventListener("click",function(){if(d){var e={accepted:!0,timestamp:(new Date).toISOString(),ccpa:{doNotSell:!1}};oe(e);le(e,{status:"given"});je({analytics:!0,marketing:!0,preferences:!0,essential:!0});$e(!1)}else{var t={accepted:!0,timestamp:(new Date).toISOString(),categories:{essential:!0,analytics:!0,preferences:!0,marketing:!0}};oe(t);le(t,{status:"given"});ce(t.categories);je(t.categories);Xe(t.categories,"[Accept]")}p()});s&&s.addEventListener("click",function(){if(d){var e=document.getElementById("cb-ccpa-optout");var t=!(!e||!e.checked);var n={accepted:!0,timestamp:(new Date).toISOString(),ccpa:{doNotSell:t}};oe(n);le(n,{status:t?"rejected":"given"});t||je({analytics:!0,marketing:!0,preferences:!0,essential:!0});$e(t)}else{var r=document.getElementById("cb-pref-analytics");var a=document.getElementById("cb-pref-preferences");var i=document.getElementById("cb-pref-marketing");var o={accepted:!0,timestamp:(new Date).toISOString(),categories:{essential:!0,analytics:!(!r||!r.checked),preferences:!(!a||!a.checked),marketing:!(!i||!i.checked)}};var c=[];o.categories.analytics||c.push("analytics");o.categories.marketing||c.push("marketing");o.categories.preferences||c.push("preferences");c.length&&De(c);oe(o);le(o,{status:"partial"});ce(o.categories);je(o.categories);Xe(o.categories,"[Save]");We(o.categories)}p()})}function gt(){mt();var e=document.getElementById("cb-initial-banner");if(e){e.style.display="flex";e.style.visibility="visible";e.style.opacity="1"}var t=document.getElementById("cb-floating-trigger");t&&(t.style.display="none")}function ut(){if("gdpr"===i){qe();if(!window.__cbConsentDefaultSet){xe();he()("consent","default",{analytics_storage:"denied",ad_storage:"denied",ad_user_data:"denied",ad_personalization:"denied",functionality_storage:"denied",personalization_storage:"denied",security_storage:"granted",wait_for_update:500});window.__cbConsentDefaultSet=!0}if(I.accepted)Xe(I.categories||{},"[Reload]");else{_e({});s&&Ye()}}else if("ccpa"===i){if(!window.__cbConsentDefaultSet){xe();he()("consent","default",{analytics_storage:"denied",ad_storage:"denied",ad_user_data:"denied",ad_personalization:"denied",functionality_storage:"denied",personalization_storage:"denied",security_storage:"granted",wait_for_update:500});window.__cbConsentDefaultSet=!0}s&&Ye();$e(!!(I&&I.accepted&&I.ccpa&&I.ccpa.doNotSell))}if(window.__CB_WEBFLOW_MODE__){mt();if(I.accepted||ct()){var e=document.getElementById("cb-initial-banner");if(e){e.style.setProperty("display","none","important");e.style.setProperty("visibility","hidden","important")}var t=document.getElementById("cb-preferences-banner");t&&t.style.setProperty("display","none","important");var n=document.getElementById("cb-floating-trigger");n&&(n.style.display="flex")}else if(o){var r=document.getElementById("cb-initial-banner");if(r){r.style.display="flex";r.style.setProperty("visibility","visible","important");r.style.setProperty("opacity","1","important")}var a=document.getElementById("cb-floating-trigger");a&&(a.style.display="none")}else{var c=document.getElementById("cb-initial-banner");if(c){c.style.setProperty("display","none","important");c.style.setProperty("visibility","hidden","important")}var l=document.getElementById("cb-floating-trigger");l&&l.style.setProperty("display","none","important")}}else if(o)if(I.accepted||ct()){mt();var d=document.getElementById("cb-floating-trigger");d&&(d.style.display="flex");var p=document.getElementById("cb-initial-banner");if(p){p.style.setProperty("display","none","important");p.style.setProperty("visibility","hidden","important")}}else gt();try{be()}catch(e){}function b(){document.addEventListener("click",function(e){var t=e.target;for(;t&&t!==document.body;){var n=t.hasAttribute&&t.hasAttribute("data-consentbit-trigger");var r=t.hasAttribute&&t.hasAttribute("data-consentbit-banner");if(n||r){e.preventDefault();e.stopPropagation();if(n)try{localStorage.removeItem(L);localStorage.removeItem(L+"_closed");I={accepted:!1,timestamp:null}}catch(e){}var a=document.getElementById("cb-initial-banner");if(a){a.style.display="flex";a.style.visibility="visible";a.style.opacity="1";g&&(document.body.style.overflow="hidden");var i=document.getElementById("cb-floating-trigger");i&&(i.style.display="none");a.scrollIntoView({behavior:"smooth",block:"start"})}else{gt();setTimeout(function(){var e=document.getElementById("cb-initial-banner");e&&e.scrollIntoView({behavior:"smooth",block:"start"})},100)}return!1}t=t.parentElement}},!0)}"loading"===document.readyState?document.addEventListener("DOMContentLoaded",b):b()}}();
 `;
   const SCRIPT_VERSION = "2026-07-21-consentmode-v2-gtm-event";
   const customizationUpdatedAt = customization?.updatedAt || customization?.updated_at || "";
@@ -11286,7 +8929,9 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || "bottom
     bannerEnabled
   };
   const bannerIsCcpa = String(effectiveBannerType || "").toLowerCase() === "ccpa";
-  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? "true" : "false"};var d=null,e=false,hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);if(!c){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else{window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}window.__cbConsentDefaultSet=true;}catch(_){}})();
+  const clarityCmpSource = String(siteConfigPayload.clarityCmpId || "consentbit");
+  const clarityBootstrap = siteConfigPayload.clarityConsentMode === false ? "" : `try{window.clarity=window.clarity||function(){(window.clarity.q=window.clarity.q||[]).push(arguments);};var ca=c?(e?'denied':'granted'):(d&&d.analytics?'granted':'denied');var cm=c?(e?'denied':'granted'):(d&&d.marketing?'granted':'denied');window.clarity('consentv2',{source:${JSON.stringify(clarityCmpSource)},ad_Storage:cm,analytics_Storage:ca});window.__cbClaritySignal=cm+'|'+ca;}catch(_){}`;
+  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? "true" : "false"};var d=null,e=false,hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}${clarityBootstrap}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);if(!c){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else{window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}window.__cbConsentDefaultSet=true;}catch(_){}})();
 `;
   const scriptToServe = serveKind === "iab" ? loaderIab : serveKind === "iabwebflow" ? loaderIabWebflow : serveKind === "webflow" ? loaderWebflow : consentModeBootstrap + loader;
   return new Response(scriptToServe, {
@@ -12108,15 +9753,21 @@ var COOKIE_DATABASE = {
       { name: "__zlcmid", category: "functional", provider: "Zopim/Zendesk", description: "Zendesk Live Chat cookie - stores a unique visitor ID for the chat session." }
     ]
   },
+  // Categories here mirror the two switches Microsoft's Clarity Consent API v2 exposes,
+  // so what we disclose matches the signal we send (see updateClarityConsent()):
+  //   analytics_Storage gates the first-party Clarity cookies -> 'behavioral' (= analytics)
+  //   ad_Storage        gates the MUID family, which identifies a browser ACROSS Microsoft
+  //                     properties (Bing, LinkedIn, ad networks) -> 'marketing'
+  // Ref: https://learn.microsoft.com/en-us/clarity/setup-and-installation/cmp-integration-guide
   "microsoft-clarity": {
     cookies: [
       { name: "_clck", category: "behavioral", provider: "Microsoft Clarity", description: "Microsoft Clarity cookie - persists the Clarity User ID and preferences, unique to that site." },
       { name: "_clsk", category: "behavioral", provider: "Microsoft Clarity", description: "Microsoft Clarity cookie - connects multiple page views by a user into a single Clarity session recording." },
       { name: "CLID", category: "behavioral", provider: "Microsoft Clarity", description: "Microsoft Clarity cookie - identifies the first time Clarity saw this user on any site using Clarity." },
-      { name: "ANONCHK", category: "behavioral", provider: "Microsoft Clarity", description: "Microsoft Clarity cookie - used to verify if cookies are enabled on a user's browser." },
-      { name: "MR", category: "behavioral", provider: "Microsoft Clarity", description: "Microsoft cookie - used to refresh the MUID cookie." },
-      { name: "MUID", category: "behavioral", provider: "Microsoft", description: "Microsoft cookie - identifies unique web browsers visiting Microsoft sites." },
-      { name: "SM", category: "behavioral", provider: "Microsoft Clarity", description: "Microsoft cookie - used in synchronizing the MUID across Microsoft domains." }
+      { name: "ANONCHK", category: "marketing", provider: "Microsoft Clarity", description: "Microsoft cookie - indicates whether MUID is transferred to ANID, an advertising cookie. Set only when advertising storage is consented to." },
+      { name: "MR", category: "marketing", provider: "Microsoft Clarity", description: "Microsoft cookie - used to refresh the MUID advertising cookie." },
+      { name: "MUID", category: "marketing", provider: "Microsoft", description: "Microsoft cookie - identifies unique web browsers across Microsoft sites and is used for advertising, analytics and personalisation." },
+      { name: "SM", category: "marketing", provider: "Microsoft Clarity", description: "Microsoft cookie - used in synchronizing the MUID advertising identifier across Microsoft domains." }
     ]
   },
   "marketo": {
@@ -13234,6 +10885,85 @@ __name(handleVerifyScript, "handleVerifyScript");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
+
+// src/services/adminNotifications.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+var ensured = false;
+async function ensureNotificationTable(db) {
+  if (ensured || !db) return;
+  await db.prepare(
+    `CREATE TABLE IF NOT EXISTS AdminNotification (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        severity TEXT NOT NULL DEFAULT 'warning',
+        title TEXT NOT NULL,
+        message TEXT,
+        siteId TEXT,
+        domain TEXT,
+        organizationId TEXT,
+        userEmail TEXT,
+        subscriptionId TEXT,
+        stripeSubscriptionId TEXT,
+        stripeCustomerId TEXT,
+        stripeChargeId TEXT,
+        stripeRefundId TEXT,
+        amountCents INTEGER,
+        currency TEXT,
+        detail TEXT,
+        dedupeKey TEXT UNIQUE,
+        readAt DATETIME,
+        readBy TEXT,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`
+  ).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_admin_notif_createdAt ON AdminNotification (createdAt DESC)`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_admin_notif_readAt ON AdminNotification (readAt)`).run();
+  ensured = true;
+}
+__name(ensureNotificationTable, "ensureNotificationTable");
+async function createAdminNotification(db, n) {
+  if (!db || !n?.type || !n?.title) return null;
+  try {
+    await ensureNotificationTable(db);
+    const id = `ntf_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const res = await db.prepare(
+      `INSERT OR IGNORE INTO AdminNotification
+           (id, type, severity, title, message, siteId, domain, organizationId, userEmail,
+            subscriptionId, stripeSubscriptionId, stripeCustomerId, stripeChargeId, stripeRefundId,
+            amountCents, currency, detail, dedupeKey, createdAt)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)`
+    ).bind(
+      id,
+      n.type,
+      n.severity || "warning",
+      n.title,
+      n.message || null,
+      n.siteId || null,
+      n.domain || null,
+      n.organizationId || null,
+      n.userEmail || null,
+      n.subscriptionId || null,
+      n.stripeSubscriptionId || null,
+      n.stripeCustomerId || null,
+      n.stripeChargeId || null,
+      n.stripeRefundId || null,
+      n.amountCents ?? null,
+      n.currency ? String(n.currency).toUpperCase() : null,
+      n.detail ? JSON.stringify(n.detail).slice(0, 4e3) : null,
+      n.dedupeKey || null,
+      (/* @__PURE__ */ new Date()).toISOString()
+    ).run();
+    const changed = res?.meta?.changes ?? res?.changes ?? 1;
+    return changed ? id : null;
+  } catch (err) {
+    console.error("[adminNotifications] write failed", err?.message || err);
+    return null;
+  }
+}
+__name(createAdminNotification, "createAdminNotification");
+
+// src/handlers/pageview.js
 async function handlePageview(request, env2) {
   const db = env2.CONSENT_WEBAPP;
   if (request.method !== "POST") {
@@ -13309,6 +11039,7 @@ async function handlePageview(request, env2) {
     preCheckOverLimit = orgUsage.pageviewCount >= limit;
   }
   if (preCheckOverLimit) {
+    await incrementBlockedPageviewUsage(db, siteId).catch(() => null);
     return Response.json(
       { success: true, overLimit: true, pageviewCount: limit },
       { status: 200 }
@@ -13323,6 +11054,25 @@ async function handlePageview(request, env2) {
   if (organizationId) {
     const orgUsage = await getPageviewUsageForOrganization(db, organizationId);
     overLimit = orgUsage.pageviewCount >= limit;
+    if (overLimit && !preCheckOverLimit) {
+      await createAdminNotification(db, {
+        type: "limit.pageviews",
+        severity: "warning",
+        title: `Pageview limit reached \u2014 ${siteDomain || siteId}`,
+        message: `${orgUsage.pageviewCount} of ${limit} pageviews used this month. Further pageviews on this organization are no longer recorded until the quota resets.`,
+        siteId,
+        domain: siteDomain || null,
+        organizationId,
+        detail: {
+          resource: "pageviews",
+          used: orgUsage.pageviewCount,
+          limit,
+          yearMonth: orgUsage.yearMonth
+        },
+        // Org-scoped, because the pageview allowance is pooled across its sites.
+        dedupeKey: `limit:pageviews:${organizationId}:${orgUsage.yearMonth}`
+      }).catch(() => null);
+    }
   }
   return Response.json(
     {
@@ -30112,8 +27862,8 @@ var CdpPage = class _CdpPage extends Page {
     })).cookies;
     const unsupportedCookieAttributes = ["sourcePort"];
     const filterUnsupportedAttributes = /* @__PURE__ */ __name((cookie) => {
-      for (const attr of unsupportedCookieAttributes) {
-        delete cookie[attr];
+      for (const attr2 of unsupportedCookieAttributes) {
+        delete cookie[attr2];
       }
       return cookie;
     }, "filterUnsupportedAttributes");
@@ -34468,6 +32218,33 @@ async function injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, TAG
 __name(injectScriptIntoWebflowHead, "injectScriptIntoWebflowHead");
 
 // src/handlers/bannerCustomization.js
+var PAID_TIERS = ["basic", "essential", "growth"];
+var BOTH_REGIONS_PLANS = ["essential", "growth"];
+async function resolveEffectivePlanId(db, env2, siteId) {
+  try {
+    const subscription = await getSubscriptionBySiteId(db, siteId);
+    let planId = subscription ? subscription.planId ?? subscription.planid ?? null : null;
+    if (planId) planId = String(planId).toLowerCase();
+    if ((!planId || !PAID_TIERS.includes(planId)) && subscription) {
+      const priceId = subscription.stripePriceId ?? subscription.stripepriceid ?? null;
+      const inferred = inferTierPlanIdFromStripePriceId(env2, priceId);
+      if (inferred) planId = inferred;
+    }
+    if (!planId || !PAID_TIERS.includes(planId)) {
+      const siteRow = await db.prepare("SELECT organizationId FROM Site WHERE id = ?1 LIMIT 1").bind(siteId).first();
+      const orgId = siteRow?.organizationId ?? siteRow?.organizationid ?? null;
+      if (orgId) {
+        const orgResult = await getEffectivePlanForOrganization(db, orgId, env2);
+        planId = orgResult?.planId || "free";
+      }
+    }
+    return planId && PAID_TIERS.includes(planId) ? planId : "free";
+  } catch (err) {
+    console.warn("[BannerCustomization] Plan resolution failed:", err?.message);
+    return null;
+  }
+}
+__name(resolveEffectivePlanId, "resolveEffectivePlanId");
 function encodeEnvelope(payload) {
   const bytes = new TextEncoder().encode(JSON.stringify(payload));
   let binary = "";
@@ -34628,7 +32405,7 @@ async function handleBannerCustomization(request, env2) {
     const wfSiteId = body?.wfSiteId || postUrl.searchParams.get("wfSiteId") || null;
     const skipScriptSwap = body?.skipScriptSwap === true;
     const manualInstall = body?.manualInstall === true;
-    const compliance = Array.isArray(body?.compliance) && body.compliance.length ? body.compliance : null;
+    let compliance = Array.isArray(body?.compliance) && body.compliance.length ? body.compliance : null;
     if (siteId) {
       try {
         const exists = await db.prepare("SELECT id FROM Site WHERE id = ?1 LIMIT 1").bind(siteId).first();
@@ -34682,8 +32459,18 @@ async function handleBannerCustomization(request, env2) {
         console.warn("[BannerCustomization][POST] Failed to set version=v2:", versionErr?.message);
       }
       if (compliance) {
-        const hasUs = compliance.includes("us") || compliance.includes("ccpa");
+        let hasUs = compliance.includes("us") || compliance.includes("ccpa");
         const hasGdpr = compliance.includes("gdpr");
+        if (hasUs && hasGdpr) {
+          const planId = await resolveEffectivePlanId(db, env2, siteId);
+          if (planId !== null && !BOTH_REGIONS_PLANS.includes(planId)) {
+            console.warn(
+              `[BannerCustomization][POST] region_mode 'both' not available on plan '${planId}' for site ${siteId} \u2014 saving as gdpr`
+            );
+            hasUs = false;
+            compliance = ["gdpr"];
+          }
+        }
         let parsedTrans = null;
         try {
           const rawTrans = customization?.translations;
@@ -36103,7 +33890,7 @@ var BTN = "display:inline-block;background:#007AFF;color:#ffffff;text-decoration
 var HR = '<div style="border:none;border-top:1px solid #e5e7eb;margin:28px 0;"></div>';
 function sendWelcomeEmail(env2, ctx, { to, name }) {
   const displayName = name || "there";
-  const dashboardUrl2 = (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "") + "/dashboard";
+  const dashboardUrl = (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "") + "/dashboard";
   const subject = `Welcome to ConsentBit, ${name || "there"}!`;
   const html = layout(
     `Welcome to ConsentBit. Your account is ready \u2014 let's get you set up.`,
@@ -36130,7 +33917,7 @@ function sendWelcomeEmail(env2, ctx, { to, name }) {
       That's it \u2014 your cookie consent banner can be live within minutes.
     </p>
 
-    <a href="${dashboardUrl2}" style="${BTN}">Go to Your Dashboard \u2192</a>
+    <a href="${dashboardUrl}" style="${BTN}">Go to Your Dashboard \u2192</a>
 
     ${HR}
 
@@ -36152,7 +33939,7 @@ Getting started is simple:
 
 That's it \u2014 your cookie consent banner can be live within minutes.
 
-Go to Your Dashboard: ${dashboardUrl2}
+Go to Your Dashboard: ${dashboardUrl}
 
 If you have any questions or need assistance along the way, feel free to reply to this email. We're here to help.
 
@@ -36166,7 +33953,7 @@ __name(sendWelcomeEmail, "sendWelcomeEmail");
 function sendFreePlanEmail(env2, ctx, { to, name, domain: domain2, scriptUrl }) {
   const displayName = name || "there";
   const displayDomain = domain2 || "your website";
-  const dashboardUrl2 = (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "") + "/dashboard";
+  const dashboardUrl = (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "") + "/dashboard";
   const noAutoLink = /* @__PURE__ */ __name((url) => String(url).replace("://", ":<span></span>//").replace(/\.(?=[a-z]{2,})/gi, "<span></span>."), "noAutoLink");
   const snippet = scriptUrl ? `&lt;script id="consentbit" src="${noAutoLink(scriptUrl)}" async&gt;&lt;/script&gt;` : '&lt;script id="consentbit" src="YOUR_SCRIPT_URL" async&gt;&lt;/script&gt;';
   const subject = `Your site is ready: ${displayDomain}`;
@@ -36206,7 +33993,7 @@ function sendFreePlanEmail(env2, ctx, { to, name, domain: domain2, scriptUrl }) 
       As your website grows, you can upgrade your plan anytime to unlock additional features and higher limits.
     </p>
 
-    <a href="${dashboardUrl2}" style="${BTN}">Go to Dashboard \u2192</a>
+    <a href="${dashboardUrl}" style="${BTN}">Go to Dashboard \u2192</a>
 
     ${HR}
 
@@ -36233,7 +34020,7 @@ Your Free Plan includes:
 
 As your website grows, you can upgrade your plan anytime to unlock additional features and higher limits.
 
-Go to Dashboard: ${dashboardUrl2}
+Go to Dashboard: ${dashboardUrl}
 
 If you need any help with setup or installation, simply reply to this email and our team will be happy to assist.
 
@@ -36248,7 +34035,7 @@ function sendPaidPlanEmail(env2, ctx, { to, name, domain: domain2, planName, inv
   const displayName = name || "there";
   const displayDomain = domain2 || "your website";
   const displayPlan = planName || "Basic";
-  const dashboardUrl2 = (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "") + "/dashboard";
+  const dashboardUrl = (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "") + "/dashboard";
   const loginEmail = to || "your email";
   const isTcf = variant === "tcf";
   const invoiceHtml = invoice ? `
@@ -36311,7 +34098,7 @@ ${invoice.invoiceUrl ? `View Invoice Online: ${invoice.invoiceUrl}` : ""}
         <li>In the <strong>General</strong> tab, find the <strong>"Support IAB TCF v2.3"</strong> card and turn on <strong>"Enable IAB TCF Support"</strong>.</li>
       </ol>
 
-      <a href="${dashboardUrl2}" style="${BTN}">Open Dashboard \u2192</a>
+      <a href="${dashboardUrl}" style="${BTN}">Open Dashboard \u2192</a>
 
       ${invoiceHtml}
 
@@ -36336,7 +34123,7 @@ Enable it from your dashboard (not from the Webflow/Framer app):
 2. Open your site, ${displayDomain}, and go to Cookie Banner.
 3. In the General tab, find the "Support IAB TCF v2.3" card and turn on "Enable IAB TCF Support".
 
-Open your dashboard: ${dashboardUrl2}
+Open your dashboard: ${dashboardUrl}
 ${invoiceText}
 If you need a hand setting up the TCF banner or choosing vendors, just reply to this email and our team will help.
 
@@ -37021,6 +34808,132 @@ async function markClickUpTaskCreated(env2, subscriptionId) {
 }
 __name(markClickUpTaskCreated, "markClickUpTaskCreated");
 
+// src/services/planTransitions.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+var ensured2 = false;
+var TIER_RANK = { free: 0, basic: 1, essential: 2, growth: 3 };
+async function ensurePlanTransitionTable(db) {
+  if (ensured2 || !db) return;
+  await db.prepare(
+    `CREATE TABLE IF NOT EXISTS PlanTransition (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        fromPlan TEXT,
+        toPlan TEXT,
+        fromInterval TEXT,
+        toInterval TEXT,
+        organizationId TEXT,
+        siteId TEXT,
+        domain TEXT,
+        userEmail TEXT,
+        subscriptionId TEXT,
+        stripeSubscriptionId TEXT,
+        amountCents INTEGER,
+        currency TEXT,
+        mrrDeltaCents INTEGER,
+        source TEXT,
+        detail TEXT,
+        dedupeKey TEXT UNIQUE,
+        occurredAt DATETIME NOT NULL,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`
+  ).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_plantr_occurredAt ON PlanTransition (occurredAt DESC)`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_plantr_kind ON PlanTransition (kind)`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_plantr_org ON PlanTransition (organizationId)`).run();
+  ensured2 = true;
+}
+__name(ensurePlanTransitionTable, "ensurePlanTransitionTable");
+var ONCE_PER_SUBSCRIPTION = /* @__PURE__ */ new Set([
+  "signup_paid",
+  "trial_started",
+  "trial_converted",
+  "trial_abandoned",
+  "cancelled"
+]);
+function transitionDedupeKey(kind, stripeSubscriptionId, stripeEventId) {
+  const sub = stripeSubscriptionId || "nosub";
+  return ONCE_PER_SUBSCRIPTION.has(kind) ? `plt:${kind}:${sub}` : `plt:${kind}:${stripeEventId || sub}`;
+}
+__name(transitionDedupeKey, "transitionDedupeKey");
+function monthlyCents(amountCents, interval) {
+  if (amountCents == null) return null;
+  return /^(year|annual)/i.test(String(interval || "")) ? Math.round(amountCents / 12) : amountCents;
+}
+__name(monthlyCents, "monthlyCents");
+function classifyTransition({ fromPlan, toPlan, fromInterval, toInterval, fromStatus, toStatus }) {
+  const a = String(fromPlan || "free").toLowerCase();
+  const b = String(toPlan || "free").toLowerCase();
+  const wasTrial = String(fromStatus || "").toLowerCase() === "trialing";
+  const isTrial = String(toStatus || "").toLowerCase() === "trialing";
+  const ended = ["canceled", "cancelled", "unpaid"].includes(String(toStatus || "").toLowerCase());
+  const hadPlan = a !== "free" && a !== "";
+  const hasPlan = b !== "free" && b !== "";
+  if (ended) return wasTrial ? "trial_abandoned" : hadPlan ? "cancelled" : null;
+  if (isTrial && !wasTrial) return "trial_started";
+  if (wasTrial && !isTrial && hasPlan) return "trial_converted";
+  if (!hadPlan && hasPlan) return "signup_paid";
+  if (hadPlan && hasPlan) {
+    if (a !== b) {
+      return (TIER_RANK[b] ?? 0) > (TIER_RANK[a] ?? 0) ? "upgrade" : "downgrade";
+    }
+    const ia = String(fromInterval || "").toLowerCase();
+    const ib = String(toInterval || "").toLowerCase();
+    if (ia && ib && ia !== ib) return "interval_change";
+  }
+  return null;
+}
+__name(classifyTransition, "classifyTransition");
+var TERMINAL_KINDS = /* @__PURE__ */ new Set(["cancelled", "trial_abandoned"]);
+async function recordPlanTransition(db, t) {
+  if (!db || !t?.kind) return null;
+  try {
+    await ensurePlanTransitionTable(db);
+    const id = `plt_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const terminal = TERMINAL_KINDS.has(t.kind);
+    const toPlan = terminal ? "free" : t.toPlan || "free";
+    const toAmountCents = terminal ? 0 : t.toAmountCents;
+    const toInterval = terminal ? null : t.toInterval;
+    const toMonthly = monthlyCents(toAmountCents, toInterval);
+    const fromMonthly = monthlyCents(t.fromAmountCents, t.fromInterval);
+    const res = await db.prepare(
+      `INSERT OR IGNORE INTO PlanTransition
+           (id, kind, fromPlan, toPlan, fromInterval, toInterval, organizationId, siteId, domain,
+            userEmail, subscriptionId, stripeSubscriptionId, amountCents, currency, mrrDeltaCents,
+            source, detail, dedupeKey, occurredAt, createdAt)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)`
+    ).bind(
+      id,
+      t.kind,
+      (t.fromPlan || "free").toLowerCase(),
+      String(toPlan).toLowerCase(),
+      t.fromInterval || null,
+      toInterval || null,
+      t.organizationId || null,
+      t.siteId || null,
+      t.domain || null,
+      t.userEmail || null,
+      t.subscriptionId || null,
+      t.stripeSubscriptionId || null,
+      toAmountCents ?? null,
+      t.currency ? String(t.currency).toUpperCase() : null,
+      toMonthly == null && fromMonthly == null ? null : (toMonthly ?? 0) - (fromMonthly ?? 0),
+      t.source || "webhook",
+      t.detail ? JSON.stringify(t.detail).slice(0, 4e3) : null,
+      t.dedupeKey || null,
+      t.occurredAt || (/* @__PURE__ */ new Date()).toISOString(),
+      (/* @__PURE__ */ new Date()).toISOString()
+    ).run();
+    const changed = res?.meta?.changes ?? res?.changes ?? 1;
+    return changed ? id : null;
+  } catch (err) {
+    console.error("[planTransitions] write failed", err?.message || err);
+    return null;
+  }
+}
+__name(recordPlanTransition, "recordPlanTransition");
+
 // src/handlers/stripeWebhook.js
 function isPaidForClickUp({ rawSubStatus, paymentStatus }) {
   if (rawSubStatus) return rawSubStatus === "active" || rawSubStatus === "trialing";
@@ -37249,6 +35162,251 @@ async function handleLegacyWebflowUpgrade(env2, db, siteId, newSubId, resolvedPl
   }
 }
 __name(handleLegacyWebflowUpgrade, "handleLegacyWebflowUpgrade");
+async function stripeGet(env2, path) {
+  if (!env2.STRIPE_SECRET_KEY) return null;
+  try {
+    const res = await fetch(`https://api.stripe.com/v1/${path}`, {
+      headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` }
+    });
+    const data = await res.json();
+    return data?.error ? null : data;
+  } catch (e) {
+    console.warn("[StripeWebhook] stripeGet failed", path, e?.message);
+    return null;
+  }
+}
+__name(stripeGet, "stripeGet");
+function stripeId(v) {
+  if (!v) return null;
+  return typeof v === "string" ? v : v.id || null;
+}
+__name(stripeId, "stripeId");
+function subscriptionIdFromInvoice(invoice) {
+  return stripeId(invoice?.subscription) || stripeId(invoice?.parent?.subscription_details?.subscription) || null;
+}
+__name(subscriptionIdFromInvoice, "subscriptionIdFromInvoice");
+function formatMoney(cents, currency) {
+  if (cents == null) return "an unknown amount";
+  return `${(cents / 100).toFixed(2)} ${String(currency || "usd").toUpperCase()}`;
+}
+__name(formatMoney, "formatMoney");
+async function cancelStripeSubscriptionNow(env2, stripeSubscriptionId) {
+  if (!stripeSubscriptionId || !env2.STRIPE_SECRET_KEY) return { ok: false, reason: "not_configured" };
+  try {
+    const res = await fetch(
+      `https://api.stripe.com/v1/subscriptions/${encodeURIComponent(stripeSubscriptionId)}`,
+      { method: "DELETE", headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` } }
+    );
+    const data = await res.json();
+    if (data?.error) {
+      const msg = String(data.error.message || "");
+      const alreadyGone = /no such subscription|canceled/i.test(msg);
+      console.warn("[StripeWebhook] refund cancel \u2014 Stripe said:", msg);
+      return { ok: alreadyGone, reason: msg };
+    }
+    return { ok: true, status: data?.status || "canceled" };
+  } catch (e) {
+    console.error("[StripeWebhook] refund cancel failed", e?.message);
+    return { ok: false, reason: e?.message || "exception" };
+  }
+}
+__name(cancelStripeSubscriptionNow, "cancelStripeSubscriptionNow");
+async function resolveRefundContext(env2, db, charge) {
+  const customerId = stripeId(charge?.customer);
+  let stripeSubscriptionId = null;
+  const invoiceId = stripeId(charge?.invoice);
+  let invoice = typeof charge?.invoice === "object" ? charge.invoice : null;
+  if (!invoice && invoiceId) invoice = await stripeGet(env2, `invoices/${invoiceId}`);
+  if (invoice) stripeSubscriptionId = subscriptionIdFromInvoice(invoice);
+  let row = stripeSubscriptionId ? await getSubscriptionByStripeId(db, stripeSubscriptionId).catch(() => null) : null;
+  if (!row && customerId) {
+    row = await db.prepare(
+      `SELECT * FROM Subscription
+           WHERE stripeCustomerId = ?1
+           ORDER BY CASE WHEN status IN ('active', 'trialing') THEN 0 ELSE 1 END, updatedAt DESC
+           LIMIT 1`
+    ).bind(customerId).first().catch(() => null);
+  }
+  if (!stripeSubscriptionId) {
+    stripeSubscriptionId = row?.stripeSubscriptionId ?? row?.stripesubscriptionid ?? null;
+  }
+  const organizationId = row?.organizationId ?? row?.organizationid ?? null;
+  const siteId = row?.siteId ?? row?.siteid ?? null;
+  let domain2 = null;
+  let platform2 = null;
+  if (siteId) {
+    const site = await db.prepare("SELECT domain, platform FROM Site WHERE id = ?1 LIMIT 1").bind(siteId).first().catch(() => null);
+    domain2 = site?.domain || null;
+    platform2 = site?.platform || null;
+  }
+  let userEmail = charge?.billing_details?.email || charge?.receipt_email || null;
+  if (organizationId) {
+    const user = await db.prepare(
+      "SELECT u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1"
+    ).bind(organizationId).first().catch(() => null);
+    if (user?.email) userEmail = user.email;
+  }
+  if (!userEmail && customerId) {
+    const cust = await stripeGet(env2, `customers/${customerId}`);
+    userEmail = cust?.email || null;
+  }
+  return {
+    row,
+    customerId,
+    stripeSubscriptionId,
+    organizationId,
+    siteId,
+    domain: domain2,
+    platform: platform2,
+    userEmail,
+    planId: row?.planId ?? row?.planid ?? null,
+    interval: row?.interval ?? "monthly"
+  };
+}
+__name(resolveRefundContext, "resolveRefundContext");
+async function processRefund(env2, db, ctx, { charge, refund, eventId, eventType }) {
+  const chargeId = charge?.id || null;
+  const refundId = refund?.id || charge?.refunds?.data?.[0]?.id || null;
+  const currency = charge?.currency || refund?.currency || "usd";
+  const chargeAmount = charge?.amount ?? null;
+  const refundedAmount = charge?.amount_refunded ?? refund?.amount ?? null;
+  const isFull = chargeAmount != null && refundedAmount != null ? refundedAmount >= chargeAmount : charge?.refunded === true;
+  const ctxRef = await resolveRefundContext(env2, db, charge);
+  const {
+    row,
+    customerId,
+    stripeSubscriptionId,
+    organizationId,
+    siteId,
+    domain: domain2,
+    platform: platform2,
+    userEmail
+  } = ctxRef;
+  console.log(
+    "[StripeWebhook] refund \u2014",
+    eventType,
+    "| chargeId:",
+    chargeId,
+    "| refundId:",
+    refundId,
+    "| refunded:",
+    refundedAmount,
+    "of",
+    chargeAmount,
+    "| full:",
+    isFull,
+    "| subId:",
+    stripeSubscriptionId,
+    "| site:",
+    domain2 || siteId
+  );
+  const cancelling = isFull && !!(stripeSubscriptionId || row?.id);
+  let cancelResult = null;
+  if (cancelling) {
+    if (stripeSubscriptionId) {
+      cancelResult = await cancelStripeSubscriptionNow(env2, stripeSubscriptionId);
+    }
+    if (row?.id) {
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      await db.prepare(
+        `UPDATE Subscription
+              SET status = 'canceled', canceledAt = ?1, cancelAtPeriodEnd = 0, updatedAt = ?2
+            WHERE id = ?3`
+      ).bind(now, now, row.id).run().catch((e) => console.warn("[StripeWebhook] refund \u2014 D1 cancel failed:", e?.message));
+    }
+    if (stripeSubscriptionId || domain2) {
+      ctx.waitUntil(
+        syncSubscriptionDeletedToLegacy(env2, {
+          email: userEmail,
+          domain: domain2,
+          subscriptionId: stripeSubscriptionId,
+          customerId,
+          platform: platform2
+        }).catch((e) => console.warn("[StripeWebhook] refund \u2014 legacy sync failed:", e?.message))
+      );
+    }
+    if (userEmail) {
+      ctx.waitUntil(
+        (async () => {
+          await capturePostHogEvent2(env2, userEmail, "subscription_refunded", {
+            plan: ctxRef.planId,
+            interval: ctxRef.interval,
+            org_id: organizationId,
+            site_id: siteId,
+            amount_refunded: refundedAmount != null ? refundedAmount / 100 : null,
+            currency: String(currency).toUpperCase(),
+            ...platform2 ? { platform: platform2 } : {}
+          });
+          await identifyPostHogPerson2(env2, userEmail, {
+            subscription_status: "canceled",
+            lifecycle_stage: "refunded",
+            did_refund: true,
+            refunded_at: (/* @__PURE__ */ new Date()).toISOString(),
+            ...platform2 ? { platform: platform2 } : {}
+          });
+        })().catch(() => {
+        })
+      );
+    }
+  }
+  await savePaymentEvent(db, {
+    eventType,
+    stripeEventId: eventId,
+    stripeInvoiceId: stripeId(charge?.invoice),
+    subscriptionId: row?.id ?? null,
+    organizationId,
+    amountCents: refundedAmount,
+    failureReason: refund?.reason || charge?.refunds?.data?.[0]?.reason || null,
+    rawPayload: {
+      chargeId,
+      refundId,
+      amountRefunded: refundedAmount,
+      chargeAmount,
+      currency,
+      full: isFull,
+      stripeSubscriptionId,
+      cancelled: cancelling,
+      cancelResult
+    }
+  }).catch((e) => console.warn("[StripeWebhook] refund \u2014 savePaymentEvent failed:", e?.message));
+  const site = domain2 || siteId || "an unidentified site";
+  const amountText = formatMoney(refundedAmount, currency);
+  const to = userEmail ? ` to ${userEmail}` : "";
+  await createAdminNotification(db, {
+    type: isFull ? "refund.full" : "refund.partial",
+    severity: isFull ? "critical" : "warning",
+    title: isFull ? cancelling ? `Refund of ${amountText} \u2014 ${site} cancelled` : `Refund of ${amountText} \u2014 no subscription matched` : `Partial refund of ${amountText} \u2014 ${site}`,
+    message: isFull ? cancelling ? `A full refund was issued${to}. The subscription has been cancelled and the site is no longer served.` : `A full refund was issued${to}, but no subscription could be matched to the charge \u2014 nothing was cancelled automatically. Check Stripe and cancel by hand if one is still running.` : `A partial refund of ${amountText}${chargeAmount != null ? ` (of ${formatMoney(chargeAmount, currency)})` : ""} was issued${to}. The subscription is still active \u2014 cancel it manually if that is not intended.`,
+    siteId,
+    domain: domain2,
+    organizationId,
+    userEmail,
+    subscriptionId: row?.id ?? null,
+    stripeSubscriptionId,
+    stripeCustomerId: customerId,
+    stripeChargeId: chargeId,
+    stripeRefundId: refundId,
+    amountCents: refundedAmount,
+    currency,
+    detail: {
+      eventType,
+      stripeEventId: eventId,
+      chargeAmount,
+      amountRefunded: refundedAmount,
+      reason: refund?.reason || charge?.refunds?.data?.[0]?.reason || null,
+      platform: platform2,
+      plan: ctxRef.planId,
+      interval: ctxRef.interval,
+      subscriptionCancelled: cancelling,
+      cancelResult,
+      matchedSubscriptionRow: !!row
+    },
+    // One row per refund however many times Stripe re-delivers it, and however
+    // many event types (charge.refunded + refund.updated) describe the same money.
+    dedupeKey: refundId ? `refund:${refundId}` : chargeId ? `charge-refund:${chargeId}:${refundedAmount}` : null
+  });
+}
+__name(processRefund, "processRefund");
 async function handleStripeWebhook(request, env2, ctx) {
   if (request.method !== "POST") {
     return Response.json({ error: "Method not allowed" }, { status: 405 });
@@ -37748,6 +35906,58 @@ async function handleStripeWebhook(request, env2, ctx) {
     }
     if (type === "customer.subscription.created") {
       const sub = event.data.object;
+      if (sub.status === "trialing" || sub.status === "active") {
+        ctx.waitUntil((async () => {
+          try {
+            const existing = await getSubscriptionByStripeId(db, sub.id).catch(() => null);
+            const orgId = existing?.organizationId ?? existing?.organizationid ?? sub.metadata?.organizationId ?? null;
+            const siteId = existing?.siteId ?? existing?.siteid ?? sub.metadata?.siteId ?? null;
+            let tier = sub.metadata?.planId || existing?.planId || existing?.planid || null;
+            const priceId = sub.items?.data?.[0]?.price?.id ?? null;
+            if (!tier || !["basic", "essential", "growth"].includes(String(tier).toLowerCase())) {
+              tier = inferTierPlanIdFromStripePriceId(env2, priceId) || tier;
+            }
+            let email = null;
+            let domain2 = null;
+            if (orgId) {
+              const u = await db.prepare(
+                "SELECT u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1"
+              ).bind(orgId).first().catch(() => null);
+              email = u?.email || null;
+            }
+            if (siteId) {
+              const s = await db.prepare("SELECT domain FROM Site WHERE id = ?1 LIMIT 1").bind(siteId).first().catch(() => null);
+              domain2 = s?.domain || null;
+            }
+            const kind = sub.status === "trialing" ? "trial_started" : "signup_paid";
+            await recordPlanTransition(db, {
+              kind,
+              fromPlan: "free",
+              toPlan: tier,
+              toInterval: sub.items?.data?.[0]?.plan?.interval === "year" ? "yearly" : "monthly",
+              toAmountCents: sub.items?.data?.[0]?.price?.unit_amount ?? sub.plan?.amount ?? null,
+              currency: sub.currency || "usd",
+              organizationId: orgId,
+              siteId,
+              domain: domain2,
+              userEmail: email,
+              subscriptionId: existing?.id ?? null,
+              stripeSubscriptionId: sub.id,
+              occurredAt: (/* @__PURE__ */ new Date()).toISOString(),
+              detail: {
+                eventType: type,
+                stripeEventId: eventId,
+                stripeStatus: sub.status,
+                priceId,
+                trialEnd: sub.trial_end ? new Date(sub.trial_end * 1e3).toISOString() : null
+              },
+              dedupeKey: transitionDedupeKey(kind, sub.id, eventId)
+            });
+          } catch (e) {
+            console.warn("[StripeWebhook] subscription.created transition log failed:", e?.message);
+          }
+        })());
+      }
       ctx.waitUntil((async () => {
         try {
           if (sub.status !== "trialing" && sub.status !== "active") {
@@ -37905,6 +36115,115 @@ async function handleStripeWebhook(request, env2, ctx) {
         organizationId: orgIdFinal,
         rawPayload: { status: sub.status, cancel_at_period_end: sub.cancel_at_period_end }
       });
+      {
+        const prevStatus = event.data.previous_attributes?.status ?? null;
+        const kind = classifyTransition({
+          fromPlan: existing?.planId ?? existing?.planid ?? "free",
+          toPlan: planIdFromMeta || existing?.planId || existing?.planid || null,
+          fromInterval: existing?.interval ?? null,
+          toInterval: intervalFromSub,
+          // previous_attributes only carries what CHANGED, so an absent status
+          // means it did not change and the old one equals the new one.
+          fromStatus: prevStatus ?? sub.status,
+          toStatus: type === "customer.subscription.deleted" ? "canceled" : sub.status
+        });
+        if (kind) {
+          try {
+            let ptEmail = null;
+            let ptDomain = null;
+            const ptSiteId = existing?.siteId ?? existing?.siteid ?? sub.metadata?.siteId ?? null;
+            if (orgIdFinal) {
+              const u = await db.prepare(
+                "SELECT u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1"
+              ).bind(orgIdFinal).first();
+              ptEmail = u?.email || null;
+            }
+            if (ptSiteId) {
+              const s = await db.prepare("SELECT domain FROM Site WHERE id = ?1 LIMIT 1").bind(ptSiteId).first();
+              ptDomain = s?.domain || null;
+            }
+            await recordPlanTransition(db, {
+              kind,
+              fromPlan: existing?.planId ?? existing?.planid ?? "free",
+              toPlan: planIdFromMeta || existing?.planId || existing?.planid || null,
+              fromInterval: existing?.interval ?? null,
+              toInterval: intervalFromSub,
+              fromAmountCents: existing?.amountCents ?? existing?.amountcents ?? null,
+              toAmountCents: sub.plan?.amount ?? sub.items?.data?.[0]?.price?.unit_amount ?? null,
+              currency: sub.currency || "usd",
+              organizationId: orgIdFinal,
+              siteId: ptSiteId,
+              domain: ptDomain,
+              userEmail: ptEmail,
+              subscriptionId: existing?.id ?? null,
+              stripeSubscriptionId: sub.id,
+              occurredAt: (/* @__PURE__ */ new Date()).toISOString(),
+              detail: { eventType: type, stripeEventId: eventId, prevStatus, newStatus: sub.status },
+              // Once-only milestones (first purchase, trial start/convert, cancel)
+              // are keyed on the SUBSCRIPTION so they cannot be double-logged by
+              // both this handler and the .created one above. Repeatable changes
+              // (upgrade, downgrade, interval) stay keyed on the event.
+              dedupeKey: transitionDedupeKey(kind, sub.id, eventId)
+            });
+          } catch (e) {
+            console.warn("[StripeWebhook] plan transition log failed:", e?.message);
+          }
+        }
+      }
+      if (type === "customer.subscription.deleted" || sub.status === "canceled" || sub.status === "unpaid") {
+        try {
+          let cnEmail = null;
+          let cnDomain = null;
+          const cnSiteId = existing?.siteId ?? existing?.siteid ?? sub.metadata?.siteId ?? null;
+          if (orgIdFinal) {
+            const u = await db.prepare(
+              "SELECT u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1"
+            ).bind(orgIdFinal).first();
+            cnEmail = u?.email || null;
+          }
+          if (cnSiteId) {
+            const s = await db.prepare("SELECT domain FROM Site WHERE id = ?1 LIMIT 1").bind(cnSiteId).first();
+            cnDomain = s?.domain || null;
+          }
+          const cnAmount = sub.plan?.amount ?? sub.items?.data?.[0]?.price?.unit_amount ?? null;
+          const cnCurrency = sub.currency || "usd";
+          const where = cnDomain || cnSiteId || "an unidentified site";
+          const unpaid = sub.status === "unpaid";
+          const atPeriodEnd = !!sub.cancel_at_period_end;
+          await createAdminNotification(db, {
+            type: unpaid ? "subscription.unpaid" : "subscription.cancelled",
+            // Losing a paying site is worth a look, but it is an expected part of
+            // the lifecycle — unlike a refund, which is money going back out.
+            severity: "warning",
+            title: unpaid ? `Subscription unpaid \u2014 ${where}` : `Subscription cancelled \u2014 ${where}`,
+            message: unpaid ? `Stripe marked this subscription unpaid after its retries were exhausted. The site is no longer served.` : `The ${planIdFromMeta || "paid"} ${intervalFromSub || ""} subscription for ${where} ended${atPeriodEnd ? " at the end of its billing period" : ""}. The site is no longer served.`,
+            siteId: cnSiteId,
+            domain: cnDomain,
+            organizationId: orgIdFinal,
+            userEmail: cnEmail,
+            subscriptionId: existing?.id ?? null,
+            stripeSubscriptionId: sub.id,
+            stripeCustomerId: typeof sub.customer === "string" ? sub.customer : sub.customer?.id || null,
+            amountCents: cnAmount,
+            currency: cnCurrency,
+            detail: {
+              eventType: type,
+              stripeEventId: eventId,
+              stripeStatus: sub.status,
+              cancelAtPeriodEnd: atPeriodEnd,
+              canceledAt,
+              plan: planIdFromMeta,
+              interval: intervalFromSub,
+              matchedSubscriptionRow: !!existing
+            },
+            // One row per subscription per terminal status, however many times
+            // Stripe re-delivers the event.
+            dedupeKey: `subcancel:${sub.id}:${sub.status}`
+          });
+        } catch (e) {
+          console.warn("[StripeWebhook] cancellation notification failed:", e?.message);
+        }
+      }
       {
         let _phEmail = null;
         let _phPlatform = null;
@@ -38119,6 +36438,43 @@ async function handleStripeWebhook(request, env2, ctx) {
           console.warn("[StripeWebhook] payment failure email lookup failed:", e?.message);
         }
       }
+      return Response.json({ received: true });
+    }
+    if (type === "charge.refunded" || type === "refund.created" || type === "refund.updated") {
+      const alreadyLogged = await db.prepare(
+        `SELECT id FROM PaymentEvent WHERE stripeEventId = ?1 LIMIT 1`
+      ).bind(eventId).first();
+      if (alreadyLogged) {
+        console.log("[StripeWebhook] refund event already processed \u2014", eventId);
+        return Response.json({ received: true });
+      }
+      let charge = null;
+      let refund = null;
+      if (type === "charge.refunded") {
+        charge = event.data.object;
+        refund = charge?.refunds?.data?.[0] || null;
+      } else {
+        refund = event.data.object;
+        if (refund?.status && refund.status !== "succeeded") {
+          console.log("[StripeWebhook] refund ignored \u2014 status:", refund.status, "| refundId:", refund.id);
+          return Response.json({ received: true });
+        }
+        const chargeId = stripeId(refund?.charge);
+        if (chargeId) charge = await stripeGet(env2, `charges/${chargeId}`);
+      }
+      if (charge?.id) {
+        const fresh = await stripeGet(env2, `charges/${charge.id}`);
+        if (fresh) charge = fresh;
+      }
+      if (!refund && charge?.id) {
+        const list = await stripeGet(env2, `refunds?charge=${encodeURIComponent(charge.id)}&limit=1`);
+        refund = list?.data?.[0] || charge?.refunds?.data?.[0] || null;
+      }
+      if (!charge) {
+        console.warn("[StripeWebhook] refund \u2014 could not resolve the charge; recording nothing.", type, eventId);
+        return Response.json({ received: true });
+      }
+      await processRefund(env2, db, ctx, { charge, refund, eventId, eventType: type });
       return Response.json({ received: true });
     }
     return Response.json({ received: true });
@@ -39683,13 +38039,13 @@ function trimEnv4(v) {
 }
 __name(trimEnv4, "trimEnv");
 var fail2 = /* @__PURE__ */ __name((error, status) => Response.json({ success: false, error }, { status }), "fail");
-async function stripeGet(env2, path) {
+async function stripeGet2(env2, path) {
   const res = await fetch(`https://api.stripe.com/v1${path}`, {
     headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` }
   });
   return { status: res.status, body: await res.json() };
 }
-__name(stripeGet, "stripeGet");
+__name(stripeGet2, "stripeGet");
 async function stripePost(env2, path, formObj) {
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(formObj)) {
@@ -39757,7 +38113,7 @@ async function prepareChange(request, env2) {
     return { error: fail2(`Price not configured for ${planId} ${interval}`, 503) };
   }
   const isDowngrade = PLAN_ORDER[planId] < PLAN_ORDER[currentPlanId];
-  const subRes = await stripeGet(env2, `/subscriptions/${stripeSubId}`);
+  const subRes = await stripeGet2(env2, `/subscriptions/${stripeSubId}`);
   if (subRes.body.error) {
     console.error("[ChangeTier] Stripe fetch sub failed:", subRes.body.error.message);
     return { error: fail2(subRes.body.error.message || "Failed to read subscription", 400) };
@@ -39817,7 +38173,7 @@ async function previewImmediateAmount(env2, ctx) {
   };
   if (promotionCodeId) base["discounts[0][promotion_code]"] = promotionCodeId;
   const qs = new URLSearchParams(base).toString();
-  const up = await stripeGet(env2, `/invoices/upcoming?${qs}`);
+  const up = await stripeGet2(env2, `/invoices/upcoming?${qs}`);
   if (!up.body.error) {
     return { amountDueCents: sumProrationCents2(up.body), currency: up.body.currency || "usd" };
   }
@@ -39826,7 +38182,7 @@ async function previewImmediateAmount(env2, ctx) {
     if (promotionCodeId) {
       const retry2 = { ...base };
       delete retry2["discounts[0][promotion_code]"];
-      const up2 = await stripeGet(env2, `/invoices/upcoming?${new URLSearchParams(retry2).toString()}`);
+      const up2 = await stripeGet2(env2, `/invoices/upcoming?${new URLSearchParams(retry2).toString()}`);
       if (!up2.body.error) {
         return { amountDueCents: sumProrationCents2(up2.body), currency: up2.body.currency || "usd", couponPreviewSkipped: true };
       }
@@ -39859,7 +38215,7 @@ async function handleChangeTierPreview(request, env2) {
   const ctx = prep.ctx;
   const { currentPlanId, currentInterval, planId, interval, isDowngrade, isTrialing, trialEndISO, periodEndISO, newPriceId, env: _e } = ctx;
   if (isTrialing) {
-    const priceRes = await stripeGet(env2, `/prices/${newPriceId}`);
+    const priceRes = await stripeGet2(env2, `/prices/${newPriceId}`);
     if (priceRes.body.error) return fail2(priceRes.body.error.message || "Could not read the plan price", 400);
     return Response.json({
       success: true,
@@ -39876,7 +38232,7 @@ async function handleChangeTierPreview(request, env2) {
     });
   }
   if (isDowngrade) {
-    const priceRes = await stripeGet(env2, `/prices/${newPriceId}`);
+    const priceRes = await stripeGet2(env2, `/prices/${newPriceId}`);
     const newAmount = priceRes.body?.error ? null : priceRes.body.unit_amount ?? null;
     return Response.json({
       success: true,
@@ -40036,7 +38392,7 @@ async function handleChangeTier(request, env2) {
   let invoiceUrl = null;
   let paymentStatus = "paid";
   if (invoiceId) {
-    const inv = await stripeGet(env2, `/invoices/${invoiceId}`);
+    const inv = await stripeGet2(env2, `/invoices/${invoiceId}`);
     if (!inv.body.error) {
       amountPaidCents = inv.body.amount_paid ?? inv.body.amount_due ?? null;
       currency = inv.body.currency || "usd";
@@ -40109,7 +38465,7 @@ async function handleDebugSchema(request, env2) {
   let pageviewSample = [];
   try {
     const pvResult = await db.prepare(
-      `SELECT id, siteId, yearMonth, pageviewCount, updatedAt FROM PageviewUsage ORDER BY updatedAt DESC LIMIT 20`
+      `SELECT id, siteId, yearMonth, pageviewCount, blockedPageviewCount, updatedAt FROM PageviewUsage ORDER BY updatedAt DESC LIMIT 20`
     ).all();
     pageviewSample = pvResult.results || [];
   } catch (e) {
@@ -43839,1872 +42195,6 @@ async function handleAdminTestScanReport(request, env2, ctx) {
 }
 __name(handleAdminTestScanReport, "handleAdminTestScanReport");
 
-// src/handlers/adminDashboard/index.js
-init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
-init_performance2();
-
-// src/handlers/adminDashboard/auth.js
-init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
-init_performance2();
-
-// src/handlers/adminDashboard/accounts.js
-init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
-init_performance2();
-
-// src/handlers/adminDashboard/crypto.js
-init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
-init_performance2();
-var enc = new TextEncoder();
-var PBKDF2_ITERATIONS2 = 1e5;
-function bytesToHex(bytes) {
-  let out = "";
-  for (const b of bytes) out += b.toString(16).padStart(2, "0");
-  return out;
-}
-__name(bytesToHex, "bytesToHex");
-function hexToBytes(hex) {
-  const out = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  return out;
-}
-__name(hexToBytes, "hexToBytes");
-function ctEq(a, b) {
-  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-__name(ctEq, "ctEq");
-async function pbkdf2(secret, salt, iterations) {
-  const key = await crypto.subtle.importKey("raw", enc.encode(secret), "PBKDF2", false, [
-    "deriveBits"
-  ]);
-  const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
-    key,
-    256
-  );
-  return new Uint8Array(bits);
-}
-__name(pbkdf2, "pbkdf2");
-async function hashSecret(secret) {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const hash = await pbkdf2(String(secret), salt, PBKDF2_ITERATIONS2);
-  return `pbkdf2$${PBKDF2_ITERATIONS2}$${bytesToHex(salt)}$${bytesToHex(hash)}`;
-}
-__name(hashSecret, "hashSecret");
-async function verifySecret(stored, supplied) {
-  if (typeof stored !== "string" || !stored || !supplied) return false;
-  const parts = stored.split("$");
-  if (parts.length !== 4 || parts[0] !== "pbkdf2") return false;
-  const iterations = Number(parts[1]);
-  if (!Number.isFinite(iterations) || iterations < 1e3) return false;
-  try {
-    const hash = await pbkdf2(String(supplied), hexToBytes(parts[2]), iterations);
-    return ctEq(bytesToHex(hash), parts[3]);
-  } catch (_) {
-    return false;
-  }
-}
-__name(verifySecret, "verifySecret");
-function isHashed(stored) {
-  return typeof stored === "string" && stored.startsWith("pbkdf2$");
-}
-__name(isHashed, "isHashed");
-async function createToken() {
-  const raw = crypto.getRandomValues(new Uint8Array(32));
-  const token = bytesToHex(raw);
-  return { token, tokenHash: await sha256Hex2(token) };
-}
-__name(createToken, "createToken");
-async function sha256Hex2(value) {
-  const buf = await crypto.subtle.digest("SHA-256", enc.encode(String(value)));
-  return bytesToHex(new Uint8Array(buf));
-}
-__name(sha256Hex2, "sha256Hex");
-
-// src/handlers/adminDashboard/accounts.js
-var SEED = {
-  admin: "snm-admin-_R24Azbzk4I0r6nqC8H3IFc_005az3TX",
-  viewer: "snm-123"
-};
-var USERNAME_RULE = "Username must be a valid email address.";
-var SECRET_RULE = "Password must be at least 8 characters.";
-var INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
-var RESET_TTL_MS = 60 * 60 * 1e3;
-function normalizeUsername(raw) {
-  return String(raw ?? "").trim().toLowerCase();
-}
-__name(normalizeUsername, "normalizeUsername");
-function isValidUsername(name) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(name) && name.length <= 254;
-}
-__name(isValidUsername, "isValidUsername");
-async function ensureAccountTable(db) {
-  await db.prepare(
-    `CREATE TABLE IF NOT EXISTS AdminDashboardAccount (
-        username TEXT PRIMARY KEY,
-        role TEXT NOT NULL,
-        secret TEXT,
-        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`
-  ).run();
-  for (const ddl of [
-    `ALTER TABLE AdminDashboardAccount ADD COLUMN email TEXT`,
-    `ALTER TABLE AdminDashboardAccount ADD COLUMN secretHash TEXT`,
-    `ALTER TABLE AdminDashboardAccount ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`,
-    `ALTER TABLE AdminDashboardAccount ADD COLUMN invitedBy TEXT`,
-    `ALTER TABLE AdminDashboardAccount ADD COLUMN tokenHash TEXT`,
-    `ALTER TABLE AdminDashboardAccount ADD COLUMN tokenPurpose TEXT`,
-    `ALTER TABLE AdminDashboardAccount ADD COLUMN tokenExpiresAt DATETIME`,
-    `ALTER TABLE AdminDashboardAccount ADD COLUMN lastLoginAt DATETIME`
-  ]) {
-    try {
-      await db.prepare(ddl).run();
-    } catch (_) {
-    }
-  }
-  const countRow = await db.prepare(`SELECT COUNT(*) AS c FROM AdminDashboardAccount`).first();
-  if ((Number(countRow?.c) || 0) === 0) {
-    let migrated = [];
-    try {
-      const { results = [] } = await db.prepare(`SELECT role, secret FROM AdminDashboardCredential`).all();
-      migrated = results.filter((r) => r?.role && r?.secret);
-    } catch (_) {
-    }
-    const rows = migrated.length ? migrated.map((r) => ({ username: String(r.role), role: String(r.role), secret: r.secret })) : [
-      { username: "admin", role: "admin", secret: SEED.admin },
-      { username: "viewer", role: "viewer", secret: SEED.viewer }
-    ];
-    for (const row of rows) {
-      await db.prepare(
-        `INSERT OR IGNORE INTO AdminDashboardAccount
-             (username, role, secretHash, status, createdAt, updatedAt)
-           VALUES (?, ?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-      ).bind(row.username, row.role === "admin" ? "admin" : "viewer", await hashSecret(row.secret)).run();
-    }
-  }
-  try {
-    await db.prepare(
-      `UPDATE AdminDashboardAccount
-            SET email = username
-          WHERE (email IS NULL OR email = '') AND username LIKE '%_@_%._%'`
-    ).run();
-  } catch (_) {
-  }
-  await upgradePlaintextSecrets(db);
-}
-__name(ensureAccountTable, "ensureAccountTable");
-async function upgradePlaintextSecrets(db) {
-  let rows = [];
-  try {
-    const { results = [] } = await db.prepare(
-      `SELECT username, secret FROM AdminDashboardAccount
-          WHERE secret IS NOT NULL AND secret != ''`
-    ).all();
-    rows = results;
-  } catch (_) {
-    return;
-  }
-  for (const row of rows) {
-    const hash = isHashed(row.secret) ? row.secret : await hashSecret(row.secret);
-    try {
-      await db.prepare(
-        `UPDATE AdminDashboardAccount
-              SET secretHash = COALESCE(secretHash, ?), secret = ''
-            WHERE username = ?`
-      ).bind(hash, row.username).run();
-    } catch (err) {
-      console.error("[adminAccounts] secret upgrade failed for", row.username, err?.message);
-    }
-  }
-}
-__name(upgradePlaintextSecrets, "upgradePlaintextSecrets");
-async function findAccount(db, username) {
-  await ensureAccountTable(db);
-  return await db.prepare(
-    `SELECT username, email, role, secretHash, status, invitedBy, tokenHash, tokenPurpose,
-              tokenExpiresAt, createdAt, updatedAt, lastLoginAt
-         FROM AdminDashboardAccount WHERE username = ?`
-  ).bind(username).first();
-}
-__name(findAccount, "findAccount");
-async function resolveAccount(db, username, secret) {
-  const name = normalizeUsername(username);
-  if (!name || !secret) return null;
-  const row = await findAccount(db, name);
-  if (!row || row.status === "invited" || !row.secretHash) return null;
-  if (!await verifySecret(row.secretHash, String(secret))) return null;
-  return { username: row.username, role: row.role === "admin" ? "admin" : "viewer" };
-}
-__name(resolveAccount, "resolveAccount");
-async function touchLogin(db, username) {
-  try {
-    await db.prepare(`UPDATE AdminDashboardAccount SET lastLoginAt = CURRENT_TIMESTAMP WHERE username = ?`).bind(normalizeUsername(username)).run();
-  } catch (_) {
-  }
-}
-__name(touchLogin, "touchLogin");
-async function listAccounts(db) {
-  await ensureAccountTable(db);
-  const { results = [] } = await db.prepare(
-    `SELECT username, email, role, status, invitedBy, createdAt, updatedAt, lastLoginAt,
-              CASE WHEN tokenPurpose = 'invite' AND tokenHash IS NOT NULL THEN 1 ELSE 0 END
-                AS invitePending
-         FROM AdminDashboardAccount
-        ORDER BY CASE role WHEN 'admin' THEN 0 ELSE 1 END, username`
-  ).all();
-  return results;
-}
-__name(listAccounts, "listAccounts");
-async function getAccount(db, username) {
-  const row = await findAccount(db, normalizeUsername(username));
-  if (!row) return null;
-  return {
-    username: row.username,
-    role: row.role,
-    status: row.status,
-    invitedBy: row.invitedBy,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-    lastLoginAt: row.lastLoginAt,
-    invitePending: row.tokenPurpose === "invite" && !!row.tokenHash ? 1 : 0
-  };
-}
-__name(getAccount, "getAccount");
-async function inviteViewer(db, email, invitedBy) {
-  const name = normalizeUsername(email);
-  if (!isValidUsername(name)) return { ok: false, error: USERNAME_RULE };
-  await ensureAccountTable(db);
-  const existing = await findAccount(db, name);
-  if (existing) return { ok: false, error: `"${name}" already has an account.` };
-  const { token, tokenHash } = await createToken();
-  await db.prepare(
-    `INSERT INTO AdminDashboardAccount
-         (username, role, secretHash, status, invitedBy, tokenHash, tokenPurpose,
-          tokenExpiresAt, createdAt, updatedAt)
-       VALUES (?, 'viewer', NULL, 'invited', ?, ?, 'invite', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-  ).bind(name, invitedBy || null, tokenHash, new Date(Date.now() + INVITE_TTL_MS).toISOString()).run();
-  return { ok: true, username: name, token };
-}
-__name(inviteViewer, "inviteViewer");
-async function reissueInvite(db, username, invitedBy) {
-  const name = normalizeUsername(username);
-  await ensureAccountTable(db);
-  const existing = await findAccount(db, name);
-  if (!existing) return { ok: false, error: "Account not found" };
-  if (existing.status !== "invited") {
-    return { ok: false, error: "That account has already been activated." };
-  }
-  const { token, tokenHash } = await createToken();
-  await db.prepare(
-    `UPDATE AdminDashboardAccount
-          SET tokenHash = ?, tokenPurpose = 'invite', tokenExpiresAt = ?, invitedBy = ?,
-              updatedAt = CURRENT_TIMESTAMP
-        WHERE username = ?`
-  ).bind(tokenHash, new Date(Date.now() + INVITE_TTL_MS).toISOString(), invitedBy || existing.invitedBy, name).run();
-  return { ok: true, username: name, token };
-}
-__name(reissueInvite, "reissueInvite");
-async function startPasswordReset(db, email) {
-  const name = normalizeUsername(email);
-  await ensureAccountTable(db);
-  const existing = await findAccount(db, name);
-  if (!existing || existing.status === "invited") return { ok: true, token: null };
-  const { token, tokenHash } = await createToken();
-  await db.prepare(
-    `UPDATE AdminDashboardAccount
-          SET tokenHash = ?, tokenPurpose = 'reset', tokenExpiresAt = ?, updatedAt = CURRENT_TIMESTAMP
-        WHERE username = ?`
-  ).bind(tokenHash, new Date(Date.now() + RESET_TTL_MS).toISOString(), name).run();
-  return { ok: true, token, username: name };
-}
-__name(startPasswordReset, "startPasswordReset");
-async function resolveToken(db, token) {
-  if (!token) return null;
-  await ensureAccountTable(db);
-  const tokenHash = await sha256Hex2(token);
-  const row = await db.prepare(
-    `SELECT username, role, status, tokenPurpose, tokenExpiresAt
-         FROM AdminDashboardAccount WHERE tokenHash = ?`
-  ).bind(tokenHash).first();
-  if (!row) return null;
-  if (row.tokenExpiresAt && Date.parse(row.tokenExpiresAt) < Date.now()) return null;
-  return {
-    username: row.username,
-    role: row.role,
-    status: row.status,
-    purpose: row.tokenPurpose
-  };
-}
-__name(resolveToken, "resolveToken");
-async function completeWithToken(db, token, newSecret) {
-  const found = await resolveToken(db, token);
-  if (!found) return { ok: false, error: "That link is invalid or has expired." };
-  const value = String(newSecret ?? "").trim();
-  if (value.length < 8) return { ok: false, error: SECRET_RULE };
-  await db.prepare(
-    `UPDATE AdminDashboardAccount
-          SET secretHash = ?, status = 'active', tokenHash = NULL, tokenPurpose = NULL,
-              tokenExpiresAt = NULL, secret = NULL, updatedAt = CURRENT_TIMESTAMP
-        WHERE username = ?`
-  ).bind(await hashSecret(value), found.username).run();
-  return { ok: true, username: found.username, purpose: found.purpose, role: found.role };
-}
-__name(completeWithToken, "completeWithToken");
-async function changeAccountSecret(db, username, currentSecret, nextSecret) {
-  const name = normalizeUsername(username);
-  const value = String(nextSecret ?? "").trim();
-  await ensureAccountTable(db);
-  const existing = await findAccount(db, name);
-  if (!existing) return { ok: false, error: "Account not found" };
-  if (!await verifySecret(existing.secretHash, String(currentSecret ?? ""))) {
-    return { ok: false, error: "Current password is incorrect." };
-  }
-  if (value.length < 8) return { ok: false, error: SECRET_RULE };
-  if (await verifySecret(existing.secretHash, value)) {
-    return { ok: false, error: "New password must be different from the current one." };
-  }
-  await db.prepare(
-    `UPDATE AdminDashboardAccount
-          SET secretHash = ?, secret = NULL, updatedAt = CURRENT_TIMESTAMP
-        WHERE username = ?`
-  ).bind(await hashSecret(value), name).run();
-  return { ok: true, username: name };
-}
-__name(changeAccountSecret, "changeAccountSecret");
-async function renameAccount(db, username, newUsername) {
-  const from2 = normalizeUsername(username);
-  const to = normalizeUsername(newUsername);
-  if (!isValidUsername(to)) return { ok: false, error: USERNAME_RULE };
-  await ensureAccountTable(db);
-  const existing = await findAccount(db, from2);
-  if (!existing) return { ok: false, error: "Account not found" };
-  if (from2 === to) return { ok: false, error: "That is already the username." };
-  const taken = await findAccount(db, to);
-  if (taken) return { ok: false, error: `"${to}" is already taken.` };
-  const previousEmail = normalizeUsername(existing.email) || null;
-  const nextEmail = !previousEmail || previousEmail === from2 ? to : existing.email;
-  await db.prepare(
-    `UPDATE AdminDashboardAccount
-          SET username = ?, email = ?, updatedAt = CURRENT_TIMESTAMP
-        WHERE username = ?`
-  ).bind(to, nextEmail, from2).run();
-  return { ok: true, username: to, previousUsername: from2, email: nextEmail, role: existing.role };
-}
-__name(renameAccount, "renameAccount");
-async function deleteAccount(db, username) {
-  const name = normalizeUsername(username);
-  await ensureAccountTable(db);
-  const existing = await findAccount(db, name);
-  if (!existing) return { ok: false, error: "Account not found" };
-  if (existing.role === "admin") return { ok: false, error: "Admin accounts cannot be deleted." };
-  await db.prepare(`DELETE FROM AdminDashboardAccount WHERE username = ?`).bind(name).run();
-  return { ok: true, username: name };
-}
-__name(deleteAccount, "deleteAccount");
-
-// src/handlers/adminDashboard/auth.js
-async function resolveCaller(request, env2, db) {
-  const key = request.headers.get("X-Admin-Key") || "";
-  if (!key) return null;
-  if (env2?.ADMIN_SECRET && ctEq(key, env2.ADMIN_SECRET)) {
-    return { username: request.headers.get("X-Admin-User") || "env", role: "admin" };
-  }
-  const username = request.headers.get("X-Admin-User") || "";
-  if (!username || !db) return null;
-  return await resolveAccount(db, username, key);
-}
-__name(resolveCaller, "resolveCaller");
-function unauthorized() {
-  return Response.json({ success: false, error: "Unauthorized" }, { status: 401 });
-}
-__name(unauthorized, "unauthorized");
-function forbidden(message) {
-  return Response.json(
-    { success: false, error: message || "Forbidden \u2014 admin role required" },
-    { status: 403 }
-  );
-}
-__name(forbidden, "forbidden");
-
-// src/handlers/adminDashboard/queries.js
-init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
-init_performance2();
-
-// src/handlers/adminDashboard/schema.js
-init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
-init_performance2();
-var SITE_CHILD_TABLES2 = [
-  "Consent",
-  "Cookie",
-  "Script",
-  "ScanHistory",
-  "ScanUsage",
-  "ScheduledScan",
-  "ScanTopupRequest",
-  "PageviewUsage",
-  "BannerCustomization",
-  "CustomCookieRule",
-  "LicenseActivation"
-];
-var ORG_CHILD_TABLES = [
-  "Subscription",
-  "SubscriptionQueue",
-  "PaymentEvent",
-  "OrganizationMember"
-];
-var USER_CHILD_TABLES = ["Session", "Feedback", "OwnershipTransfer"];
-var EMAIL_KEYED_ROWS = [
-  { table: "EmailVerificationCode", columns: ["email"] },
-  { table: "OwnershipTransfer", columns: ["currentEmail", "newEmail"] }
-];
-function normalizePlatform(raw) {
-  const v = (raw || "").toLowerCase();
-  if (v === "webflow") return "webflow";
-  if (v === "framer") return "framer";
-  return "webapp";
-}
-__name(normalizePlatform, "normalizePlatform");
-
-// src/handlers/adminDashboard/scans.js
-init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
-init_performance2();
-var claimsTableReady = false;
-async function ensureScanClaimsTable(db) {
-  if (claimsTableReady) return;
-  await db.prepare(
-    `CREATE TABLE IF NOT EXISTS scan_claims (
-        id           TEXT PRIMARY KEY,
-        scan_id      TEXT,
-        site_url     TEXT,
-        scanned_url  TEXT,
-        email        TEXT NOT NULL,
-        user_id      TEXT,
-        purpose      TEXT,
-        claimed_at   TEXT NOT NULL
-      )`
-  ).run();
-  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_scan_claims_site ON scan_claims (site_url, claimed_at)`).run();
-  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_scan_claims_email ON scan_claims (email, claimed_at)`).run();
-  claimsTableReady = true;
-}
-__name(ensureScanClaimsTable, "ensureScanClaimsTable");
-async function recordScanClaim(db, { scanId, email, userId, purpose } = {}) {
-  if (!db || !scanId || !email) return;
-  try {
-    await ensureScanClaimsTable(db);
-    const report2 = await db.prepare(`SELECT site_url, scanned_url FROM scan_reports WHERE id = ?1`).bind(scanId).first();
-    await db.prepare(
-      `INSERT INTO scan_claims
-           (id, scan_id, site_url, scanned_url, email, user_id, purpose, claimed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`
-    ).bind(
-      crypto.randomUUID(),
-      scanId,
-      report2?.site_url ?? null,
-      report2?.scanned_url ?? null,
-      String(email).trim().toLowerCase(),
-      userId || null,
-      purpose || null,
-      (/* @__PURE__ */ new Date()).toISOString()
-    ).run();
-  } catch (err) {
-    console.error("[scanClaims] write failed:", err?.message || err);
-  }
-}
-__name(recordScanClaim, "recordScanClaim");
-function cutoffIso(days) {
-  const n = Number(days);
-  if (!n || n <= 0) return null;
-  return new Date(Date.now() - n * 24 * 60 * 60 * 1e3).toISOString();
-}
-__name(cutoffIso, "cutoffIso");
-async function listScanEvents(db, { search, days, year, month, claimed, limit } = {}) {
-  await ensureScanClaimsTable(db);
-  const where = [];
-  const binds = [];
-  if (search) {
-    where.push("(e.submitted_url LIKE ? OR e.site_url LIKE ?)");
-    binds.push(`%${search}%`, `%${search}%`);
-  }
-  const cutoff = cutoffIso(days);
-  if (cutoff) {
-    where.push("e.submitted_at >= ?");
-    binds.push(cutoff);
-  }
-  if (year) {
-    where.push("substr(e.submitted_at, 1, 4) = ?");
-    binds.push(String(year));
-  }
-  if (month) {
-    where.push("substr(e.submitted_at, 6, 2) = ?");
-    binds.push(String(month).padStart(2, "0"));
-  }
-  if (claimed === "claimed") {
-    where.push("EXISTS (SELECT 1 FROM scan_claims c WHERE c.site_url = e.site_url)");
-  } else if (claimed === "anonymous") {
-    where.push("NOT EXISTS (SELECT 1 FROM scan_claims c WHERE c.site_url = e.site_url)");
-  }
-  const cap = Math.min(Math.max(Number(limit) || 200, 1), 1e3);
-  const sql = `SELECT e.id, e.submitted_url, e.site_url, e.submitted_at, e.country, e.referer,
-            r.id AS report_id, r.scan_date, r.timing_ms, r.emailed_at,
-            json_extract(r.report_data, '$.grade')        AS grade,
-            json_extract(r.report_data, '$.totalCookies') AS total_cookies,
-            (SELECT COUNT(*) FROM scan_claims c WHERE c.site_url = e.site_url) AS claim_count,
-            (SELECT c2.email FROM scan_claims c2 WHERE c2.site_url = e.site_url
-              ORDER BY c2.claimed_at DESC LIMIT 1)                             AS claimed_by
-       FROM scan_events e
-       LEFT JOIN scan_reports r ON r.site_url = e.site_url` + (where.length ? ` WHERE ${where.join(" AND ")}` : "") + ` ORDER BY e.submitted_at DESC, e.rowid DESC LIMIT ${cap}`;
-  const { results = [] } = await db.prepare(sql).bind(...binds).all();
-  return results.map((r) => ({
-    id: r.id,
-    submittedUrl: r.submitted_url,
-    siteUrl: r.site_url,
-    submittedAt: r.submitted_at,
-    country: r.country,
-    referer: r.referer,
-    reportId: r.report_id ?? null,
-    scanDate: r.scan_date ?? null,
-    timingMs: r.timing_ms ?? null,
-    emailedAt: r.emailed_at ?? null,
-    grade: r.grade ?? null,
-    totalCookies: r.total_cookies ?? null,
-    claimCount: Number(r.claim_count) || 0,
-    claimedBy: r.claimed_by ?? null
-  }));
-}
-__name(listScanEvents, "listScanEvents");
-async function getScanStats(db) {
-  await ensureScanClaimsTable(db);
-  const week = new Date(Date.now() - 7 * 24 * 60 * 60 * 1e3).toISOString();
-  const [total, domains, recent, claims, claimants, years] = await Promise.all([
-    db.prepare(`SELECT COUNT(*) AS c FROM scan_events`).first(),
-    db.prepare(`SELECT COUNT(DISTINCT site_url) AS c FROM scan_events WHERE site_url IS NOT NULL`).first(),
-    db.prepare(`SELECT COUNT(*) AS c FROM scan_events WHERE submitted_at >= ?1`).bind(week).first(),
-    db.prepare(`SELECT COUNT(*) AS c FROM scan_claims`).first(),
-    db.prepare(`SELECT COUNT(DISTINCT email) AS c FROM scan_claims`).first(),
-    db.prepare(
-      `SELECT DISTINCT substr(submitted_at, 1, 4) AS y
-           FROM scan_events
-          WHERE submitted_at IS NOT NULL AND length(submitted_at) >= 4
-          ORDER BY y DESC`
-    ).all()
-  ]);
-  return {
-    totalScans: Number(total?.c) || 0,
-    uniqueDomains: Number(domains?.c) || 0,
-    scansLast7Days: Number(recent?.c) || 0,
-    totalClaims: Number(claims?.c) || 0,
-    uniqueClaimants: Number(claimants?.c) || 0,
-    years: (years?.results ?? []).map((r) => String(r.y)).filter((y) => /^\d{4}$/.test(y))
-  };
-}
-__name(getScanStats, "getScanStats");
-async function listScansForEmail(db, email) {
-  const address = String(email || "").trim().toLowerCase();
-  if (!db || !address) return [];
-  try {
-    await ensureScanClaimsTable(db);
-    const { results = [] } = await db.prepare(
-      `SELECT c.id, c.scan_id, c.site_url, c.scanned_url, c.purpose, c.claimed_at,
-                r.scan_date, r.emailed_at,
-                json_extract(r.report_data, '$.grade')        AS grade,
-                json_extract(r.report_data, '$.totalCookies') AS total_cookies
-           FROM scan_claims c
-           LEFT JOIN scan_reports r ON r.id = c.scan_id
-          WHERE c.email = ?1
-          ORDER BY c.claimed_at DESC
-          LIMIT 100`
-    ).bind(address).all();
-    return results.map((r) => ({
-      id: r.id,
-      scanId: r.scan_id,
-      siteUrl: r.site_url,
-      scannedUrl: r.scanned_url,
-      purpose: r.purpose,
-      claimedAt: r.claimed_at,
-      // Null once that domain has been re-scanned: the upsert mints a fresh
-      // scan_reports id, so this claim's scan_id no longer resolves.
-      scanDate: r.scan_date ?? null,
-      emailedAt: r.emailed_at ?? null,
-      grade: r.grade ?? null,
-      totalCookies: r.total_cookies ?? null
-    }));
-  } catch (err) {
-    console.error("[scanClaims] lookup failed:", err?.message || err);
-    return [];
-  }
-}
-__name(listScansForEmail, "listScansForEmail");
-
-// src/handlers/adminDashboard/queries.js
-function placeholders(arr) {
-  return arr.map(() => "?").join(",");
-}
-__name(placeholders, "placeholders");
-function derivePlatforms(concat2) {
-  if (!concat2) return [];
-  const set = /* @__PURE__ */ new Set();
-  for (const part of String(concat2).split(",")) set.add(normalizePlatform(part.trim()));
-  return [...set];
-}
-__name(derivePlatforms, "derivePlatforms");
-var KNOWN_TIERS = /* @__PURE__ */ new Set(["free", "basic", "essential", "growth"]);
-function derivePlans(concat2) {
-  const set = /* @__PURE__ */ new Set();
-  if (concat2) {
-    for (const raw of String(concat2).split(",")) {
-      const v = raw.trim().toLowerCase();
-      if (KNOWN_TIERS.has(v)) set.add(v);
-    }
-  }
-  if (!set.size) set.add("free");
-  return [...set];
-}
-__name(derivePlans, "derivePlans");
-function deriveStatuses(concat2) {
-  const set = /* @__PURE__ */ new Set();
-  if (concat2) {
-    for (const raw of String(concat2).split(",")) {
-      let v = raw.trim().toLowerCase();
-      if (!v) continue;
-      if (v === "cancelled") v = "canceled";
-      set.add(v);
-    }
-  }
-  return [...set];
-}
-__name(deriveStatuses, "deriveStatuses");
-function yearOf(dt) {
-  return dt ? String(dt).slice(0, 4) : "";
-}
-__name(yearOf, "yearOf");
-function monthOf(dt) {
-  return dt ? String(dt).slice(5, 7) : "";
-}
-__name(monthOf, "monthOf");
-var INTERNAL_DOMAINS = ["seattlenewmedia.com"];
-function isInternalOrTest(email) {
-  const e = String(email || "").toLowerCase().trim();
-  if (!e || !e.includes("@")) return false;
-  const [local, domain2] = e.split("@");
-  if (INTERNAL_DOMAINS.includes(domain2)) return true;
-  if (local === "test" || /^test[._+-]?/.test(local)) return true;
-  if (local.includes("+test")) return true;
-  return false;
-}
-__name(isInternalOrTest, "isInternalOrTest");
-async function listUsers(db, { platform: platform2 = "all", search = "", plan = "all", status = "all", year = "", month = "", audience = "all", billing = "all" } = {}) {
-  const where = [];
-  const params = [];
-  if (search) {
-    where.push(`(
-      u.email LIKE ? OR u.name LIKE ? OR u.id = ?
-      OR EXISTS (
-        SELECT 1 FROM Site s
-          JOIN Organization o ON s.organizationId = o.id
-         WHERE o.ownerUserId = u.id
-           AND (s.domain LIKE ? OR s.customDomain LIKE ? OR s.stagingUrl LIKE ? OR s.name LIKE ?)
-      )
-    )`);
-    const like = `%${search}%`;
-    params.push(like, like, search, like, like, like, like);
-  }
-  const sql = `
-    SELECT
-      u.id, u.email, u.name, u.createdAt, u.updatedAt,
-      (SELECT COUNT(*) FROM Organization o WHERE o.ownerUserId = u.id) AS orgCount,
-      (SELECT COUNT(*) FROM Site s
-         JOIN Organization o ON s.organizationId = o.id
-        WHERE o.ownerUserId = u.id) AS siteCount,
-      (SELECT GROUP_CONCAT(DISTINCT COALESCE(NULLIF(s.platform,''),'webapp'))
-         FROM Site s JOIN Organization o ON s.organizationId = o.id
-        WHERE o.ownerUserId = u.id) AS platforms,
-      (SELECT GROUP_CONCAT(DISTINCT sub.planId)
-         FROM Subscription sub JOIN Organization o ON sub.organizationId = o.id
-        WHERE o.ownerUserId = u.id) AS plans,
-      (SELECT GROUP_CONCAT(DISTINCT sub.status)
-         FROM Subscription sub JOIN Organization o ON sub.organizationId = o.id
-        WHERE o.ownerUserId = u.id) AS statuses
-    FROM User u
-    ${where.length ? "WHERE " + where.join(" AND ") : ""}
-    ORDER BY u.createdAt DESC
-    LIMIT 2000
-  `;
-  const { results = [] } = await db.prepare(sql).bind(...params).all();
-  let mapped = results.map((r) => ({
-    id: r.id,
-    email: r.email,
-    name: r.name,
-    createdAt: r.createdAt,
-    updatedAt: r.updatedAt,
-    orgCount: Number(r.orgCount) || 0,
-    siteCount: Number(r.siteCount) || 0,
-    platforms: derivePlatforms(r.platforms),
-    plans: derivePlans(r.plans),
-    statuses: deriveStatuses(r.statuses),
-    internal: isInternalOrTest(r.email)
-  }));
-  if (audience === "external") {
-    mapped = mapped.filter((u) => !u.internal);
-  } else if (audience === "internal") {
-    mapped = mapped.filter((u) => u.internal);
-  }
-  if (platform2 && platform2 !== "all") {
-    if (platform2 === "webapp") {
-      mapped = mapped.filter((u) => u.platforms.includes("webapp") || u.platforms.length === 0);
-    } else {
-      mapped = mapped.filter((u) => u.platforms.includes(platform2));
-    }
-  }
-  if (billing === "free") {
-    mapped = mapped.filter((u) => !u.plans.some((p) => p !== "free"));
-  } else if (billing === "paid") {
-    mapped = mapped.filter((u) => u.plans.some((p) => p !== "free"));
-  }
-  if (plan && plan !== "all") {
-    mapped = mapped.filter((u) => u.plans.includes(plan));
-  }
-  if (status && status !== "all") {
-    const s = status === "cancelled" ? "canceled" : status;
-    mapped = mapped.filter((u) => u.statuses.includes(s));
-  }
-  if (year) {
-    mapped = mapped.filter((u) => yearOf(u.createdAt) === String(year));
-  }
-  if (month) {
-    const mm = String(month).padStart(2, "0");
-    mapped = mapped.filter((u) => monthOf(u.createdAt) === mm);
-  }
-  return mapped;
-}
-__name(listUsers, "listUsers");
-function deriveRegulation(bannerType, regionMode) {
-  const bt = String(bannerType || "gdpr").toLowerCase();
-  const rm = String(regionMode || "gdpr").toLowerCase();
-  if (bt === "iab") return "iab";
-  if (rm === "both") return "both";
-  if (rm === "ccpa" || bt === "ccpa") return "ccpa";
-  return "gdpr";
-}
-__name(deriveRegulation, "deriveRegulation");
-var REGULATION_SQL = {
-  iab: `lower(COALESCE(s.banner_type,'gdpr')) = 'iab'`,
-  both: `lower(COALESCE(s.banner_type,'gdpr')) != 'iab'
-         AND lower(COALESCE(s.region_mode,'gdpr')) = 'both'`,
-  ccpa: `lower(COALESCE(s.banner_type,'gdpr')) != 'iab'
-         AND lower(COALESCE(s.region_mode,'gdpr')) != 'both'
-         AND (lower(COALESCE(s.region_mode,'gdpr')) = 'ccpa'
-              OR lower(COALESCE(s.banner_type,'gdpr')) = 'ccpa')`,
-  gdpr: `lower(COALESCE(s.banner_type,'gdpr')) NOT IN ('iab','ccpa')
-         AND lower(COALESCE(s.region_mode,'gdpr')) NOT IN ('both','ccpa')`
-};
-async function listSites2(db, {
-  search = "",
-  platform: platform2 = "all",
-  banner = "all",
-  regulation = "all",
-  year = "",
-  month = "",
-  audience = "all",
-  limit
-} = {}) {
-  const where = [];
-  const params = [];
-  if (regulation && regulation !== "all" && REGULATION_SQL[regulation]) {
-    where.push(`(${REGULATION_SQL[regulation]})`);
-  }
-  if (search) {
-    where.push(`(s.domain LIKE ? OR s.name LIKE ? OR s.id = ? OR u.email LIKE ? OR o.name LIKE ?)`);
-    const like = `%${search}%`;
-    params.push(like, like, search, like, like);
-  }
-  if (banner === "live") {
-    where.push("COALESCE(s.verified, 0) = 1");
-  } else if (banner === "not-live") {
-    where.push("COALESCE(s.verified, 0) = 0");
-  }
-  if (year) {
-    where.push("substr(s.createdAt, 1, 4) = ?");
-    params.push(String(year));
-  }
-  if (month) {
-    where.push("substr(s.createdAt, 6, 2) = ?");
-    params.push(String(month).padStart(2, "0"));
-  }
-  const cap = Math.min(Math.max(Number(limit) || 500, 1), 2e3);
-  const sql = `
-    SELECT
-      s.id, s.name, s.domain, s.platform, s.verified, s.verified_at, s.createdAt,
-      s.banner_type, s.region_mode,
-      s.isLegacy, s.legacySource, s.organizationId,
-      o.name AS orgName,
-      u.id AS ownerId, u.email AS ownerEmail,
-      EXISTS (SELECT 1 FROM BannerCustomization b WHERE b.siteId = s.id) AS hasCustomization
-    FROM Site s
-    LEFT JOIN Organization o ON s.organizationId = o.id
-    LEFT JOIN User u ON o.ownerUserId = u.id
-    ${where.length ? "WHERE " + where.join(" AND ") : ""}
-    ORDER BY s.createdAt DESC
-    LIMIT ${cap}
-  `;
-  const { results = [] } = await db.prepare(sql).bind(...params).all();
-  let mapped = results.map((r) => ({
-    id: r.id,
-    name: r.name,
-    domain: r.domain,
-    platform: normalizePlatform(r.platform),
-    rawPlatform: r.platform ?? null,
-    verified: Number(r.verified) || 0,
-    verifiedAt: r.verified_at ?? null,
-    createdAt: r.createdAt,
-    bannerType: r.banner_type ?? null,
-    regionMode: r.region_mode ?? null,
-    regulation: deriveRegulation(r.banner_type, r.region_mode),
-    isLegacy: Number(r.isLegacy) || 0,
-    legacySource: r.legacySource ?? null,
-    organizationId: r.organizationId,
-    orgName: r.orgName ?? null,
-    ownerId: r.ownerId ?? null,
-    ownerEmail: r.ownerEmail ?? null,
-    hasCustomization: Number(r.hasCustomization) === 1,
-    internal: isInternalOrTest(r.ownerEmail)
-  }));
-  if (platform2 && platform2 !== "all") {
-    mapped = mapped.filter((s) => s.platform === platform2);
-  }
-  if (audience === "external") {
-    mapped = mapped.filter((s) => !s.internal);
-  } else if (audience === "internal") {
-    mapped = mapped.filter((s) => s.internal);
-  }
-  return mapped;
-}
-__name(listSites2, "listSites");
-async function getSiteStats(db) {
-  const [total, live, customized, years] = await Promise.all([
-    db.prepare(`SELECT COUNT(*) AS c FROM Site`).first(),
-    db.prepare(`SELECT COUNT(*) AS c FROM Site WHERE COALESCE(verified, 0) = 1`).first(),
-    db.prepare(`SELECT COUNT(DISTINCT siteId) AS c FROM BannerCustomization`).first(),
-    db.prepare(
-      `SELECT DISTINCT substr(createdAt, 1, 4) AS y
-           FROM Site
-          WHERE createdAt IS NOT NULL AND length(createdAt) >= 4
-          ORDER BY y DESC`
-    ).all()
-  ]);
-  return {
-    totalSites: Number(total?.c) || 0,
-    bannerLive: Number(live?.c) || 0,
-    bannerConfigured: Number(customized?.c) || 0,
-    years: (years?.results ?? []).map((r) => String(r.y)).filter((y) => /^\d{4}$/.test(y))
-  };
-}
-__name(getSiteStats, "getSiteStats");
-async function getStats(db) {
-  const users = await listUsers(db, { platform: "all" });
-  const { results: siteAgg = [] } = await db.prepare(`SELECT COALESCE(NULLIF(platform,''),'webapp') AS p, COUNT(*) AS c FROM Site GROUP BY p`).all();
-  const usersByPlatform = { webflow: 0, framer: 0, webapp: 0 };
-  for (const u of users) {
-    if (u.platforms.includes("webflow")) usersByPlatform.webflow++;
-    if (u.platforms.includes("framer")) usersByPlatform.framer++;
-    if (u.platforms.includes("webapp") || u.platforms.length === 0) usersByPlatform.webapp++;
-  }
-  const sitesByPlatform = { webflow: 0, framer: 0, webapp: 0 };
-  let totalSites = 0;
-  for (const row of siteAgg) {
-    const p = normalizePlatform(row.p);
-    sitesByPlatform[p] = (sitesByPlatform[p] || 0) + Number(row.c);
-    totalSites += Number(row.c);
-  }
-  return {
-    totalUsers: users.length,
-    totalSites,
-    usersByPlatform,
-    sitesByPlatform
-  };
-}
-__name(getStats, "getStats");
-async function selectUserRow(db, userId) {
-  try {
-    return await db.prepare(`SELECT id, email, name, billingEmail, createdAt, updatedAt FROM User WHERE id = ?`).bind(userId).first();
-  } catch (_) {
-    return await db.prepare(`SELECT id, email, name, createdAt, updatedAt FROM User WHERE id = ?`).bind(userId).first();
-  }
-}
-__name(selectUserRow, "selectUserRow");
-async function getUserDetail(db, userId, scannerDb = null) {
-  const user = await selectUserRow(db, userId);
-  if (!user) return null;
-  const { results: orgs = [] } = await db.prepare(`SELECT id, name, createdAt FROM Organization WHERE ownerUserId = ? ORDER BY createdAt DESC`).bind(userId).all();
-  const organizations = [];
-  const allPlatforms = /* @__PURE__ */ new Set();
-  let siteCount = 0;
-  for (const org of orgs) {
-    const { results: sites = [] } = await db.prepare(
-      `SELECT id, name, domain, platform, verified, isLegacy, legacySource, createdAt,
-                banner_type, region_mode
-           FROM Site WHERE organizationId = ? ORDER BY createdAt DESC`
-    ).bind(org.id).all();
-    const siteRows = sites.map((s) => {
-      const p = normalizePlatform(s.platform);
-      allPlatforms.add(p);
-      return {
-        id: s.id,
-        name: s.name,
-        domain: s.domain,
-        platform: p,
-        rawPlatform: s.platform ?? null,
-        verified: Number(s.verified) || 0,
-        isLegacy: Number(s.isLegacy) || 0,
-        legacySource: s.legacySource ?? null,
-        createdAt: s.createdAt,
-        bannerType: s.banner_type ?? null,
-        regionMode: s.region_mode ?? null,
-        regulation: deriveRegulation(s.banner_type, s.region_mode)
-      };
-    });
-    siteCount += siteRows.length;
-    const { results: subscriptions = [] } = await db.prepare(
-      `SELECT id, stripeSubscriptionId, planType, interval, status,
-                currentPeriodEnd, cancelAtPeriodEnd, amountCents, licenseKey, createdAt
-           FROM Subscription WHERE organizationId = ? ORDER BY createdAt DESC`
-    ).bind(org.id).all();
-    organizations.push({
-      id: org.id,
-      name: org.name,
-      createdAt: org.createdAt,
-      sites: siteRows,
-      subscriptions
-    });
-  }
-  const { results: memberOf = [] } = await db.prepare(`SELECT organizationId, role, joinedAt FROM OrganizationMember WHERE userId = ?`).bind(userId).all();
-  const sessionRow = await db.prepare(`SELECT COUNT(*) AS c FROM Session WHERE userId = ?`).bind(userId).first();
-  let feedback = [];
-  try {
-    const r = await db.prepare(`SELECT id, message, createdAt FROM Feedback WHERE userId = ? ORDER BY createdAt DESC LIMIT 50`).bind(userId).all();
-    feedback = r.results ?? [];
-  } catch (_) {
-    feedback = [];
-  }
-  const scans = scannerDb ? await listScansForEmail(scannerDb, user.email) : [];
-  return {
-    id: user.id,
-    email: user.email,
-    // Null when the customer never set one — Stripe then bills the account email.
-    billingEmail: user.billingEmail ?? null,
-    scans,
-    name: user.name,
-    createdAt: user.createdAt,
-    updatedAt: user.updatedAt,
-    orgCount: orgs.length,
-    siteCount,
-    platforms: [...allPlatforms],
-    organizations,
-    memberOf,
-    sessionCount: Number(sessionRow?.c) || 0,
-    feedback
-  };
-}
-__name(getUserDetail, "getUserDetail");
-async function updateUser(db, userId, fields) {
-  const existing = await db.prepare(`SELECT id FROM User WHERE id = ?`).bind(userId).first();
-  if (!existing) return { ok: false, error: "User not found" };
-  if (fields.email !== void 0) {
-    const email = String(fields.email).trim().toLowerCase();
-    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-      return { ok: false, error: "Invalid email address" };
-    }
-    const clash = await db.prepare(`SELECT id FROM User WHERE email = ? AND id != ?`).bind(email, userId).first();
-    if (clash) return { ok: false, error: "Another user already uses that email" };
-  }
-  const sets = [];
-  const params = [];
-  if (fields.name !== void 0) {
-    sets.push("name = ?");
-    params.push(fields.name);
-  }
-  if (fields.email !== void 0) {
-    sets.push("email = ?");
-    params.push(String(fields.email).trim().toLowerCase());
-  }
-  if (!sets.length) return { ok: true };
-  sets.push("updatedAt = CURRENT_TIMESTAMP");
-  params.push(userId);
-  await db.prepare(`UPDATE User SET ${sets.join(", ")} WHERE id = ?`).bind(...params).run();
-  return { ok: true };
-}
-__name(updateUser, "updateUser");
-async function deleteUserEverywhere(db, userId) {
-  const deleted = {};
-  const errors = [];
-  const bump = /* @__PURE__ */ __name((t, n) => deleted[t] = (deleted[t] || 0) + n, "bump");
-  const fail5 = /* @__PURE__ */ __name((m) => errors.push(m), "fail");
-  const user = await db.prepare(`SELECT id, email FROM User WHERE id = ?`).bind(userId).first();
-  if (!user) return { ok: false, deleted, error: "User not found" };
-  const { results: orgs = [] } = await db.prepare(`SELECT id FROM Organization WHERE ownerUserId = ?`).bind(userId).all();
-  const orgIds = orgs.map((o) => o.id);
-  let siteIds = [];
-  if (orgIds.length) {
-    const { results: sites = [] } = await db.prepare(`SELECT id FROM Site WHERE organizationId IN (${placeholders(orgIds)})`).bind(...orgIds).all();
-    siteIds = sites.map((s) => s.id);
-  }
-  if (siteIds.length) {
-    for (const table of SITE_CHILD_TABLES2) {
-      bump(table, await delIn(db, table, "siteId", siteIds, fail5));
-    }
-    await deleteWebflowOAuthForSites(db, siteIds, bump, fail5);
-    bump("Site", await delIn(db, "Site", "id", siteIds, fail5));
-  }
-  if (orgIds.length) {
-    for (const table of ORG_CHILD_TABLES) {
-      bump(table, await delIn(db, table, "organizationId", orgIds, fail5));
-    }
-    bump("Organization", await delIn(db, "Organization", "id", orgIds, fail5));
-  }
-  bump("OrganizationMember", await delEq(db, "OrganizationMember", "userId", userId, fail5));
-  for (const table of USER_CHILD_TABLES) {
-    bump(table, await delEq(db, table, "userId", userId, fail5));
-  }
-  if (user.email) {
-    for (const { table, columns } of EMAIL_KEYED_ROWS) {
-      for (const column of columns) {
-        bump(table, await delEq(db, table, column, user.email, fail5));
-      }
-    }
-  }
-  bump("User", await delEq(db, "User", "id", userId, fail5));
-  const survivor = await db.prepare(`SELECT id FROM User WHERE id = ?`).bind(userId).first();
-  if (survivor) {
-    return {
-      ok: false,
-      deleted,
-      errors,
-      error: `Related data was removed, but the user record could not be deleted` + (errors.length ? `: ${errors[0]}` : ". Another table still references this user.")
-    };
-  }
-  return { ok: true, deleted, errors };
-}
-__name(deleteUserEverywhere, "deleteUserEverywhere");
-async function deleteWebflowOAuthForSites(db, siteIds, bump, onError) {
-  if (!siteIds.length) return;
-  let userKeys = [];
-  try {
-    const { results = [] } = await db.prepare(
-      `SELECT DISTINCT userKey FROM WebflowOAuthSite
-          WHERE siteId IN (${placeholders(siteIds)}) AND userKey IS NOT NULL`
-    ).bind(...siteIds).all();
-    userKeys = results.map((r) => r.userKey).filter(Boolean);
-  } catch (_) {
-    return;
-  }
-  bump("WebflowOAuthSite", await delIn(db, "WebflowOAuthSite", "siteId", siteIds, onError));
-  for (const key of userKeys) {
-    try {
-      const stillUsed = await db.prepare(`SELECT COUNT(*) AS c FROM WebflowOAuthSite WHERE userKey = ?`).bind(key).first();
-      if ((Number(stillUsed?.c) || 0) > 0) continue;
-      bump("WebflowOAuthToken", await delEq(db, "WebflowOAuthToken", "userKey", key, onError));
-    } catch (_) {
-    }
-  }
-}
-__name(deleteWebflowOAuthForSites, "deleteWebflowOAuthForSites");
-async function deleteSites(db, siteIds) {
-  const deleted = {};
-  const errors = [];
-  const bump = /* @__PURE__ */ __name((t, n) => deleted[t] = (deleted[t] || 0) + n, "bump");
-  const fail5 = /* @__PURE__ */ __name((m) => errors.push(m), "fail");
-  const ids = (siteIds || []).map((s) => String(s).trim()).filter(Boolean);
-  if (!ids.length) return { ok: false, deleted, error: "No site ids provided" };
-  const { results = [] } = await db.prepare(`SELECT id, domain, name FROM Site WHERE id IN (${placeholders(ids)})`).bind(...ids).all();
-  const validIds = results.map((r) => r.id);
-  if (!validIds.length) return { ok: false, deleted, error: "No matching sites found" };
-  for (const table of SITE_CHILD_TABLES2) {
-    bump(table, await delIn(db, table, "siteId", validIds, fail5));
-  }
-  await deleteWebflowOAuthForSites(db, validIds, bump, fail5);
-  bump("Site", await delIn(db, "Site", "id", validIds, fail5));
-  const survivors = await db.prepare(`SELECT COUNT(*) AS c FROM Site WHERE id IN (${placeholders(validIds)})`).bind(...validIds).first();
-  if ((Number(survivors?.c) || 0) > 0) {
-    return {
-      ok: false,
-      deleted,
-      errors,
-      sites: results,
-      error: `Child data was removed, but ${survivors.c} site row(s) could not be deleted` + (errors.length ? `: ${errors[0]}` : ".")
-    };
-  }
-  return { ok: true, deleted, errors, sites: results };
-}
-__name(deleteSites, "deleteSites");
-function isMissingTable(err) {
-  return /no such table/i.test(String(err?.message || err));
-}
-__name(isMissingTable, "isMissingTable");
-async function delIn(db, table, col, ids, onError) {
-  if (!ids.length) return 0;
-  try {
-    const res = await db.prepare(`DELETE FROM ${table} WHERE ${col} IN (${placeholders(ids)})`).bind(...ids).run();
-    return Number(res?.meta?.changes) || 0;
-  } catch (err) {
-    if (!isMissingTable(err)) onError?.(`${table}.${col}: ${err?.message || err}`);
-    return 0;
-  }
-}
-__name(delIn, "delIn");
-async function delEq(db, table, col, val, onError) {
-  try {
-    const res = await db.prepare(`DELETE FROM ${table} WHERE ${col} = ?`).bind(val).run();
-    return Number(res?.meta?.changes) || 0;
-  } catch (err) {
-    if (!isMissingTable(err)) onError?.(`${table}.${col}: ${err?.message || err}`);
-    return 0;
-  }
-}
-__name(delEq, "delEq");
-
-// src/handlers/adminDashboard/emails.js
-init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
-init_performance2();
-function dashboardUrl(env2) {
-  const raw = env2?.ADMIN_DASHBOARD_URL || "https://admin.consentbit.com";
-  return String(raw).replace(/\/+$/, "");
-}
-__name(dashboardUrl, "dashboardUrl");
-var BTN2 = "display:inline-block;background:#007AFF;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:14px 32px;border-radius:8px;";
-function shell(title2, bodyHtml) {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>${title2}</title></head>
-<body style="margin:0;padding:0;background:#f0f4f8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f0f4f8;padding:40px 16px;">
-    <tr><td align="center">
-      <table role="presentation" width="100%" style="max-width:560px;" cellpadding="0" cellspacing="0">
-        <tr><td style="background:#ffffff;border-radius:16px;padding:40px 40px 32px;box-shadow:0 2px 12px rgba(0,0,0,0.06);">
-          ${bodyHtml}
-        </td></tr>
-        <tr><td align="center" style="padding:24px 0 8px;">
-          <p style="margin:0;color:#9ca3af;font-size:12px;line-height:1.6;">
-            ConsentBit Admin \xB7 internal tool<br/>
-            If you weren't expecting this email you can safely ignore it.
-          </p>
-        </td></tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>`;
-}
-__name(shell, "shell");
-function sendAdminInviteEmail(env2, ctx, { to, token, invitedBy, role = "viewer" }) {
-  const link = `${dashboardUrl(env2)}/accept-invite?token=${encodeURIComponent(token)}`;
-  const from2 = invitedBy && invitedBy !== "-" ? invitedBy : "a ConsentBit admin";
-  const html = shell(
-    "Your ConsentBit Admin invitation",
-    `<h1 style="margin:0 0 16px;font-size:22px;color:#111827;">You've been invited to ConsentBit Admin</h1>
-     <p style="margin:0 0 12px;color:#374151;font-size:15px;line-height:1.6;">
-       ${escapeHtml(from2)} has given you <b>${escapeHtml(role)}</b> access to the ConsentBit
-       admin dashboard.
-     </p>
-     <p style="margin:0 0 24px;color:#374151;font-size:15px;line-height:1.6;">
-       Choose your password to activate the account. This link works once and expires in 7 days.
-     </p>
-     <p style="margin:0 0 24px;"><a href="${link}" style="${BTN2}">Set my password</a></p>
-     <p style="margin:0;color:#6b7280;font-size:13px;line-height:1.6;word-break:break-all;">
-       Or paste this into your browser:<br/>${link}
-     </p>`
-  );
-  const text = `You've been invited to ConsentBit Admin by ${from2} with ${role} access.
-
-Set your password (link works once, expires in 7 days):
-${link}
-`;
-  return dispatch(env2, ctx, {
-    to,
-    subject: "Your ConsentBit Admin invitation",
-    html,
-    text
-  });
-}
-__name(sendAdminInviteEmail, "sendAdminInviteEmail");
-function sendAdminResetEmail(env2, ctx, { to, token }) {
-  const link = `${dashboardUrl(env2)}/reset-password?token=${encodeURIComponent(token)}`;
-  const html = shell(
-    "Reset your ConsentBit Admin password",
-    `<h1 style="margin:0 0 16px;font-size:22px;color:#111827;">Reset your password</h1>
-     <p style="margin:0 0 24px;color:#374151;font-size:15px;line-height:1.6;">
-       Someone asked to reset the password for this ConsentBit Admin account. This link
-       works once and expires in 1 hour. If it wasn't you, ignore this email \u2014 your
-       current password keeps working.
-     </p>
-     <p style="margin:0 0 24px;"><a href="${link}" style="${BTN2}">Choose a new password</a></p>
-     <p style="margin:0;color:#6b7280;font-size:13px;line-height:1.6;word-break:break-all;">
-       Or paste this into your browser:<br/>${link}
-     </p>`
-  );
-  const text = `Reset your ConsentBit Admin password (link works once, expires in 1 hour):
-${link}
-
-If you didn't ask for this, ignore this email.
-`;
-  return dispatch(env2, ctx, {
-    to,
-    subject: "Reset your ConsentBit Admin password",
-    html,
-    text
-  });
-}
-__name(sendAdminResetEmail, "sendAdminResetEmail");
-function dispatch(env2, ctx, opts) {
-  const p = sendBrevoEmail(env2, opts).catch(
-    (err) => console.error("[adminDashboard/email] send failed", err?.message || err)
-  );
-  if (ctx?.waitUntil) {
-    ctx.waitUntil(p);
-    return Promise.resolve();
-  }
-  return p;
-}
-__name(dispatch, "dispatch");
-function escapeHtml(s) {
-  return String(s ?? "").replace(
-    /[&<>"']/g,
-    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
-  );
-}
-__name(escapeHtml, "escapeHtml");
-
-// src/handlers/adminDashboard/audit.js
-init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
-init_performance2();
-var ensured = false;
-async function ensureAuditTable(db) {
-  if (ensured) return;
-  await db.prepare(
-    `CREATE TABLE IF NOT EXISTS AdminDashboardAuditLog (
-        id TEXT PRIMARY KEY,
-        actor TEXT,
-        actorRole TEXT,
-        action TEXT NOT NULL,
-        target TEXT,
-        detail TEXT,
-        outcome TEXT NOT NULL DEFAULT 'ok',
-        ip TEXT,
-        userAgent TEXT,
-        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`
-  ).run();
-  await db.prepare(
-    `CREATE INDEX IF NOT EXISTS idx_admin_audit_createdAt
-         ON AdminDashboardAuditLog (createdAt DESC)`
-  ).run();
-  ensured = true;
-}
-__name(ensureAuditTable, "ensureAuditTable");
-async function logAudit(db, request, entry) {
-  if (!db || !entry?.action) return;
-  try {
-    await ensureAuditTable(db);
-    await db.prepare(
-      `INSERT INTO AdminDashboardAuditLog
-           (id, actor, actorRole, action, target, detail, outcome, ip, userAgent, createdAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
-    ).bind(
-      crypto.randomUUID(),
-      entry.actor || "-",
-      entry.actorRole || null,
-      entry.action,
-      entry.target || null,
-      entry.detail ? JSON.stringify(entry.detail).slice(0, 4e3) : null,
-      entry.outcome || "ok",
-      request?.headers?.get("CF-Connecting-IP") || null,
-      (request?.headers?.get("User-Agent") || "").slice(0, 300) || null
-    ).run();
-  } catch (err) {
-    console.error("[adminAudit] write failed", err?.message || err);
-  }
-}
-__name(logAudit, "logAudit");
-async function listAudit(db, { actor, action, search, limit } = {}) {
-  await ensureAuditTable(db);
-  const where = [];
-  const binds = [];
-  if (actor && actor !== "all") {
-    where.push("actor = ?");
-    binds.push(actor);
-  }
-  if (action && action !== "all") {
-    where.push("action LIKE ?");
-    binds.push(`${action}%`);
-  }
-  if (search) {
-    where.push("(target LIKE ? OR detail LIKE ? OR action LIKE ?)");
-    binds.push(`%${search}%`, `%${search}%`, `%${search}%`);
-  }
-  const cap = Math.min(Math.max(Number(limit) || 200, 1), 1e3);
-  const sql = `SELECT id, actor, actorRole, action, target, detail, outcome, ip, userAgent, createdAt
-       FROM AdminDashboardAuditLog` + (where.length ? ` WHERE ${where.join(" AND ")}` : "") + ` ORDER BY createdAt DESC, rowid DESC LIMIT ${cap}`;
-  const { results = [] } = await db.prepare(sql).bind(...binds).all();
-  return results.map((r) => ({
-    ...r,
-    detail: r.detail ? safeParse(r.detail) : null
-  }));
-}
-__name(listAudit, "listAudit");
-async function listAuditActors(db) {
-  await ensureAuditTable(db);
-  const { results = [] } = await db.prepare(`SELECT DISTINCT actor FROM AdminDashboardAuditLog ORDER BY actor`).all();
-  return results.map((r) => r.actor).filter(Boolean);
-}
-__name(listAuditActors, "listAuditActors");
-function safeParse(s) {
-  try {
-    return JSON.parse(s);
-  } catch (_) {
-    return s;
-  }
-}
-__name(safeParse, "safeParse");
-
-// src/handlers/adminDashboard/index.js
-function getDb(env2) {
-  return env2.CONSENT_WEBAPP || null;
-}
-__name(getDb, "getDb");
-function getScannerDb(env2) {
-  return env2.COOKIE_SCANNER_DB || null;
-}
-__name(getScannerDb, "getScannerDb");
-function noDb() {
-  return Response.json({ success: false, error: "CONSENT_WEBAPP not configured" }, { status: 503 });
-}
-__name(noDb, "noDb");
-async function handleAdminDashboardAuth(request, env2) {
-  if (request.method !== "POST") {
-    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
-  }
-  const db = getDb(env2);
-  if (!db) return noDb();
-  let username = "";
-  let secret = "";
-  try {
-    const body = await request.json();
-    username = String(body?.username ?? "");
-    secret = String(body?.secret ?? "");
-  } catch (_) {
-    return Response.json({ success: false, error: "Bad request" }, { status: 400 });
-  }
-  try {
-    const account = await resolveAccount(db, username, secret);
-    if (!account) {
-      await logAudit(db, request, {
-        action: "login",
-        actor: normalizeUsername(username) || "-",
-        target: normalizeUsername(username) || null,
-        outcome: "denied",
-        detail: { reason: "invalid credentials" }
-      });
-      return Response.json({ role: null }, { status: 401 });
-    }
-    await touchLogin(db, account.username);
-    await logAudit(db, request, {
-      action: "login",
-      actor: account.username,
-      actorRole: account.role
-    });
-    return Response.json({ role: account.role, username: account.username });
-  } catch (err) {
-    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
-  }
-}
-__name(handleAdminDashboardAuth, "handleAdminDashboardAuth");
-async function handleAdminDashboardAccountSetup(request, env2) {
-  const db = getDb(env2);
-  if (!db) return noDb();
-  try {
-    if (request.method === "GET") {
-      const token = new URL(request.url).searchParams.get("token") || "";
-      const found = await resolveToken(db, token);
-      if (!found) {
-        return Response.json(
-          { success: false, error: "That link is invalid or has expired." },
-          { status: 400 }
-        );
-      }
-      return Response.json({ username: found.username, purpose: found.purpose });
-    }
-    if (request.method === "POST") {
-      let body = {};
-      try {
-        body = await request.json();
-      } catch (_) {
-        return Response.json({ success: false, error: "Bad request" }, { status: 400 });
-      }
-      const r = await completeWithToken(db, String(body?.token || ""), body?.secret);
-      if (!r.ok) return Response.json({ success: false, error: r.error }, { status: 400 });
-      await logAudit(db, request, {
-        action: r.purpose === "invite" ? "account.invite_accepted" : "account.password_reset",
-        actor: r.username,
-        actorRole: r.role,
-        target: r.username
-      });
-      return Response.json({ ok: true, username: r.username, purpose: r.purpose });
-    }
-    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
-  } catch (err) {
-    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
-  }
-}
-__name(handleAdminDashboardAccountSetup, "handleAdminDashboardAccountSetup");
-async function handleAdminDashboardRecover(request, env2, ctx) {
-  if (request.method !== "POST") {
-    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
-  }
-  const db = getDb(env2);
-  if (!db) return noDb();
-  let email = "";
-  try {
-    const body = await request.json();
-    email = normalizeUsername(body?.email);
-  } catch (_) {
-    return Response.json({ success: false, error: "Bad request" }, { status: 400 });
-  }
-  const generic = { ok: true, message: "If that account exists, a reset link is on its way." };
-  if (!email) return Response.json(generic);
-  try {
-    const r = await startPasswordReset(db, email);
-    if (r.token) {
-      await sendAdminResetEmail(env2, ctx, { to: r.username, token: r.token });
-      await logAudit(db, request, {
-        action: "account.reset_requested",
-        actor: r.username,
-        target: r.username
-      });
-    } else {
-      await logAudit(db, request, {
-        action: "account.reset_requested",
-        actor: email,
-        target: email,
-        outcome: "denied",
-        detail: { reason: "no such active account" }
-      });
-    }
-  } catch (err) {
-    console.error("[adminDashboard] recover failed", err?.message || err);
-  }
-  return Response.json(generic);
-}
-__name(handleAdminDashboardRecover, "handleAdminDashboardRecover");
-async function handleAdminDashboardAudit(request, env2) {
-  if (request.method !== "GET") {
-    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
-  }
-  const db = getDb(env2);
-  if (!db) return noDb();
-  const caller = await resolveCaller(request, env2, db);
-  if (!caller) return unauthorized();
-  if (caller.role !== "admin") return forbidden("Only an admin can view the activity log.");
-  const url = new URL(request.url);
-  try {
-    const entries = await listAudit(db, {
-      actor: url.searchParams.get("actor") || void 0,
-      action: url.searchParams.get("action") || void 0,
-      search: (url.searchParams.get("search") || "").trim() || void 0,
-      limit: url.searchParams.get("limit") || void 0
-    });
-    return Response.json({ entries, actors: await listAuditActors(db), count: entries.length });
-  } catch (err) {
-    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
-  }
-}
-__name(handleAdminDashboardAudit, "handleAdminDashboardAudit");
-async function handleAdminDashboardSites(request, env2) {
-  if (request.method !== "GET") {
-    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
-  }
-  const db = getDb(env2);
-  if (!db) return noDb();
-  const caller = await resolveCaller(request, env2, db);
-  if (!caller) return unauthorized();
-  const url = new URL(request.url);
-  try {
-    const sites = await listSites2(db, {
-      search: (url.searchParams.get("search") || "").trim(),
-      platform: url.searchParams.get("platform") || "all",
-      banner: url.searchParams.get("banner") || "all",
-      regulation: url.searchParams.get("regulation") || "all",
-      year: url.searchParams.get("year") || "",
-      month: url.searchParams.get("month") || "",
-      audience: url.searchParams.get("audience") || "all",
-      limit: url.searchParams.get("limit") || void 0
-    });
-    return Response.json({ sites, stats: await getSiteStats(db), count: sites.length });
-  } catch (err) {
-    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
-  }
-}
-__name(handleAdminDashboardSites, "handleAdminDashboardSites");
-async function handleAdminDashboardScans(request, env2) {
-  if (request.method !== "GET") {
-    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
-  }
-  const db = getDb(env2);
-  if (!db) return noDb();
-  const caller = await resolveCaller(request, env2, db);
-  if (!caller) return unauthorized();
-  const scannerDb = getScannerDb(env2);
-  if (!scannerDb) {
-    return Response.json(
-      { success: false, error: "COOKIE_SCANNER_DB not configured" },
-      { status: 503 }
-    );
-  }
-  const url = new URL(request.url);
-  try {
-    const events = await listScanEvents(scannerDb, {
-      search: (url.searchParams.get("search") || "").trim() || void 0,
-      days: url.searchParams.get("days") || void 0,
-      year: url.searchParams.get("year") || void 0,
-      month: url.searchParams.get("month") || void 0,
-      claimed: url.searchParams.get("claimed") || void 0,
-      limit: url.searchParams.get("limit") || void 0
-    });
-    return Response.json({ events, stats: await getScanStats(scannerDb), count: events.length });
-  } catch (err) {
-    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
-  }
-}
-__name(handleAdminDashboardScans, "handleAdminDashboardScans");
-async function handleAdminDashboardAccounts(request, env2, ctx) {
-  const db = getDb(env2);
-  if (!db) return noDb();
-  const caller = await resolveCaller(request, env2, db);
-  if (!caller) return unauthorized();
-  const who = { actor: caller.username, actorRole: caller.role };
-  try {
-    if (request.method === "GET") {
-      if (caller.role === "admin") {
-        return Response.json({ accounts: await listAccounts(db), me: caller.username });
-      }
-      const self2 = await getAccount(db, caller.username);
-      return Response.json({ accounts: self2 ? [self2] : [], me: caller.username });
-    }
-    if (request.method === "POST") {
-      let body = {};
-      try {
-        body = await request.json();
-      } catch (_) {
-        return Response.json({ success: false, error: "Bad request" }, { status: 400 });
-      }
-      const action = String(body?.action || "change-key");
-      if (action === "invite" || action === "create") {
-        if (caller.role !== "admin") {
-          await logAudit(db, request, {
-            ...who,
-            action: "account.invite",
-            target: normalizeUsername(body?.username || body?.email),
-            outcome: "denied"
-          });
-          return forbidden("Only an admin can add accounts.");
-        }
-        const r = await inviteViewer(db, body?.username || body?.email, caller.username);
-        if (!r.ok) return Response.json({ success: false, error: r.error }, { status: 400 });
-        await sendAdminInviteEmail(env2, ctx, {
-          to: r.username,
-          token: r.token,
-          invitedBy: caller.username
-        });
-        await logAudit(db, request, { ...who, action: "account.invite", target: r.username });
-        return Response.json({
-          ok: true,
-          username: r.username,
-          invited: true,
-          accounts: await listAccounts(db)
-        });
-      }
-      if (action === "resend-invite") {
-        if (caller.role !== "admin") return forbidden("Only an admin can resend invitations.");
-        const r = await reissueInvite(db, body?.username, caller.username);
-        if (!r.ok) return Response.json({ success: false, error: r.error }, { status: 400 });
-        await sendAdminInviteEmail(env2, ctx, {
-          to: r.username,
-          token: r.token,
-          invitedBy: caller.username
-        });
-        await logAudit(db, request, { ...who, action: "account.invite_resent", target: r.username });
-        return Response.json({ ok: true, username: r.username, accounts: await listAccounts(db) });
-      }
-      if (action === "rename") {
-        if (caller.role !== "admin") {
-          return forbidden("Only an admin can change a username.");
-        }
-        const r = await renameAccount(db, body?.username, body?.newUsername);
-        if (!r.ok) return Response.json({ success: false, error: r.error }, { status: 400 });
-        await logAudit(db, request, {
-          ...who,
-          action: "account.rename",
-          target: r.username,
-          detail: { from: r.previousUsername, to: r.username }
-        });
-        return Response.json({
-          ok: true,
-          username: r.username,
-          previousUsername: r.previousUsername,
-          accounts: await listAccounts(db)
-        });
-      }
-      if (action === "change-key") {
-        const target = normalizeUsername(body?.username || caller.username);
-        if (target !== caller.username) {
-          return forbidden("You can only change your own key.");
-        }
-        const r = await changeAccountSecret(db, target, body?.currentSecret, body?.secret);
-        if (!r.ok) {
-          await logAudit(db, request, {
-            ...who,
-            action: "account.change_password",
-            target,
-            outcome: "failed",
-            detail: { reason: r.error }
-          });
-          return Response.json({ success: false, error: r.error }, { status: 400 });
-        }
-        await logAudit(db, request, { ...who, action: "account.change_password", target: r.username });
-        return Response.json({ ok: true, username: r.username });
-      }
-      return Response.json({ success: false, error: "Unknown action" }, { status: 400 });
-    }
-    if (request.method === "DELETE") {
-      if (caller.role !== "admin") {
-        return forbidden("Only an admin can remove viewer accounts.");
-      }
-      const url = new URL(request.url);
-      const username = normalizeUsername(url.searchParams.get("username") || "");
-      if (!username) {
-        return Response.json({ success: false, error: "Missing username" }, { status: 400 });
-      }
-      if (username === caller.username) {
-        return Response.json(
-          { success: false, error: "You cannot delete your own account." },
-          { status: 400 }
-        );
-      }
-      const r = await deleteAccount(db, username);
-      if (!r.ok) return Response.json({ success: false, error: r.error }, { status: 400 });
-      await logAudit(db, request, { ...who, action: "account.delete", target: r.username });
-      return Response.json({ ok: true, accounts: await listAccounts(db) });
-    }
-    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
-  } catch (err) {
-    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
-  }
-}
-__name(handleAdminDashboardAccounts, "handleAdminDashboardAccounts");
-async function handleAdminDashboardStats(request, env2) {
-  if (request.method !== "GET") {
-    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
-  }
-  const db = getDb(env2);
-  if (!db) return noDb();
-  if (!await resolveCaller(request, env2, db)) return unauthorized();
-  try {
-    const stats = await getStats(db);
-    return Response.json(stats);
-  } catch (err) {
-    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
-  }
-}
-__name(handleAdminDashboardStats, "handleAdminDashboardStats");
-async function handleAdminDashboardUsers(request, env2) {
-  const db = getDb(env2);
-  if (!db) return noDb();
-  const caller = await resolveCaller(request, env2, db);
-  if (!caller) return unauthorized();
-  const url = new URL(request.url);
-  if (request.method === "DELETE") {
-    if (caller.role !== "admin") return forbidden();
-    const ids = (url.searchParams.get("ids") || "").split(",").map((s) => s.trim()).filter(Boolean);
-    if (!ids.length) {
-      return Response.json({ success: false, error: "Missing ids" }, { status: 400 });
-    }
-    if (url.searchParams.get("confirm") !== "DELETE") {
-      return Response.json(
-        { success: false, error: "Confirmation did not match. Deletion aborted." },
-        { status: 400 }
-      );
-    }
-    const totals = {};
-    const results = [];
-    try {
-      for (const id of ids) {
-        const detail = await getUserDetail(db, id);
-        const email = detail?.email || null;
-        if (!detail) {
-          results.push({ id, email, ok: false, error: "User not found" });
-          continue;
-        }
-        const report2 = await deleteUserEverywhere(db, id);
-        results.push({ id, email, ok: !!report2.ok, error: report2.error || null });
-        for (const [table, n] of Object.entries(report2.deleted || {})) {
-          totals[table] = (totals[table] || 0) + n;
-        }
-      }
-    } catch (err) {
-      return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
-    }
-    const deletedCount = results.filter((r) => r.ok).length;
-    const failed = results.filter((r) => !r.ok);
-    await logAudit(db, request, {
-      actor: caller.username,
-      actorRole: caller.role,
-      action: "user.bulk_delete",
-      target: `${deletedCount} users`,
-      outcome: failed.length ? "failed" : "ok",
-      detail: {
-        requested: ids.length,
-        deleted: results.filter((r) => r.ok).map((r) => r.email || r.id),
-        failed: failed.map((f) => ({ id: f.id, error: f.error })),
-        rows: totals
-      }
-    });
-    return Response.json({
-      ok: failed.length === 0,
-      requested: ids.length,
-      deletedCount,
-      failed,
-      results,
-      deleted: totals,
-      ...failed.length ? {
-        error: `${deletedCount} of ${ids.length} deleted. ${failed.length} failed: ${failed.map((f) => `${f.email || f.id} (${f.error})`).join("; ")}`
-      } : {}
-    });
-  }
-  if (request.method !== "GET") {
-    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
-  }
-  const platform2 = url.searchParams.get("platform") || "all";
-  const search = (url.searchParams.get("search") || "").trim();
-  const plan = url.searchParams.get("plan") || "all";
-  const status = url.searchParams.get("status") || "all";
-  const year = url.searchParams.get("year") || "";
-  const month = url.searchParams.get("month") || "";
-  const audience = url.searchParams.get("audience") || "all";
-  const billing = url.searchParams.get("billing") || "all";
-  try {
-    const users = await listUsers(db, { platform: platform2, search, plan, status, year, month, audience, billing });
-    return Response.json({ users, count: users.length });
-  } catch (err) {
-    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
-  }
-}
-__name(handleAdminDashboardUsers, "handleAdminDashboardUsers");
-async function handleAdminDashboardSite(request, env2) {
-  const db = getDb(env2);
-  if (!db) return noDb();
-  const caller = await resolveCaller(request, env2, db);
-  if (!caller) return unauthorized();
-  if (caller.role !== "admin") return forbidden();
-  if (request.method !== "DELETE") {
-    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
-  }
-  const url = new URL(request.url);
-  const idsParam = url.searchParams.get("ids") || "";
-  const ids = idsParam.split(",").map((s) => s.trim()).filter(Boolean);
-  if (!ids.length) {
-    return Response.json({ success: false, error: "Missing ids" }, { status: 400 });
-  }
-  try {
-    const report2 = await deleteSites(db, ids);
-    await logAudit(db, request, {
-      actor: caller.username,
-      actorRole: caller.role,
-      action: "site.delete",
-      target: (report2.sites || []).map((s) => s.domain || s.id).join(", ") || ids.join(", "),
-      outcome: report2.ok ? "ok" : "failed",
-      detail: { ids, rows: report2.deleted, error: report2.error || null }
-    });
-    if (!report2.ok) return Response.json({ success: false, error: report2.error }, { status: 400 });
-    return Response.json(report2);
-  } catch (err) {
-    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
-  }
-}
-__name(handleAdminDashboardSite, "handleAdminDashboardSite");
-async function handleAdminDashboardUser(request, env2) {
-  const db = getDb(env2);
-  if (!db) return noDb();
-  const caller = await resolveCaller(request, env2, db);
-  if (!caller) return unauthorized();
-  if (request.method !== "GET" && caller.role !== "admin") return forbidden();
-  const url = new URL(request.url);
-  const id = url.searchParams.get("id");
-  if (!id) {
-    return Response.json({ success: false, error: "Missing id" }, { status: 400 });
-  }
-  try {
-    if (request.method === "GET") {
-      const detail = await getUserDetail(db, id, getScannerDb(env2));
-      if (!detail) return Response.json({ success: false, error: "User not found" }, { status: 404 });
-      return Response.json(detail);
-    }
-    if (request.method === "PATCH") {
-      let body = {};
-      try {
-        body = await request.json();
-      } catch (_) {
-        return Response.json({ success: false, error: "Bad request" }, { status: 400 });
-      }
-      const fields = {};
-      if ("name" in body) fields.name = body.name === "" ? null : body.name;
-      if ("email" in body) fields.email = String(body.email);
-      const before = await getUserDetail(db, id);
-      const result = await updateUser(db, id, fields);
-      if (!result.ok) return Response.json({ success: false, error: result.error }, { status: 400 });
-      const detail = await getUserDetail(db, id, getScannerDb(env2));
-      await logAudit(db, request, {
-        actor: caller.username,
-        actorRole: caller.role,
-        action: "user.edit",
-        target: detail?.email || id,
-        detail: {
-          id,
-          from: { name: before?.name ?? null, email: before?.email ?? null },
-          to: { name: detail?.name ?? null, email: detail?.email ?? null }
-        }
-      });
-      return Response.json({ ok: true, user: detail });
-    }
-    if (request.method === "DELETE") {
-      const confirm = url.searchParams.get("confirm");
-      const detail = await getUserDetail(db, id);
-      if (!detail) return Response.json({ success: false, error: "User not found" }, { status: 404 });
-      if (confirm !== detail.email) {
-        return Response.json(
-          { success: false, error: "Confirmation email did not match. Deletion aborted." },
-          { status: 400 }
-        );
-      }
-      const report2 = await deleteUserEverywhere(db, id);
-      await logAudit(db, request, {
-        actor: caller.username,
-        actorRole: caller.role,
-        action: "user.delete",
-        target: detail.email,
-        outcome: report2.ok ? "ok" : "failed",
-        detail: { id, rows: report2.deleted, error: report2.error || null }
-      });
-      if (!report2.ok) return Response.json({ success: false, error: report2.error }, { status: 400 });
-      return Response.json(report2);
-    }
-    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
-  } catch (err) {
-    return Response.json({ success: false, error: err?.message || "Failed" }, { status: 500 });
-  }
-}
-__name(handleAdminDashboardUser, "handleAdminDashboardUser");
-
 // src/handlers/checkLegacyScript.js
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
@@ -46600,10 +43090,10 @@ function normalizeCategories(cats) {
   return cats.categories && typeof cats.categories === "object" ? cats.categories : cats;
 }
 __name(normalizeCategories, "normalizeCategories");
-function escapeHtml2(s) {
+function escapeHtml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
-__name(escapeHtml2, "escapeHtml");
+__name(escapeHtml, "escapeHtml");
 function cookieDuration(expires) {
   if (!expires || expires.toLowerCase() === "session") return "session";
   try {
@@ -46669,15 +43159,15 @@ function buildHtml(consent, cookies, customCookieRules, siteDomain, logoUrl = nu
   const cookieRows = (() => {
     const scanned = relevantCookies.map((c) => `
       <tr>
-        <td class="proof-td">${escapeHtml2(c.name || "\u2014")}</td>
-        <td class="proof-td">${escapeHtml2(cookieDuration(c.expires))}</td>
-        <td class="proof-td">${escapeHtml2(c.description || "\u2014")}</td>
+        <td class="proof-td">${escapeHtml(c.name || "\u2014")}</td>
+        <td class="proof-td">${escapeHtml(cookieDuration(c.expires))}</td>
+        <td class="proof-td">${escapeHtml(c.description || "\u2014")}</td>
       </tr>`);
     const custom = relevantCustomRules.map((r) => `
       <tr>
-        <td class="proof-td">${escapeHtml2(r.name || "\u2014")} <span style="font-size:10px;color:#6b7280">(custom)</span></td>
-        <td class="proof-td">${escapeHtml2(r.duration || "\u2014")}</td>
-        <td class="proof-td">${escapeHtml2(r.description || "\u2014")}</td>
+        <td class="proof-td">${escapeHtml(r.name || "\u2014")} <span style="font-size:10px;color:#6b7280">(custom)</span></td>
+        <td class="proof-td">${escapeHtml(r.duration || "\u2014")}</td>
+        <td class="proof-td">${escapeHtml(r.description || "\u2014")}</td>
       </tr>`);
     const all = [...scanned, ...custom];
     return all.length > 0 ? all.join("") : `<tr><td class="proof-td" colspan="3" style="color:#6b7280;text-align:center">No cookies recorded for accepted categories.</td></tr>`;
@@ -46730,18 +43220,18 @@ function buildHtml(consent, cookies, customCookieRules, siteDomain, logoUrl = nu
   </div>
 
   <table class="proof-meta" role="presentation">
-    <tr><td class="proof-label">Consented domain</td><td class="proof-value">${escapeHtml2(siteDomain)}</td></tr>
-    <tr><td class="proof-label">Consent date</td><td class="proof-value">${escapeHtml2(ts)}</td></tr>
-    <tr><td class="proof-label">Consent ID</td><td class="proof-value">${escapeHtml2(consent.id || "\u2014")}</td></tr>
-    <tr><td class="proof-label">Country</td><td class="proof-value">${escapeHtml2(consent.country || "\u2014")}</td></tr>
-    <tr><td class="proof-label">Anonymized IP address</td><td class="proof-value">${escapeHtml2(anonIp)}</td></tr>
-    <tr><td class="proof-label">Consent status</td><td class="proof-value">${escapeHtml2(consentStatusLabel)}</td></tr>
+    <tr><td class="proof-label">Consented domain</td><td class="proof-value">${escapeHtml(siteDomain)}</td></tr>
+    <tr><td class="proof-label">Consent date</td><td class="proof-value">${escapeHtml(ts)}</td></tr>
+    <tr><td class="proof-label">Consent ID</td><td class="proof-value">${escapeHtml(consent.id || "\u2014")}</td></tr>
+    <tr><td class="proof-label">Country</td><td class="proof-value">${escapeHtml(consent.country || "\u2014")}</td></tr>
+    <tr><td class="proof-label">Anonymized IP address</td><td class="proof-value">${escapeHtml(anonIp)}</td></tr>
+    <tr><td class="proof-label">Consent status</td><td class="proof-value">${escapeHtml(consentStatusLabel)}</td></tr>
   </table>
 
   <div class="proof-section-box">
     <div class="proof-categories-header">
       <p class="proof-categories-title">Accepted Categories</p>
-      <p class="proof-categories-line">${escapeHtml2(acceptedLabels)}</p>
+      <p class="proof-categories-line">${escapeHtml(acceptedLabels)}</p>
     </div>
     <table class="proof-cookie-table">
       <thead>
@@ -48471,11 +44961,11 @@ async function handleAuthDashboardInit(request, env2) {
   const pageStatsMap = {};
   if (siteIds.length > 0) {
     try {
-      const placeholders2 = siteIds.map((_, i) => `?${i + 1}`).join(",");
+      const placeholders = siteIds.map((_, i) => `?${i + 1}`).join(",");
       const { results: cookieRows } = await db.prepare(
         `SELECT siteId, COUNT(*) as total, COUNT(DISTINCT category) as cats
            FROM Cookie
-           WHERE siteId IN (${placeholders2}) AND (isExpected = 0 OR isExpected IS NULL)
+           WHERE siteId IN (${placeholders}) AND (isExpected = 0 OR isExpected IS NULL)
            GROUP BY siteId`
       ).bind(...siteIds).all();
       for (const row of cookieRows || []) {
@@ -48489,11 +44979,11 @@ async function handleAuthDashboardInit(request, env2) {
     } catch (_) {
     }
     try {
-      const placeholders2 = siteIds.map((_, i) => `?${i + 1}`).join(",");
+      const placeholders = siteIds.map((_, i) => `?${i + 1}`).join(",");
       const { results: pageRows } = await db.prepare(
         `SELECT siteId, COUNT(*) as pagesScanned
            FROM ScanHistory
-           WHERE siteId IN (${placeholders2})
+           WHERE siteId IN (${placeholders})
              AND LOWER(TRIM(COALESCE(scanStatus, ''))) IN ('completed', '')
              AND strftime('%Y-%m', createdAt) = strftime('%Y-%m', 'now')
            GROUP BY siteId`
@@ -48534,10 +45024,10 @@ async function handleAuthDashboardInit(request, env2) {
   });
   let unassignedRows = [];
   try {
-    const placeholders2 = allOrgIds.map((_, i) => `?${i + 1}`).join(",");
+    const placeholders = allOrgIds.map((_, i) => `?${i + 1}`).join(",");
     const { results: unassignedSubs } = await db.prepare(
       `SELECT * FROM Subscription
-         WHERE organizationId IN (${placeholders2})
+         WHERE organizationId IN (${placeholders})
            AND licenseKey IS NOT NULL
            AND (siteId IS NULL OR siteId = '')
          ORDER BY createdAt DESC`
@@ -48855,11 +45345,11 @@ function isValidEmail2(email) {
   return e.includes("@") && e.includes(".") && e.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 }
 __name(isValidEmail2, "isValidEmail");
-async function sha256Hex3(s) {
+async function sha256Hex2(s) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-__name(sha256Hex3, "sha256Hex");
+__name(sha256Hex2, "sha256Hex");
 function randomToken() {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -49000,7 +45490,7 @@ async function processTransferRequest(request, env2, ctx, owner, opts = {}) {
   }
   await cancelPendingOwnershipTransfers(db, userId);
   const secret = randomToken();
-  const tokenHash = await sha256Hex3(secret);
+  const tokenHash = await sha256Hex2(secret);
   const ttlMinutes = Number(env2.OWNERSHIP_TRANSFER_TTL_MINUTES || 60) || 60;
   const row = await createOwnershipTransfer(db, {
     userId,
@@ -49093,7 +45583,7 @@ async function handleTransferOwnershipAuthorize(request, env2) {
   if (new Date(row.expiresAt).getTime() <= Date.now()) {
     return Response.json({ success: false, error: "This authorization link has expired. Please start the transfer again." }, { status: 410 });
   }
-  const computed = await sha256Hex3(secret || "");
+  const computed = await sha256Hex2(secret || "");
   if (!secret || computed !== row.tokenHash) {
     await incrementOwnershipTransferAttempts(db, id);
     return Response.json({ success: false, error: "This authorization link is invalid." }, { status: 400 });
@@ -49129,11 +45619,11 @@ function generateCode() {
   return String(Math.floor(1e5 + Math.random() * 9e5));
 }
 __name(generateCode, "generateCode");
-async function sha256Hex4(s) {
+async function sha256Hex3(s) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-__name(sha256Hex4, "sha256Hex");
+__name(sha256Hex3, "sha256Hex");
 async function sendEmailViaBrevo2(env2, { to, subject, text, html }) {
   const apiKey = env2.BREVO_API_KEY;
   const fromEmail = env2.BREVO_FROM_EMAIL;
@@ -49190,7 +45680,7 @@ async function handleAuthRequestCode(request, env2, ctx) {
   const testCode = (env2.TEST_LOGIN_CODE || "").trim();
   if (testEmail && testCode && email === testEmail && purpose === "login") {
     const ttlMinutes2 = Number(env2.OTP_TTL_MINUTES || 10) || 10;
-    const fixedHash = await sha256Hex4(`${purpose}|${email}|${testCode}|${salt}`);
+    const fixedHash = await sha256Hex3(`${purpose}|${email}|${testCode}|${salt}`);
     const fixedRow = await createEmailVerificationCode(db, { email, purpose, codeHash: fixedHash, name: null, ttlMinutes: ttlMinutes2 });
     console.log("[AuthRequestCode] test-login: issued fixed code (email skipped) for", email, "requestId", fixedRow.id);
     return Response.json(
@@ -49200,7 +45690,7 @@ async function handleAuthRequestCode(request, env2, ctx) {
   }
   const [existingUser, codeHash] = await Promise.all([
     getUserByEmail(db, email),
-    sha256Hex4(`${purpose}|${email}|${code}|${salt}`)
+    sha256Hex3(`${purpose}|${email}|${code}|${salt}`)
   ]);
   if (purpose === "login" && !existingUser) {
     return Response.json({ success: false, error: "No account found with this email. Please sign up first." }, { status: 404 });
@@ -49279,16 +45769,120 @@ __name(handleAuthRequestCode, "handleAuthRequestCode");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
+
+// src/handlers/scanClaims.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+var claimsTableReady = false;
+async function ensureScanClaimsTable(db) {
+  if (claimsTableReady) return;
+  await db.prepare(
+    `CREATE TABLE IF NOT EXISTS scan_claims (
+        id           TEXT PRIMARY KEY,
+        scan_id      TEXT,
+        site_url     TEXT,
+        scanned_url  TEXT,
+        email        TEXT NOT NULL,
+        user_id      TEXT,
+        purpose      TEXT,
+        claimed_at   TEXT NOT NULL
+      )`
+  ).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_scan_claims_site ON scan_claims (site_url, claimed_at)`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_scan_claims_email ON scan_claims (email, claimed_at)`).run();
+  claimsTableReady = true;
+}
+__name(ensureScanClaimsTable, "ensureScanClaimsTable");
+async function recordScanClaim(db, { scanId, email, userId, purpose } = {}) {
+  if (!db || !scanId || !email) return;
+  try {
+    await ensureScanClaimsTable(db);
+    const report2 = await db.prepare(`SELECT site_url, scanned_url FROM scan_reports WHERE id = ?1`).bind(scanId).first();
+    await db.prepare(
+      `INSERT INTO scan_claims
+           (id, scan_id, site_url, scanned_url, email, user_id, purpose, claimed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`
+    ).bind(
+      crypto.randomUUID(),
+      scanId,
+      report2?.site_url ?? null,
+      report2?.scanned_url ?? null,
+      String(email).trim().toLowerCase(),
+      userId || null,
+      purpose || null,
+      (/* @__PURE__ */ new Date()).toISOString()
+    ).run();
+  } catch (err) {
+    console.error("[scanClaims] write failed:", err?.message || err);
+  }
+}
+__name(recordScanClaim, "recordScanClaim");
+var STAGING_GROUPS = [
+  { key: "webflow", label: "Webflow staging", patterns: ["%.webflow.io"] },
+  {
+    key: "framer",
+    label: "Framer staging",
+    // Framer publishes to framer.website; framer.app/framer.media are the older
+    // and asset-host forms, kept because old scans still carry them.
+    patterns: ["%.framer.website", "%.framer.app", "%.framer.media"]
+  },
+  {
+    key: "host",
+    label: "Other host preview",
+    patterns: [
+      "%.vercel.app",
+      "%.netlify.app",
+      "%.pages.dev",
+      "%.workers.dev",
+      "%.github.io",
+      "%.wixsite.com",
+      "%.myshopify.com",
+      "%.squarespace.com",
+      "%.weebly.com",
+      "%.herokuapp.com",
+      "%.ngrok.io",
+      "%.ngrok-free.app",
+      "%.ngrok.app"
+    ]
+  },
+  {
+    key: "subdomain",
+    label: "Non-production subdomain",
+    // Conventional non-production hostnames on a domain the customer owns.
+    patterns: ["staging.%", "stage.%", "dev.%", "test.%", "preview.%", "sandbox.%", "uat.%", "qa.%", "demo.%"]
+  },
+  {
+    key: "local",
+    label: "Local / IP",
+    patterns: ["localhost", "localhost:%", "%.local", "%.test"],
+    // Bare IPv4 — GLOB, because LIKE has no character classes.
+    glob: "[0-9]*.[0-9]*.[0-9]*.[0-9]*"
+  }
+];
+var STAGING_FILTERS = {
+  staging: STAGING_GROUPS.map((g) => g.key),
+  "staging-webflow": ["webflow"],
+  "staging-framer": ["framer"],
+  "staging-other": ["host", "subdomain", "local"]
+};
+function likeToRegExp(pattern) {
+  const body = pattern.split("%").map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*");
+  return new RegExp(`^${body}$`, "i");
+}
+__name(likeToRegExp, "likeToRegExp");
+var GROUP_RES = STAGING_GROUPS.map((g) => ({ key: g.key, res: g.patterns.map(likeToRegExp) }));
+
+// src/handlers/authVerifyCode.js
 function isValidEmail4(email) {
   const e = (email || "").trim().toLowerCase();
   return e.includes("@") && e.includes(".") && e.length <= 320;
 }
 __name(isValidEmail4, "isValidEmail");
-async function sha256Hex5(s) {
+async function sha256Hex4(s) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-__name(sha256Hex5, "sha256Hex");
+__name(sha256Hex4, "sha256Hex");
 async function handleAuthVerifyCode(request, env2, ctx) {
   const db = env2.CONSENT_WEBAPP;
   if (request.method !== "POST") {
@@ -49318,7 +45912,7 @@ async function handleAuthVerifyCode(request, env2, ctx) {
     const [row2, userPrefetch, computed2] = await Promise.all([
       getLatestValidEmailVerificationCode(db, { email, purpose }),
       getUserByEmail(db, email),
-      sha256Hex5(`${purpose}|${email}|${code}|${salt}`)
+      sha256Hex4(`${purpose}|${email}|${code}|${salt}`)
     ]);
     if (!row2?.id) return Response.json({ success: false, error: "Code expired or not found" }, { status: 400 });
     const attempts2 = Number(row2.attempts ?? row2.Attempts ?? 0);
@@ -49352,7 +45946,7 @@ async function handleAuthVerifyCode(request, env2, ctx) {
   }
   const [row, computed] = await Promise.all([
     getLatestValidEmailVerificationCode(db, { email, purpose }),
-    sha256Hex5(`${purpose}|${email}|${code}|${salt}`)
+    sha256Hex4(`${purpose}|${email}|${code}|${salt}`)
   ]);
   if (!row?.id) return Response.json({ success: false, error: "Code expired or not found" }, { status: 400 });
   const attempts = Number(row.attempts ?? row.Attempts ?? 0);
@@ -51922,6 +48516,319 @@ async function handleWebflowCancelSubscriptions(request, env2) {
 }
 __name(handleWebflowCancelSubscriptions, "handleWebflowCancelSubscriptions");
 
+// src/services/subscriptionEndSweep.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+init_db();
+
+// src/services/scriptPresence.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+var CONSENTBIT_HOSTS = [
+  "api.consentbit.com",
+  "app.consentbit.com",
+  "cdn.consentbit.com",
+  "manager.consentbit.com",
+  "consent-webapp-manager.web-8fb.workers.dev"
+];
+var CONSENTBIT_URL_MARKERS = [
+  "cdn.jsdelivr.net/gh/reshmalb17/",
+  // all old-app jsdelivr repos (cmp_script, cmp_script_V2, …)
+  "gh/seattlenewmedia/consentbit-public",
+  // hosted consent.js repo
+  "consentbitstyle.css",
+  "consentbit.css"
+];
+var CONSENTBIT_PATH_MARKERS = ["/client_data/", "/consentbit/", "/consentv2/", "/api/v2/cdn/runtime/"];
+var CONSENTBIT_SCRIPT_IDS = [
+  "consentbit",
+  "consentbitbanner",
+  "appscript",
+  "consentscript2025",
+  "consentscriptv22025",
+  "consentscriptversion22025",
+  "consentscriptversion312025"
+];
+var FETCH_TIMEOUT_MS2 = 15e3;
+var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 ConsentBit-ScriptCheck/1.0";
+function checkUrlForSite(site) {
+  const raw = String(site?.customDomain || site?.domain || "").trim();
+  if (!raw) return null;
+  const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const u = new URL(withScheme);
+    if (!u.hostname || !u.hostname.includes(".")) return null;
+    return u.toString();
+  } catch (_) {
+    return null;
+  }
+}
+__name(checkUrlForSite, "checkUrlForSite");
+function collectScripts(html) {
+  const out = [];
+  const re = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    out.push({ attrs: m[1] || "", body: m[2] || "" });
+  }
+  const openOnly = /<script\b([^>]*)\/>/gi;
+  while ((m = openOnly.exec(html)) !== null) {
+    out.push({ attrs: m[1] || "", body: "" });
+  }
+  return out;
+}
+__name(collectScripts, "collectScripts");
+function attr(attrs, name) {
+  const m = String(attrs || "").match(
+    new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))`, "i")
+  );
+  return m ? (m[2] || m[3] || m[4] || "").trim() : "";
+}
+__name(attr, "attr");
+function decodeEntities(s) {
+  return String(s || "").replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;/gi, "'");
+}
+__name(decodeEntities, "decodeEntities");
+function hostOf(src) {
+  try {
+    return new URL(src, "https://placeholder.local/").hostname.toLowerCase();
+  } catch (_) {
+    return "";
+  }
+}
+__name(hostOf, "hostOf");
+function classifyScript({ attrs, body }, siteIds) {
+  const src = decodeEntities(attr(attrs, "src"));
+  const srcLower = src.toLowerCase();
+  const idLower = attr(attrs, "id").toLowerCase();
+  if (src) {
+    for (const id of siteIds) {
+      if (id && srcLower.includes(String(id).toLowerCase())) {
+        return { match: true, how: "site_id_in_src", strong: true };
+      }
+    }
+    const host = hostOf(src);
+    if (CONSENTBIT_HOSTS.some((h) => host === h || host.endsWith(`.${h}`))) {
+      return { match: true, how: "consentbit_host", strong: true };
+    }
+    if (CONSENTBIT_URL_MARKERS.some((mk) => srcLower.includes(mk))) {
+      return { match: true, how: "known_script_url", strong: true };
+    }
+    if (CONSENTBIT_PATH_MARKERS.some((mk) => srcLower.includes(mk))) {
+      return { match: true, how: "consentbit_path", strong: true };
+    }
+  }
+  if (body) {
+    const bodyLower = body.toLowerCase();
+    if (CONSENTBIT_HOSTS.some((h) => bodyLower.includes(h)) || CONSENTBIT_URL_MARKERS.some((mk) => bodyLower.includes(mk))) {
+      return { match: true, how: "inline_loader", strong: true };
+    }
+    for (const id of siteIds) {
+      if (id && bodyLower.includes(String(id).toLowerCase())) {
+        return { match: true, how: "site_id_inline", strong: true };
+      }
+    }
+  }
+  if (idLower && CONSENTBIT_SCRIPT_IDS.includes(idLower)) {
+    return { match: true, how: "known_script_id", strong: false };
+  }
+  return { match: false };
+}
+__name(classifyScript, "classifyScript");
+function headOf(html) {
+  const m = String(html).match(/<head\b[^>]*>([\s\S]*?)<\/head\s*>/i);
+  return m ? m[1] : "";
+}
+__name(headOf, "headOf");
+async function checkScriptOnUrl(url, siteIds = []) {
+  const ids = (Array.isArray(siteIds) ? siteIds : [siteIds]).filter(Boolean);
+  let res;
+  try {
+    res = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      headers: { "User-Agent": UA, Accept: "text/html,application/xhtml+xml" },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS2)
+    });
+  } catch (err) {
+    return { ok: false, status: 0, found: false, inHead: false, error: err?.message || "fetch failed" };
+  }
+  if (!res.ok) {
+    return { ok: false, status: res.status, found: false, inHead: false, error: `HTTP ${res.status}` };
+  }
+  let html = "";
+  try {
+    html = await res.text();
+  } catch (err) {
+    return { ok: false, status: res.status, found: false, inHead: false, error: "body unreadable" };
+  }
+  if (!html || html.length < 40) {
+    return { ok: false, status: res.status, found: false, inHead: false, error: "empty document" };
+  }
+  const head = headOf(html);
+  for (const [scope, source2] of [
+    ["head", head],
+    ["document", html]
+  ]) {
+    if (!source2) continue;
+    for (const tag of collectScripts(source2)) {
+      const verdict = classifyScript(tag, ids);
+      if (verdict.match) {
+        return {
+          ok: true,
+          status: res.status,
+          found: true,
+          inHead: scope === "head",
+          how: verdict.how
+        };
+      }
+    }
+  }
+  return { ok: true, status: res.status, found: false, inHead: false };
+}
+__name(checkScriptOnUrl, "checkScriptOnUrl");
+async function checkScriptForSite(site) {
+  const url = checkUrlForSite(site);
+  if (!url) {
+    return { ok: false, status: 0, found: false, inHead: false, error: "no domain on record", url: null };
+  }
+  const ids = [site?.cdnScriptId, site?.id].filter(Boolean);
+  const result = await checkScriptOnUrl(url, ids);
+  return { ...result, url };
+}
+__name(checkScriptForSite, "checkScriptForSite");
+
+// src/services/subscriptionEndSweep.js
+var BATCH_SIZE = 5;
+var RECHECK_AFTER_MS = 24 * 60 * 60 * 1e3;
+var MAX_CONSECUTIVE_FAILURES = 3;
+var schemaReady = false;
+async function ensureOnce(db) {
+  if (schemaReady) return;
+  await ensureSchema(db);
+  schemaReady = true;
+}
+__name(ensureOnce, "ensureOnce");
+var ENDED_STATUSES = ["canceled", "cancelled", "unpaid", "incomplete_expired"];
+async function stampEndedSubscriptions(db) {
+  const { results = [] } = await db.prepare(
+    `SELECT id, status, cancelAtPeriodEnd, currentPeriodEnd
+         FROM Subscription
+        WHERE endedAt IS NULL
+          AND currentPeriodEnd IS NOT NULL
+          AND (LOWER(COALESCE(status,'')) IN (${ENDED_STATUSES.map(() => "?").join(",")})
+               OR COALESCE(cancelAtPeriodEnd, 0) = 1)
+        LIMIT 200`
+  ).bind(...ENDED_STATUSES).all();
+  const now = Date.now();
+  const nowIso3 = new Date(now).toISOString();
+  let stamped = 0;
+  for (const row of results) {
+    const raw = row.currentPeriodEnd ?? row.currentperiodend ?? null;
+    if (!raw) continue;
+    const endMs = Date.parse(String(raw).replace(" ", "T"));
+    if (!Number.isFinite(endMs) || endMs > now) continue;
+    try {
+      await db.prepare(`UPDATE Subscription SET endedAt = ?1, updatedAt = ?1 WHERE id = ?2 AND endedAt IS NULL`).bind(nowIso3, row.id).run();
+      stamped++;
+    } catch (err) {
+      console.error("[endSweep] could not stamp endedAt", row.id, err?.message || err);
+    }
+  }
+  if (stamped) console.log(`[endSweep] ${stamped} subscription(s) reached period end`);
+  return stamped;
+}
+__name(stampEndedSubscriptions, "stampEndedSubscriptions");
+async function findSitesDueForCheck(db, limit) {
+  const cutoff = new Date(Date.now() - RECHECK_AFTER_MS).toISOString();
+  const { results = [] } = await db.prepare(
+    `SELECT s.id, s.name, s.domain, s.customDomain, s.cdnScriptId, s.organizationId,
+              s.scriptStatus, s.scriptCheckedAt, COALESCE(s.scriptCheckFailures, 0) AS failures
+         FROM Site s
+        WHERE COALESCE(s.scriptStatus, '') <> 'removed'
+          AND (s.scriptCheckedAt IS NULL OR s.scriptCheckedAt < ?1)
+          AND EXISTS (
+                SELECT 1 FROM Subscription sub
+                 WHERE sub.endedAt IS NOT NULL
+                   AND (sub.siteId = s.id
+                        OR (sub.siteId IS NULL AND sub.organizationId = s.organizationId))
+              )
+          AND NOT EXISTS (
+                SELECT 1 FROM Subscription live
+                 WHERE (live.siteId = s.id
+                        OR (live.siteId IS NULL AND live.organizationId = s.organizationId))
+                   AND LOWER(COALESCE(live.status, '')) IN ('active', 'trialing')
+              )
+        ORDER BY COALESCE(s.scriptCheckedAt, '') ASC
+        LIMIT ?2`
+  ).bind(cutoff, limit).all();
+  return results;
+}
+__name(findSitesDueForCheck, "findSitesDueForCheck");
+function decideStatus(result, previousFailures) {
+  if (result.ok) {
+    return result.found ? { status: "present", failures: 0 } : { status: "removed", failures: 0, reason: "page loaded, no ConsentBit script" };
+  }
+  const failures = (Number(previousFailures) || 0) + 1;
+  if (failures >= MAX_CONSECUTIVE_FAILURES) {
+    return {
+      status: "removed",
+      failures,
+      reason: `unreachable ${failures}x (${result.error || "no response"})`
+    };
+  }
+  return { status: "unknown", failures, reason: result.error || "unreachable" };
+}
+__name(decideStatus, "decideStatus");
+async function applyResult(db, site, result) {
+  const decision = decideStatus(result, site.failures);
+  const nowIso3 = (/* @__PURE__ */ new Date()).toISOString();
+  await db.prepare(
+    `UPDATE Site
+          SET scriptStatus = ?1,
+              scriptCheckedAt = ?2,
+              scriptCheckFailures = ?3,
+              -- First time we concluded it was gone; left alone on later checks
+              -- so the date keeps meaning "when it disappeared".
+              scriptRemovedAt = CASE WHEN ?1 = 'removed' THEN COALESCE(scriptRemovedAt, ?2)
+                                     ELSE scriptRemovedAt END
+        WHERE id = ?4`
+  ).bind(decision.status, nowIso3, decision.failures, site.id).run();
+  console.log(
+    `[endSweep] ${site.domain || site.id} \u2192 ${decision.status}` + (decision.reason ? ` (${decision.reason})` : "") + (result.how ? ` [${result.how}]` : "")
+  );
+  return decision.status;
+}
+__name(applyResult, "applyResult");
+async function runDueScriptChecks(db, limit = BATCH_SIZE) {
+  const sites = await findSitesDueForCheck(db, limit);
+  if (!sites.length) return 0;
+  await Promise.all(
+    sites.map(async (site) => {
+      try {
+        const result = await checkScriptForSite(site);
+        await applyResult(db, site, result);
+      } catch (err) {
+        console.error("[endSweep] check failed", site.domain || site.id, err?.message || err);
+      }
+    })
+  );
+  return sites.length;
+}
+__name(runDueScriptChecks, "runDueScriptChecks");
+async function processSubscriptionEndSweep(env2) {
+  const db = env2?.CONSENT_WEBAPP;
+  if (!db) return;
+  try {
+    await ensureOnce(db);
+    await stampEndedSubscriptions(db);
+    await runDueScriptChecks(db);
+  } catch (err) {
+    console.error("[endSweep] sweep failed", err?.message || err);
+  }
+}
+__name(processSubscriptionEndSweep, "processSubscriptionEndSweep");
+
 // src/middleware/consentAccess.js
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
@@ -52150,13 +49057,13 @@ async function resolveSubscription3(db, site) {
   return sub;
 }
 __name(resolveSubscription3, "resolveSubscription");
-async function stripeGet2(env2, path) {
+async function stripeGet3(env2, path) {
   const res = await fetch(`https://api.stripe.com/v1${path}`, {
     headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` }
   });
   return { status: res.status, body: await res.json() };
 }
-__name(stripeGet2, "stripeGet");
+__name(stripeGet3, "stripeGet");
 async function stripePost2(env2, path, formObj) {
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(formObj)) {
@@ -52203,7 +49110,7 @@ async function previewImmediateAmount2(env2, ctx) {
   };
   if (promotionCodeId) base["discounts[0][promotion_code]"] = promotionCodeId;
   const qs = new URLSearchParams(base).toString();
-  const up = await stripeGet2(env2, `/invoices/upcoming?${qs}`);
+  const up = await stripeGet3(env2, `/invoices/upcoming?${qs}`);
   if (!up.body.error) {
     return { amountDueCents: sumProrationCents3(up.body), currency: up.body.currency || "usd" };
   }
@@ -52212,7 +49119,7 @@ async function previewImmediateAmount2(env2, ctx) {
     if (promotionCodeId) {
       const retry2 = { ...base };
       delete retry2["discounts[0][promotion_code]"];
-      const up2 = await stripeGet2(env2, `/invoices/upcoming?${new URLSearchParams(retry2).toString()}`);
+      const up2 = await stripeGet3(env2, `/invoices/upcoming?${new URLSearchParams(retry2).toString()}`);
       if (!up2.body.error) {
         return { amountDueCents: sumProrationCents3(up2.body), currency: up2.body.currency || "usd", couponPreviewSkipped: true };
       }
@@ -52277,7 +49184,7 @@ async function prepareChange2(request, env2) {
     return { error: fail3(`Price not configured for ${planId} ${interval}`, 503) };
   }
   const isDowngrade = PLAN_ORDER2[planId] < PLAN_ORDER2[currentPlanId];
-  const subRes = await stripeGet2(env2, `/subscriptions/${stripeSubId}`);
+  const subRes = await stripeGet3(env2, `/subscriptions/${stripeSubId}`);
   if (subRes.body.error) {
     console.error(`${TAG7} Stripe fetch sub failed:`, subRes.body.error.message);
     return { error: fail3(subRes.body.error.message || "Failed to read subscription", 400) };
@@ -52320,7 +49227,7 @@ async function handleFramerChangeTierPreview(request, env2) {
   const ctx = prep.ctx;
   const { currentPlanId, currentInterval, planId, interval, isDowngrade, isTrialing, trialEndISO, periodEndISO, newPriceId } = ctx;
   if (isTrialing) {
-    const priceRes = await stripeGet2(env2, `/prices/${newPriceId}`);
+    const priceRes = await stripeGet3(env2, `/prices/${newPriceId}`);
     if (priceRes.body.error) return fail3(priceRes.body.error.message || "Could not read the plan price", 400);
     return Response.json({
       success: true,
@@ -52337,7 +49244,7 @@ async function handleFramerChangeTierPreview(request, env2) {
     });
   }
   if (isDowngrade) {
-    const priceRes = await stripeGet2(env2, `/prices/${newPriceId}`);
+    const priceRes = await stripeGet3(env2, `/prices/${newPriceId}`);
     const newAmount = priceRes.body?.error ? null : priceRes.body.unit_amount ?? null;
     return Response.json({
       success: true,
@@ -52490,7 +49397,7 @@ async function handleFramerChangeTier(request, env2) {
   let invoiceUrl = null;
   let paymentStatus = "paid";
   if (invoiceId) {
-    const inv = await stripeGet2(env2, `/invoices/${invoiceId}`);
+    const inv = await stripeGet3(env2, `/invoices/${invoiceId}`);
     if (!inv.body.error) {
       amountPaidCents = inv.body.amount_paid ?? inv.body.amount_due ?? null;
       currency = inv.body.currency || "usd";
@@ -52569,7 +49476,7 @@ async function prepareSwitch2(request, env2) {
     console.error(`${TAG7} Missing price env var for`, planId, targetInterval);
     return { error: fail3(`Price not configured for ${planId} ${targetInterval}`, 503) };
   }
-  const subRes = await stripeGet2(env2, `/subscriptions/${stripeSubId}`);
+  const subRes = await stripeGet3(env2, `/subscriptions/${stripeSubId}`);
   if (subRes.body.error) {
     console.error(`${TAG7} Stripe fetch sub failed:`, subRes.body.error.message);
     return { error: fail3(subRes.body.error.message || "Failed to read subscription", 400) };
@@ -52614,7 +49521,7 @@ async function handleFramerSwitchIntervalPreview(request, env2) {
   let amountDueCents = null;
   let currency = "usd";
   if (isTrialing) {
-    const priceRes = await stripeGet2(env2, `/prices/${newPriceId}`);
+    const priceRes = await stripeGet3(env2, `/prices/${newPriceId}`);
     if (priceRes.body.error) return fail3(priceRes.body.error.message || "Could not read the plan price", 400);
     amountDueCents = priceRes.body.unit_amount ?? null;
     currency = priceRes.body.currency || "usd";
@@ -52625,7 +49532,7 @@ async function handleFramerSwitchIntervalPreview(request, env2) {
       "subscription_items[0][price]": newPriceId,
       subscription_proration_behavior: "create_prorations"
     });
-    const inv = await stripeGet2(env2, `/invoices/upcoming?${params.toString()}`);
+    const inv = await stripeGet3(env2, `/invoices/upcoming?${params.toString()}`);
     if (inv.body.error) {
       console.warn(`${TAG7} preview upcoming-invoice error:`, inv.body.error.message);
       return fail3(inv.body.error.message || "Could not preview the charge", 400);
@@ -52673,7 +49580,7 @@ async function handleFramerSwitchInterval2(request, env2) {
   const updated = updateRes.body;
   let newPeriodEnd = updated.current_period_end || null;
   if (!newPeriodEnd) {
-    const fresh = await stripeGet2(env2, `/subscriptions/${stripeSubId}`);
+    const fresh = await stripeGet3(env2, `/subscriptions/${stripeSubId}`);
     newPeriodEnd = fresh.body?.current_period_end || null;
   }
   const newPeriodEndISO = newPeriodEnd ? new Date(newPeriodEnd * 1e3).toISOString() : null;
@@ -52899,13 +49806,13 @@ async function resolveSubscription4(db, site) {
   return sub;
 }
 __name(resolveSubscription4, "resolveSubscription");
-async function stripeGet3(env2, path) {
+async function stripeGet4(env2, path) {
   const res = await fetch(`https://api.stripe.com/v1${path}`, {
     headers: { Authorization: `Bearer ${env2.STRIPE_SECRET_KEY}` }
   });
   return { status: res.status, body: await res.json() };
 }
-__name(stripeGet3, "stripeGet");
+__name(stripeGet4, "stripeGet");
 async function stripePost3(env2, path, formObj) {
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(formObj)) {
@@ -52952,7 +49859,7 @@ async function previewImmediateAmount3(env2, ctx) {
   };
   if (promotionCodeId) base["discounts[0][promotion_code]"] = promotionCodeId;
   const qs = new URLSearchParams(base).toString();
-  const up = await stripeGet3(env2, `/invoices/upcoming?${qs}`);
+  const up = await stripeGet4(env2, `/invoices/upcoming?${qs}`);
   if (!up.body.error) {
     return { amountDueCents: sumProrationCents4(up.body), currency: up.body.currency || "usd" };
   }
@@ -52961,7 +49868,7 @@ async function previewImmediateAmount3(env2, ctx) {
     if (promotionCodeId) {
       const retry2 = { ...base };
       delete retry2["discounts[0][promotion_code]"];
-      const up2 = await stripeGet3(env2, `/invoices/upcoming?${new URLSearchParams(retry2).toString()}`);
+      const up2 = await stripeGet4(env2, `/invoices/upcoming?${new URLSearchParams(retry2).toString()}`);
       if (!up2.body.error) {
         return { amountDueCents: sumProrationCents4(up2.body), currency: up2.body.currency || "usd", couponPreviewSkipped: true };
       }
@@ -53039,7 +49946,7 @@ async function prepareChange3(request, env2, identity2, label) {
   }
   const isDowngrade = PLAN_ORDER3[planId] < PLAN_ORDER3[currentPlanId];
   log(rid, `plan ${currentPlanId}/${currentInterval} \u2192 ${planId}/${interval} (${isDowngrade ? "DOWNGRADE" : "UPGRADE"}) price=${newPriceId}`);
-  const subRes = await stripeGet3(env2, `/subscriptions/${stripeSubId}`);
+  const subRes = await stripeGet4(env2, `/subscriptions/${stripeSubId}`);
   if (subRes.body.error) {
     return { error: failLog(rid, subRes.body.error.message || "Failed to read subscription", 400) };
   }
@@ -53085,7 +49992,7 @@ async function handleWebflowChangeTierPreview(request, env2, ctxArg, identity2) 
   const ctx = prep.ctx;
   const { rid, t0, currentPlanId, currentInterval, planId, interval, isDowngrade, isTrialing, trialEndISO, periodEndISO, newPriceId } = ctx;
   if (isTrialing) {
-    const priceRes = await stripeGet3(env2, `/prices/${newPriceId}`);
+    const priceRes = await stripeGet4(env2, `/prices/${newPriceId}`);
     if (priceRes.body.error) return failLog(rid, priceRes.body.error.message || "Could not read the plan price", 400);
     log(rid, `\u2713 preview (trialing) \u2014 charged at trial end: ${priceRes.body.unit_amount} ${priceRes.body.currency || "usd"} (${Date.now() - t0}ms)`);
     return Response.json({
@@ -53103,7 +50010,7 @@ async function handleWebflowChangeTierPreview(request, env2, ctxArg, identity2) 
     });
   }
   if (isDowngrade) {
-    const priceRes = await stripeGet3(env2, `/prices/${newPriceId}`);
+    const priceRes = await stripeGet4(env2, `/prices/${newPriceId}`);
     const newAmount = priceRes.body?.error ? null : priceRes.body.unit_amount ?? null;
     log(rid, `\u2713 preview (downgrade) \u2014 no charge now, effective ${periodEndISO || "-"}, new plan ${newAmount} ${priceRes.body?.currency || "usd"} (${Date.now() - t0}ms)`);
     return Response.json({
@@ -53266,7 +50173,7 @@ async function handleWebflowChangeTier(request, env2, ctxArg, identity2) {
   let invoiceUrl = null;
   let paymentStatus = "paid";
   if (invoiceId) {
-    const inv = await stripeGet3(env2, `/invoices/${invoiceId}`);
+    const inv = await stripeGet4(env2, `/invoices/${invoiceId}`);
     if (!inv.body.error) {
       amountPaidCents = inv.body.amount_paid ?? inv.body.amount_due ?? null;
       currency = inv.body.currency || "usd";
@@ -53371,7 +50278,7 @@ async function prepareSwitch3(request, env2, identity2, label) {
     return { error: failLog(rid, `Price not configured for ${planId} ${targetInterval}`, 503) };
   }
   log(rid, `interval ${currentInterval} \u2192 ${targetInterval} on ${planId} price=${newPriceId}`);
-  const subRes = await stripeGet3(env2, `/subscriptions/${stripeSubId}`);
+  const subRes = await stripeGet4(env2, `/subscriptions/${stripeSubId}`);
   if (subRes.body.error) {
     return { error: failLog(rid, subRes.body.error.message || "Failed to read subscription", 400) };
   }
@@ -53420,7 +50327,7 @@ async function handleWebflowSwitchIntervalPreview(request, env2, ctxArg, identit
   let amountDueCents = null;
   let currency = "usd";
   if (isTrialing) {
-    const priceRes = await stripeGet3(env2, `/prices/${newPriceId}`);
+    const priceRes = await stripeGet4(env2, `/prices/${newPriceId}`);
     if (priceRes.body.error) return failLog(rid, priceRes.body.error.message || "Could not read the plan price", 400);
     amountDueCents = priceRes.body.unit_amount ?? null;
     currency = priceRes.body.currency || "usd";
@@ -53431,7 +50338,7 @@ async function handleWebflowSwitchIntervalPreview(request, env2, ctxArg, identit
       "subscription_items[0][price]": newPriceId,
       subscription_proration_behavior: "create_prorations"
     });
-    const inv = await stripeGet3(env2, `/invoices/upcoming?${params.toString()}`);
+    const inv = await stripeGet4(env2, `/invoices/upcoming?${params.toString()}`);
     if (inv.body.error) {
       return failLog(rid, inv.body.error.message || "Could not preview the charge", 400);
     }
@@ -53482,7 +50389,7 @@ async function handleWebflowSwitchInterval2(request, env2, ctxArg, identity2) {
   log(rid, `stripe sub updated \u2014 status=${updated.status} price=${updated.items?.data?.[0]?.price?.id || "-"}`);
   let newPeriodEnd = updated.current_period_end || null;
   if (!newPeriodEnd) {
-    const fresh = await stripeGet3(env2, `/subscriptions/${stripeSubId}`);
+    const fresh = await stripeGet4(env2, `/subscriptions/${stripeSubId}`);
     newPeriodEnd = fresh.body?.current_period_end || null;
   }
   const newPeriodEndISO = newPeriodEnd ? new Date(newPeriodEnd * 1e3).toISOString() : null;
@@ -53535,11 +50442,11 @@ function isValidEmail7(email) {
   return e.includes("@") && e.includes(".") && e.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 }
 __name(isValidEmail7, "isValidEmail");
-async function sha256Hex6(s) {
+async function sha256Hex5(s) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-__name(sha256Hex6, "sha256Hex");
+__name(sha256Hex5, "sha256Hex");
 function randomToken2() {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -53659,7 +50566,7 @@ async function handleFramerTransferOwnershipRequest(request, env2, ctx) {
   const userId = owner.id ?? owner.userId;
   await cancelPendingOwnershipTransfers(db, userId);
   const secret = randomToken2();
-  const tokenHash = await sha256Hex6(secret);
+  const tokenHash = await sha256Hex5(secret);
   const ttlMinutes = Number(env2.OWNERSHIP_TRANSFER_TTL_MINUTES || 60) || 60;
   const row = await createOwnershipTransfer(db, {
     userId,
@@ -54925,27 +51832,9 @@ var PUBLIC_PATHS = /* @__PURE__ */ new Set([
   "/api/v2/webflow-checkout-token",
   // Legacy aliases without /api/ prefix (backwards-compat for older bundles)
   "/licenses/activate-license",
-  "/licenses/check-domain-script",
-  // Standalone Admin Dashboard (Next.js) backend. "Public" for TRANSPORT ONLY —
-  // any-origin CORS, plain JSON, no CSRF — with authorization enforced INSIDE each
-  // handler (handlers/adminDashboard/auth.js): X-Admin-User + X-Admin-Key must match
-  // an AdminDashboardAccount row (or X-Admin-Key alone may be env.ADMIN_SECRET), and
-  // the resolved role gates writes. Called server-to-server from the dashboard's
-  // Next.js routes, so no key reaches a browser.
-  "/api/admin/dashboard/stats",
-  "/api/admin/dashboard/users",
-  "/api/admin/dashboard/user",
-  "/api/admin/dashboard/site",
-  "/api/admin/dashboard/auth",
-  "/api/admin/dashboard/accounts",
-  "/api/admin/dashboard/audit",
-  "/api/admin/dashboard/scans",
-  "/api/admin/dashboard/sites",
-  // Emailed-link surfaces. Unauthenticated by design — the single-use token in
-  // the link is the credential, and recover always answers identically so it
-  // cannot be used to discover who has an account.
-  "/api/admin/dashboard/account-setup",
-  "/api/admin/dashboard/account-recover"
+  "/licenses/check-domain-script"
+  // NOTE: the /api/admin/dashboard/* paths were removed from this set when the
+  // Admin Dashboard API moved to its own worker (../Admin-Dashboard-Server).
 ]);
 var WEBFLOW_APP_ROUTES = {
   "oauth/status": /* @__PURE__ */ __name((req, env2) => handleWebflowOAuthStatus(req, env2, { authenticated: true }), "oauth/status"),
@@ -55377,40 +52266,9 @@ async function dispatchApiRoute(pathname, request, env2, ctx) {
     case "/api/admin/test-scan-report":
       response = await handleAdminTestScanReport(request, env2, ctx);
       break;
-    // — Admin Dashboard (standalone Next.js app) — read/edit/delete users
-    case "/api/admin/dashboard/stats":
-      response = await handleAdminDashboardStats(request, env2);
-      break;
-    case "/api/admin/dashboard/users":
-      response = await handleAdminDashboardUsers(request, env2);
-      break;
-    case "/api/admin/dashboard/user":
-      response = await handleAdminDashboardUser(request, env2);
-      break;
-    case "/api/admin/dashboard/site":
-      response = await handleAdminDashboardSite(request, env2);
-      break;
-    case "/api/admin/dashboard/auth":
-      response = await handleAdminDashboardAuth(request, env2);
-      break;
-    case "/api/admin/dashboard/accounts":
-      response = await handleAdminDashboardAccounts(request, env2, ctx);
-      break;
-    case "/api/admin/dashboard/account-setup":
-      response = await handleAdminDashboardAccountSetup(request, env2);
-      break;
-    case "/api/admin/dashboard/account-recover":
-      response = await handleAdminDashboardRecover(request, env2, ctx);
-      break;
-    case "/api/admin/dashboard/audit":
-      response = await handleAdminDashboardAudit(request, env2);
-      break;
-    case "/api/admin/dashboard/scans":
-      response = await handleAdminDashboardScans(request, env2);
-      break;
-    case "/api/admin/dashboard/sites":
-      response = await handleAdminDashboardSites(request, env2);
-      break;
+    // The /api/admin/dashboard/* cases were removed with the move to
+    // ../Admin-Dashboard-Server. They now 404 here, which is intended: the
+    // dashboard's WORKER_BASE_URL points at that worker.
     case "/api/check-legacy-script":
       response = await handleCheckLegacyScript(request, env2);
       break;
@@ -55525,6 +52383,26 @@ async function executeScheduledScans(env2, ctx) {
                 await markScanLimitNotified(db, scheduledScan.siteId, scanUsage.yearMonth);
               }
             }
+            ctx.waitUntil(
+              createAdminNotification(db, {
+                type: "limit.scans",
+                severity: "warning",
+                title: `Scan limit reached \u2014 ${site.domain || scheduledScan.siteId}`,
+                message: `${scanUsage.scanCount} of ${scansLimit} scans used this month on the ${plan?.id || "free"} plan. Scheduled scans are being skipped until the quota resets.`,
+                siteId: scheduledScan.siteId,
+                domain: site.domain || null,
+                organizationId,
+                detail: {
+                  resource: "scans",
+                  used: scanUsage.scanCount,
+                  limit: scansLimit,
+                  yearMonth: scanUsage.yearMonth,
+                  plan: plan?.id || "free",
+                  customerEmailed: !alreadyNotified
+                },
+                dedupeKey: `limit:scans:${scheduledScan.siteId}:${scanUsage.yearMonth}`
+              }).catch(() => null)
+            );
             executed.push({ id: scheduledScan.id, status: "skipped", reason: "scan_limit_reached" });
             continue;
           }
@@ -55699,7 +52577,11 @@ var index_default = {
         executeScheduledScans(env2, ctx),
         processSubscriptionQueue(env2),
         reportStripeMeteredUsage(env2),
-        processFinalPaymentReminders(env2, ctx)
+        processFinalPaymentReminders(env2, ctx),
+        // Stamps Subscription.endedAt when a paid period lapses, then re-checks
+        // whether those sites still carry the ConsentBit script. Self-limiting:
+        // a few sites per tick, each looked at no more than daily.
+        processSubscriptionEndSweep(env2)
       ])
     );
   },
