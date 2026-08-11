@@ -64,7 +64,7 @@ export function getLoaderIabScript(customization, opts = {}, isGAC = false) {
  * Cookie Consent UI Integration
  * Works with TCFManager for proper consent handling
  */
-const BASE_URL = "https://test-cmp.pages.dev/";
+const BASE_URL = "https://api.consentbit.com/";
 
 // Google Additional Consent (AC) toggle — baked from the isGAC build argument.
 const IS_GAC = ${isGoogleAC};
@@ -2608,6 +2608,14 @@ function rebuildPurposeAccordionsFromGvl() {
         const description = escapeHtml(item.description || '');
         const illustrations = Array.isArray(item.illustrations) ? item.illustrations : [];
         const descLegal = item.descriptionLegal ? \`<p class="cb-iab-ad-settings-details-des" style="margin-top:8px;font-style:italic;opacity:.85">\${escapeHtml(item.descriptionLegal)}</p>\` : '';
+        // TCF v2.4 / policy 5.0.b: Features must display the standard feature
+        // explanation text alongside the name + full description. Read from the GVL
+        // (standardTexts.features); fall back to the fixed standard string since the
+        // bundled @iabtcf may not expose the new field.
+        const FEATURE_STANDARD_TEXT = 'These means of processing can be used solely in pursuit of one or several purposes for which you are given a choice in this notice.';
+        const featureStdHtml = (kind === 'feature')
+            ? \`<p class="cb-iab-ad-settings-details-des" style="margin-top:8px;margin-bottom: 8px;">\${escapeHtml((gvl.standardTexts && gvl.standardTexts.features) || FEATURE_STANDARD_TEXT)}</p>\`
+            : '';
 
         let toggles = '';
         if (showLi || showConsent) {
@@ -2649,6 +2657,7 @@ function rebuildPurposeAccordionsFromGvl() {
             <div class="cb-child-accordion-body" id="cbIABPNFSection\${idAttr}Body">
                 <div class="cb-iab-ad-settings-details">
                     <p class="cb-iab-ad-settings-details-des">\${description}</p>
+                    \${featureStdHtml}
                     \${illustrations.length ? \`<div class="cb-iab-illustrations">
                         <p class="cb-iab-illustrations-title">Illustrations</p>
                         <ul class="cb-iab-illustrations-des">
