@@ -232,9 +232,20 @@ export async function handleRenameDomain(request, env) {
 
   // Always update domain + updatedAt. Update platform fields only when we actually fetched HTML
   // — a transient fetch failure shouldn't wipe valid existing platform data.
+  //
+  // A site that was installed / first logged in through the Webflow or Framer plugin keeps that
+  // platform. Renaming the domain from the webapp must never demote it: markerless HTML here means
+  // "we found no evidence", not "this is no longer a Webflow site" (the new domain may not be
+  // published yet, may be behind a proxy, or may serve the marker only after JS runs). So an empty
+  // detection is only allowed to write over an already-empty/unknown platform. Detecting the OTHER
+  // plugin is real evidence and still wins.
+  const currentPlatform = String(targetSite.platform ?? targetSite.PLATFORM ?? '').toLowerCase();
+  const hasPluginPlatform = currentPlatform === 'webflow' || currentPlatform === 'framer';
+  const platformLocked = hasPluginPlatform && detection && !detection.platform;
+
   const sets = ['domain = ?1', 'updatedAt = ?2'];
   const binds = [domain, new Date().toISOString()];
-  if (detection) {
+  if (detection && !platformLocked) {
     sets.push(`platform = ?${binds.length + 1}`);
     binds.push(detection.platform);
     sets.push(`platformSiteId = ?${binds.length + 1}`);
@@ -251,12 +262,17 @@ export async function handleRenameDomain(request, env) {
       success: true,
       available: true,
       domain,
-      platform: detection ? detection.platform : (targetSite.platform ?? ''),
-      platformSiteId: detection ? detection.platformSiteId : (targetSite.platformSiteId ?? targetSite.platformsiteid ?? ''),
+      platform: (detection && !platformLocked) ? detection.platform : (targetSite.platform ?? ''),
+      platformSiteId: (detection && !platformLocked)
+        ? detection.platformSiteId
+        : (targetSite.platformSiteId ?? targetSite.platformsiteid ?? ''),
       detected: !!detection,
-      code: detection
-        ? (detection.platform ? 'PLATFORM_DETECTED' : 'PLATFORM_UNKNOWN')
-        : 'PLATFORM_FETCH_FAILED',
+      // PLATFORM_RETAINED: HTML had no marker, but the site's plugin platform was kept.
+      code: platformLocked
+        ? 'PLATFORM_RETAINED'
+        : detection
+          ? (detection.platform ? 'PLATFORM_DETECTED' : 'PLATFORM_UNKNOWN')
+          : 'PLATFORM_FETCH_FAILED',
       isOldScript,
     },
     { status: 200 },

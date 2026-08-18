@@ -8,6 +8,8 @@ import {
   getPageviewUsageForOrganization,
 } from '../services/db.js';
 import { createAdminNotification } from '../services/adminNotifications.js';
+import { authorizeRequestHost } from '../utils/domainValidate.js';
+import { trackCustomDomain } from '../services/domainResolver.js';
 
 export async function handlePageview(request, env) {
   const db = env.CONSENT_WEBAPP;
@@ -51,19 +53,15 @@ export async function handlePageview(request, env) {
     );
   }
 
-  // Origin validation: only accept pageviews from the site's own origin (or its subdomains).
+  // Origin validation: only accept pageviews from a host that belongs to this site.
   // This prevents cross-origin abuse (e.g. evil.com injecting fake analytics for another site).
-  function normalizeHost(raw) {
-    const s = String(raw || '').trim().toLowerCase();
-    return s.replace(/^www\./, '').replace(/\.+$/, '');
-  }
-  function hostMatchesSite(host, siteDomain) {
-    const h = normalizeHost(host);
-    const d = normalizeHost(siteDomain);
-    if (!h || !d) return false;
-    if (h === d) return true;
-    return h.endsWith(`.${d}`);
-  }
+  //
+  // "Belongs to" is wider than Site.domain alone: a site registered with its
+  // builder's staging URL (foo.webflow.io) can later have a real domain attached
+  // to the same script, and views from it must count. An unrecognised host is
+  // only accepted once services/domainResolver.js has confirmed it against the
+  // platform's own records — never on the strength of the request's headers,
+  // which a copied embed reproduces exactly.
   const originHeader = request.headers.get('Origin') || '';
   const refererHeader = request.headers.get('Referer') || '';
   let requestHost = '';
@@ -76,11 +74,24 @@ export async function handlePageview(request, env) {
   }
 
   const siteDomain = site.domain || site.siteDomain || site.sitedomain || '';
-  if (requestHost && !hostMatchesSite(requestHost, siteDomain)) {
-    return Response.json(
-      { success: false, error: 'Origin not allowed for this site' },
-      { status: 403 },
-    );
+  if (requestHost) {
+    let decision = authorizeRequestHost(site, requestHost);
+
+    if (!decision.allowed && decision.candidate) {
+      const tracked = await trackCustomDomain(db, env, site, decision.candidate);
+      if (tracked.matched) {
+        site.customDomain = tracked.customDomain;
+        if (tracked.stagingUrl) site.stagingUrl = tracked.stagingUrl;
+        decision = authorizeRequestHost(site, requestHost);
+      }
+    }
+
+    if (!decision.allowed) {
+      return Response.json(
+        { success: false, error: 'Origin not allowed for this site' },
+        { status: 403 },
+      );
+    }
   }
 
   const organizationId = site ? (site.organizationId ?? site.organizationid) : null;

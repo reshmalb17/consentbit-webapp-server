@@ -441,7 +441,7 @@ export async function handleChangeTier(request, env) {
   try {
     const sId = siteId ?? sub.siteId ?? sub.siteid;
     const siteRow = sId
-      ? await db.prepare('SELECT domain, legacySource FROM Site WHERE id = ?1 LIMIT 1').bind(sId).first()
+      ? await db.prepare('SELECT domain, legacySource, platform FROM Site WHERE id = ?1 LIMIT 1').bind(sId).first()
       : null;
     await syncSubscriptionUpdateToLegacy(env, {
       email: user.email || null,
@@ -450,7 +450,10 @@ export async function handleChangeTier(request, env) {
       customerId: sub.stripeCustomerId ?? sub.stripecustomerid,
       status: 'active',
       cancelAtPeriodEnd: !!(sub.cancelAtPeriodEnd ?? sub.cancelatperiodend),
-      platform: siteRow?.legacySource || null,
+      // legacySource is only set on migrated legacy sites; Site.platform carries the install
+      // origin for everyone else. Falling back to it stops a plugin user's legacy row (and KV
+      // shard, which is chosen by this same value) from being demoted by a webapp plan change.
+      platform: siteRow?.legacySource || siteRow?.platform || null,
       interval,
     });
   } catch (syncErr) {

@@ -263,7 +263,7 @@ export async function handleSwitchBillingInterval(request, env) {
   try {
     const siteId = sub.siteId ?? sub.siteid;
     const siteRow = siteId
-      ? await db.prepare('SELECT domain, legacySource FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first()
+      ? await db.prepare('SELECT domain, legacySource, platform FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first()
       : null;
     await syncSubscriptionUpdateToLegacy(env, {
       email: user.email || null,
@@ -272,7 +272,8 @@ export async function handleSwitchBillingInterval(request, env) {
       customerId: sub.stripeCustomerId ?? sub.stripecustomerid,
       status: sub.status ?? 'active',
       cancelAtPeriodEnd: !!(sub.cancelAtPeriodEnd ?? sub.cancelatperiodend),
-      platform: siteRow?.legacySource || null,
+      // See changeTier.js — legacySource alone misses non-legacy Webflow/Framer plugin sites.
+      platform: siteRow?.legacySource || siteRow?.platform || null,
       interval: targetInterval,
     });
   } catch (syncErr) {

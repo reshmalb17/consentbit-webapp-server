@@ -146,15 +146,19 @@ async function upsertLegacySite(legacyDb, { customerId, subscriptionId, domain, 
   const now = nowUnix();
   await legacyDb
     .prepare(
+      // platform is the user's install origin (webflow/framer), not a per-event fact. A caller
+      // that doesn't know it passes null — that means "no new information", NOT "webapp/pending",
+      // so on conflict we keep whatever the row already has. Only a caller that actually knows
+      // the platform may change it. Fresh inserts still default to 'pending' as before.
       `INSERT INTO sites (customer_id, subscription_id, site_domain, status, platform, created_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+       VALUES (?1, ?2, ?3, ?4, COALESCE(?5, 'pending'), ?6, ?6)
        ON CONFLICT(subscription_id) DO UPDATE SET
          site_domain = excluded.site_domain,
          status = excluded.status,
-         platform = excluded.platform,
+         platform = CASE WHEN ?5 IS NOT NULL THEN excluded.platform ELSE platform END,
          updated_at = excluded.updated_at`
     )
-    .bind(customerId || null, subscriptionId || null, domain, status || 'active', platform || 'pending', now)
+    .bind(customerId || null, subscriptionId || null, domain, status || 'active', platform || null, now)
     .run();
 }
 
@@ -163,16 +167,18 @@ async function upsertLegacyLicense(legacyDb, { licenseKey, customerId, subscript
   const now = nowUnix();
   await legacyDb
     .prepare(
+      // Same rule as upsertLegacySite: a null platform means "unknown", so it must not
+      // overwrite an install origin the row already recorded.
       `INSERT INTO licenses (license_key, customer_id, subscription_id, site_domain, used_site_domain, platform, status, created_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+       VALUES (?1, ?2, ?3, ?4, ?5, COALESCE(?6, 'pending'), ?7, ?8, ?8)
        ON CONFLICT(license_key) DO UPDATE SET
          site_domain = COALESCE(excluded.site_domain, site_domain),
          used_site_domain = COALESCE(excluded.used_site_domain, used_site_domain),
-         platform = excluded.platform,
+         platform = CASE WHEN ?6 IS NOT NULL THEN excluded.platform ELSE platform END,
          status = excluded.status,
          updated_at = excluded.updated_at`
     )
-    .bind(licenseKey, customerId || null, subscriptionId || null, domain || null, usedDomain || null, platform || 'pending', status || 'active', now)
+    .bind(licenseKey, customerId || null, subscriptionId || null, domain || null, usedDomain || null, platform || null, status || 'active', now)
     .run();
 }
 

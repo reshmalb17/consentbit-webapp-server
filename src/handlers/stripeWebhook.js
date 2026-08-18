@@ -1186,7 +1186,10 @@ export async function handleStripeWebhook(request, env, ctx) {
             subscriptionId: subId,
             customerId: session.customer,
             status: subscriptionStatus,
-            platform: null,
+            // Checkout metadata knows the install origin here (it's the same `platform` used for
+            // the Site COALESCE above). Hardcoding null threw it away and let the legacy row /
+            // KV shard fall back to the webflow default for Framer sites.
+            platform: platform || null,
             licenseKey: licenseKey || null,
             interval,
             cancelAtPeriodEnd: 0,
@@ -1763,16 +1766,21 @@ export async function handleStripeWebhook(request, env, ctx) {
           (async () => {
             try {
               let domain = null;
+              let sitePlatform = null;
               if (siteId) {
                 const { getSiteById } = await import('../services/db.js');
                 const site = await getSiteById(db, siteId);
                 domain = site?.domain || null;
+                // Without this the sync ran with an unknown platform, so the legacy row was
+                // demoted and the KV write landed in the webflow shard regardless of origin.
+                sitePlatform = site?.legacySource || site?.platform || null;
               }
               await syncFn(env, {
                 subscriptionId: sub.id,
                 customerId: sub.customer,
                 domain,
                 status,
+                platform: sitePlatform,
                 cancelAtPeriodEnd: sub.cancel_at_period_end ? 1 : 0,
                 interval: intervalFromSub,
               });

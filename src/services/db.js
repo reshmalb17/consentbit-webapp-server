@@ -95,6 +95,29 @@ export async function ensureSchema(db) {
     await db.prepare(`ALTER TABLE Site ADD COLUMN stagingUrl TEXT`).run();
   } catch (_) {}
 
+  // ── Custom domain learned after registration ───────────────────────────────
+  // A site registered with its builder's staging URL (foo.webflow.io) keeps that
+  // value in `domain` forever — it is UNIQUE NOT NULL and half the app keys off
+  // it. When the customer later attaches a real domain to the SAME script, the
+  // domain lands here instead. See services/domainResolver.js for how it is
+  // proven to belong to the site before being written.
+  try {
+    // How customDomain was established: 'webflow_api' | 'framer_fid' |
+    // 'migration' | 'manual'. Never blank once customDomain is set.
+    await db.prepare(`ALTER TABLE Site ADD COLUMN customDomainSource TEXT`).run();
+  } catch (_) {}
+
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN customDomainDetectedAt DATETIME`).run();
+  } catch (_) {}
+
+  try {
+    // Every OTHER domain the platform reports for this site, as a JSON array of
+    // hostnames. Webflow projects routinely have several; they all serve the same
+    // script and must all be authorized.
+    await db.prepare(`ALTER TABLE Site ADD COLUMN additionalDomains TEXT`).run();
+  } catch (_) {}
+
   try {
     await db.prepare(`ALTER TABLE Site ADD COLUMN billingEmail TEXT`).run();
   } catch (_) {}
@@ -2478,6 +2501,73 @@ export async function getSiteById(db, siteId) {
     .bind(siteId)
     .first();
   return row || null;
+}
+
+/**
+ * Record the custom domain a site was found to be serving on.
+ *
+ * Only ever called after services/domainResolver.js has confirmed the host
+ * against the platform's own records — an incoming request alone never gets
+ * here, because a copied embed produces an identical one.
+ *
+ * The UPDATE is guarded on customDomain still being empty, so concurrent
+ * requests racing on the same site cannot fight over the value and an existing
+ * one is never silently rewritten. Pass `overwrite` for the admin sweep, which
+ * is re-reading the platform's authoritative list.
+ *
+ * Returns true when a row was actually written.
+ */
+export async function setSiteCustomDomain(db, siteId, host, options = {}) {
+  if (!siteId || !host) return false;
+  const source = options.source || 'detected';
+  const additional = Array.isArray(options.additionalDomains) && options.additionalDomains.length
+    ? JSON.stringify([...new Set(options.additionalDomains.filter(Boolean))])
+    : null;
+
+  const guard = options.overwrite === true
+    ? ''
+    : `AND (customDomain IS NULL OR TRIM(customDomain) = '')`;
+
+  const res = await db
+    .prepare(
+      `UPDATE Site
+          SET customDomain = ?2,
+              customDomainSource = ?3,
+              customDomainDetectedAt = datetime('now'),
+              additionalDomains = COALESCE(?4, additionalDomains),
+              updatedAt = datetime('now')
+        WHERE id = ?1 ${guard}`
+    )
+    .bind(siteId, host, source, additional)
+    .run();
+
+  return (res?.meta?.changes ?? 0) > 0;
+}
+
+/**
+ * Record the builder's staging URL for a site (foo.webflow.io).
+ *
+ * Sites registered under their custom domain never had this filled in, and sites
+ * registered under staging have it only in `domain`. Both cases need it here so
+ * the two hosts can be told apart and both stay authorized. Same empty-guard as
+ * setSiteCustomDomain — an existing value is never rewritten unless asked.
+ */
+export async function setSiteStagingUrl(db, siteId, host, options = {}) {
+  if (!siteId || !host) return false;
+  const guard = options.overwrite === true
+    ? ''
+    : `AND (stagingUrl IS NULL OR TRIM(stagingUrl) = '')`;
+
+  const res = await db
+    .prepare(
+      `UPDATE Site
+          SET stagingUrl = ?2, updatedAt = datetime('now')
+        WHERE id = ?1 ${guard}`
+    )
+    .bind(siteId, host)
+    .run();
+
+  return (res?.meta?.changes ?? 0) > 0;
 }
 
 export async function getSiteByDomain(db, domain) {

@@ -264,7 +264,8 @@ export async function handleCancelSubscription(request, env, ctx) {
       customerId: sub.stripeCustomerId ?? sub.stripecustomerid,
       status: 'active',
       cancelAtPeriodEnd: true,
-      platform: site?.legacySource || null,
+      // See changeTier.js — legacySource alone misses non-legacy Webflow/Framer plugin sites.
+      platform: site?.legacySource || site?.platform || null,
       interval: sub.interval ?? 'monthly',
     });
   } catch (syncErr) {
