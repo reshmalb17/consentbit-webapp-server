@@ -5,9 +5,57 @@
 // Cache per Worker instance — ensureSchema only runs once per cold start.
 const _schemaEnsured = new WeakMap();
 
+// ⚠️ BUMP THIS WHENEVER YOU ADD OR CHANGE DDL IN _runEnsureSchema() BELOW. ⚠️
+// The stamped version is what lets a cold start skip all 108 DDL statements. If you
+// add a CREATE/ALTER below and DO NOT bump this, the new statement will never run on
+// any environment that is already stamped at the current version.
+const SCHEMA_VERSION = 1;
+
+/**
+ * Idempotent schema setup, run once per Worker isolate.
+ *
+ * Caches the in-flight PROMISE rather than a boolean. The previous version set a
+ * boolean *before* awaiting the work, which meant (a) a concurrent caller could sail
+ * past a half-applied schema, and (b) if the migration threw, the flag stayed set so
+ * the failure was never retried — the next request silently skipped the whole thing.
+ * That is why a failed login "worked on retry" without anything being fixed.
+ */
 export async function ensureSchema(db) {
-  if (_schemaEnsured.get(db)) return;
-  _schemaEnsured.set(db, true);
+  const inflight = _schemaEnsured.get(db);
+  if (inflight) return inflight;
+
+  const p = _runEnsureSchema(db).catch((err) => {
+    // Clear the cache so the next request genuinely retries instead of skipping.
+    _schemaEnsured.delete(db);
+    throw err;
+  });
+  _schemaEnsured.set(db, p);
+  return p;
+}
+
+async function _runEnsureSchema(db) {
+  const _schemaT0 = Date.now();
+
+  // ── Fast path ────────────────────────────────────────────────────────────────
+  // Every deployed environment already has these tables, so the 108 DDL statements
+  // below are a no-op that measured 8–28s of D1 round-trips on every cold start and
+  // blocked real requests behind it. One SELECT replaces them.
+  // A missing table (brand-new DB, or first run after this change) throws here and
+  // falls through to the full migration, which creates it.
+  try {
+    const stamped = await db.prepare('SELECT version FROM SchemaVersion WHERE id = 1').first();
+    if (stamped && Number(stamped.version) === SCHEMA_VERSION) {
+      console.log(`[ensureSchema] ✅ schema v${SCHEMA_VERSION} current — skipped full migration (${Date.now() - _schemaT0}ms)`);
+      return;
+    }
+  } catch (_) {
+    // SchemaVersion table does not exist yet — run the full migration below.
+  }
+
+  // Diagnostic: this only ever logs on the FIRST request to a fresh isolate.
+  // If you see COLD START but never the matching "completed" line, the migration
+  // threw partway — that throw is what surfaces as a 500 to the caller.
+  console.log('[ensureSchema] ⏳ COLD START — running FULL schema migration');
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS Site (
       id TEXT PRIMARY KEY,
@@ -927,6 +975,26 @@ export async function ensureSchema(db) {
   try {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_wf_oauth_site_userkey ON WebflowOAuthSite(userKey)`).run();
   } catch (e) {}
+
+  // Stamp the version LAST, and only on a clean run. If any statement above threw,
+  // we never get here, the marker stays absent/stale, and the next cold start
+  // correctly replays the whole migration instead of assuming it succeeded.
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS SchemaVersion (
+      id INTEGER PRIMARY KEY,
+      version INTEGER NOT NULL,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+  await db
+    .prepare(
+      `INSERT INTO SchemaVersion (id, version, updatedAt) VALUES (1, ?1, datetime('now'))
+       ON CONFLICT(id) DO UPDATE SET version = ?1, updatedAt = datetime('now')`,
+    )
+    .bind(SCHEMA_VERSION)
+    .run();
+
+  console.log(`[ensureSchema] ✅ FULL migration completed in ${Date.now() - _schemaT0}ms — stamped v${SCHEMA_VERSION}`);
 }
 
 // ---------------------------------------------------------------------------

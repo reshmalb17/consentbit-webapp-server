@@ -1088,8 +1088,19 @@ export default {
       try {
         wfResp = await handler(req, env, ctx, auth.identity);
       } catch (err) {
-        console.error('[Worker] /api/wf handler error:', err);
-        wfResp = Response.json({ success: false, error: 'Internal server error' }, { status: 500 });
+        // `ref` is echoed to the caller so support can grep this exact failure in
+        // the tail without exposing the underlying error to the browser.
+        const ref = crypto.randomUUID().slice(0, 8);
+        console.error(`[Worker] /api/wf handler error: ref=${ref} path=${pathname}`, err?.stack || err?.message || err);
+        wfResp = Response.json(
+          {
+            success: false,
+            error: 'Our server is busy right now. Please try again in a moment.',
+            code: 'SERVER_BUSY',
+            ref,
+          },
+          { status: 500 },
+        );
       }
       return withCors(withSecurityHeaders(wfResp), request, env);
     }
@@ -1158,8 +1169,19 @@ export default {
     try {
       ({ response, isPublic } = await dispatchApiRoute(pathname, request, env, ctx));
     } catch (err) {
-      console.error('[Worker] Unhandled error:', err);
-      response = Response.json({ success: false, error: 'Internal server error' }, { status: 500 });
+      // `ref` is echoed to the caller so support can grep this exact failure in
+      // the tail without exposing the underlying error to the browser.
+      const ref = crypto.randomUUID().slice(0, 8);
+      console.error(`[Worker] Unhandled error: ref=${ref} path=${pathname}`, err?.stack || err?.message || err);
+      response = Response.json(
+        {
+          success: false,
+          error: 'Our server is busy right now. Please try again in a moment.',
+          code: 'SERVER_BUSY',
+          ref,
+        },
+        { status: 500 },
+      );
       // Preserve the endpoint's public-ness on error so public routes still get
       // withPublicCors (any-origin). Forcing false here routes the 500 through the
       // credentialed allowlist, which drops CORS headers for non-allowlisted

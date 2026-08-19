@@ -47,6 +47,13 @@ async function sendEmailViaBrevo(env, { to, subject, text, html }) {
     console.error('[AuthRequestCode] Brevo non-200', { status: res.status, bodySnippet: t.slice(0, 400) });
     throw new Error(`Brevo send failed: ${res.status} ${t}`.slice(0, 300));
   }
+
+  // Return Brevo's messageId — the ONLY field that correlates this request to a
+  // delivery record in the Brevo dashboard (Transactional → Logs). A 2xx here
+  // means Brevo accepted the message, NOT that the mailbox received it: bounces,
+  // blocklisting and spam-filing all happen after this point.
+  const body = await res.json().catch(() => null);
+  return body?.messageId || null;
 }
 
 export async function handleAuthRequestCode(request, env, ctx) {
@@ -97,10 +104,18 @@ export async function handleAuthRequestCode(request, env, ctx) {
   }
 
   // Run user lookup and hash computation in parallel — neither depends on the other
+  const lookupT0 = Date.now();
   const [existingUser, codeHash] = await Promise.all([
     getUserByEmail(db, email),
     sha256Hex(`${purpose}|${email}|${code}|${salt}`),
   ]);
+  console.log('[AuthRequestCode] user lookup', {
+    email,
+    purpose,
+    userFound: !!existingUser,
+    userId: existingUser?.id || null,
+    lookupMs: Date.now() - lookupT0,
+  });
 
   if (purpose === 'login' && !existingUser) {
     return Response.json({ success: false, error: 'No account found with this email. Please sign up first.' }, { status: 404 });
@@ -113,7 +128,15 @@ export async function handleAuthRequestCode(request, env, ctx) {
   const displayName = name || loginUser?.name || '';
 
   const ttlMinutes = Number(env.OTP_TTL_MINUTES || 10) || 10;
+  // A large insertMs here means this request paid for the cold-start schema
+  // migration — cross-reference the [ensureSchema] COLD START line in the tail.
+  const insertT0 = Date.now();
   const row = await createEmailVerificationCode(db, { email, purpose, codeHash, name, ttlMinutes });
+  console.log('[AuthRequestCode] code row written', {
+    requestId: row.id,
+    expiresAt: row.expiresAt,
+    insertMs: Date.now() - insertT0,
+  });
 
   const subject = `Your ConsentBit verification code`;
   const text = `Hello${displayName ? ` ${displayName}` : ''},\n\nYour verification code is: ${code}\n\nThis code will expire in ${ttlMinutes} minutes, so please use it as soon as possible.\n\nIf you did not request this verification code, you can safely ignore this email.\n\nBest regards,\nConsentBit Team\n`;
@@ -160,13 +183,30 @@ export async function handleAuthRequestCode(request, env, ctx) {
 
   // Brevo is configured — fire email in background and respond immediately
   console.log('[AuthRequestCode] dispatching Brevo email to:', email);
+  const brevoT0 = Date.now();
   ctx.waitUntil(
     sendEmailViaBrevo(env, { to: email, subject, text, html })
-      .then(() => {
-        console.log('[AuthRequestCode] ✅ Brevo email sent to:', email);
+      .then((messageId) => {
+        // ACCEPTED ≠ DELIVERED. Brevo returning 2xx only means it queued the mail.
+        // To confirm the mailbox actually got it, look this messageId up in
+        // Brevo → Transactional → Logs and check for Blocked / Hard bounce /
+        // Soft bounce / Spam / Deferred, and check the Blocklist for the address.
+        console.log('[AuthRequestCode] ✅ Brevo ACCEPTED for delivery (not proof of inbox delivery)', {
+          to: email,
+          emailDomain,
+          messageId,
+          requestId: row.id,
+          brevoMs: Date.now() - brevoT0,
+        });
       })
       .catch((e) => {
-        console.error('[AuthRequestCode] ❌ Brevo send failed:', e?.message || e);
+        console.error('[AuthRequestCode] ❌ Brevo send FAILED', {
+          to: email,
+          emailDomain,
+          requestId: row.id,
+          brevoMs: Date.now() - brevoT0,
+          error: e?.message || String(e),
+        });
       })
   );
 
