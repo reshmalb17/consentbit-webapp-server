@@ -1,3 +1,6 @@
+// AUTO-GENERATED — DO NOT EDIT BY HAND.
+// Minified build of src/handlers/cdnNm.js (loader template only).
+// Regenerate with:  npm run minify:cdn
 import { getBannerCustomization, getEffectivePlanForOrganization, getSubscriptionBySiteId, inferTierPlanIdFromStripePriceId } from '../services/db.js';
 import { authorizeRequestHost } from '../utils/domainValidate.js';
 import { trackCustomDomain } from '../services/domainResolver.js';
@@ -33,6 +36,10 @@ async function _handleCDNScript(request, env, url) {
 
   const site = await db
     .prepare(
+      // SELECT * rather than a column list: this handler never calls
+      // ensureSchema (it is the hot path), so naming a column added by a later
+      // migration would fail every banner request until some other route ran the
+      // ALTER. Same single row either way.
       'SELECT * FROM Site WHERE cdnScriptId = ?1'
     )
     .bind(cdnScriptId)
@@ -55,6 +62,9 @@ async function _handleCDNScript(request, env, url) {
     });
   }
 
+  // Host this request came from, once authorized. Sent to the client below as
+  // registeredDomain so the in-page guard does not disable a banner the server
+  // has already cleared.
   let authorizedHost = null;
 
   if (resolvedSite.domain) {
@@ -73,6 +83,9 @@ async function _handleCDNScript(request, env, url) {
       try {
         const sourceHost = new URL(sourceHeader).hostname.replace(/^www\./, '').toLowerCase();
 
+        // Staging URL as recorded in KV by the Webflow app. Still consulted
+        // because it predates Site.stagingUrl and is populated for sites the
+        // column never was.
         let stagingHost = null;
         const platformSiteId = resolvedSite.platformSiteId ?? resolvedSite.platformsiteid ?? null;
         if (platformSiteId && env.WEBFLOW_AUTHENTICATION) {
@@ -89,6 +102,11 @@ async function _handleCDNScript(request, env, url) {
 
         let decision = authorizeRequestHost(resolvedSite, sourceHost, { stagingHost });
 
+        // Unknown host on a platform we can check. A site registered with its
+        // staging URL reaches here the first time its custom domain is visited:
+        // ask the platform whether the domain really belongs to this site, and
+        // serve straight away if it does. Confirmed hosts are written to
+        // Site.customDomain, so this costs one lookup per site, not per request.
         if (!decision.allowed && decision.candidate) {
           const tracked = await trackCustomDomain(db, env, resolvedSite, decision.candidate);
           if (tracked.matched) {
@@ -314,6 +332,18 @@ async function _handleCDNScript(request, env, url) {
     var bannerFooterJustify = textAlign === 'center' ? 'center' : 'flex-end';
     var closeButtonEnabled = ((configTrans.closeButtonEnabled != null ? configTrans.closeButtonEnabled : enTrans.closeButtonEnabled) === '1');
     var boxPadding = closeButtonEnabled ? '28px 20px 20px 20px' : '20px';
+    // The banner inherits the host page's font by default — it names no family of its
+    // own, so it reads as part of the site it sits on. bannerFontFamily is still stored
+    // by the dashboard but deliberately not read here: we load no webfont, so a named
+    // family would either resolve to nothing or silently fall back to the host page.
+    //
+    // The Designer app's Type → Font card can opt a site INTO the banner's own stack
+    // via two additive keys in translations.config, both optional:
+    //   bannerFontMode    'default' (inject the stack below) | 'inherit' (inject nothing)
+    //   bannerFontEnabled '1' | '0' — fallback for callers that send only this flag
+    // Absent both keys the banner inherits, which is what a site with no Font card
+    // preference gets. 'inherit' on the two containers is enough on its own: every
+    // child rule in the runtime's stylesheet already declares font-family:inherit.
     var fontFamilyCss = 'inherit';
     try {
       var _fontMode = configTrans.bannerFontMode != null
@@ -604,6 +634,14 @@ async function _handleCDNScript(request, env, url) {
       "#cb-preferences-banner.cb-banner .cb-banner-footer{" +
         "flex:0 0 auto;" +
       "}" +
+      // Branding strip: bleeds past the panel's 28px padding so it sits flush with
+      // the card edges; the panel's overflow:hidden clips it to the border radius.
+      //
+      // Colours are FIXED, never derived from the dashboard's backgroundColor, and
+      // opaque so the panel colour cannot show through. The strip is a constant piece
+      // of ConsentBit branding and must look identical on every site, whatever banner
+      // colour the customer picks. !important guards each paint property against the
+      // customer overrides layered on top of this sheet.
       "#cb-preferences-banner.cb-banner .cb-brand-footer{" +
         "flex:0 0 auto;" +
         "box-sizing:border-box;" +
@@ -620,6 +658,8 @@ async function _handleCDNScript(request, env, url) {
         "background-color:#F7F8FA!important;" +
         "border-top:1px solid #EFF1F4!important;" +
       "}" +
+      // !important throughout: the baseline sheet forces blue + underline on every
+      // ".cb-banner a", which is right for policy links but wrong for the branding mark.
       "#cb-preferences-banner.cb-banner .cb-brand-footer a{" +
         "display:inline-flex!important;" +
         "align-items:center;" +
@@ -689,6 +729,7 @@ async function _handleCDNScript(request, env, url) {
           "min-width:0!important;" +
           "box-sizing:border-box!important;" +
         "}" +
+        // Panel padding drops to 20px here, so the bleed has to match.
         "#cb-preferences-banner.cb-banner .cb-brand-footer{" +
           "width:calc(100% + 40px)!important;" +
           "margin:16px -20px -20px!important;" +
@@ -757,8 +798,27 @@ async function _handleCDNScript(request, env, url) {
     bannerEnabled,
     apiBase,
     gaId: GA_ID,
+    // Microsoft Clarity Consent API v2.
+    //   clarityCmpId — the partner "source" identifier Microsoft issues to a CMP (request
+    //     it from clarity-cmp@microsoft.com). Until one is assigned we send our own name,
+    //     which Clarity accepts but cannot attribute to a listed partner.
+    //   clarityConsentMode — escape hatch. Off means Clarity's tag is hard-blocked like
+    //     any other analytics script instead of being consent-gated. Defaults on; no DB
+    //     column is required for that default to hold.
     clarityCmpId: resolvedSite.clarityCmpId || 'consentbit',
     clarityConsentMode: resolvedSite.clarityConsentMode !== 0 && resolvedSite.clarityConsentMode !== false,
+    // Google Consent Mode v2.
+    //   gtmConsentMode — the same arrangement as clarityConsentMode, for the two Google
+    //     loaders (gtm.js / gtag/js). On means they are governed by the consent SIGNAL
+    //     already published by the pre-blocker (consent default = denied, set before the
+    //     loader can run) instead of by the script blocker. Off restores hard-blocking.
+    //     Defaults on; no DB column is required for that default to hold.
+    //
+    //     The main runtime has always exempted these hosts — isGoogleAnalyticsUrl() /
+    //     isConsentSignalGoverned() below. The pre-blocker did not, so gtm.js was killed
+    //     before the container could read the consent defaults: no Container Loaded, no
+    //     Consent Initialisation, no cookieless pings, and nothing for Tag Assistant to
+    //     attach to. This flag closes that gap; it does not widen what the runtime allows.
     gtmConsentMode: resolvedSite.gtmConsentMode !== 0 && resolvedSite.gtmConsentMode !== false,
     platform: resolvedSite.platform || null,
     styles: customStyles || null,
@@ -826,6 +886,11 @@ async function _handleCDNScript(request, env, url) {
     scriptBlockProviders: SCRIPT_BLOCK_PROVIDERS,
     customCookieRules: customCookieRules,
     pendingScan: resolvedSite.pendingScan === 1,
+    // The host this response was authorized for, not just the registered one —
+    // a site can legitimately run on its staging URL and its custom domain, and
+    // the in-page guard compares this against location.hostname. Falls back to
+    // the registered domain when the request carried no Origin/Referer, which is
+    // exactly the copied-embed case that guard exists to catch.
     registeredDomain: authorizedHost || resolvedSite.domain
       ? String(resolvedSite.domain).replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0].toLowerCase()
       : null,
@@ -908,7 +973,19 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
   };
   const bannerIsCcpa = String(effectiveBannerType || '').toLowerCase() === 'ccpa';
 
+  // Microsoft Clarity Consent API v2, signalled ahead of clarity.js: install the queue
+  // stub the CMP integration guide mandates, then send exactly ONE consentv2 call
+  // carrying the stored decision (default-denied when there is none). Deliberately not a
+  // default-then-stored pair — Microsoft asks CMPs to avoid that redundant state change.
+  // __cbClaritySignal is the same fingerprint updateClarityConsent() dedupes against, so
+  // the loader will not re-send this decision. Reuses c/d/e resolved just above:
+  // c = CCPA regime, d = stored categories, e = "Do Not Sell" opt-out.
   const clarityCmpSource = String(siteConfigPayload.clarityCmpId || 'consentbit');
+  // Emitted BEFORE the Google Consent Mode work below, for two reasons: Microsoft asks
+  // for the signal as early as possible, and the enclosing IIFE has a single catch — a
+  // throw anywhere in the gtag section would otherwise skip the Clarity call entirely
+  // and leave Clarity on its own regional default. The inner try/catch is the mirror
+  // image: a failure here must not cost us Google Consent Mode.
   const clarityBootstrap = siteConfigPayload.clarityConsentMode === false ? '' :
     `try{` +
     `window.clarity=window.clarity||function(){(window.clarity.q=window.clarity.q||[]).push(arguments);};` +
