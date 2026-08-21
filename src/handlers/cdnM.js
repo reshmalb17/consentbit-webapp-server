@@ -446,16 +446,14 @@ async function _handleCDNScript(request, env, url) {
         "margin:0 0 8px;" +
         "font-size:16px!important;" +
         "line-height:1.4!important;" +
-        "font-weight:600;" +
-        "font-family:inherit;" +
+        "font-weight:600;"  +
         "color:" + headingColor + ";" +
         "text-align:" + textAlign + "!important;" +
         "width:100%;" +
       "}" +
       "#cb-initial-banner.cb-banner h3," +
       "#cb-preferences-banner.cb-banner h3{" +
-        "font-weight:600!important;" +
-        "font-family:inherit!important;" +
+        "font-weight:600!important;"  +
         "color:" + headingColor + ";" +
         "text-align:" + textAlign + "!important;" +
         "width:100%;" +
