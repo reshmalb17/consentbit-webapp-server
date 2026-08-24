@@ -3582,7 +3582,7 @@ ${inlineConfig}
 }();
 `;
 
-  const SCRIPT_VERSION = '2026-08-13-system-font-only';
+  const SCRIPT_VERSION = '2026-08-22-script-recreation-fixes';
   const customizationUpdatedAt = customization?.updatedAt || customization?.updated_at || '';
   const translationsSig = await (async () => {
     try {

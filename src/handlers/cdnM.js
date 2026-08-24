@@ -73,17 +73,18 @@ async function _handleCDNScript(request, env, url) {
       try {
         const sourceHost = new URL(sourceHeader).hostname.replace(/^www\./, '').toLowerCase();
 
+        // stagingUrl comes off the Site row already SELECTed above, so this costs no
+        // extra query. It used to be read from WEBFLOW_AUTHENTICATION KV on every
+        // request — one KV read per pageview for a value D1 already had in hand.
+        // Nothing writes stagingUrl to KV any more (setSiteStagingUrl, called from
+        // trackCustomDomain, is the live writer), so KV only held stale legacy copies.
         let stagingHost = null;
-        const platformSiteId = resolvedSite.platformSiteId ?? resolvedSite.platformsiteid ?? null;
-        if (platformSiteId && env.WEBFLOW_AUTHENTICATION) {
+        const siteStagingUrl = resolvedSite.stagingUrl ?? resolvedSite.stagingurl ?? null;
+        // Webflow writes the literal string "Not Published" for unpublished sites.
+        if (siteStagingUrl && String(siteStagingUrl).trim().toLowerCase() !== 'not published') {
           try {
-            const kvRaw = await env.WEBFLOW_AUTHENTICATION.get(platformSiteId);
-            if (kvRaw) {
-              const kvData = JSON.parse(kvRaw);
-              if (kvData.stagingUrl) {
-                stagingHost = new URL(kvData.stagingUrl.startsWith('http') ? kvData.stagingUrl : `https://${kvData.stagingUrl}`).hostname.replace(/^www\./, '').toLowerCase();
-              }
-            }
+            const raw = String(siteStagingUrl).trim();
+            stagingHost = new URL(raw.startsWith('http') ? raw : `https://${raw}`).hostname.replace(/^www\./, '').toLowerCase();
           } catch { }
         }
 
