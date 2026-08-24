@@ -1,9 +1,9 @@
-// Microsoft Clarity CMP partner "source" identifier.
-// >>> REPLACE THIS with the CMP ID Microsoft issues (request it from
-// >>> clarity-cmp@microsoft.com). Unlike the other loaders, this one is served as a
-// >>> static asset with no server-injected __CONSENT_SITE__ payload, so the ID cannot
-// >>> be configured per site - it has to be edited here.
-window.__CB_CLARITY_CMP_ID__ = 'consentbit';
+// Microsoft Clarity CMP partner "source" identifier, issued to ConsentBit by Microsoft.
+// Kept as a NUMBER: the CMP integration guide writes `source: <your-cmp-id>` unquoted
+// while quoting the storage values. Unlike the other loaders, this one is served as a
+// static asset with no server-injected __CONSENT_SITE__ payload, so the ID cannot be
+// configured per site - it has to be edited here.
+window.__CB_CLARITY_CMP_ID__ = 165;
 
 // CRITICAL: Initialize consent mode IMMEDIATELY (before IIFE) to prevent blocking
 // This ensures consent mode is set even if script loads asynchronously
@@ -35,7 +35,7 @@ window.__CB_CLARITY_CMP_ID__ = 'consentbit';
         if (cbCk('cb-consent-marketing_storage') === 'true' || cbCk('_cb_cms_') === 'true') cbAd = 'granted';
       }
       window.clarity = window.clarity || function () { (window.clarity.q = window.clarity.q || []).push(arguments); };
-      window.clarity('consentv2', { source: (cbCfg.clarityCmpId || window.__CB_CLARITY_CMP_ID__ || 'consentbit'), ad_Storage: cbAd, analytics_Storage: cbAn });
+      window.clarity('consentv2', { source: (cbCfg.clarityCmpId || window.__CB_CLARITY_CMP_ID__ || 165), ad_Storage: cbAd, analytics_Storage: cbAn });
       window.__cbClaritySignal = cbAd + '|' + cbAn;
     }
   } catch (e) {}
@@ -622,7 +622,7 @@ window.gtag('consent', 'default', {
         if (window.__cbClaritySignal === sg) return;
         window.__cbClaritySignal = sg;
         window.clarity = window.clarity || function () { (window.clarity.q = window.clarity.q || []).push(arguments); };
-        window.clarity('consentv2', { source: (cfg.clarityCmpId || window.__CB_CLARITY_CMP_ID__ || 'consentbit'), ad_Storage: ad, analytics_Storage: an });
+        window.clarity('consentv2', { source: (cfg.clarityCmpId || window.__CB_CLARITY_CMP_ID__ || 165), ad_Storage: ad, analytics_Storage: an });
       } catch (e) {}
     }
 

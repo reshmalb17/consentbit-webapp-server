@@ -751,7 +751,7 @@ async function _handleCDNScript(request, env, url) {
     //   clarityConsentMode â escape hatch. Off means Clarity's tag is hard-blocked like
     //     any other analytics script instead of being consent-gated. Defaults on; no DB
     //     column is required for that default to hold.
-    clarityCmpId: resolvedSite.clarityCmpId || 'consentbit',
+    clarityCmpId: resolvedSite.clarityCmpId || 165,
     clarityConsentMode: resolvedSite.clarityConsentMode !== 0 && resolvedSite.clarityConsentMode !== false,
     // Google Consent Mode v2.
     //   gtmConsentMode â the same arrangement as clarityConsentMode, for the two Google
@@ -878,7 +878,7 @@ ${inlineConfig}
     var apiBase = SITE.apiBase;
     var gaMeasurementId = SITE.gaId || null;
     var clarityConsentEnabled = false !== SITE.clarityConsentMode;
-    var clarityCmpId = SITE.clarityCmpId || "consentbit";
+    var clarityCmpId = SITE.clarityCmpId || 165;
     var customization = SITE.customization || null;
     var pendingScan = true === SITE.pendingScan;
     var bannerLayoutVisual = customization && customization.bannerLayoutVisual || "box";
@@ -3654,7 +3654,10 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
   // __cbClaritySignal is the same fingerprint updateClarityConsent() dedupes against, so
   // the loader will not re-send this decision. Reuses c/d/e resolved just above:
   // c = CCPA regime, d = stored categories, e = "Do Not Sell" opt-out.
-  const clarityCmpSource = String(siteConfigPayload.clarityCmpId || 'consentbit');
+  // Microsoft issued ConsentBit CMP ID 165. Sent as a NUMBER, not a string: the
+  // integration guide writes `source: <your-cmp-id>` unquoted while quoting the
+  // storage values, so JSON.stringify() below must emit 165 rather than "165".
+  const clarityCmpSource = siteConfigPayload.clarityCmpId || 165;
   // Emitted BEFORE the Google Consent Mode work below, for two reasons: Microsoft asks
   // for the signal as early as possible, and the enclosing IIFE has a single catch â a
   // throw anywhere in the gtag section would otherwise skip the Clarity call entirely
