@@ -759,7 +759,7 @@ function cbClarityConsent(categories) {
     if (window.__cbClaritySignal === sg) return;
     window.__cbClaritySignal = sg;
     window.clarity = window.clarity || function () { (window.clarity.q = window.clarity.q || []).push(arguments); };
-    window.clarity('consentv2', { source: (cfg.clarityCmpId || 'consentbit'), ad_Storage: ad, analytics_Storage: an });
+    window.clarity('consentv2', { source: (cfg.clarityCmpId || 165), ad_Storage: ad, analytics_Storage: an });
   } catch (e) {}
 }
 
