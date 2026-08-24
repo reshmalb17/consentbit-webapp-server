@@ -137,7 +137,7 @@ async function _handleCDNScript(request, env, url) {
     subStatusForDebug = status;
     const INACTIVE_STATUSES = ['canceled', 'cancelled', 'past_due', 'unpaid', 'incomplete_expired'];
     if (status && INACTIVE_STATUSES.includes(status)) {
-      return new Response('// Subscription inactive — banner disabled', {
+      return new Response('// Subscription inactive â banner disabled', {
         status: 402,
         headers: { 'Content-Type': 'application/javascript' },
       });
@@ -216,14 +216,14 @@ async function _handleCDNScript(request, env, url) {
 
   const SECTION_LABELS = {
     en: { essential: 'Strictly Necessary', analytics: 'Analytics',   marketing: 'Marketing',      preferences: 'Preferences'  },
-    es: { essential: 'Estrictamente Necesarias', analytics: 'Analíticas',  marketing: 'Marketing',      preferences: 'Preferencias' },
-    fr: { essential: 'Strictement Nécessaires',  analytics: 'Analytiques', marketing: 'Marketing',      preferences: 'Préférences'  },
+    es: { essential: 'Estrictamente Necesarias', analytics: 'AnalÃ­ticas',  marketing: 'Marketing',      preferences: 'Preferencias' },
+    fr: { essential: 'Strictement NÃ©cessaires',  analytics: 'Analytiques', marketing: 'Marketing',      preferences: 'PrÃ©fÃ©rences'  },
     de: { essential: 'Unbedingt Notwendig',      analytics: 'Analytik',    marketing: 'Marketing',      preferences: 'Einstellungen'},
     it: { essential: 'Strettamente Necessari',   analytics: 'Analitica',   marketing: 'Marketing',      preferences: 'Preferenze'   },
-    pt: { essential: 'Estritamente Necessários', analytics: 'Analíticos',  marketing: 'Marketing',      preferences: 'Preferências' },
-    sv: { essential: 'Strikt Nödvändiga',        analytics: 'Analytik',    marketing: 'Marknadsföring', preferences: 'Inställningar'},
+    pt: { essential: 'Estritamente NecessÃ¡rios', analytics: 'AnalÃ­ticos',  marketing: 'Marketing',      preferences: 'PreferÃªncias' },
+    sv: { essential: 'Strikt NÃ¶dvÃ¤ndiga',        analytics: 'Analytik',    marketing: 'MarknadsfÃ¶ring', preferences: 'InstÃ¤llningar'},
     nl: { essential: 'Strikt Noodzakelijk',      analytics: 'Analytics',   marketing: 'Marketing',      preferences: 'Voorkeuren'   },
-    pl: { essential: 'Ściśle Niezbędne',         analytics: 'Analityczne', marketing: 'Marketingowe',   preferences: 'Preferencje'  },
+    pl: { essential: 'ÅciÅle NiezbÄdne',         analytics: 'Analityczne', marketing: 'Marketingowe',   preferences: 'Preferencje'  },
   };
 
   let enTrans = {};
@@ -303,7 +303,7 @@ async function _handleCDNScript(request, env, url) {
     // purpose: a named font either resolves to nothing (we load no webfont) or silently
     // inherits whatever the host page happens to serve, so the banner looked different
     // from site to site for no stated reason. bannerFontFamily is still stored by the
-    // dashboard — read it back in here if the font picker is ever re-enabled.
+    // dashboard â read it back in here if the font picker is ever re-enabled.
     var fontFamilyCss = "system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
 
     var positionStyles = '';
@@ -745,22 +745,22 @@ async function _handleCDNScript(request, env, url) {
     apiBase,
     gaId: GA_ID,
     // Microsoft Clarity Consent API v2.
-    //   clarityCmpId — the partner "source" identifier Microsoft issues to a CMP (request
+    //   clarityCmpId â the partner "source" identifier Microsoft issues to a CMP (request
     //     it from clarity-cmp@microsoft.com). Until one is assigned we send our own name,
     //     which Clarity accepts but cannot attribute to a listed partner.
-    //   clarityConsentMode — escape hatch. Off means Clarity's tag is hard-blocked like
+    //   clarityConsentMode â escape hatch. Off means Clarity's tag is hard-blocked like
     //     any other analytics script instead of being consent-gated. Defaults on; no DB
     //     column is required for that default to hold.
     clarityCmpId: resolvedSite.clarityCmpId || 'consentbit',
     clarityConsentMode: resolvedSite.clarityConsentMode !== 0 && resolvedSite.clarityConsentMode !== false,
     // Google Consent Mode v2.
-    //   gtmConsentMode — the same arrangement as clarityConsentMode, for the two Google
+    //   gtmConsentMode â the same arrangement as clarityConsentMode, for the two Google
     //     loaders (gtm.js / gtag/js). On means they are governed by the consent SIGNAL
     //     already published by the pre-blocker (consent default = denied, set before the
     //     loader can run) instead of by the script blocker. Off restores hard-blocking.
     //     Defaults on; no DB column is required for that default to hold.
     //
-    //     The main runtime has always exempted these hosts — isGoogleAnalyticsUrl() /
+    //     The main runtime has always exempted these hosts â isGoogleAnalyticsUrl() /
     //     isConsentSignalGoverned() below. The pre-blocker did not, so gtm.js was killed
     //     before the container could read the consent defaults: no Container Loaded, no
     //     Consent Initialisation, no cookieless pings, and nothing for Tag Assistant to
@@ -850,7 +850,7 @@ ${inlineConfig}
   // Idempotency guard: if this banner script ends up embedded/executed TWICE on a page
   // (e.g. a leftover legacy install + the current one), only the FIRST copy initialises.
   // Without this, both copies bind the banner's click handlers and a single Accept/Reject
-  // fires the /api/consent POST twice → duplicate consent-log rows.
+  // fires the /api/consent POST twice â duplicate consent-log rows.
   if (window.__cbBannerInit) return;
   window.__cbBannerInit = true;
   var SITE = window.__CONSENT_SITE__ || {};
@@ -906,8 +906,8 @@ ${inlineConfig}
     var consentState = loadConsentState();
     // --- GPC (Global Privacy Control) gate -------------------------------------
     // Honor navigator.globalPrivacyControl as a CCPA "Do Not Sell/Share" opt-out.
-    // MUST run here — before the script blocker (shouldBlockScript/isCategoryAllowed)
-    // and boot() read consentState — so non-essential scripts are blocked from first
+    // MUST run here â before the script blocker (shouldBlockScript/isCategoryAllowed)
+    // and boot() read consentState â so non-essential scripts are blocked from first
     // paint. Scoped to CCPA; first visit only: a stored choice always wins, so a user
     // who opted back in is never overridden. navigator.globalPrivacyControl is
     // browser-set and synchronous, so no async/geo wait is needed (the banner type is
@@ -943,12 +943,12 @@ ${inlineConfig}
     /** Original document.createElement, captured before we patch it. */
     var nativeCreateElement = null;
 
-    /** URL-pattern → category rules shipped by the worker. */
+    /** URL-pattern â category rules shipped by the worker. */
     var scriptBlockProviders = SITE.scriptBlockProviders || [];
-    /** URL-pattern → category rules defined by the site owner in the dashboard. */
+    /** URL-pattern â category rules defined by the site owner in the dashboard. */
     var customCookieRules = SITE.customCookieRules || [];
 
-    /** Fallback domain → category map, used for iframes and for scripts no rule matched. */
+    /** Fallback domain â category map, used for iframes and for scripts no rule matched. */
     var KNOWN_TRACKER_DOMAINS = [{
       domain: "facebook.com",
       category: "marketing"
@@ -1064,7 +1064,7 @@ ${inlineConfig}
     return "" === value && "title" === key ? "We value your privacy" : "" === value && "description" === key ? "We use cookies to provide you with the best possible experience. They also allow us to analyze user behavior in order to constantly improve the website for you." : value
   }
 
-  /** Translate a button label. Anything over 80 chars is not a real label — fall back to English. */
+  /** Translate a button label. Anything over 80 chars is not a real label â fall back to English. */
   function translateButton(key) {
     var lang = getActiveLanguage();
     var value = (TRANSLATIONS[lang] || TRANSLATIONS.en)[key];
@@ -1157,7 +1157,7 @@ ${inlineConfig}
 
   /**
    * Position the initial banner for the current layout, corner setting and viewport.
-   * Returns true when the banner ended up horizontally centered — the caller uses that
+   * Returns true when the banner ended up horizontally centered â the caller uses that
    * to pick the matching entrance animation (centered banners animate differently).
    */
   function positionInitialBanner(bannerEl) {
@@ -1235,7 +1235,7 @@ ${inlineConfig}
     return host.trim()
   }
 
-  /** True when the string ends in a known file extension — i.e. it is a filename, not a hostname. */
+  /** True when the string ends in a known file extension â i.e. it is a filename, not a hostname. */
   function looksLikeFilename(value) {
     var dot = value.lastIndexOf(".");
     if (dot < 0) return false;
@@ -1486,21 +1486,20 @@ ${inlineConfig}
 
   /** Script elements with a src, de-duplicated by URL. */
   function getUniqueScriptElements() {
-    var seenSrcs = {};
-    var unique = [];
+    // Deliberately NOT deduped by src any more: blocking is per-element, so collapsing
+    // duplicates left every copy after the first running un-blocked (the same pixel added
+    // twice — hardcoded plus GTM — is common). Name kept because the caller refers to it.
+    var withSrc = [];
     var scripts = document.scripts;
     for (var i = 0; i < scripts.length; i++) {
       var script = scripts[i];
-      if (script.src && !seenSrcs[script.src]) {
-        seenSrcs[script.src] = true;
-        unique.push(script)
-      }
+      if (script.src) withSrc.push(script)
     }
-    return unique
+    return withSrc
   }
 
   /**
-   * Any Google tag host whose behaviour Consent Mode governs — analytics (GA/GTM) AND
+   * Any Google tag host whose behaviour Consent Mode governs â analytics (GA/GTM) AND
    * advertising (Ads, AdSense, Ad Manager). A site may run ads with no analytics tag at
    * all, so the advertising hosts must be here or such a site gets no consent signal.
    */
@@ -1516,7 +1515,7 @@ ${inlineConfig}
       -1 !== lower.indexOf("securepubads.g.doubleclick.net")
   }
 
-  /** True when the page carries a Google tag — including one we have already blocked. */
+  /** True when the page carries a Google tag â including one we have already blocked. */
   function hasGoogleTagScript() {
     var scripts = document.scripts;
     for (var i = 0; i < scripts.length; i++) {
@@ -1531,7 +1530,7 @@ ${inlineConfig}
   /**
    * Guarantee window.dataLayer + window.gtag exist so Consent Mode commands can always
    * be queued, even when no Google tag has loaded yet. Pushes are inert until a tag
-   * consumes them and are replayed in order when one arrives — which is why the CMP
+   * consumes them and are replayed in order when one arrives â which is why the CMP
    * must never condition its signalling on detecting a tag first.
    */
   function ensureGtag() {
@@ -1544,9 +1543,9 @@ ${inlineConfig}
 
   /**
    * Consent Mode companion flags. Both must be set before any Google tag fires.
-   *   ads_data_redaction — while ad_storage is denied, strip ad click identifiers from
+   *   ads_data_redaction â while ad_storage is denied, strip ad click identifiers from
    *     outgoing requests so no user-level ad data leaves the page.
-   *   url_passthrough — carry gclid/dclid/wbraid across navigations in the URL, so
+   *   url_passthrough â carry gclid/dclid/wbraid across navigations in the URL, so
    *     conversions still attribute for users who declined cookies.
    * Idempotent: repeat calls just re-push the same value.
    */
@@ -1558,7 +1557,7 @@ ${inlineConfig}
 
   /**
    * Microsoft Clarity tag hosts. Clarity is governed by a consent SIGNAL, not by the
-   * script blocker — Microsoft's CMP integration guide requires the tag to load
+   * script blocker â Microsoft's CMP integration guide requires the tag to load
    * regardless of consent status, as early as possible. With consent denied Clarity
    * runs cookieless (no _clck/_clsk/MUID) on its own; hard-blocking it instead would
    * leave it with no signal at all, so it would fall back to its own regional default.
@@ -1570,7 +1569,7 @@ ${inlineConfig}
     return -1 !== lower.indexOf("clarity.ms") || -1 !== lower.indexOf("clarity.microsoft.com")
   }
 
-  /** True when a consent signal — not the script blocker — governs this script. */
+  /** True when a consent signal â not the script blocker â governs this script. */
   function isConsentSignalGoverned(category, src) {
     if ("analytics" === category && isGoogleAnalyticsUrl(src)) return true;
     return clarityConsentEnabled && isClarityTagUrl(src)
@@ -1579,7 +1578,7 @@ ${inlineConfig}
   /**
    * Guarantee window.clarity exists as a queueing stub before clarity.js loads, exactly
    * as Microsoft's CMP integration guide specifies. The real tag drains window.clarity.q
-   * on arrival, so a consent call made this early is deferred rather than lost — the
+   * on arrival, so a consent call made this early is deferred rather than lost â the
    * same contract as pushing to dataLayer before a Google tag exists.
    */
   function ensureClarityQueue() {
@@ -1591,11 +1590,11 @@ ${inlineConfig}
 
   /**
    * Signal the visitor's decision to Microsoft Clarity's Consent API v2.
-   *   analytics_Storage — statistics/analytics purposes; gates the _clck / _clsk cookies
-   *   ad_Storage        — marketing/advertising purposes; gates MUID
+   *   analytics_Storage â statistics/analytics purposes; gates the _clck / _clsk cookies
+   *   ad_Storage        â marketing/advertising purposes; gates MUID
    * Key names are case-sensitive (capital S) and values must be lowercase
    * "granted"/"denied". Granular choices are respected: analytics-only consent must NOT
-   * grant ad_Storage — over-granting is called out explicitly in Microsoft's guide.
+   * grant ad_Storage â over-granting is called out explicitly in Microsoft's guide.
    *
    * Microsoft also asks CMPs to avoid redundant consent-state changes, and every banner
    * interaction plus every page load routes through here, so an unchanged decision is
@@ -1703,7 +1702,7 @@ ${inlineConfig}
    * Work out which consent categories a script belongs to. Explicit markup on the
    * element wins (our own data-consentbit* attributes, then CookieYes'); otherwise we
    * match the URL against the worker-supplied provider rules and then the site owner's
-   * custom rules. An empty array means "unknown" — and unknown scripts are never blocked.
+   * custom rules. An empty array means "unknown" â and unknown scripts are never blocked.
    */
   function resolveScriptCategories(src, scriptEl) {
     if (scriptEl && scriptEl.getAttribute) {
@@ -1758,7 +1757,12 @@ ${inlineConfig}
    */
   function shouldBlockScript(src, scriptEl) {
     if (isInjectingScript) return false;
-    if (!src || "string" != typeof src) return false;
+    if (!src) return false;
+    // NOT a typeof bail-out: GTM assigns a TrustedScriptURL object (not a string) on sites
+    // with a Trusted Types policy, and returning false there let the tag through un-blocked.
+    // Only the matching copy is coerced; the caller still forwards the ORIGINAL value to
+    // setAttribute, so Trusted Types enforcement is preserved.
+    if ("string" != typeof src) { try { src = String(src); } catch (err) { return false; } }
     var lower = src.toLowerCase();
     if (-1 !== lower.indexOf("consentbit") || -1 !== lower.indexOf("client_data")) return false;
     var categories = resolveScriptCategories(src, scriptEl);
@@ -1798,6 +1802,10 @@ ${inlineConfig}
       var src = scriptEl.getAttribute && scriptEl.getAttribute("src") || scriptEl.src || "";
       if (src) {
         if (shouldBlockScript(src, scriptEl)) try {
+          // Stash the real type: overwriting it with javascript/blocked would otherwise turn
+          // a type="module" script into a classic one when it is released.
+          var originalType = scriptEl.getAttribute("type") || "";
+          originalType && "javascript/blocked" !== originalType && scriptEl.setAttribute("data-cb-orig-type", originalType);
           scriptEl.setAttribute("data-cb-blocked-src", src);
           scriptEl.setAttribute("type", "javascript/blocked");
           scriptEl.removeAttribute("src")
@@ -1824,19 +1832,33 @@ ${inlineConfig}
   function patchScriptElement(scriptEl) {
     if (scriptEl && !scriptEl.__cp) {
       scriptEl.__cp = true;
+      var lastAssignedSrc = "";
       try {
         Object.defineProperty(scriptEl, "src", {
           configurable: true,
           enumerable: true,
+          // The native getter ALWAYS returns a string, and consumers call .indexOf()/.includes()
+          // on it (Google Tag Assistant enumerates page scripts exactly this way). Return the
+          // assigned value String()-coerced so a TrustedScriptURL never leaks out, and fall back
+          // to data-cb-blocked-src so a blocked script reports the URL it intends to load
+          // rather than "".
           get: function () {
-            return scriptEl.getAttribute("src") || ""
+            if (lastAssignedSrc) return String(lastAssignedSrc);
+            var attrValue = "";
+            try {
+              attrValue = (scriptEl.getAttribute && (scriptEl.getAttribute("src") || scriptEl.getAttribute("data-cb-blocked-src"))) || ""
+            } catch (err) {}
+            return String(attrValue)
           },
           set: function (value) {
+            lastAssignedSrc = value;
             if (shouldBlockScript(value, scriptEl)) {
+              var originalType = scriptEl.getAttribute("type") || "";
+              originalType && "javascript/blocked" !== originalType && !scriptEl.getAttribute("data-cb-orig-type") && scriptEl.setAttribute("data-cb-orig-type", originalType);
               scriptEl.setAttribute("data-cb-blocked-src", value);
               scriptEl.setAttribute("type", "javascript/blocked");
               scriptEl.removeAttribute("src")
-            } else scriptEl.setAttribute("src", value)
+            } else scriptEl.setAttribute("src", value)  // ORIGINAL value, never the coerced copy
           }
         })
       } catch (err) {}
@@ -1849,7 +1871,10 @@ ${inlineConfig}
           },
           set: function (value) {
             var type = value;
-            shouldBlockScript(scriptEl.getAttribute("src") || scriptEl.src || "", scriptEl) && (type = "javascript/blocked");
+            if (shouldBlockScript(scriptEl.getAttribute("src") || scriptEl.src || "", scriptEl)) {
+              value && "javascript/blocked" !== value && scriptEl.setAttribute("data-cb-orig-type", value);
+              type = "javascript/blocked"
+            }
             scriptEl.setAttribute("type", type)
           }
         })
@@ -1877,7 +1902,7 @@ ${inlineConfig}
     }
   }
 
-  /** Block a newly inserted node — the script itself, or any scripts inside a subtree. */
+  /** Block a newly inserted node â the script itself, or any scripts inside a subtree. */
   function scanNodeForScripts(node) {
     if (node && 1 === node.nodeType)
       if ("SCRIPT" !== node.nodeName) {
@@ -1894,8 +1919,8 @@ ${inlineConfig}
    * scripts the site author parked as type="text/plain" with a category attribute, and
    * inline scripts whose source we stashed on the element.
    *
-   * A blocked script cannot simply be re-enabled in place — the browser will not
-   * re-evaluate an existing element — so each one is rebuilt as a fresh <script> and
+   * A blocked script cannot simply be re-enabled in place â the browser will not
+   * re-evaluate an existing element â so each one is rebuilt as a fresh <script> and
    * swapped in. isInjectingScript suppresses the blocker while we do that.
    *
    * In Webflow mode script blocking is owned by the Webflow setup script, so we just
@@ -1919,18 +1944,27 @@ ${inlineConfig}
             isInjectingScript = true;
             try {
               var revived = document.createElement("script");
+              // async/defer must be set explicitly: a created script defaults to async.
+              // crossorigin/integrity/referrerpolicy must NOT be — the attribute loop below copies
+              // them when the original had them, and assigning "" here fabricates crossorigin=""
+              // (anonymous), forcing CORS mode on hosts that send no Access-Control-Allow-Origin.
               revived.async = blocked.hasAttribute("async");
               revived.defer = blocked.hasAttribute("defer");
-              revived.crossOrigin = blocked.crossOrigin || "";
-              revived.integrity = blocked.integrity || "";
-              revived.referrerPolicy = blocked.referrerPolicy || "";
               blocked.id && (revived.id = blocked.id);
               revived.src = blockedSrc;
               var attrs = blocked.attributes;
               for (var a = 0; a < attrs.length; a++) {
                 var attrName = attrs[a].name;
-                "src" !== attrName && "type" !== attrName && "data-cb-blocked-src" !== attrName && revived.setAttribute(attrName, attrs[a].value)
+                // nonce is skipped on purpose — see the note below.
+                "src" !== attrName && "type" !== attrName && "data-cb-blocked-src" !== attrName && "data-cb-orig-type" !== attrName && "nonce" !== attrName && revived.setAttribute(attrName, attrs[a].value)
               }
+              var originalType = blocked.getAttribute("data-cb-orig-type");
+              originalType && (revived.type = originalType);
+              // The browser blanks the nonce CONTENT attribute once an element is inserted; the
+              // real value survives only on the .nonce property. Copying the attribute would
+              // carry nonce="" and get the released script refused under a nonce CSP.
+              var blockedNonce = blocked.nonce || blocked.getAttribute("nonce") || "";
+              if (blockedNonce) try { revived.nonce = blockedNonce } catch (err) {}
               blocked.parentNode ? blocked.parentNode.replaceChild(revived, blocked) : document.head.appendChild(revived);
             } catch (err) {
             } finally {
@@ -1966,7 +2000,7 @@ ${inlineConfig}
         }
       }
 
-      // 3. Inline scripts we emptied — their source is stashed on the element as __ci.
+      // 3. Inline scripts we emptied â their source is stashed on the element as __ci.
       var blockedInline = document.querySelectorAll('script[type="javascript/blocked"][data-cb-inline="1"]');
       for (var b = 0; b < blockedInline.length; b++) {
         var inlineEl = blockedInline[b];
@@ -1977,12 +2011,29 @@ ${inlineConfig}
           try {
             var revivedInline = document.createElement("script");
             if (inlineSource) revivedInline.textContent = inlineSource;
+            var inlineNonce = inlineEl.nonce || (inlineEl.getAttribute && inlineEl.getAttribute("nonce")) || "";
+            if (inlineNonce) try { revivedInline.nonce = inlineNonce } catch (err) {}
             inlineEl.parentNode ? inlineEl.parentNode.replaceChild(revivedInline, inlineEl) : document.head.appendChild(revivedInline);
           } catch(err) {
           } finally {
             isInjectingScript = false;
           }
         }
+      }
+
+      // 4. Iframes patchIframeElement() parked earlier. Until this existed there was no
+      // iframe release path at all — every selector above targets <script> — so a tracker
+      // iframe blocked before consent stayed blank for the rest of the pageview. Setting
+      // the attribute directly (rather than the patched .src property) keeps this out of
+      // the blocker, and clearing the stash first stops it being reprocessed.
+      var blockedFrames = document.querySelectorAll("iframe[data-cb-blocked-src]");
+      for (var f = 0; f < blockedFrames.length; f++) {
+        var frame = blockedFrames[f];
+        var frameSrc = frame.getAttribute("data-cb-blocked-src");
+        if (frameSrc && !shouldBlockIframe(frameSrc)) try {
+          frame.removeAttribute("data-cb-blocked-src");
+          frame.setAttribute("src", frameSrc);
+        } catch (err) {}
       }
     }
   }
@@ -2021,7 +2072,7 @@ ${inlineConfig}
   };
 
   /**
-   * Clear cookies already dropped by categories the visitor just declined — blocking the
+   * Clear cookies already dropped by categories the visitor just declined â blocking the
    * script only stops future writes, so anything set before the decision must be removed.
    */
   function deleteCookiesForCategories(deniedCategories) {
@@ -2058,9 +2109,10 @@ ${inlineConfig}
     return null
   }
 
-  /** Unlike scripts, tracking iframes get no GA/GTM exemption — they are blocked outright. */
+  /** Unlike scripts, tracking iframes get no GA/GTM exemption â they are blocked outright. */
   function shouldBlockIframe(src) {
-    if (!src || "string" != typeof src) return false;
+    if (!src) return false;
+    if ("string" != typeof src) { try { src = String(src); } catch (err) { return false; } }
     var lower = src.toLowerCase();
     if (-1 !== lower.indexOf("consentbit") || -1 !== lower.indexOf("client_data")) return false;
     var category = categoryForIframeUrl(src);
@@ -2071,14 +2123,21 @@ ${inlineConfig}
   function patchIframeElement(iframeEl) {
     if (iframeEl && !iframeEl.__ip) {
       iframeEl.__ip = true;
+      var lastAssignedSrc = "";
       try {
         Object.defineProperty(iframeEl, "src", {
           configurable: true,
           enumerable: true,
           get: function () {
-            return iframeEl.getAttribute("src") || ""
+            if (lastAssignedSrc) return String(lastAssignedSrc);
+            var attrValue = "";
+            try {
+              attrValue = (iframeEl.getAttribute && (iframeEl.getAttribute("src") || iframeEl.getAttribute("data-cb-blocked-src"))) || ""
+            } catch (err) {}
+            return String(attrValue)
           },
           set: function (value) {
+            lastAssignedSrc = value;
             if (shouldBlockIframe(value)) {
               iframeEl.setAttribute("data-cb-blocked-src", value);
               iframeEl.removeAttribute("src")
@@ -2117,8 +2176,8 @@ ${inlineConfig}
       } catch (err) {
         nativeCreateElement = document.createElement
       }
-      document.createElement = function (tagName) {
-        var element = nativeCreateElement(tagName);
+      document.createElement = function (tagName, options) {
+        var element = arguments.length > 1 ? nativeCreateElement(tagName, options) : nativeCreateElement(tagName);
         var tag = String(tagName || "").toLowerCase();
         "script" === tag ? patchScriptElement(element) : tag === "iframe" && patchIframeElement(element);
         return element
@@ -2141,7 +2200,7 @@ ${inlineConfig}
           attributeFilter: ["src"]
         })
       } catch (err) {
-        // Older browsers reject attributeFilter without attributes — fall back to childList only.
+        // Older browsers reject attributeFilter without attributes â fall back to childList only.
         observer.observe(document.documentElement, {
           childList: true,
           subtree: true
@@ -2172,15 +2231,17 @@ ${inlineConfig}
           var category = categories.length > 0 ? categories[0] : "uncategorized";
           if (isBlockableCategory(category))
             if ("analytics" === category && gaMeasurementId && isGoogleAnalyticsUrl(src)) {
-              // We manage this GA tag through Consent Mode — leave it loading.
+              // We manage this GA tag through Consent Mode â leave it loading.
             } else if (clarityConsentEnabled && isClarityTagUrl(src)) {
               // Microsoft Clarity is gated by Consent API v2, not by blocking: it must
               // load even with consent denied so it can run cookieless. This sweep
               // duplicates shouldBlockScript()'s logic rather than calling it, so the
-              // exemption has to be repeated here — see isConsentSignalGoverned().
+              // exemption has to be repeated here â see isConsentSignalGoverned().
             } else if (isCategoryAllowed(category)) {
               // Consent already granted for this category.
             } else try {
+              var originalType = script.getAttribute("type") || "";
+              originalType && "javascript/blocked" !== originalType && script.setAttribute("data-cb-orig-type", originalType);
               script.setAttribute("data-cb-blocked-src", src);
               script.setAttribute("type", "javascript/blocked");
               script.removeAttribute("src");
@@ -2285,20 +2346,20 @@ ${inlineConfig}
       functionality_storage: categories.preferences ? "granted" : "denied",
       personalization_storage: categories.preferences ? "granted" : "denied"
     };
-    // Always signal — never gate on tag detection. A tag that loads later replays the
+    // Always signal â never gate on tag detection. A tag that loads later replays the
     // queued dataLayer commands, so an early push is correct and a skipped push is not.
     ensureGtag()("consent", "update", consentUpdate);
     updateClarityConsent(categories);
     pushConsentDataLayerEvent(categories, source)
   }
 
-  // CCPA consent mode: opt-out model — storage is granted unless the user opted out
+  // CCPA consent mode: opt-out model â storage is granted unless the user opted out
   // ("Do Not Sell/Share"). Mirrors updateGoogleConsentMode() but keyed off a single
   // doNotSell flag rather than per-category toggles.
   function updateGoogleConsentModeCcpa(doNotSell) {
     // Every signal is declared explicitly. An omitted signal is treated by Google as
     // unset (i.e. unconstrained), so functionality_storage / personalization_storage
-    // must be sent even under an opt-out regime — they track doNotSell for consistency
+    // must be sent even under an opt-out regime â they track doNotSell for consistency
     // with analytics_storage, which this codebase already denies on opt-out.
     var consentUpdate = {
       analytics_storage: doNotSell ? "denied" : "granted",
@@ -2309,7 +2370,7 @@ ${inlineConfig}
       personalization_storage: doNotSell ? "denied" : "granted"
     };
     ensureGtag()("consent", "update", consentUpdate);
-    // CCPA has no per-category model — project the single opt-out onto the same
+    // CCPA has no per-category model â project the single opt-out onto the same
     // category keys so one GTM trigger works for both regulations, and expose the
     // raw flag as well for containers that need to branch on it.
     var ccpaCats = {
@@ -2341,7 +2402,7 @@ ${inlineConfig}
 
   /**
    * Build the stylesheet: BASE_CSS first, then the dashboard's colour/typography
-   * overrides layered on top. Runs once — a #cb-styles element means we already did.
+   * overrides layered on top. Runs once â a #cb-styles element means we already did.
    */
   function injectStyles() {
     if (!document.getElementById("cb-styles")) {
@@ -2375,7 +2436,7 @@ ${inlineConfig}
       var prefsScrollbarCss = "#cb-preferences-banner.cb-banner .cb-banner-body{padding-right:4px;}#cb-preferences-banner.cb-banner .cb-gdpr-accordion > div{margin-right:2px;}";
 
       // No webfont is loaded here. Fetching Montserrat from fonts.googleapis.com sent the
-      // visitor's IP to Google on every page view, before any consent interaction — the exact
+      // visitor's IP to Google on every page view, before any consent interaction â the exact
       // transfer this banner exists to gate. The banner uses the system UI font stack instead;
       // if the host page already serves a matching font, the stack picks it up at no cost.
       var acceptButtonCss = "";
@@ -2385,7 +2446,7 @@ ${inlineConfig}
         acceptButtonCss = ".cb-banner button#cb-accept-all-btn{background-color:" + acceptBg + " !important;color:" + acceptText + " !important;}#cb-initial-banner.cb-banner #cb-accept-all-btn{background:" + acceptBg + " !important;color:" + acceptText + " !important;}"
       }
 
-      // Reject deliberately reuses the accept colours — the two buttons are styled identically.
+      // Reject deliberately reuses the accept colours â the two buttons are styled identically.
       var rejectButtonCss = "";
       if (customization && customization.acceptButtonBg) {
         var rejectBg = String(customization.acceptButtonBg);
@@ -2407,14 +2468,14 @@ ${inlineConfig}
     }
   }
 
-  /** Close (×) button for the initial banner. */
+  /** Close (Ã) button for the initial banner. */
   function appendCloseButton(container, buttonId) {
     if (isCloseButtonEnabled()) {
       var closeBtn = document.createElement("button");
       closeBtn.type = "button";
       closeBtn.id = buttonId;
       closeBtn.setAttribute("aria-label", "Close");
-      closeBtn.textContent = "×";
+      closeBtn.textContent = "Ã";
       var color = "#0f172a";
       if (customization && customization.backgroundColor) {
         color = contrastingTextColor(customization.backgroundColor);
@@ -2424,14 +2485,14 @@ ${inlineConfig}
     }
   }
 
-  /** Close (×) button for the preferences panel — same as above, nudged 6px further in. */
+  /** Close (Ã) button for the preferences panel â same as above, nudged 6px further in. */
   function appendPrefsCloseButton(container) {
     if (isCloseButtonEnabled()) {
       var closeBtn = document.createElement("button");
       closeBtn.type = "button";
       closeBtn.id = "cb-close-prefs-btn";
       closeBtn.setAttribute("aria-label", "Close");
-      closeBtn.textContent = "×";
+      closeBtn.textContent = "Ã";
       var color = "#0f172a";
       if (customization && customization.backgroundColor) {
         color = contrastingTextColor(customization.backgroundColor);
@@ -2444,12 +2505,12 @@ ${inlineConfig}
   /**
    * ConsentBit wordmark, inlined rather than fetched: a customer's Content-Security-Policy
    * can block an external <img>/<use>, and an extra request for a 9.75px mark is not worth it.
-   * Every fill is a fixed brand grey — the mark must render identically on every site,
+   * Every fill is a fixed brand grey â the mark must render identically on every site,
    * independent of whatever banner colours the customer has configured.
    *
    * A function, NOT a var, and deliberately so. boot() is invoked partway up this file
    * (see the readyState line at the end of injectStyles), and when the script is injected
-   * dynamically — as the Webflow installer does — readyState is already "interactive" or
+   * dynamically â as the Webflow installer does â readyState is already "interactive" or
    * "complete", so boot() runs SYNCHRONOUSLY, before any statement below it executes.
    * Anything held in a var down here is still undefined at that point, which is how this
    * mark once rendered as the literal text "undefined" on exactly those installs. Function
@@ -2550,7 +2611,7 @@ ${inlineConfig}
           } else initialText.textContent = descriptionText;
           initialBody.appendChild(initialText);
 
-          // "Do Not Sell My Personal Information" — opens the preferences panel.
+          // "Do Not Sell My Personal Information" â opens the preferences panel.
           var doNotSellRow = document.createElement("p");
           doNotSellRow.style.marginTop = "20px";
           doNotSellRow.style.marginBottom = "0";
@@ -2581,7 +2642,7 @@ ${inlineConfig}
           prefsBody.appendChild(prefsHeading);
 
           var prefsText = document.createElement("p");
-          // Strip any trailing "More info." — we render our own policy link instead.
+          // Strip any trailing "More info." â we render our own policy link instead.
           var optOutIntro = (translate("ccpaOptOutPreferenceIntro") || translate("ccpaOptOut") || "").replace(/\s*More info\.?\s*$/i, "").trim();
           if (privacyPolicyUrl && isCookiePolicyLinkEnabled()) {
             prefsText.appendChild(document.createTextNode(optOutIntro + " "));
@@ -2631,7 +2692,7 @@ ${inlineConfig}
            * (or an "Always Active" badge for essential) and a description. Expanding a row
            * collapses its siblings, so only one is ever open.
            *
-           * The visible toggle is a <button role="switch"> mirroring a hidden checkbox —
+           * The visible toggle is a <button role="switch"> mirroring a hidden checkbox â
            * the checkbox is what the save handler reads, the button is what gets styled.
            */
           var buildCategoryRow = function (options) {
@@ -2688,7 +2749,7 @@ ${inlineConfig}
             }
             header.appendChild(control);
 
-            // Description: animated open/closed via a 0fr → 1fr grid row.
+            // Description: animated open/closed via a 0fr â 1fr grid row.
             var description = document.createElement("div");
             description.className = "cb-gdpr-cat-desc";
             description.style.cssText = "display:grid;grid-template-rows:0fr;opacity:0;font-size:13px;line-height:1.5;transition:grid-template-rows .3s ease,opacity .25s ease;";
@@ -2727,7 +2788,7 @@ ${inlineConfig}
               }
 
               shouldExpand ? expand(description) : collapse(description);
-              expandBtn.textContent = shouldExpand ? "−" : "+";
+              expandBtn.textContent = shouldExpand ? "â" : "+";
               expandBtn.setAttribute("aria-expanded", shouldExpand ? "true" : "false")
             });
 
@@ -2869,7 +2930,7 @@ ${inlineConfig}
         document.body.appendChild(wrapper);
         stopScroll && (document.body.style.overflow = "hidden");
 
-        // Re-position the banner on resize (desktop corner ↔ mobile full-width).
+        // Re-position the banner on resize (desktop corner â mobile full-width).
         if (!window.__cbResizeInit) {
           window.__cbResizeInit = true;
           window.addEventListener("resize", function() {
@@ -2889,7 +2950,7 @@ ${inlineConfig}
           }
         }
       } else {
-        // document.body does not exist yet — try again shortly.
+        // document.body does not exist yet â try again shortly.
         setTimeout(buildBanners, 100)
       }
   }
@@ -2916,7 +2977,7 @@ ${inlineConfig}
   // Should the banner stay closed (suppressed) on this page load? The user dismissed it
   // via the close (X) button WITHOUT consenting (consentState.accepted stays false, so
   // non-essential scripts remain blocked the whole time).
-  //   - Floating logo ENABLED: stay closed indefinitely — the logo is the reopen path,
+  //   - Floating logo ENABLED: stay closed indefinitely â the logo is the reopen path,
   //     so the banner never auto-returns.
   //   - Floating logo DISABLED: stay closed for 24h, then re-show so the visitor still
   //     has a way to consent (no dead-end when there's no logo to reopen with).
@@ -2946,7 +3007,7 @@ ${inlineConfig}
     }
   }
 
-  /** Inline SVG cookie icon — used when the hosted logo image cannot be loaded. */
+  /** Inline SVG cookie icon â used when the hosted logo image cannot be loaded. */
   function createFallbackLogoSvg() {
     var SVG_NS = "http://www.w3.org/2000/svg";
     var svg = document.createElementNS(SVG_NS, "svg");
@@ -3004,7 +3065,7 @@ ${inlineConfig}
 
   /**
    * The persistent floating button that reopens the banner.
-   * Image loading degrades in two steps: primary URL → fallback URL → inline SVG.
+   * Image loading degrades in two steps: primary URL â fallback URL â inline SVG.
    */
   function createFloatingTrigger() {
     if (!document.getElementById("cb-floating-trigger") && isFloatingLogoEnabled()) {
@@ -3141,7 +3202,7 @@ ${inlineConfig}
       showInitialBanner()
     });
 
-    // Customise → open the preferences panel, toggles pre-filled from the saved choice.
+    // Customise â open the preferences panel, toggles pre-filled from the saved choice.
     customiseBtn && customiseBtn.addEventListener("click", function () {
       if (initialBanner && prefsBanner) {
         if (!isCcpa) {
@@ -3186,7 +3247,7 @@ ${inlineConfig}
       dismissBanners()
     });
 
-    // Close (×) on either banner: dismiss WITHOUT consenting. Scripts stay blocked and
+    // Close (Ã) on either banner: dismiss WITHOUT consenting. Scripts stay blocked and
     // the timestamp lets wasBannerDismissed() keep it closed on the next page load.
     var closeInitialBtn = document.getElementById("cb-close-initial-btn");
     var closePrefsBtn = document.getElementById("cb-close-prefs-btn");
@@ -3360,7 +3421,7 @@ ${inlineConfig}
     if ("gdpr" === bannerType) {
       blockExistingScripts();
       // consentModeBootstrap (served ahead of this script on the standard path) may
-      // already have pushed the default — do not overwrite it with a stale one.
+      // already have pushed the default â do not overwrite it with a stale one.
       if (!window.__cbConsentDefaultSet) {
         setConsentModeFlags();
         ensureGtag()("consent", "default", {
@@ -3444,7 +3505,7 @@ ${inlineConfig}
         if (wfTriggerToHide) wfTriggerToHide.style.display = "none";
       } else {
         // bannerEnabled === false (region-suppressed, e.g. CCPA banner for a non-US
-        // visitor): show NO consent UI at all — hide both the banner AND the floating
+        // visitor): show NO consent UI at all â hide both the banner AND the floating
         // trigger. CCPA does not apply outside the US, so no surface is presented.
         var wfSuppressedBanner = document.getElementById("cb-initial-banner");
         if (wfSuppressedBanner) {
@@ -3464,8 +3525,8 @@ ${inlineConfig}
     /**
      * Let the site re-open the banner from its own markup, via a capture-phase click
      * listener so it works no matter what the host page does with the event:
-     *   data-consentbit-trigger — clear the stored consent, then show the banner
-     *   data-consentbit-banner  — just show the banner, keeping the stored consent
+     *   data-consentbit-trigger â clear the stored consent, then show the banner
+     *   data-consentbit-banner  â just show the banner, keeping the stored consent
      */
     function bindConsentTriggers() {
       document.addEventListener("click", function (event) {
@@ -3500,7 +3561,7 @@ ${inlineConfig}
                 block: "start"
               })
             } else {
-              // Banner was never built (e.g. bannerEnabled false) — build it now.
+              // Banner was never built (e.g. bannerEnabled false) â build it now.
               showBannerNow();
               setTimeout(function () {
                 var builtBanner = document.getElementById("cb-initial-banner");
@@ -3589,13 +3650,13 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
   // Microsoft Clarity Consent API v2, signalled ahead of clarity.js: install the queue
   // stub the CMP integration guide mandates, then send exactly ONE consentv2 call
   // carrying the stored decision (default-denied when there is none). Deliberately not a
-  // default-then-stored pair — Microsoft asks CMPs to avoid that redundant state change.
+  // default-then-stored pair â Microsoft asks CMPs to avoid that redundant state change.
   // __cbClaritySignal is the same fingerprint updateClarityConsent() dedupes against, so
   // the loader will not re-send this decision. Reuses c/d/e resolved just above:
   // c = CCPA regime, d = stored categories, e = "Do Not Sell" opt-out.
   const clarityCmpSource = String(siteConfigPayload.clarityCmpId || 'consentbit');
   // Emitted BEFORE the Google Consent Mode work below, for two reasons: Microsoft asks
-  // for the signal as early as possible, and the enclosing IIFE has a single catch — a
+  // for the signal as early as possible, and the enclosing IIFE has a single catch â a
   // throw anywhere in the gtag section would otherwise skip the Clarity call entirely
   // and leave Clarity on its own regional default. The inner try/catch is the mirror
   // image: a failure here must not cost us Google Consent Mode.
