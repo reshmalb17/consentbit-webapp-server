@@ -7,6 +7,7 @@ import {
   canonicalEmbedOrigin,
   buildEmbedScriptUrl,
   normalizeDomain,
+  normalizeSignupSource,
 } from '../services/db.js';
 import { sendFreePlanEmail } from '../services/email.js';
 import { capturePostHogEvent } from '../services/posthog.js';
@@ -134,20 +135,24 @@ export async function handleOnboardingFirstSetup(request, env, ctx) {
   // Only when a brand-new site was minted (not when createSite returned an existing one).
   // Keyed by email to merge with the client-side funnel. Never let it block setup.
   if (user.email && site._created) {
+    // Reaching this endpoint proves the ACTION happened in the webapp, not that the
+    // ACCOUNT was created there — a Webflow/Framer user can add a site from the dashboard.
+    // Report the recorded signup origin, and send no platform at all when it is unknown.
+    const signupSource = normalizeSignupSource(user.signupSource);
     try {
       await capturePostHogEvent(env, user.email, 'script_generated', {
         site_id: site.id,
         domain: site.domain,
         script_url: scriptUrl,
         plan_tier: 'free',
-        platform: 'webapp',
+        ...(signupSource ? { platform: signupSource } : {}),
         ...(site.id ? { $groups: { site: String(site.id) } } : {}),
       });
       await captureGa4Event(env, user.email, 'script_generated', {
         site_id: site.id,
         domain: site.domain,
         plan_tier: 'free',
-        platform: 'webapp',
+        ...(signupSource ? { platform: signupSource } : {}),
       });
     } catch (e) { /* analytics only */ }
   }

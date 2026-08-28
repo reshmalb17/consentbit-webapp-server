@@ -21,6 +21,8 @@ import {
   inferTierPlanIdFromStripePriceId,
   markTrialUsed,
   claimPaymentFailureEmail,
+  normalizeSignupSource,
+  getSignupSourceByEmail,
 } from '../services/db.js';
 import { capturePostHogEvent as _phCapture, identifyPostHogPerson as _phIdentify, identifyPostHogSite as _phSite } from '../services/posthog.js';
 import { captureGa4Event as _ga4Capture } from '../services/ga4.js';
@@ -834,16 +836,21 @@ export async function handleStripeWebhook(request, env, ctx) {
               try {
                 const _sgEmail = (session.customer_email || session.customer_details?.email || '').trim().toLowerCase();
                 if (_sgEmail) {
+                  // Checkout metadata first, then the account's recorded signup origin.
+                  // Both blank means the origin is unknown — send no platform rather than
+                  // asserting 'webapp', which used to mislabel plugin users here.
+                  const _sgPlatform =
+                    normalizeSignupSource(platform) || await getSignupSourceByEmail(db, _sgEmail);
                   await capturePostHogEvent(env, _sgEmail, 'script_generated', {
                     site_id: createdSite.id,
                     domain: createdSite.domain,
-                    platform: platform || 'webapp',
+                    ...(_sgPlatform ? { platform: _sgPlatform } : {}),
                     ...(createdSite.id ? { $groups: { site: String(createdSite.id) } } : {}),
                   });
                   await _ga4Capture(env, _sgEmail, 'script_generated', {
                     site_id: createdSite.id,
                     domain: createdSite.domain,
-                    platform: platform || 'webapp',
+                    ...(_sgPlatform ? { platform: _sgPlatform } : {}),
                   });
                 }
               } catch (phErr) { /* analytics only */ }
@@ -908,18 +915,23 @@ export async function handleStripeWebhook(request, env, ctx) {
         // PostHog: use email as canonical distinct_id to match client-side events
         if (orgId) {
           const _phEmail = (session.customer_email || session.customer_details?.email || '').trim().toLowerCase() || null;
-          // Resolve PostHog platform: checkout metadata → Site.platform (DB) → default 'webapp'.
-          // Webflow/Framer set platform explicitly (metadata and/or DB column); webapp leaves it
-          // null, so a null result here means webapp. Wrapped in try/catch so this PostHog-only
-          // lookup can never throw or affect the payment/webhook flow.
-          let _phPlatform = platform || null;
+          // Resolve PostHog platform: checkout metadata → Site.platform (DB) → User.signupSource.
+          // Webflow/Framer set platform explicitly (metadata and/or DB column). Site.platform is
+          // NULL for BOTH webapp sites and sites whose origin was never recorded, so a null here
+          // must NOT be read as 'webapp' — only User.signupSource can assert that, and when it is
+          // also blank the origin stays unknown and no platform tag is sent at all.
+          // Wrapped in try/catch so this PostHog-only lookup can never throw or affect the
+          // payment/webhook flow.
+          let _phPlatform = normalizeSignupSource(platform);
           if (!_phPlatform && siteId && db) {
             try {
               const _phSiteRow = await db.prepare('SELECT platform FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
-              _phPlatform = _phSiteRow?.platform || null;
+              _phPlatform = normalizeSignupSource(_phSiteRow?.platform);
             } catch (e) { /* ignore — PostHog attribution only */ }
           }
-          _phPlatform = _phPlatform || 'webapp';
+          if (!_phPlatform && _phEmail && db) {
+            _phPlatform = await getSignupSourceByEmail(db, _phEmail);
+          }
           if (_phEmail) {
             await capturePostHogEvent(env, _phEmail, 'subscription_activated', {
               status: subscriptionStatus,
@@ -945,7 +957,7 @@ export async function handleStripeWebhook(request, env, ctx) {
               currency: (session.currency || 'usd').toUpperCase(),
               status: subscriptionStatus,
               site_id: siteId || null,
-              platform: _phPlatform || 'webapp',
+              ...(_phPlatform ? { platform: _phPlatform } : {}),
             });
             // Update site group with new plan — tracks per-site status independently
             if (siteId) {
@@ -1607,8 +1619,13 @@ export async function handleStripeWebhook(request, env, ctx) {
           _phEmail = _phUser?.email || null;
           const _phSite = (existing?.siteId ?? existing?.siteid) ? await db.prepare('SELECT platform FROM Site WHERE id = ?1 LIMIT 1').bind(existing.siteId ?? existing.siteid).first() : null;
           // Site.platform is authoritative for Webflow/Framer ('webflow'/'framer'); sub metadata
-          // covers the case where siteId is missing on the local record. Null everywhere = webapp.
-          _phPlatform = _phSite?.platform || sub.metadata?.platform || 'webapp';
+          // covers the case where siteId is missing on the local record. Null in both is NOT
+          // evidence of a webapp signup — only User.signupSource can assert that. When that is
+          // blank too the origin is unknown and every tag below is omitted.
+          _phPlatform =
+            normalizeSignupSource(_phSite?.platform) ||
+            normalizeSignupSource(sub.metadata?.platform) ||
+            await getSignupSourceByEmail(db, _phEmail);
         } catch (e) { /* ignore */ }
 
         // Use email as distinct_id — only fire PostHog if we have the email
@@ -1636,7 +1653,7 @@ export async function handleStripeWebhook(request, env, ctx) {
                 currency: (_subPrice?.currency || 'usd').toUpperCase(),
                 status: 'active',
                 site_id: existing?.siteId ?? existing?.siteid ?? null,
-                platform: _phPlatform || 'webapp',
+                ...(_phPlatform ? { platform: _phPlatform } : {}),
               });
             }
 
@@ -1649,7 +1666,7 @@ export async function handleStripeWebhook(request, env, ctx) {
                 interval: intervalFromSub,
                 site_id: existing?.siteId ?? existing?.siteid ?? null,
                 org_id: orgIdFinal,
-                platform: _phPlatform,
+                ...(_phPlatform ? { platform: _phPlatform } : {}),
                 $set: { did_cancel_in_trial: true, trial_cancelled_at: new Date().toISOString() },
               });
             }

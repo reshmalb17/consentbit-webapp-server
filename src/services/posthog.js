@@ -4,6 +4,16 @@ import { captureGa4Event } from './ga4.js';
 // These are attribution facts about the person, not about a single event.
 const PLUGIN_PLATFORMS = new Set(['webflow', 'framer']);
 
+// The only values that are real signup origins. Anything else — '', 'pending', an
+// unrecognised string — is "unknown" and normalizes to null, so no caller can turn a
+// missing value into a 'webapp' claim. Kept local (rather than imported from db.js) to
+// avoid a module cycle; mirrors normalizeSignupSource there.
+const PLATFORM_TAGS = new Set(['webapp', 'webflow', 'framer']);
+function normalizePlatformTag(value) {
+  const v = String(value || '').trim().toLowerCase();
+  return PLATFORM_TAGS.has(v) ? v : null;
+}
+
 /**
  * Keep the `platform` PERSON property pinned to where the user actually came from.
  *
@@ -15,6 +25,12 @@ const PLUGIN_PLATFORMS = new Set(['webflow', 'framer']);
  * Rule applied here, at the single send chokepoint so every caller inherits it:
  *   • platform 'webflow' / 'framer'  → stays in `$set`      (authoritative, always wins)
  *   • platform 'webapp' / anything else → moved to `$set_once` (only fills a blank person)
+ *
+ * Callers now only send platform='webapp' when `User.signupSource` positively says the account
+ * was created in the webapp; an unrecorded origin sends no platform at all. That is what stops
+ * a plugin user with a blank person property from being stamped 'webapp' by `$set_once` here.
+ * 'webapp' still goes through `$set_once` rather than `$set` so it can never overwrite a
+ * webflow/framer person that an older, looser write may have already got right.
  *
  * The event-level `platform` property is left untouched — that correctly describes where
  * THIS event happened, and only the person-level property is an attribution claim.
@@ -73,15 +89,18 @@ export async function captureInstallationVerified(env, db, siteId, domain) {
   if ((!env.POSTHOG_API_KEY && !env.GA4_API_SECRET) || !siteId || !db) return;
   try {
     const row = await db.prepare(
-      `SELECT u.email AS email, s.platform AS platform FROM User u
+      `SELECT u.email AS email, s.platform AS platform, u.signupSource AS signupSource FROM User u
          JOIN OrganizationMember om ON om.userId = u.id
          JOIN Site s ON s.organizationId = om.organizationId
         WHERE s.id = ?1 LIMIT 1`
     ).bind(siteId).first();
     const email = row?.email || null;
     if (!email) return;
-    // Site.platform is the plugin attribution ('webflow'/'framer'); null means webapp.
-    const platform = row?.platform || 'webapp';
+    // Site.platform is the plugin attribution ('webflow'/'framer'). It is NULL both for webapp
+    // sites and for sites whose origin was never recorded, so fall back to the account's
+    // explicit User.signupSource — and when that is blank too, send no platform at all rather
+    // than claiming 'webapp'.
+    const platform = normalizePlatformTag(row?.platform) || normalizePlatformTag(row?.signupSource);
     await capturePostHogEvent(env, email, 'installation_verified', {
       site_id: String(siteId),
       domain: domain || null,
@@ -92,7 +111,7 @@ export async function captureInstallationVerified(env, db, siteId, domain) {
       site_id: String(siteId),
       domain: domain || null,
       source: 'backend_detect',
-      platform,
+      ...(platform ? { platform } : {}),
     });
   } catch (e) {
     console.warn('[PostHog] installation_verified failed:', e?.message);

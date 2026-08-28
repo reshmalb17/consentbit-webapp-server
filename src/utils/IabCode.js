@@ -12,6 +12,20 @@ export function getLoaderIabScript(customization, opts = {}, isGAC = false) {
   // the ATP list and produces a Google AC string on top of the IAB TCF flow.
   const isGoogleAC = isGAC === true;
 
+  // Growth-plan entitlement: when branding removal is on the "Powered by ConsentBit"
+  // strip is left out of the generated markup entirely. Read from opts only — the cdn
+  // handler passes a value already checked against the live plan, so the raw
+  // customization row is deliberately not consulted here.
+  const hideBranding = o.hideBranding === true || o.hideBranding === 1;
+  const brandFooterHtml = hideBranding
+    ? ''
+    : `<div class="cb-brand-footer">
+        <a href="https://consentbit.com" target="_blank" rel="noopener noreferrer" aria-label="Powered by ConsentBit">
+          <span class="cb-brand-credit">Powered by</span>
+          <span class="cb-brand-mark">\${CB_WORDMARK_SVG}</span>
+        </a>
+      </div>`;
+
   const colorsJson = JSON.stringify({
     bannerBg: c.backgroundColor || '#FFFFFF',
     textColor: c.textColor || '#000000',
@@ -435,12 +449,7 @@ function injectHTML() {
           <button aria-label="Save My Preferences" class="cb-btn cb-btn-preferences" id="cbSaveBtn">Save My Preferences</button>
 
         </div>
-      <div class="cb-brand-footer">
-        <a href="https://consentbit.com" target="_blank" rel="noopener noreferrer" aria-label="Powered by ConsentBit">
-          <span class="cb-brand-credit">Powered by</span>
-          <span class="cb-brand-mark">\${CB_WORDMARK_SVG}</span>
-        </a>
-      </div>
+      ${brandFooterHtml}
     </div>
   </div>
 </div>\`;

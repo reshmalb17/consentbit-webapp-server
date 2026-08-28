@@ -300,7 +300,9 @@ export async function handleSyncPlugin(request, env) {
   let user = await getUserByEmail(db, email);
   const isNewUser = !user;
   if (!user) {
-    user = await createUser(db, { email, name: null });
+    // Account is being minted by the Framer plugin publish flow — origin is 'framer',
+    // matching the platform this handler reports to PostHog further down.
+    user = await createUser(db, { email, name: null, signupSource: 'framer' });
   }
 
   // ── 2. Resolve organization (one per user — created on demand) ───────────

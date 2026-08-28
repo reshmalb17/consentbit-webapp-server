@@ -447,6 +447,12 @@ async function _runEnsureSchema(db) {
   try {
     await db.prepare(`ALTER TABLE BannerCustomization ADD COLUMN contentEditedFromWebapp INTEGER DEFAULT 0`).run();
   } catch (e) { /* Column already exists */ }
+  // "Powered by ConsentBit" footer on the preference banner. 0 = shown (default),
+  // 1 = removed. Growth-plan entitlement — gated in handlers/bannerCustomization.js
+  // on save and re-checked against the live plan in handlers/cdnM.js on serve.
+  try {
+    await db.prepare(`ALTER TABLE BannerCustomization ADD COLUMN hideBranding INTEGER DEFAULT 0`).run();
+  } catch (e) { /* Column already exists */ }
 
   // Consent table (for consent logs)
   await db.prepare(`
@@ -932,6 +938,13 @@ async function _runEnsureSchema(db) {
   try { await db.prepare(`ALTER TABLE Site ADD COLUMN isLegacy INTEGER DEFAULT 0`).run(); } catch (e) {}
   try { await db.prepare(`ALTER TABLE Site ADD COLUMN legacySource TEXT`).run(); } catch (e) {}
   try { await db.prepare(`ALTER TABLE User ADD COLUMN billingEmail TEXT`).run(); } catch (e) {}
+
+  // signupSource — where this ACCOUNT was actually created: 'webapp' | 'webflow' | 'framer'.
+  // Positive attribution only. NULL means "created before this column existed, or by a path that
+  // cannot prove the origin" — it must never be read as 'webapp'. Site.platform stays NULL for
+  // webapp sites, so on its own it cannot tell "signed up in the webapp" apart from "we don't
+  // know"; this column is the single place that distinction is recorded.
+  try { await db.prepare(`ALTER TABLE User ADD COLUMN signupSource TEXT`).run(); } catch (e) {}
 
   // ── Webflow App OAuth (Data Client) ──────────────────────────────────────
   // Short-lived CSRF state issued in /authorize and consumed in /callback.
@@ -3027,9 +3040,70 @@ export async function getUserByEmail(db, email) {
   return user || null;
 }
 
-export async function createUser(db, { email, name, passwordHash = 'passwordless' }) {
+// Only these three are real signup origins. Anything else (including '' / 'pending' /
+// an unrecognised plugin string) is treated as "unknown" and left NULL, so a bad caller
+// can never manufacture a false 'webapp' attribution.
+const SIGNUP_SOURCES = new Set(['webapp', 'webflow', 'framer']);
+
+export function normalizeSignupSource(value) {
+  const v = String(value || '').trim().toLowerCase();
+  return SIGNUP_SOURCES.has(v) ? v : null;
+}
+
+/**
+ * Where the account was created, straight from User.signupSource.
+ * Returns null when unknown — callers must NOT fall back to 'webapp'.
+ * Wrapped so a DB without the column (or without the user) can never throw.
+ */
+export async function getSignupSourceByEmail(db, email) {
+  if (!db || !email) return null;
+  try {
+    const row = await db
+      .prepare('SELECT signupSource FROM User WHERE email = ?1 LIMIT 1')
+      .bind(String(email).trim().toLowerCase())
+      .first();
+    return normalizeSignupSource(row?.signupSource);
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Record the signup origin on an existing row, but only if it is still blank —
+ * signup origin is a first-write-wins attribution fact, so a later login/publish
+ * through a different surface must never rewrite it. Never throws (the column may
+ * not exist yet on an un-migrated DB).
+ */
+export async function setSignupSourceIfMissing(db, userId, source) {
+  const normalized = normalizeSignupSource(source);
+  if (!db || !userId || !normalized) return;
+  try {
+    await db
+      .prepare(`UPDATE User SET signupSource = ?1 WHERE id = ?2 AND (signupSource IS NULL OR signupSource = '')`)
+      .bind(normalized, userId)
+      .run();
+  } catch (e) { /* column missing on this DB — attribution only, never fatal */ }
+}
+
+export async function createUser(db, { email, name, passwordHash = 'passwordless', signupSource = null }) {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
+  const source = normalizeSignupSource(signupSource);
+
+  // Preferred insert: also stamps signupSource. Falls through to the long-standing
+  // statements below on any DB that has not picked up the column yet.
+  if (source) {
+    try {
+      await db
+        .prepare(
+          `INSERT INTO User (id, email, name, passwordHash, password_hash, signupSource, createdAt, updatedAt)
+           VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?6)`
+        )
+        .bind(id, email.trim().toLowerCase(), (name || '').trim() || null, passwordHash, source, now)
+        .run();
+      return { id, email: email.trim().toLowerCase(), name: (name || '').trim() || null, signupSource: source };
+    } catch (e) { /* fall through to the compatibility inserts below */ }
+  }
 
   // Insert into both camelCase and snake_case password columns for compatibility
   try {
@@ -3063,7 +3137,11 @@ export async function createUser(db, { email, name, passwordHash = 'passwordless
       .run();
   }
 
-  return { id, email: email.trim().toLowerCase(), name: (name || '').trim() || null };
+  // Reached only when the signupSource-aware insert above was skipped or failed.
+  // Best-effort second write so the attribution still lands where the column exists.
+  if (source) await setSignupSourceIfMissing(db, id, source);
+
+  return { id, email: email.trim().toLowerCase(), name: (name || '').trim() || null, signupSource: source };
 }
 
 export async function getUserById(db, id) {
@@ -4018,6 +4096,28 @@ export async function saveBannerCustomization(db, siteId, customization) {
         now
       )
       .run();
+
+    if (customization.hideBranding !== undefined) {
+      const brandFlag = customization.hideBranding ? 1 : 0;
+      const writeBrandFlag = () =>
+        db
+          .prepare(`UPDATE BannerCustomization SET hideBranding = ?1 WHERE siteId = ?2`)
+          .bind(brandFlag, siteId)
+          .run();
+      try {
+        await writeBrandFlag();
+      } catch (_) {
+        // Column not there yet on this isolate — add it and retry once.
+        try {
+          await db
+            .prepare(`ALTER TABLE BannerCustomization ADD COLUMN hideBranding INTEGER DEFAULT 0`)
+            .run();
+          await writeBrandFlag();
+        } catch (brandErr) {
+          console.warn('[db] hideBranding write skipped:', brandErr?.message);
+        }
+      }
+    }
 
     return { success: true };
   } catch (error) {

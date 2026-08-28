@@ -33,6 +33,7 @@ import {
   buildEmbedScriptUrl,
   getSubscriptionByOrganization,
   normalizeDomain,
+  normalizeSignupSource,
 } from '../services/db.js';
 import { injectScriptIntoWebflowHead } from './webflowFreeRegister.js';
 import { sendPaidPlanEmail } from '../services/email.js';
@@ -241,7 +242,19 @@ async function provisionAccount(db, env, request, ctx, {
 }) {
   const [existingUser] = await Promise.all([getUserByEmail(db, email)]);
   const isNewUser = !existingUser;
-  const user = existingUser ?? await createUser(db, { email, name: null });
+  // This endpoint serves BOTH the webapp checkout and plugin checkouts — see the
+  // `platformSiteIdToStore` branch below, which stores a platformSiteId and assumes
+  // 'webflow' whenever wfSiteId is present. So `platform` being absent does NOT mean
+  // "webapp": a plugin checkout that simply didn't name its platform lands here too.
+  // wfSiteId is the tell. Only a checkout with no plugin site id at all is provably a
+  // webapp signup; a nameless plugin checkout leaves the origin unrecorded (null)
+  // rather than being mislabelled 'webapp'.
+  const checkoutSource = normalizeSignupSource(platform) || (wfSiteId ? null : 'webapp');
+  const user = existingUser ?? await createUser(db, { email, name: null, signupSource: checkoutSource });
+  // Origin to report to analytics: what the plugin declared, else the account's recorded
+  // signup source. Never a bare 'webapp' default — an unknown stays unknown (null).
+  const attributionPlatform =
+    normalizeSignupSource(platform) || normalizeSignupSource(existingUser?.signupSource) || (isNewUser ? checkoutSource : null);
 
   const orgName = user.name ? `${user.name}'s Organization` : 'My Organization';
   const org = await getOrCreateOrganizationForUser(db, { userId: user.id, organizationName: orgName });
@@ -267,7 +280,7 @@ async function provisionAccount(db, env, request, ctx, {
         site_id: site.id,
         domain: site.domain,
         plan_tier: planId,
-        platform: platform || 'webapp',
+        ...(attributionPlatform ? { platform: attributionPlatform } : {}),
         ...(site.id ? { $groups: { site: String(site.id) } } : {}),
       },
     });

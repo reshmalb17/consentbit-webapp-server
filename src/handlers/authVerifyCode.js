@@ -193,7 +193,10 @@ export async function handleAuthVerifyCode(request, env, ctx) {
   // Consume OTP + create user in parallel — createUser only needs email+name from the row (already have both)
   const [, user] = await Promise.all([
     consumeEmailVerificationCode(db, row.id),
-    createUser(db, { email, name }),
+    // Reached only when no account existed, so this OTP is the account's creation.
+    // /api/auth/request-code + /verify-code are the webapp's own login flow; the
+    // plugins register through SyncPlugin / webflowFreeRegister instead.
+    createUser(db, { email, name, signupSource: 'webapp' }),
   ]);
 
   // Create session, then respond immediately (see login-path note above — dashboardInit is

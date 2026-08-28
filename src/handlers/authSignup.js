@@ -59,7 +59,8 @@ export async function handleAuthSignup(request, env) {
     return Response.json({ success: false, error: 'An account with this email already exists' }, { status: 409 });
   }
 
-  const user = await createUser(db, { email, name: name || null, passwordHash: storedHash });
+  // Email+password signup only exists in the webapp — a genuine 'webapp' origin.
+  const user = await createUser(db, { email, name: name || null, passwordHash: storedHash, signupSource: 'webapp' });
 
   const session = await createSession(db, { userId: user.id });
 

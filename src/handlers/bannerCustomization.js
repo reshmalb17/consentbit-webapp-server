@@ -14,6 +14,11 @@ const PAID_TIERS = ['basic', 'essential', 'growth'];
 // entitlement — matches the pricing table and the Designer app's UI gate in
 // Consentbit-Webflow-App-New -Design/src/lib/planGate.js.
 const BOTH_REGIONS_PLANS = ['essential', 'growth'];
+// Removing the "Powered by ConsentBit" footer from the preference banner is a
+// Growth-only entitlement. The webapp only renders the checkbox for Growth, but this
+// endpoint is callable directly, so the value is re-checked here on save and again
+// against the live plan in handlers/cdnM.js when the script is served.
+const REMOVE_BRANDING_PLANS = ['growth'];
 
 // Resolve the site's effective paid tier. Deliberately mirrors the resolution in
 // handlers/cdn.js (site subscription → Stripe price-id inference → organization
@@ -303,6 +308,20 @@ export async function handleBannerCustomization(request, env) {
 
     if (!customization) {
       return Response.json({ success: false, error: 'customization is required' }, { status: 400 });
+    }
+
+    // Plan gate: hideBranding is Growth-only. Downgrade the flag rather than rejecting
+    // the request — the rest of this save is legitimate and should still persist.
+    // A null plan means resolution itself failed; don't demote a paying site on a
+    // transient D1 error, leave the requested value alone.
+    if (customization.hideBranding === 1 || customization.hideBranding === true) {
+      const brandingPlanId = await resolveEffectivePlanId(db, env, siteId);
+      if (brandingPlanId !== null && !REMOVE_BRANDING_PLANS.includes(brandingPlanId)) {
+        console.warn(
+          `[BannerCustomization][POST] hideBranding not available on plan '${brandingPlanId}' for site ${siteId} — saving as 0`
+        );
+        customization.hideBranding = 0;
+      }
     }
 
     try {

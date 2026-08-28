@@ -8,8 +8,8 @@ directory = "./public"
 
 [[d1_databases]]
 binding = "CONSENT_WEBAPP"
-database_name = "consent-webapp"
-database_id = "bc37fa30-5060-491d-b19c-f3eeb7b1fd00"
+database_name = "consent-webapp-eu"
+database_id = "1185db31-80ad-4021-b269-a439bd52e84d"
 
 [[d1_databases]]
 binding = "LEGACY_DB"
@@ -200,8 +200,8 @@ STRIPE_PRODUCT_YEARLY  = ""
 
 [[env.production.d1_databases]]
 binding = "CONSENT_WEBAPP"
-database_name = "consent-webapp"
-database_id = "bc37fa30-5060-491d-b19c-f3eeb7b1fd00"
+database_name = "consent-webapp-eu"
+database_id = "1185db31-80ad-4021-b269-a439bd52e84d"
 
 [[env.production.d1_databases]]
 binding = "LEGACY_DB"
