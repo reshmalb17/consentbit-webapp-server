@@ -855,7 +855,6 @@ async function _runEnsureSchema(db) {
       purpose TEXT NOT NULL, -- 'login' | 'signup'
       codeHash TEXT NOT NULL,
       name TEXT, -- only for signup
-      passwordHash TEXT, -- PBKDF2 hash of a signup password, moved to User on verify
       attempts INTEGER DEFAULT 0,
       consumedAt DATETIME,
       expiresAt DATETIME NOT NULL,
@@ -868,14 +867,6 @@ async function _runEnsureSchema(db) {
   try {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_evc_expires ON EmailVerificationCode(expiresAt)`).run();
   } catch (e) {}
-  // A signup password is hashed at request-code time and parked here until the OTP is
-  // verified, so the plaintext is never written to the database and the User row gets a
-  // finished PBKDF2 hash the moment the account is created.
-  try {
-    await db.prepare(`ALTER TABLE EmailVerificationCode ADD COLUMN passwordHash TEXT`).run();
-  } catch (e) {
-    // Column already exists, ignore
-  }
 
   // Account ownership transfer — a pending request that must be authorized by the
   // CURRENT owner (link emailed to the old email) before the account's email/name
@@ -1653,26 +1644,12 @@ async function tagKvAsMigrated(kvByKey, entry) {
 
 export async function createEmailVerificationCode(
   db,
-  { email, purpose, codeHash, name, ttlMinutes = 10, passwordHash = null } = {},
+  { email, purpose, codeHash, name, ttlMinutes = 10 } = {},
 ) {
   await ensureSchema(db);
   const id = crypto.randomUUID();
   const now = new Date();
   const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000).toISOString();
-  // Preferred insert: also parks the signup password hash. Falls through to the
-  // long-standing statement below on any DB that has not picked up the column yet.
-  try {
-    await db
-      .prepare(
-        `INSERT INTO EmailVerificationCode (id, email, purpose, codeHash, name, passwordHash, attempts, consumedAt, expiresAt, createdAt)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, ?7, ?8)`,
-      )
-      .bind(id, email.trim().toLowerCase(), purpose, codeHash, name || null, passwordHash || null, expiresAt, now.toISOString())
-      .run();
-    return { id, expiresAt };
-  } catch (e) {
-    // Column missing — fall through.
-  }
   await db
     .prepare(
       `INSERT INTO EmailVerificationCode (id, email, purpose, codeHash, name, attempts, consumedAt, expiresAt, createdAt)
@@ -3051,72 +3028,6 @@ export async function verifyPassword(plainPassword, storedSaltHash) {
     HASH_BYTES * 8
   );
   return toHex(bits) === hashHex;
-}
-
-/**
- * Password policy shared by signup and set-password. Mirrors the client-side check in
- * PasswordSection.tsx so the two cannot drift. Returns an error string, or null when
- * the password is acceptable.
- */
-export function validatePasswordPolicy(password) {
-  const p = typeof password === 'string' ? password : '';
-  if (p.length < 8) return 'Password must be at least 8 characters.';
-  if (!/[A-Za-z]/.test(p) || !/[0-9]/.test(p)) {
-    return 'Password must contain at least one letter and one number.';
-  }
-  return null;
-}
-
-/**
- * Accounts created by the OTP flow carry the literal sentinel 'passwordless' (see
- * createUser's default), and older rows may be NULL or empty. None of those are hashes:
- * comparing user input against them directly would let anyone sign in to those accounts
- * by typing the sentinel, so every password path must funnel them through here.
- */
-export function isPasswordSet(stored) {
-  const s = typeof stored === 'string' ? stored.trim() : '';
-  return s !== '' && s !== 'passwordless';
-}
-
-/**
- * Verify a plaintext password against whatever format the row happens to hold.
- * `needsRehash` flags the legacy 'client:' SHA-256 rows so a successful sign-in can
- * silently upgrade them to PBKDF2 — see handleAuthLogin.
- */
-export async function verifyStoredPassword({ email, password, stored }) {
-  if (!isPasswordSet(stored)) return { valid: false, needsRehash: false };
-  const s = String(stored).trim();
-  if (s.startsWith('client:')) {
-    const expected = s.slice(7).toLowerCase();
-    const seed = `${(email || '').trim().toLowerCase()}|${(password || '').trim()}`;
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(seed));
-    const actual = Array.from(new Uint8Array(buf))
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
-    return { valid: actual === expected, needsRehash: true };
-  }
-  if (s.includes(':')) return { valid: await verifyPassword(password, s), needsRehash: false };
-  return { valid: false, needsRehash: false };
-}
-
-/**
- * Store a new PBKDF2 hash. createUser writes both passwordHash and password_hash, so
- * keep the pair in step; the fallback covers DBs that only have the camelCase column.
- */
-export async function updateUserPasswordHash(db, userId, passwordHash) {
-  try {
-    await db
-      .prepare(`UPDATE User SET passwordHash = ?1, password_hash = ?1, updatedAt = datetime('now') WHERE id = ?2`)
-      .bind(passwordHash, userId)
-      .run();
-    return;
-  } catch (e) {
-    // password_hash column absent on this DB — fall through.
-  }
-  await db
-    .prepare(`UPDATE User SET passwordHash = ?1, updatedAt = datetime('now') WHERE id = ?2`)
-    .bind(passwordHash, userId)
-    .run();
 }
 
 // --- Users ---

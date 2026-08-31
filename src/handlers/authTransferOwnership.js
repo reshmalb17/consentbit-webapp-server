@@ -9,8 +9,84 @@ import {
   markOwnershipTransferAuthorized,
   renameUserAccount,
   deleteSessionsForUser,
+  updateUserBillingEmail,
+  getOrganizationsForUser,
+  getSubscriptionsByOrganization,
 } from '../services/db.js';
 import { capturePostHogEvent } from '../services/posthog.js';
+
+/**
+ * Move billing identity to the new owner: the stored billing email and, on every Stripe
+ * customer behind this account's subscriptions, the customer `email` and `name`.
+ *
+ * Without this the account changed hands but invoices, receipts and Stripe's dashboard
+ * kept showing the PREVIOUS owner — so billing mail went to someone who no longer owns
+ * the account.
+ *
+ * Deliberately best-effort and isolated: the rename has already been committed by the
+ * time this runs, and a Stripe outage or a stale customer id must not turn a completed
+ * transfer into an error for the user. Anything that fails is logged and skipped, so it
+ * can be reconciled manually.
+ */
+async function moveBillingIdentity(db, env, userId, newEmail, newName) {
+  const result = { billingEmailUpdated: false, stripeCustomersUpdated: 0, errors: [] };
+
+  try {
+    await updateUserBillingEmail(db, userId, newEmail);
+    result.billingEmailUpdated = true;
+  } catch (e) {
+    result.errors.push('billingEmail: ' + (e?.message || e));
+  }
+
+  const secret = env.STRIPE_SECRET_KEY;
+  if (!secret) {
+    result.errors.push('stripe: STRIPE_SECRET_KEY not configured');
+    return result;
+  }
+
+  // One account can own several organizations, each with several subscriptions, and
+  // those can share a Stripe customer — dedupe so each customer is patched once.
+  let customerIds = [];
+  try {
+    const orgs = await getOrganizationsForUser(db, userId);
+    const seen = new Set();
+    for (const org of orgs) {
+      const subs = await getSubscriptionsByOrganization(db, org.id);
+      for (const sub of subs) {
+        const cid = sub?.stripeCustomerId;
+        if (cid && !seen.has(cid)) { seen.add(cid); customerIds.push(cid); }
+      }
+    }
+  } catch (e) {
+    result.errors.push('subscription lookup: ' + (e?.message || e));
+    return result;
+  }
+
+  for (const customerId of customerIds) {
+    try {
+      const body = new URLSearchParams({ email: newEmail });
+      if (newName) body.set('name', newName);
+      const res = await fetch(`https://api.stripe.com/v1/customers/${customerId}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${secret}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: body.toString(),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.error) {
+        result.errors.push(`stripe ${customerId}: ${data?.error?.message || res.status}`);
+        continue;
+      }
+      result.stripeCustomersUpdated++;
+    } catch (e) {
+      result.errors.push(`stripe ${customerId}: ${e?.message || e}`);
+    }
+  }
+
+  return result;
+}
 
 // ---------------------------------------------------------------------------
 // Account ownership transfer
@@ -337,6 +413,20 @@ export async function handleTransferOwnershipAuthorize(request, env) {
   // Perform the in-place rename — this is the actual ownership transfer.
   const updated = await renameUserAccount(db, row.userId, { email: row.newEmail, name: row.newName });
   await markOwnershipTransferAuthorized(db, id);
+
+  // Carry the billing identity across too: the stored billing email plus the Stripe
+  // customer's email/name. Runs after the rename is committed and never throws, so a
+  // Stripe failure leaves the transfer itself intact (see moveBillingIdentity).
+  const billing = await moveBillingIdentity(db, env, row.userId, row.newEmail, row.newName);
+  if (billing.errors.length) {
+    console.warn('[TransferOwnership] billing identity partially moved', {
+      userId: row.userId,
+      billingEmailUpdated: billing.billingEmailUpdated,
+      stripeCustomersUpdated: billing.stripeCustomersUpdated,
+      errors: billing.errors,
+    });
+  }
+
   // Revoke all sessions so the old owner is signed out everywhere.
   await deleteSessionsForUser(db, row.userId);
 

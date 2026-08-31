@@ -84,8 +84,6 @@ import { handleAuthLogin } from './handlers/authLogin.js';
 import { handleAuthSignup } from './handlers/authSignup.js';
 import { handleAuthMe } from './handlers/authMe.js';
 import { handleAuthProfile } from './handlers/authProfile.js';
-import { handleAuthSetPassword } from './handlers/authSetPassword.js';
-import { handleAuthPublicKey } from './handlers/authPublicKey.js';
 import { handleTransferOwnershipRequest, handleTransferOwnershipAuthorize, handleWfTransferOwnershipRequest } from './handlers/authTransferOwnership.js';
 import { handleAuthRequestCode } from './handlers/authRequestCode.js';
 import { handleAuthVerifyCode } from './handlers/authVerifyCode.js';
@@ -163,9 +161,6 @@ import { sendScanLimitEmail, sendPaymentFailureEmail } from './services/email.js
  * (the CDN script must be able to read plain JSON).
  */
 const PUBLIC_PATHS = new Set([
-  // A public key is not a secret, and the login page must be able to read it before
-  // anyone is signed in.
-  '/api/auth/public-key',
   '/api/consent',
   '/api/framer-consent',
   '/api/scan-scripts',
@@ -398,13 +393,6 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleAuthMe(request, env); break;
     case '/api/auth/profile':
       response = await handleAuthProfile(request, env); break;
-    // Deliberately NOT in AUTH_RATE_PATHS: everything in that set is also CSRF-exempt,
-    // and this endpoint changes a credential from an existing session, so the CSRF
-    // check matters more here than the looser rate limit would.
-    case '/api/auth/set-password':
-      response = await handleAuthSetPassword(request, env); break;
-    case '/api/auth/public-key':
-      response = await handleAuthPublicKey(request, env); break;
     case '/api/auth/transfer-ownership/request':
       response = await handleTransferOwnershipRequest(request, env, ctx); break;
     case '/api/auth/transfer-ownership/authorize':

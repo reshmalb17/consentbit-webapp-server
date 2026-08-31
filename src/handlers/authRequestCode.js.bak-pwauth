@@ -1,11 +1,4 @@
-import {
-  createEmailVerificationCode,
-  getUserByEmail,
-  hashPassword,
-  validatePasswordPolicy,
-} from '../services/db.js';
-import { pwDebug } from '../utils/pwDebug.js';
-import { resolvePasswordField, AuthCryptoError } from '../utils/authCrypto.js';
+import { createEmailVerificationCode, getUserByEmail } from '../services/db.js';
 
 function isValidEmail(email) {
   const e = (email || '').trim().toLowerCase();
@@ -88,40 +81,6 @@ export async function handleAuthRequestCode(request, env, ctx) {
     return Response.json({ success: false, error: 'name is required for signup' }, { status: 400 });
   }
 
-  // Optional signup password — omitting it keeps the original OTP-only signup working.
-  // Validated here so a bad password fails before we send an email, and hashed below so
-  // the plaintext is never persisted anywhere.
-  // Accepts either the RSA-OAEP form (`passwordEnc`) or plaintext — see authCrypto.js.
-  let signupPassword = '';
-  let signupConfirm = '';
-  let signupEncrypted = false;
-  if (purpose === 'signup') {
-    try {
-      const pw = await resolvePasswordField(env, { enc: body?.passwordEnc, plain: body?.password });
-      const cf = await resolvePasswordField(env, { enc: body?.confirmPasswordEnc, plain: body?.confirmPassword });
-      signupPassword = pw.password;
-      signupConfirm = cf.password;
-      signupEncrypted = pw.encrypted;
-    } catch (e) {
-      if (e instanceof AuthCryptoError) {
-        pwDebug('request-code:decrypt-failed', { email, reason: e.message });
-        return Response.json({ success: false, error: e.message, code: 'PASSWORD_ENC_FAILED' }, { status: 400 });
-      }
-      throw e;
-    }
-  }
-  if (signupPassword) {
-    if (signupConfirm && signupPassword !== signupConfirm) {
-      return Response.json({ success: false, error: 'Passwords do not match' }, { status: 400 });
-    }
-    const policyError = validatePasswordPolicy(signupPassword);
-    if (policyError) {
-      pwDebug('request-code:policy-rejected', { email, reason: policyError, passwordLen: signupPassword.length });
-      return Response.json({ success: false, error: policyError }, { status: 400 });
-    }
-  }
-  pwDebug('request-code:input', { email, purpose, hasPassword: !!signupPassword, passwordLen: signupPassword.length, confirmProvided: !!signupConfirm, encrypted: signupEncrypted });
-
   const code = generateCode();
   const salt = env.OTP_SECRET || 'dev-otp-secret';
 
@@ -172,16 +131,7 @@ export async function handleAuthRequestCode(request, env, ctx) {
   // A large insertMs here means this request paid for the cold-start schema
   // migration — cross-reference the [ensureSchema] COLD START line in the tail.
   const insertT0 = Date.now();
-  const signupPasswordHash = signupPassword ? await hashPassword(signupPassword) : null;
-  const row = await createEmailVerificationCode(db, {
-    email,
-    purpose,
-    codeHash,
-    name,
-    ttlMinutes,
-    passwordHash: signupPasswordHash,
-  });
-  pwDebug('request-code:parked', { requestId: row.id, purpose, parkedHash: !!signupPasswordHash, hashLen: signupPasswordHash ? signupPasswordHash.length : 0 });
+  const row = await createEmailVerificationCode(db, { email, purpose, codeHash, name, ttlMinutes });
   console.log('[AuthRequestCode] code row written', {
     requestId: row.id,
     expiresAt: row.expiresAt,

@@ -40,6 +40,7 @@
 
 import { syncSubscriptionUpdateToLegacy } from '../services/syncLegacy.js';
 import { requireWebflowIdentity } from '../middleware/webflowIdentity.js';
+import { isPromotionCodeAllowedForEmail } from '../services/promoRestrictions.js';
 
 const TAG = '[webflow-upgrade]';
 const PLAN_ORDER = { basic: 1, essential: 2, growth: 3 };
@@ -308,6 +309,14 @@ async function prepareChange(request, env, identity, label) {
 
   if (!siteId) return { error: failLog(rid, 'siteId required', 400) };
   if (!planId) return { error: failLog(rid, 'planId must be basic, essential, or growth', 400) };
+
+  // Per-customer promo restrictions (see services/promoRestrictions.js).
+  if (promotionCodeId) {
+    const promoOk = await isPromotionCodeAllowedForEmail(
+      env.STRIPE_SECRET_KEY, promotionCodeId, id.email,
+    );
+    if (!promoOk.allowed) return { error: failLog(rid, promoOk.reason, 400) };
+  }
 
   const site = await resolveSite(db, siteId);
   if (!site) return { error: failLog(rid, 'Site not found', 404) };

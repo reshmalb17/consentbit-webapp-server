@@ -727,29 +727,6 @@ async function _handleCDNScript(request, env, url) {
     _enT.strictlyNecessary = '';
   }
 
-  // The Webflow Designer App mis-maps the CCPA opt-out panel body into ccpaDescription
-  // (buildCustomizationPayload.js: `ccpaDescription: ccpaContent.optOutBody`), so the
-  // initial CCPA banner renders the opt-out paragraph, truncated mid-word at 320 chars.
-  // That app exposes no editor field for the CCPA notice, so an identical pair is the
-  // mis-map's signature. Equality ALONE is not enough though: 11 prod rows (framer /
-  // webapp) have the pair equal to the *notice* text instead, where ccpaDescription is
-  // already correct and it is the opt-out intro that was overwritten - blanking those
-  // would break working banners. The two populations separate cleanly by length: every
-  // shipped notice default is ~160 chars, every opt-out intro 481-595, with nothing in
-  // between. Gate on the runtime's own 320 cap, above which a notice would be truncated
-  // anyway. Blanking lets the existing W("ccpaDescription") || W("description") chain
-  // fall through to the site's own banner message - what the dashboard already shows.
-  if (translationsForScript && translationsForScript.en) {
-    const _ccpaT = translationsForScript.en;
-    if (
-      _ccpaT.ccpaDescription &&
-      _ccpaT.ccpaDescription === _ccpaT.ccpaOptOutPreferenceIntro &&
-      String(_ccpaT.ccpaDescription).length > 320
-    ) {
-      _ccpaT.ccpaDescription = '';
-    }
-  }
-
   function resolveWorkerFloatingLogoUrl() {
     try {
       return new URL(request.url).origin + '/embed/floating-logo.svg';
