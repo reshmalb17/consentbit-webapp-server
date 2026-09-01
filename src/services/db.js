@@ -9,6 +9,18 @@ const _schemaEnsured = new WeakMap();
 // The stamped version is what lets a cold start skip all 108 DDL statements. If you
 // add a CREATE/ALTER below and DO NOT bump this, the new statement will never run on
 // any environment that is already stamped at the current version.
+// v2 (2026-09-01) added User.emailVerifiedAt + EmailVerificationToken. Those objects are
+// ALREADY APPLIED to consent-webapp-eu (verified directly), so this is deliberately held
+// at 1 while the production worker is still running v1 code against the SAME database.
+//
+// Why: the two scripts share one SchemaVersion row. With them disagreeing, each cold start
+// read the other's stamp, re-ran all ~108 DDL statements (~17s) and re-stamped its own
+// number — so signups intermittently blew past serverFetch's 20s abort and failed with a
+// cancel or a 500, while warm isolates worked fine.
+//
+// RESTORE TO 2 when production is deployed with this same code, in the same session, so
+// both scripts agree. Leaving it at 1 is only safe because this database already has the
+// v2 objects; a FRESH database stamped at 1 would silently skip them.
 const SCHEMA_VERSION = 1;
 
 /**
@@ -954,6 +966,45 @@ async function _runEnsureSchema(db) {
   // webapp sites, so on its own it cannot tell "signed up in the webapp" apart from "we don't
   // know"; this column is the single place that distinction is recorded.
   try { await db.prepare(`ALTER TABLE User ADD COLUMN signupSource TEXT`).run(); } catch (e) {}
+
+  // emailVerifiedAt — ISO timestamp, NULL means "not proven". Only the direct
+  // password-signup path (/api/auth/signup) can create a NULL row: the OTP flow proves
+  // the address by definition, so it stamps this at creation.
+  //
+  // The backfill is load-bearing. Every account that existed before this column would
+  // otherwise read as unverified and be locked out of paid checkout, so they are
+  // grandfathered to their own createdAt on the migration that adds the column. It runs
+  // once — after the ALTER succeeds there are no NULL rows left to catch, and later
+  // NULLs are genuinely-unverified new signups.
+  let addedEmailVerifiedAt = false;
+  try {
+    await db.prepare(`ALTER TABLE User ADD COLUMN emailVerifiedAt TEXT`).run();
+    addedEmailVerifiedAt = true;
+  } catch (e) {}
+  if (addedEmailVerifiedAt) {
+    try {
+      await db.prepare(`UPDATE User SET emailVerifiedAt = COALESCE(createdAt, datetime('now')) WHERE emailVerifiedAt IS NULL`).run();
+    } catch (e) {}
+  }
+
+  // Emailed verification links. Mirrors OwnershipTransfer: the row holds only a SHA-256
+  // of the secret, so a database read cannot be replayed as a valid link.
+  try {
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS EmailVerificationToken (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        email TEXT NOT NULL,
+        tokenHash TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        createdAt TEXT NOT NULL,
+        expiresAt TEXT NOT NULL,
+        usedAt TEXT
+      )
+    `).run();
+  } catch (e) {}
+  try { await db.prepare(`CREATE INDEX IF NOT EXISTS idx_email_verif_user ON EmailVerificationToken(userId, status)`).run(); } catch (e) {}
+  try { await db.prepare(`CREATE INDEX IF NOT EXISTS idx_email_verif_expires ON EmailVerificationToken(expiresAt)`).run(); } catch (e) {}
 
   // ── Webflow App OAuth (Data Client) ──────────────────────────────────────
   // Short-lived CSRF state issued in /authorize and consumed in /callback.
@@ -3275,6 +3326,61 @@ export async function deleteSessionsForUser(db, userId) {
 }
 
 /** Mark any still-pending transfers for this user as cancelled (single active request at a time). */
+/** True when this User row has proven ownership of its email address. */
+export function isEmailVerified(user) {
+  if (!user) return false;
+  const v = user.emailVerifiedAt ?? user.emailverifiedat ?? null;
+  return typeof v === 'string' && v.trim() !== '';
+}
+
+/** Stamp the address as proven. Idempotent — re-verifying keeps the first timestamp. */
+export async function markUserEmailVerified(db, userId) {
+  try {
+    await db
+      .prepare(`UPDATE User SET emailVerifiedAt = datetime('now'), updatedAt = datetime('now') WHERE id = ?1 AND (emailVerifiedAt IS NULL OR emailVerifiedAt = '')`)
+      .bind(userId)
+      .run();
+  } catch (e) {
+    // Column missing on a DB that has not run ensureSchema yet — non-fatal.
+  }
+}
+
+/** Supersede any outstanding links for this user, so only the newest one works. */
+export async function cancelPendingEmailVerifications(db, userId) {
+  try {
+    await db
+      .prepare(`UPDATE EmailVerificationToken SET status = 'cancelled' WHERE userId = ?1 AND status = 'pending'`)
+      .bind(userId)
+      .run();
+  } catch (e) {}
+}
+
+export async function createEmailVerificationToken(db, { userId, email, tokenHash, ttlMinutes = 1440 }) {
+  const id = crypto.randomUUID();
+  const now = new Date();
+  const createdAt = now.toISOString();
+  const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000).toISOString();
+  await db
+    .prepare(
+      `INSERT INTO EmailVerificationToken (id, userId, email, tokenHash, status, createdAt, expiresAt)
+       VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)`,
+    )
+    .bind(id, userId, String(email || '').trim().toLowerCase(), tokenHash, createdAt, expiresAt)
+    .run();
+  return { id, expiresAt };
+}
+
+export async function getEmailVerificationTokenById(db, id) {
+  return db.prepare(`SELECT * FROM EmailVerificationToken WHERE id = ?1`).bind(id).first();
+}
+
+export async function markEmailVerificationTokenUsed(db, id) {
+  await db
+    .prepare(`UPDATE EmailVerificationToken SET status = 'used', usedAt = datetime('now') WHERE id = ?1`)
+    .bind(id)
+    .run();
+}
+
 export async function cancelPendingOwnershipTransfers(db, userId) {
   await db
     .prepare(`UPDATE OwnershipTransfer SET status = 'cancelled' WHERE userId = ?1 AND status = 'pending'`)

@@ -16,6 +16,7 @@ import {
 import { sendWelcomeEmail } from '../services/email.js';
 import { sendScanReportForId } from '../services/scanReport.js';
 import { recordScanClaim } from './scanClaims.js';
+import { markUserEmailVerified } from '../services/db.js';
 import { pwDebug } from '../utils/pwDebug.js';
 // No hashing happens here: a signup password is hashed in request-code and parked on
 // the OTP row, and this handler only moves that hash onto the account it creates.
@@ -145,6 +146,9 @@ export async function handleAuthVerifyCode(request, env, ctx) {
     const [, session] = await Promise.all([
       consumeEmailVerificationCode(db, row.id),
       createSession(db, { userId: userPrefetch.id }),
+      // Logging in by emailed code proves the address just as signup does — clears the
+      // unverified flag for anyone who signed up with a password and never clicked.
+      markUserEmailVerified(db, userPrefetch.id).catch(() => {}),
     ]);
 
     // If a cookie-scan id was handed off, read it from the shared scanner DB,
@@ -212,6 +216,15 @@ export async function handleAuthVerifyCode(request, env, ctx) {
   ]);
 
   pwDebug('verify-code:user-created', { userId: user.id, email: user.email, passwordSet: !!parkedPasswordHash });
+
+  // Entering a code we emailed to this address IS proof of ownership, so this account
+  // never needs the separate confirmation link the direct-signup path sends.
+  // Non-fatal: a failure here must not break an otherwise-successful signup.
+  try {
+    await markUserEmailVerified(db, user.id);
+  } catch (e) {
+    console.error('[VerifyCode] markUserEmailVerified failed', e?.message || String(e));
+  }
 
   // Create session, then respond immediately (see login-path note above — dashboardInit is
   // built lazily by /api/auth/dashboard-init, which also creates the org on first load).

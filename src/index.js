@@ -85,6 +85,8 @@ import { handleAuthSignup } from './handlers/authSignup.js';
 import { handleAuthMe } from './handlers/authMe.js';
 import { handleAuthProfile } from './handlers/authProfile.js';
 import { handleAuthSetPassword } from './handlers/authSetPassword.js';
+import { handleAuthVerifyEmail, handleAuthVerifyEmailResend } from './handlers/authVerifyEmail.js';
+import { handlePasswordSignup, handlePasswordLogin } from './handlers/authPassword.js';
 import { handleAuthPublicKey } from './handlers/authPublicKey.js';
 import { handleTransferOwnershipRequest, handleTransferOwnershipAuthorize, handleWfTransferOwnershipRequest } from './handlers/authTransferOwnership.js';
 import { handleAuthRequestCode } from './handlers/authRequestCode.js';
@@ -303,6 +305,10 @@ const AUTH_RATE_PATHS = new Set([
   '/api/auth/signup',
   '/api/auth/request-code',
   '/api/auth/verify-code',
+  '/api/auth/password-signup',
+  '/api/auth/password-login',
+  // Arrives from a mail client: no session cookie, no XHR header.
+  '/api/auth/verify-email',
   '/api/auth/transfer-ownership/authorize',
   '/api/onboarding/first-setup',
 ]);
@@ -385,7 +391,18 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     case '/api/auth/login':
       response = await handleAuthLogin(request, env); break;
     case '/api/auth/signup':
-      response = await handleAuthSignup(request, env); break;
+      response = await handleAuthSignup(request, env, ctx); break;
+    // Clicked from an email, so it must work without a session or a CSRF header.
+    // Dedicated password flow — one scheme only (PBKDF2, hashed server-side).
+    // The older /api/auth/signup and /api/auth/login stay for existing clients.
+    case '/api/auth/password-signup':
+      response = await handlePasswordSignup(request, env, ctx); break;
+    case '/api/auth/password-login':
+      response = await handlePasswordLogin(request, env); break;
+    case '/api/auth/verify-email':
+      response = await handleAuthVerifyEmail(request, env, ctx); break;
+    case '/api/auth/verify-email/resend':
+      response = await handleAuthVerifyEmailResend(request, env, ctx); break;
     case '/api/auth/request-code':
       response = await handleAuthRequestCode(request, env, ctx); break;
     case '/api/auth/verify-code':

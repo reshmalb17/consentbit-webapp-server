@@ -5,7 +5,7 @@
 // Checkout uses `customer_email` from the logged-in user; Stripe creates the Customer on completion.
 // Returns { success, sessionId, url }
 
-import { getSessionById, getUserById, getSiteTrialUsed } from '../services/db.js';
+import { getSessionById, getUserById, getSiteTrialUsed, isEmailVerified } from '../services/db.js';
 import {
   isCodeAllowedForEmail,
   isCouponIdAllowedForEmail,
@@ -117,6 +117,23 @@ export async function handleCreateCheckoutSession(request, env) {
   const email = (user.email && typeof user.email === 'string') ? user.email.trim().toLowerCase() : null;
   if (!email || !email.includes('@')) {
     return Response.json({ success: false, error: 'Login required' }, { status: 401 });
+  }
+
+  // Direct password signup creates an account without proving the address. Paying is the
+  // point where that matters — a subscription, invoices and receipts would otherwise be
+  // attached to an address nobody has shown they control. Accounts that pre-date the
+  // emailVerifiedAt column are grandfathered by the backfill in ensureSchema, and the OTP
+  // signup path stamps the column at creation, so this only stops genuinely-unproven ones.
+  if (!isEmailVerified(user)) {
+    console.warn('[CreateCheckout] blocked — email not verified', { userId: user.id, email });
+    return Response.json(
+      {
+        success: false,
+        emailNotVerified: true,
+        error: 'Confirm your email address before upgrading. Check your inbox for the confirmation link, or request a new one from your profile.',
+      },
+      { status: 403 },
+    );
   }
 
   /**
