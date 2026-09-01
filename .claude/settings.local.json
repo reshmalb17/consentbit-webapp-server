@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "PowerShell($f = \"c:\\\\Users\\\\naren\\\\OneDrive\\\\Desktop\\\\settlenewmedia\\\\consentbit-webapp-server\\\\src\\\\handlers\\\\cdn.js\"; $lines = Get-Content -LiteralPath $f; for \\($i = 805; $i -lt 845; $i++\\) { \"{0,4}: len={1}\" -f \\($i+1\\), $lines[$i].Length })",
-      "PowerShell($f = \"c:\\\\Users\\\\naren\\\\OneDrive\\\\Desktop\\\\settlenewmedia\\\\consentbit-webapp-server\\\\src\\\\handlers\\\\cdn.js\"; $lines = Get-Content -LiteralPath $f; $loader = $lines[807]; $loader.Substring\\(0, 500\\))"
+      "PowerShell($f = \"c:\\\\Users\\\\naren\\\\OneDrive\\\\Desktop\\\\settlenewmedia\\\\consentbit-webapp-server\\\\src\\\\handlers\\\\cdn.js\"; $lines = Get-Content -LiteralPath $f; $loader = $lines[807]; $loader.Substring\\(0, 500\\))",
+      "WebFetch(domain:developers.google.com)",
+      "WebSearch"
     ]
   }
 }
