@@ -5,7 +5,7 @@
 // Checkout uses `customer_email` from the logged-in user; Stripe creates the Customer on completion.
 // Returns { success, sessionId, url }
 
-import { getSessionById, getUserById, getSiteTrialUsed, isEmailVerified } from '../services/db.js';
+import { getSessionById, getUserById, getSiteTrialUsed } from '../services/db.js';
 import {
   isCodeAllowedForEmail,
   isCouponIdAllowedForEmail,
@@ -119,22 +119,18 @@ export async function handleCreateCheckoutSession(request, env) {
     return Response.json({ success: false, error: 'Login required' }, { status: 401 });
   }
 
-  // Direct password signup creates an account without proving the address. Paying is the
-  // point where that matters — a subscription, invoices and receipts would otherwise be
-  // attached to an address nobody has shown they control. Accounts that pre-date the
-  // emailVerifiedAt column are grandfathered by the backfill in ensureSchema, and the OTP
-  // signup path stamps the column at creation, so this only stops genuinely-unproven ones.
-  if (!isEmailVerified(user)) {
-    console.warn('[CreateCheckout] blocked — email not verified', { userId: user.id, email });
-    return Response.json(
-      {
-        success: false,
-        emailNotVerified: true,
-        error: 'Confirm your email address before upgrading. Check your inbox for the confirmation link, or request a new one from your profile.',
-      },
-      { status: 403 },
-    );
-  }
+  // NOTE: there was an emailVerifiedAt gate here, blocking checkout until the address was
+  // confirmed. It was removed deliberately:
+  //
+  //   1. Signup goes through an emailed code again, so every webapp account is proven at
+  //      creation — the gate guarded a hole that no longer exists on that path.
+  //   2. SyncPlugin.js and customeCheeckout.js (Webflow/Framer registration) never stamp
+  //      emailVerifiedAt, so it would have blocked EVERY plugin-registered customer from
+  //      upgrading, plus three real accounts that already existed unstamped.
+  //
+  // Only /api/auth/password-signup can still create an unproven account, and no UI calls
+  // it. If that changes, re-add the gate — but stamp the plugin registration paths first,
+  // or you will lock out Webflow and Framer users.
 
   /**
    * Do not pre-create / search Customers. Checkout Sessions accept `customer_email` alone;

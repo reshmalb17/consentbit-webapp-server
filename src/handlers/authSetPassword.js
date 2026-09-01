@@ -120,6 +120,17 @@ export async function handleAuthSetPassword(request, env) {
         { status: 401 },
       );
     }
+
+    // Reusing the same password is a no-op dressed up as a change: the user believes
+    // they have rotated a credential that may have been exposed, when nothing moved.
+    // Checked here rather than only in the UI so it holds for any caller.
+    if (newPassword === currentPassword) {
+      pwDebug('set-password:unchanged', { userId: user.id });
+      return Response.json(
+        { success: false, error: 'New password must be different from your current password.' },
+        { status: 400 },
+      );
+    }
   }
 
   await updateUserPasswordHash(db, user.id, await hashPassword(newPassword));
@@ -129,4 +140,80 @@ export async function handleAuthSetPassword(request, env) {
     { success: true, hasPassword: true, message: 'Password updated.' },
     { status: 200 },
   );
+}
+
+/**
+ * POST /api/auth/verify-password — check the signed-in user's current password without
+ * changing anything.
+ *
+ * The profile panel uses this to reveal the "new password" fields only once the current
+ * one is confirmed, so a user is not asked to type a new password before finding out the
+ * old one was wrong. handleAuthSetPassword re-verifies on save regardless — this endpoint
+ * is a UX gate, never the authorization.
+ *
+ * Deliberately NOT in AUTH_RATE_PATHS: everything in that set is CSRF-exempt, and this
+ * takes a password from an existing session, so the CSRF header check matters more here
+ * than the looser rate limit would. Guessing through it already requires a valid session,
+ * i.e. the account is compromised anyway.
+ */
+export async function handleAuthVerifyPassword(request, env) {
+  const db = env.CONSENT_WEBAPP;
+
+  if (request.method !== 'POST') {
+    return Response.json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
+  }
+
+  const sid = getSessionIdFromCookie(request);
+  if (!sid) return Response.json({ success: false, error: 'Login required' }, { status: 401 });
+
+  const session = await getSessionById(db, sid);
+  if (!session) return Response.json({ success: false, error: 'Login required' }, { status: 401 });
+
+  const user = await getUserById(db, session.userId ?? session.user_id);
+  if (!user) return Response.json({ success: false, error: 'Login required' }, { status: 401 });
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
+  }
+
+  let currentPassword = '';
+  try {
+    const op = await resolvePasswordField(env, {
+      enc: body?.currentPasswordEnc,
+      plain: body?.currentPassword,
+    });
+    currentPassword = op.password;
+  } catch (e) {
+    if (e instanceof AuthCryptoError) {
+      return Response.json({ success: false, error: e.message, code: 'PASSWORD_ENC_FAILED' }, { status: 400 });
+    }
+    throw e;
+  }
+
+  // D1 casing varies by how the row was written.
+  const stored =
+    user.passwordHash ?? user.password_hash ?? user.passwordhash ?? null;
+
+  // No password set: nothing to verify, and the caller should be showing the
+  // "set a first password" form rather than asking for a current one.
+  if (!isPasswordSet(stored)) {
+    return Response.json({ success: true, valid: false, passwordNotSet: true });
+  }
+
+  if (!currentPassword) {
+    return Response.json({ success: false, error: 'Enter your current password' }, { status: 400 });
+  }
+
+  const { valid } = await verifyStoredPassword({
+    email: user.email,
+    password: currentPassword,
+    stored,
+  });
+  pwDebug('verify-password:result', { userId: user.id, valid, storedFormat: describeStored(stored) });
+
+  // 200 either way — "wrong password" is a normal answer here, not a request failure.
+  return Response.json({ success: true, valid });
 }
