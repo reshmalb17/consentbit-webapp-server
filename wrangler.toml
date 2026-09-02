@@ -8,8 +8,8 @@ directory = "./public"
 
 [[d1_databases]]
 binding = "CONSENT_WEBAPP"
-database_name = "consent-webapp"
-database_id = "bc37fa30-5060-491d-b19c-f3eeb7b1fd00"
+database_name = "consent-webapp-eu"
+database_id = "1185db31-80ad-4021-b269-a439bd52e84d"
 
 [[d1_databases]]
 binding = "LEGACY_DB"
@@ -102,7 +102,11 @@ TEST_LOGIN_CODE = "424242"
 # If unset here and not in the dashboard, the Worker uses `request.url.origin` (OK when the API is called on the worker hostname).
 CDN_BASE_URL = ""
 # Public origin of your Next.js app (no trailing slash). If set, embed tries https://<WEBAPP>/asset/logo.webp first; on failure it loads /embed/floating-logo.svg from this Worker. If empty, the Worker SVG is used directly.
-WEBAPP_PUBLIC_URL = ""
+# Also the origin used to build emailed links — email verification, ownership transfer,
+# and the billing link in Stripe emails. Left EMPTY on production (see [env.production.vars]),
+# where those fall back to accounts.consentbit.com. Pointed here at the Test webapp so a
+# tester clicking a confirmation link lands on the build they are testing, not on live.
+WEBAPP_PUBLIC_URL = "https://consentbitfrontend.pages.dev"
 # ── Webflow App OAuth (Data Client) — default env (consent-webapp-manager) ───
 #   Secrets (NOT in this file): `wrangler secret put webflow_TEST_CLIENT_ID`
 #                               `wrangler secret put WEBFLOW_CLIENT_TEST_SECRET`
@@ -200,8 +204,8 @@ STRIPE_PRODUCT_YEARLY  = ""
 
 [[env.production.d1_databases]]
 binding = "CONSENT_WEBAPP"
-database_name = "consent-webapp"
-database_id = "bc37fa30-5060-491d-b19c-f3eeb7b1fd00"
+database_name = "consent-webapp-eu"
+database_id = "1185db31-80ad-4021-b269-a439bd52e84d"
 
 [[env.production.d1_databases]]
 binding = "LEGACY_DB"

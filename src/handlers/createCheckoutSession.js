@@ -5,7 +5,12 @@
 // Checkout uses `customer_email` from the logged-in user; Stripe creates the Customer on completion.
 // Returns { success, sessionId, url }
 
-import { getSessionById, getUserById, getSiteTrialUsed } from '../services/db.js';
+import { getSessionById, getUserById, getSiteTrialUsed, isEmailVerified } from '../services/db.js';
+import {
+  isCodeAllowedForEmail,
+  isCouponIdAllowedForEmail,
+  PROMO_NOT_ALLOWED_MESSAGE,
+} from '../services/promoRestrictions.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -112,6 +117,23 @@ export async function handleCreateCheckoutSession(request, env) {
   const email = (user.email && typeof user.email === 'string') ? user.email.trim().toLowerCase() : null;
   if (!email || !email.includes('@')) {
     return Response.json({ success: false, error: 'Login required' }, { status: 401 });
+  }
+
+  // Direct password signup creates an account without proving the address. Paying is the
+  // point where that matters — a subscription, invoices and receipts would otherwise be
+  // attached to an address nobody has shown they control. Accounts that pre-date the
+  // emailVerifiedAt column are grandfathered by the backfill in ensureSchema, and the OTP
+  // signup path stamps the column at creation, so this only stops genuinely-unproven ones.
+  if (!isEmailVerified(user)) {
+    console.warn('[CreateCheckout] blocked — email not verified', { userId: user.id, email });
+    return Response.json(
+      {
+        success: false,
+        emailNotVerified: true,
+        error: 'Confirm your email address before upgrading. Check your inbox for the confirmation link, or request a new one from your profile.',
+      },
+      { status: 403 },
+    );
   }
 
   /**
@@ -294,6 +316,11 @@ export async function handleCreateCheckoutSession(request, env) {
   }
 
   if (stripeCouponId) {
+    // Raw coupon ids bypass promotion-code checks — verify the account is allowed first.
+    const rawOk = await isCouponIdAllowedForEmail(secret, stripeCouponId, email);
+    if (!rawOk.allowed) {
+      return Response.json({ success: false, error: rawOk.reason }, { status: 400 });
+    }
     params.set('discounts[0][coupon]', stripeCouponId);
   }
 
@@ -309,6 +336,10 @@ export async function handleCreateCheckoutSession(request, env) {
       if (verify.error || !verify.active) {
         console.warn('[CreateCheckout] promotion code rejected', { id: promotionCodeId, err: verify.error?.message });
         return Response.json({ success: false, error: 'Promotion code is no longer valid' }, { status: 400 });
+      }
+      if (!isCodeAllowedForEmail(verify.code, email)) {
+        console.warn('[CreateCheckout] promo restricted to another account', { code: verify.code, email });
+        return Response.json({ success: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 400 });
       }
       params.set('discounts[0][promotion_code]', promotionCodeId);
       if (verify.code) params.set('subscription_data[metadata][promotionCode]', verify.code);
@@ -347,6 +378,10 @@ export async function handleCreateCheckoutSession(request, env) {
       if (!promo || !promo.active) {
         return Response.json({ success: false, error: 'Invalid or expired coupon code' }, { status: 400 });
       }
+      if (!isCodeAllowedForEmail(promo.code || couponCode, email)) {
+        console.warn('[CreateCheckout] coupon restricted to another account', { code: promo.code || couponCode, email });
+        return Response.json({ success: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 400 });
+      }
       params.set('discounts[0][promotion_code]', promo.id);
       params.set('subscription_data[metadata][promotionCode]', promo.code || couponCode);
       console.log('[CreateCheckout] coupon attached to session', { promoId: promo.id, code: promo.code });
@@ -356,12 +391,18 @@ export async function handleCreateCheckoutSession(request, env) {
     }
   }
 
-  // ── Allow customers to enter a promo code directly on Stripe Checkout ──
-  // Mutually exclusive with pre-applied discounts[] — Stripe rejects sessions
-  // that set both. So only enable the input field when no discount was attached.
-  if (!params.has('discounts[0][promotion_code]') && !params.has('discounts[0][coupon]')) {
-    params.set('allow_promotion_codes', 'true');
-  }
+  // ── Stripe's own promo input is deliberately DISABLED ──────────────────────
+  // Setting allow_promotion_codes=true renders Stripe's "Add promotion code" box on
+  // the hosted checkout page. Codes typed there are applied by Stripe directly — this
+  // worker never sees them, so the per-customer allowlist in services/promoRestrictions.js
+  // cannot run. Stripe's own `promotion_code.customer` restriction can't cover for us
+  // either: these sessions carry `customer_email` only (the Customer is created after
+  // checkout completes), so there is no Customer for Stripe to match against.
+  //
+  // Net effect: leaving it on made every active code — including restricted ones —
+  // redeemable by anyone who knew the string. Promo codes must therefore be entered in
+  // our own coupon field, which validates them server-side before they reach Stripe.
+  // Do not re-enable without first attaching a real `customer` to the session.
 
   // Final visibility into what we're sending to Stripe
   if (params.has('discounts[0][promotion_code]') || params.has('discounts[0][coupon]')) {
@@ -372,7 +413,7 @@ export async function handleCreateCheckoutSession(request, env) {
       hasTrial: params.has('subscription_data[trial_period_days]'),
     });
   } else {
-    console.log('[CreateCheckout] no discount being applied to Stripe session (allow_promotion_codes=true)');
+    console.log('[CreateCheckout] no discount being applied to Stripe session');
   }
 
   console.log('[CreateCheckout] creating Stripe checkout session — plan:', planId || 'legacy', '| interval:', body.interval === 'yearly' ? 'yearly' : 'monthly');

@@ -18,6 +18,7 @@ import {
   getOrganizationMember,
 } from '../services/db.js';
 import { syncSubscriptionUpdateToLegacy } from '../services/syncLegacy.js';
+import { isPromotionCodeAllowedForEmail } from '../services/promoRestrictions.js';
 
 const PLAN_ORDER = { basic: 1, essential: 2, growth: 3 };
 
@@ -98,6 +99,14 @@ async function prepareChange(request, env) {
 
   const member = await getOrganizationMember(db, userId, organizationId);
   if (!member) return { error: fail('Not allowed for this organization', 403) };
+
+  // Per-customer promo restrictions (see services/promoRestrictions.js).
+  if (promotionCodeId) {
+    const promoOk = await isPromotionCodeAllowedForEmail(
+      env.STRIPE_SECRET_KEY, promotionCodeId, user.email,
+    );
+    if (!promoOk.allowed) return { error: fail(promoOk.reason, 400) };
+  }
 
   // Load current subscription — prefer the per-site license, fall back to org.
   const sub = (siteId ? await getSubscriptionBySiteId(db, siteId) : null)

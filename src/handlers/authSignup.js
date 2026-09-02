@@ -1,8 +1,9 @@
 // src/handlers/authSignup.js
 import { ensureSchema } from '../services/db.js';
 import { getUserByEmail, createUser, createSession, hashPassword } from '../services/db.js';
+import { issueEmailVerification } from './authVerifyEmail.js';
 
-export async function handleAuthSignup(request, env) {
+export async function handleAuthSignup(request, env, ctx) {
   const db = env.CONSENT_WEBAPP;
   if (!db) {
     return Response.json({ success: false, error: 'Database not configured' }, { status: 503 });
@@ -40,16 +41,24 @@ export async function handleAuthSignup(request, env) {
       return Response.json({ success: false, error: 'Invalid password format' }, { status: 400 });
     }
     storedHash = 'client:' + passwordHash;
-  } else if (password && confirmPassword) {
+  } else if (password) {
+    // confirmPassword is optional: the signup form has a single password field with a
+    // reveal toggle, so there is nothing to compare. Still enforced when a client does
+    // send it, so a form that adds the field keeps its typo check.
     if (password.length < 8) {
       return Response.json({ success: false, error: 'Password must be at least 8 characters' }, { status: 400 });
     }
-    if (password !== confirmPassword) {
+    // Mirror the policy the signup form applies, so the server is the authority rather
+    // than trusting the client to have checked.
+    if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
+      return Response.json({ success: false, error: 'Password must contain at least one letter and one number' }, { status: 400 });
+    }
+    if (confirmPassword && password !== confirmPassword) {
       return Response.json({ success: false, error: 'Password and confirm password do not match' }, { status: 400 });
     }
     storedHash = await hashPassword(password);
   } else {
-    return Response.json({ success: false, error: 'passwordHash + confirmPasswordHash or password + confirmPassword required' }, { status: 400 });
+    return Response.json({ success: false, error: 'password required' }, { status: 400 });
   }
 
   await ensureSchema(db);
@@ -59,9 +68,20 @@ export async function handleAuthSignup(request, env) {
     return Response.json({ success: false, error: 'An account with this email already exists' }, { status: 409 });
   }
 
-  const user = await createUser(db, { email, name: name || null, passwordHash: storedHash });
+  // Email+password signup only exists in the webapp — a genuine 'webapp' origin.
+  const user = await createUser(db, { email, name: name || null, passwordHash: storedHash, signupSource: 'webapp' });
 
   const session = await createSession(db, { userId: user.id });
+
+  // Nothing here proved the address belongs to whoever just registered it, so send the
+  // proof after the fact. The account is usable immediately; paid checkout stays gated
+  // on emailVerifiedAt until this link is clicked (see createCheckoutSession.js).
+  // Fire-and-forget: a mail failure must not fail an otherwise-successful signup.
+  try {
+    await issueEmailVerification(env, ctx, db, user);
+  } catch (e) {
+    console.error('[AuthSignup] verification email failed', e?.message || String(e));
+  }
 
   const isProd = env.NODE_ENV === 'production';
   const cookieFlags = isProd

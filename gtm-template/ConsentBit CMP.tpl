@@ -178,6 +178,10 @@ const CONSENT_TYPES = [
 // Matches the value the banner itself uses.
 const WAIT_FOR_UPDATE = 500;
 
+// localStorage key remembering the last region sent to the dashboard. Must stay a
+// fixed literal — see the note at the sync block at the bottom of this file.
+const SYNC_KEY = 'cb_gtm_region';
+
 const ALL_TYPES = 'ad_storage,ad_user_data,ad_personalization,analytics_storage,' +
                   'functionality_storage,personalization_storage';
 
@@ -281,25 +285,6 @@ for (let i = 0; i < rows.length; i++) {
 // trusting whatever the container says.
 setInWindow('__cbGtmRegionMode', regionSetup, true);
 
-// --- Save the choice to the ConsentBit dashboard ------------------------------
-// One GET, only when the value changes — the last value sent is remembered per
-// Script ID. Sites already configured to run GDPR and CCPA together are never
-// touched by this: the endpoint refuses to downgrade them.
-if (data.syncRegionToDashboard && (regionSetup === 'gdpr' || regionSetup === 'ccpa')) {
-  const syncKey = 'cb_gtm_region_' + scriptId;
-  if (localStorage.getItem(syncKey) !== regionSetup) {
-    const syncUrl = CDN_ORIGIN + '/api/gtm/region?scriptId=' +
-        encodeUriComponent(scriptId) + '&mode=' + encodeUriComponent(regionSetup);
-    sendPixel(syncUrl, () => {
-      // Only remember it once it actually went out, so a failed send retries on the
-      // next page rather than being silently dropped.
-      localStorage.setItem(syncKey, regionSetup);
-    }, () => {
-      log('ConsentBit: could not save the region setting to your dashboard.');
-    });
-  }
-}
-
 // Tell the banner the default has already been published, so its boot() skips the
 // duplicate gtag("consent","default") push. The banner checks this flag.
 setInWindow('__cbConsentDefaultSet', true, true);
@@ -311,6 +296,28 @@ setInWindow('__cbConsentDefaultSet', true, true);
 const url = CDN_ORIGIN + '/consentbit/' + encodeUriComponent(scriptId) + '/script.js';
 
 injectScript(url, data.gtmOnSuccess, data.gtmOnFailure, url);
+
+// --- Save the choice to the ConsentBit dashboard ------------------------------
+// LAST on purpose: the banner is the job, this is bookkeeping. A denied permission
+// here throws in the sandbox, and anything after it would never run.
+//
+// One GET, only when the value changes — SYNC_KEY is a fixed literal because the
+// access_local_storage permission matches keys exactly (no wildcards), so a key
+// built from the Script ID would be denied. Sites configured to run GDPR and CCPA
+// together are never touched: the endpoint refuses to downgrade them.
+if (data.syncRegionToDashboard && (regionSetup === 'gdpr' || regionSetup === 'ccpa')) {
+  if (localStorage.getItem(SYNC_KEY) !== regionSetup) {
+    const syncUrl = CDN_ORIGIN + '/api/gtm/region?scriptId=' +
+        encodeUriComponent(scriptId) + '&mode=' + encodeUriComponent(regionSetup);
+    sendPixel(syncUrl, () => {
+      // Only remember it once it actually went out, so a failed send retries on the
+      // next page rather than being silently dropped.
+      localStorage.setItem(SYNC_KEY, regionSetup);
+    }, () => {
+      log('ConsentBit: could not save the region setting to your dashboard.');
+    });
+  }
+}
 
 
 ___WEB_PERMISSIONS___
@@ -766,7 +773,7 @@ ___WEB_PERMISSIONS___
                 "mapValue": [
                   {
                     "type": 1,
-                    "string": "cb_gtm_region_*"
+                    "string": "cb_gtm_region"
                   },
                   {
                     "type": 8,

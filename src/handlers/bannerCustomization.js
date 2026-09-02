@@ -305,6 +305,20 @@ export async function handleBannerCustomization(request, env) {
       return Response.json({ success: false, error: 'customization is required' }, { status: 400 });
     }
 
+    // Plan gate: hideBranding is Growth-only. Downgrade the flag rather than rejecting
+    // the request — the rest of this save is legitimate and should still persist.
+    // A null plan means resolution itself failed; don't demote a paying site on a
+    // transient D1 error, leave the requested value alone.
+    if (customization.hideBranding === 1 || customization.hideBranding === true) {
+      const brandingPlanId = await resolveEffectivePlanId(db, env, siteId);
+      if (brandingPlanId !== null && !REMOVE_BRANDING_PLANS.includes(brandingPlanId)) {
+        console.warn(
+          `[BannerCustomization][POST] hideBranding not available on plan '${brandingPlanId}' for site ${siteId} — saving as 0`
+        );
+        customization.hideBranding = 0;
+      }
+    }
+
     try {
       await saveBannerCustomization(db, siteId, customization);
 

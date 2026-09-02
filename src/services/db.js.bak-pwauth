@@ -9,18 +9,6 @@ const _schemaEnsured = new WeakMap();
 // The stamped version is what lets a cold start skip all 108 DDL statements. If you
 // add a CREATE/ALTER below and DO NOT bump this, the new statement will never run on
 // any environment that is already stamped at the current version.
-// v2 (2026-09-01) added User.emailVerifiedAt + EmailVerificationToken. Those objects are
-// ALREADY APPLIED to consent-webapp-eu (verified directly), so this is deliberately held
-// at 1 while the production worker is still running v1 code against the SAME database.
-//
-// Why: the two scripts share one SchemaVersion row. With them disagreeing, each cold start
-// read the other's stamp, re-ran all ~108 DDL statements (~17s) and re-stamped its own
-// number — so signups intermittently blew past serverFetch's 20s abort and failed with a
-// cancel or a 500, while warm isolates worked fine.
-//
-// RESTORE TO 2 when production is deployed with this same code, in the same session, so
-// both scripts agree. Leaving it at 1 is only safe because this database already has the
-// v2 objects; a FRESH database stamped at 1 would silently skip them.
 const SCHEMA_VERSION = 1;
 
 /**
@@ -867,7 +855,6 @@ async function _runEnsureSchema(db) {
       purpose TEXT NOT NULL, -- 'login' | 'signup'
       codeHash TEXT NOT NULL,
       name TEXT, -- only for signup
-      passwordHash TEXT, -- PBKDF2 hash of a signup password, moved to User on verify
       attempts INTEGER DEFAULT 0,
       consumedAt DATETIME,
       expiresAt DATETIME NOT NULL,
@@ -880,14 +867,6 @@ async function _runEnsureSchema(db) {
   try {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_evc_expires ON EmailVerificationCode(expiresAt)`).run();
   } catch (e) {}
-  // A signup password is hashed at request-code time and parked here until the OTP is
-  // verified, so the plaintext is never written to the database and the User row gets a
-  // finished PBKDF2 hash the moment the account is created.
-  try {
-    await db.prepare(`ALTER TABLE EmailVerificationCode ADD COLUMN passwordHash TEXT`).run();
-  } catch (e) {
-    // Column already exists, ignore
-  }
 
   // Account ownership transfer — a pending request that must be authorized by the
   // CURRENT owner (link emailed to the old email) before the account's email/name
@@ -966,45 +945,6 @@ async function _runEnsureSchema(db) {
   // webapp sites, so on its own it cannot tell "signed up in the webapp" apart from "we don't
   // know"; this column is the single place that distinction is recorded.
   try { await db.prepare(`ALTER TABLE User ADD COLUMN signupSource TEXT`).run(); } catch (e) {}
-
-  // emailVerifiedAt — ISO timestamp, NULL means "not proven". Only the direct
-  // password-signup path (/api/auth/signup) can create a NULL row: the OTP flow proves
-  // the address by definition, so it stamps this at creation.
-  //
-  // The backfill is load-bearing. Every account that existed before this column would
-  // otherwise read as unverified and be locked out of paid checkout, so they are
-  // grandfathered to their own createdAt on the migration that adds the column. It runs
-  // once — after the ALTER succeeds there are no NULL rows left to catch, and later
-  // NULLs are genuinely-unverified new signups.
-  let addedEmailVerifiedAt = false;
-  try {
-    await db.prepare(`ALTER TABLE User ADD COLUMN emailVerifiedAt TEXT`).run();
-    addedEmailVerifiedAt = true;
-  } catch (e) {}
-  if (addedEmailVerifiedAt) {
-    try {
-      await db.prepare(`UPDATE User SET emailVerifiedAt = COALESCE(createdAt, datetime('now')) WHERE emailVerifiedAt IS NULL`).run();
-    } catch (e) {}
-  }
-
-  // Emailed verification links. Mirrors OwnershipTransfer: the row holds only a SHA-256
-  // of the secret, so a database read cannot be replayed as a valid link.
-  try {
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS EmailVerificationToken (
-        id TEXT PRIMARY KEY,
-        userId TEXT NOT NULL,
-        email TEXT NOT NULL,
-        tokenHash TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
-        createdAt TEXT NOT NULL,
-        expiresAt TEXT NOT NULL,
-        usedAt TEXT
-      )
-    `).run();
-  } catch (e) {}
-  try { await db.prepare(`CREATE INDEX IF NOT EXISTS idx_email_verif_user ON EmailVerificationToken(userId, status)`).run(); } catch (e) {}
-  try { await db.prepare(`CREATE INDEX IF NOT EXISTS idx_email_verif_expires ON EmailVerificationToken(expiresAt)`).run(); } catch (e) {}
 
   // ── Webflow App OAuth (Data Client) ──────────────────────────────────────
   // Short-lived CSRF state issued in /authorize and consumed in /callback.
@@ -1704,26 +1644,12 @@ async function tagKvAsMigrated(kvByKey, entry) {
 
 export async function createEmailVerificationCode(
   db,
-  { email, purpose, codeHash, name, ttlMinutes = 10, passwordHash = null } = {},
+  { email, purpose, codeHash, name, ttlMinutes = 10 } = {},
 ) {
   await ensureSchema(db);
   const id = crypto.randomUUID();
   const now = new Date();
   const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000).toISOString();
-  // Preferred insert: also parks the signup password hash. Falls through to the
-  // long-standing statement below on any DB that has not picked up the column yet.
-  try {
-    await db
-      .prepare(
-        `INSERT INTO EmailVerificationCode (id, email, purpose, codeHash, name, passwordHash, attempts, consumedAt, expiresAt, createdAt)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, ?7, ?8)`,
-      )
-      .bind(id, email.trim().toLowerCase(), purpose, codeHash, name || null, passwordHash || null, expiresAt, now.toISOString())
-      .run();
-    return { id, expiresAt };
-  } catch (e) {
-    // Column missing — fall through.
-  }
   await db
     .prepare(
       `INSERT INTO EmailVerificationCode (id, email, purpose, codeHash, name, attempts, consumedAt, expiresAt, createdAt)
@@ -3104,72 +3030,6 @@ export async function verifyPassword(plainPassword, storedSaltHash) {
   return toHex(bits) === hashHex;
 }
 
-/**
- * Password policy shared by signup and set-password. Mirrors the client-side check in
- * PasswordSection.tsx so the two cannot drift. Returns an error string, or null when
- * the password is acceptable.
- */
-export function validatePasswordPolicy(password) {
-  const p = typeof password === 'string' ? password : '';
-  if (p.length < 8) return 'Password must be at least 8 characters.';
-  if (!/[A-Za-z]/.test(p) || !/[0-9]/.test(p)) {
-    return 'Password must contain at least one letter and one number.';
-  }
-  return null;
-}
-
-/**
- * Accounts created by the OTP flow carry the literal sentinel 'passwordless' (see
- * createUser's default), and older rows may be NULL or empty. None of those are hashes:
- * comparing user input against them directly would let anyone sign in to those accounts
- * by typing the sentinel, so every password path must funnel them through here.
- */
-export function isPasswordSet(stored) {
-  const s = typeof stored === 'string' ? stored.trim() : '';
-  return s !== '' && s !== 'passwordless';
-}
-
-/**
- * Verify a plaintext password against whatever format the row happens to hold.
- * `needsRehash` flags the legacy 'client:' SHA-256 rows so a successful sign-in can
- * silently upgrade them to PBKDF2 — see handleAuthLogin.
- */
-export async function verifyStoredPassword({ email, password, stored }) {
-  if (!isPasswordSet(stored)) return { valid: false, needsRehash: false };
-  const s = String(stored).trim();
-  if (s.startsWith('client:')) {
-    const expected = s.slice(7).toLowerCase();
-    const seed = `${(email || '').trim().toLowerCase()}|${(password || '').trim()}`;
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(seed));
-    const actual = Array.from(new Uint8Array(buf))
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
-    return { valid: actual === expected, needsRehash: true };
-  }
-  if (s.includes(':')) return { valid: await verifyPassword(password, s), needsRehash: false };
-  return { valid: false, needsRehash: false };
-}
-
-/**
- * Store a new PBKDF2 hash. createUser writes both passwordHash and password_hash, so
- * keep the pair in step; the fallback covers DBs that only have the camelCase column.
- */
-export async function updateUserPasswordHash(db, userId, passwordHash) {
-  try {
-    await db
-      .prepare(`UPDATE User SET passwordHash = ?1, password_hash = ?1, updatedAt = datetime('now') WHERE id = ?2`)
-      .bind(passwordHash, userId)
-      .run();
-    return;
-  } catch (e) {
-    // password_hash column absent on this DB — fall through.
-  }
-  await db
-    .prepare(`UPDATE User SET passwordHash = ?1, updatedAt = datetime('now') WHERE id = ?2`)
-    .bind(passwordHash, userId)
-    .run();
-}
-
 // --- Users ---
 
 export async function getUserByEmail(db, email) {
@@ -3326,61 +3186,6 @@ export async function deleteSessionsForUser(db, userId) {
 }
 
 /** Mark any still-pending transfers for this user as cancelled (single active request at a time). */
-/** True when this User row has proven ownership of its email address. */
-export function isEmailVerified(user) {
-  if (!user) return false;
-  const v = user.emailVerifiedAt ?? user.emailverifiedat ?? null;
-  return typeof v === 'string' && v.trim() !== '';
-}
-
-/** Stamp the address as proven. Idempotent — re-verifying keeps the first timestamp. */
-export async function markUserEmailVerified(db, userId) {
-  try {
-    await db
-      .prepare(`UPDATE User SET emailVerifiedAt = datetime('now'), updatedAt = datetime('now') WHERE id = ?1 AND (emailVerifiedAt IS NULL OR emailVerifiedAt = '')`)
-      .bind(userId)
-      .run();
-  } catch (e) {
-    // Column missing on a DB that has not run ensureSchema yet — non-fatal.
-  }
-}
-
-/** Supersede any outstanding links for this user, so only the newest one works. */
-export async function cancelPendingEmailVerifications(db, userId) {
-  try {
-    await db
-      .prepare(`UPDATE EmailVerificationToken SET status = 'cancelled' WHERE userId = ?1 AND status = 'pending'`)
-      .bind(userId)
-      .run();
-  } catch (e) {}
-}
-
-export async function createEmailVerificationToken(db, { userId, email, tokenHash, ttlMinutes = 1440 }) {
-  const id = crypto.randomUUID();
-  const now = new Date();
-  const createdAt = now.toISOString();
-  const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000).toISOString();
-  await db
-    .prepare(
-      `INSERT INTO EmailVerificationToken (id, userId, email, tokenHash, status, createdAt, expiresAt)
-       VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)`,
-    )
-    .bind(id, userId, String(email || '').trim().toLowerCase(), tokenHash, createdAt, expiresAt)
-    .run();
-  return { id, expiresAt };
-}
-
-export async function getEmailVerificationTokenById(db, id) {
-  return db.prepare(`SELECT * FROM EmailVerificationToken WHERE id = ?1`).bind(id).first();
-}
-
-export async function markEmailVerificationTokenUsed(db, id) {
-  await db
-    .prepare(`UPDATE EmailVerificationToken SET status = 'used', usedAt = datetime('now') WHERE id = ?1`)
-    .bind(id)
-    .run();
-}
-
 export async function cancelPendingOwnershipTransfers(db, userId) {
   await db
     .prepare(`UPDATE OwnershipTransfer SET status = 'cancelled' WHERE userId = ?1 AND status = 'pending'`)

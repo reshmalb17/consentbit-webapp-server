@@ -1,18 +1,28 @@
 // src/handlers/authLogin.js
-import { getUserByEmail, createSession } from '../services/db.js';
+import {
+  getUserByEmail,
+  createSession,
+  hashPassword,
+  isPasswordSet,
+  verifyStoredPassword,
+  updateUserPasswordHash,
+} from '../services/db.js';
+import { pwDebug, describeStored } from '../utils/pwDebug.js';
+import { resolvePasswordField, AuthCryptoError } from '../utils/authCrypto.js';
 
-/** Compute SHA-256(email|password) as hex - same as frontend hashPasswordForRequest */
-async function computeClientHash(email, password) {
-  const s = `${(email || '').trim().toLowerCase()}|${(password || '').trim()}`;
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
-  return Array.from(new Uint8Array(buf))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
+/**
+ * Password sign-in.
+ *
+ * A client-supplied `passwordHash` is deliberately NOT accepted any more. The previous
+ * scheme compared that field to the stored value, which made the stored value a login
+ * credential in its own right: anyone able to read the User table could authenticate as
+ * any user without ever knowing a password. The password now arrives either RSA-OAEP
+ * encrypted (passwordEnc) or as plaintext over HTTPS, and is checked against a PBKDF2
+ * hash here. Encryption is a transport-layer nicety; TLS and the PBKDF2 hash at rest are
+ * what actually protect the credential.
+ */
 export async function handleAuthLogin(request, env) {
   const db = env.CONSENT_WEBAPP;
-  // Request body: email + passwordHash (required). Optional: password for server-side verify fallback.
 
   if (request.method !== 'POST') {
     return new Response('Method Not Allowed', { status: 405 });
@@ -22,35 +32,36 @@ export async function handleAuthLogin(request, env) {
   try {
     body = await request.json();
   } catch {
-    return Response.json(
-      { success: false, error: 'Invalid JSON body' },
-      { status: 400 }
-    );
+    return Response.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
   }
 
   const email = (body.email || '').trim().toLowerCase();
-  let passwordHash = (body.passwordHash || '').trim();
-  const password = (body.password || '').trim();
+
+  // `passwordEnc` is the RSA-OAEP form; `password` stays accepted so the endpoint keeps
+  // working before the key secret is set and for any client that has not been updated.
+  let password = '';
+  let encrypted = false;
+  try {
+    ({ password, encrypted } = await resolvePasswordField(env, { enc: body.passwordEnc, plain: body.password }));
+  } catch (e) {
+    if (e instanceof AuthCryptoError) {
+      pwDebug('login:decrypt-failed', { email, reason: e.message });
+      return Response.json({ success: false, error: e.message, code: 'PASSWORD_ENC_FAILED' }, { status: 400 });
+    }
+    throw e;
+  }
+
+  pwDebug('login:request', { email, passwordProvided: !!password, passwordLen: password.length, encrypted, legacyHashFieldSent: body.passwordHash !== undefined });
 
   if (!email) {
-    return Response.json(
-      { success: false, error: 'email required' },
-      { status: 400 }
-    );
+    return Response.json({ success: false, error: 'email required' }, { status: 400 });
   }
-  // If password sent, compute hash server-side so login works even if client hash differed
-  if (password && !passwordHash) {
-    passwordHash = await computeClientHash(email, password);
-  }
-  if (!passwordHash) {
-    return Response.json(
-      { success: false, error: 'passwordHash required' },
-      { status: 400 }
-    );
+  if (!password) {
+    return Response.json({ success: false, error: 'password required' }, { status: 400 });
   }
 
   const user = await getUserByEmail(db, email);
-  // D1 may return column as passwordHash, password_hash, passwordhash, or other casing
+  // D1 may return the column as passwordHash, password_hash, passwordhash or other casing
   const passKey = user && Object.keys(user).find((k) => k.toLowerCase() === 'passwordhash');
   const stored = user && (
     user.passwordHash ??
@@ -58,35 +69,51 @@ export async function handleAuthLogin(request, env) {
     user.passwordhash ??
     (passKey ? user[passKey] : undefined)
   );
-  if (!user || !stored) {
-    return Response.json(
-      { success: false, error: 'Invalid credentials' },
-      { status: 401 }
-    );
+
+  pwDebug('login:lookup', { email, userFound: !!user, userId: user?.id ?? null, storedFormat: describeStored(stored), storedColumn: passKey ?? null });
+
+  if (!user) {
+    return Response.json({ success: false, error: 'Invalid credentials' }, { status: 401 });
   }
-  // Diagnostic: lengths only (no hash values)
-  const storedPrefix = typeof stored === 'string' ? stored.slice(0, 7) : 'n/a';
-  const storedHashLen = typeof stored === 'string' && stored.startsWith('client:') ? stored.length - 7 : 0;
-  let valid = false;
-  if (stored.startsWith('client:')) {
-    // New accounts: verify with client-sent SHA-256 hash (case-insensitive hex)
-    const storedHash = stored.slice(7).toLowerCase();
-    valid = passwordHash.toLowerCase() === storedHash;
-  } else {
-    // Legacy accounts (PBKDF2): we no longer accept plain password; user must reset
+
+  // Accounts created through the OTP flow hold the 'passwordless' sentinel rather than a
+  // hash. Report that distinctly (the frontend raises PasswordNotSetError on this flag)
+  // so the user is pointed at the email-code route instead of "wrong password".
+  if (!isPasswordSet(stored)) {
+    pwDebug('login:no-password-set', { email, userId: user.id, storedFormat: describeStored(stored) });
     return Response.json(
-      { success: false, error: 'This account uses an older sign-in method. Please use “Forgot password” to set a new password.' },
-      { status: 401 }
-    );
-  }
-  if (!valid) {
-    return Response.json(
-      { success: false, error: 'Invalid credentials' },
-      { status: 401 }
+      {
+        success: false,
+        passwordNotSet: true,
+        error: 'This account has no password yet. Sign in with an email code, then set one from your profile.',
+      },
+      { status: 401 },
     );
   }
 
+  const { valid, needsRehash } = await verifyStoredPassword({ email, password, stored });
+  pwDebug('login:verify', { email, userId: user.id, valid, needsRehash, storedFormat: describeStored(stored) });
+  if (!valid) {
+    return Response.json({ success: false, error: 'Invalid credentials' }, { status: 401 });
+  }
+
+  // Legacy 'client:' SHA-256 row — upgrade it to PBKDF2 now that the plaintext is in hand.
+  // Non-fatal by design: a write failure here must never block an otherwise valid sign-in.
+  if (needsRehash) {
+    try {
+      await updateUserPasswordHash(db, user.id, await hashPassword(password));
+      pwDebug('login:rehashed', { userId: user.id, from: 'legacy-client-sha256', to: 'pbkdf2' });
+    } catch (e) {
+      pwDebug('login:rehash-failed', { userId: user.id, error: e?.message || String(e) });
+      console.error('[AuthLogin] password rehash failed', {
+        userId: user.id,
+        error: e?.message || String(e),
+      });
+    }
+  }
+
   const session = await createSession(db, { userId: user.id });
+  pwDebug('login:success', { userId: user.id, email, sessionCreated: true });
 
   const isProd = env.NODE_ENV === 'production';
 

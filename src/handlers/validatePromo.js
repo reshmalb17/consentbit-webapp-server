@@ -3,7 +3,44 @@
 // Returns: { success, valid, discountCents?, finalCents?, stripeCouponId?, message }
 // Validates using Stripe promotion codes only (no PromoCode table). Create codes in Stripe Dashboard.
 
-import { ensureSchema } from '../services/db.js';
+import { ensureSchema, getSessionById, getUserById } from '../services/db.js';
+import {
+  isRestrictedCode,
+  isCodeAllowedForEmail,
+  PROMO_NOT_ALLOWED_MESSAGE,
+} from '../services/promoRestrictions.js';
+
+/** Logged-in account email, with an ?email/body email hint for embedded apps. See validate-coupon. */
+async function resolveCallerEmail(request, env, body) {
+  // Debug: identity resolution is the usual failure point for restricted codes.
+  // Cookie NAMES only — never log the sid value.
+  const cookie = request.headers.get('Cookie') || '';
+  const cookieNames = cookie ? cookie.split(';').map((c) => c.split('=')[0].trim()).filter(Boolean) : [];
+  const m = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
+  console.log('[ValidatePromo] identity debug', {
+    origin: request.headers.get('Origin') || null,
+    referer: request.headers.get('Referer') || null,
+    hasCookieHeader: cookie.length > 0,
+    cookieNames,
+    hasSid: !!m,
+    emailHint: (body?.email || '') ? 'present' : 'absent',
+  });
+  try {
+    if (m && env.CONSENT_WEBAPP) {
+      const session = await getSessionById(env.CONSENT_WEBAPP, m[1].trim());
+      console.log('[ValidatePromo] session lookup', { sessionFound: !!session, userId: session ? (session.userId ?? session.user_id ?? null) : null });
+      if (session) {
+        const user = await getUserById(env.CONSENT_WEBAPP, session.userId ?? session.user_id);
+        console.log('[ValidatePromo] user lookup', { userFound: !!user, email: user?.email ?? null });
+        if (user?.email) return String(user.email).trim().toLowerCase();
+      }
+    }
+  } catch (e) {
+    console.warn('[ValidatePromo] session lookup failed', e?.message);
+  }
+  const hint = (body?.email || '').toString().trim().toLowerCase();
+  return hint || null;
+}
 
 const PRICES = { monthly: 800, yearly: 7200 }; // cents per license: $8, $72
 
@@ -52,6 +89,16 @@ export async function handleValidatePromo(request, env) {
   const stripePromo = await findStripePromoByCode(stripeSecret, code);
   if (!stripePromo) {
     return Response.json({ success: true, valid: false, message: 'Invalid promo code' });
+  }
+
+  // Per-customer promo restrictions (see services/promoRestrictions.js).
+  const promoCodeString = stripePromo.promotionCode?.code || code;
+  if (isRestrictedCode(promoCodeString)) {
+    const callerEmail = await resolveCallerEmail(request, env, body);
+    if (!isCodeAllowedForEmail(promoCodeString, callerEmail)) {
+      console.warn('[ValidatePromo] restricted code denied', { code: promoCodeString, callerEmail });
+      return Response.json({ success: true, valid: false, message: PROMO_NOT_ALLOWED_MESSAGE });
+    }
   }
 
   const coupon = stripePromo.coupon;

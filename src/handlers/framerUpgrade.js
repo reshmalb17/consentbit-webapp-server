@@ -42,6 +42,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { syncSubscriptionUpdateToLegacy } from '../services/syncLegacy.js';
+import { isPromotionCodeAllowedForEmail } from '../services/promoRestrictions.js';
 
 const TAG = '[framer-upgrade]';
 const PLAN_ORDER = { basic: 1, essential: 2, growth: 3 };
@@ -379,6 +380,14 @@ async function prepareChange(request, env) {
   const site = await resolveSite(db, siteId);
   const auth = await requireFramerAuth(request, env, site);
   if (!auth.ok) return { error: auth.res };
+
+  // Per-customer promo restrictions (see services/promoRestrictions.js).
+  if (promotionCodeId) {
+    const promoOk = await isPromotionCodeAllowedForEmail(
+      env.STRIPE_SECRET_KEY, promotionCodeId, auth.email,
+    );
+    if (!promoOk.allowed) return { error: fail(promoOk.reason, 400) };
+  }
 
   const sub = await resolveSubscription(db, site);
   if (!sub) return { error: fail('No active subscription found', 404) };

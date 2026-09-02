@@ -13,6 +13,7 @@ import {
   saveBannerCustomization,
   getWebflowOAuthTokenBySite,
   getWebflowOAuthTokenByUser,
+  setSignupSourceIfMissing,
 } from '../services/db.js';
 import { capturePostHogEvent, identifyPostHogPerson, identifyPostHogSite } from '../services/posthog.js';
 
@@ -209,6 +210,9 @@ export async function handleWebflowFreeRegister(request, env) {
         .bind(userId, email, nameGuess, now)
         .run();
     }
+    // The account was just minted by the Webflow first-publish flow — stamp the origin.
+    // Separate statement so it can't break either INSERT fallback above.
+    await setSignupSourceIfMissing(db, userId, 'webflow');
     user = await db.prepare('SELECT * FROM User WHERE id = ?1').bind(userId).first();
   }
 

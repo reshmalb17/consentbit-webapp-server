@@ -8,6 +8,11 @@
 // Returns: { success, url, sessionId }
 
 import { getSessionById, getUserById, getSubscriptionBySiteId, getSiteTrialUsed } from '../services/db.js';
+import {
+  isCodeAllowedForEmail,
+  isCouponIdAllowedForEmail,
+  PROMO_NOT_ALLOWED_MESSAGE,
+} from '../services/promoRestrictions.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -166,8 +171,12 @@ export async function handleUpgradeSubscription(request, env) {
     bodyKeys: Object.keys(body || {}),
   });
 
-  // a) Raw coupon id (coup_xxx)
+  // a) Raw coupon id (coup_xxx) — bypasses promotion-code checks, so gate it here.
   if (stripeCouponId) {
+    const rawOk = await isCouponIdAllowedForEmail(secret, stripeCouponId, email);
+    if (!rawOk.allowed) {
+      return Response.json({ success: false, error: rawOk.reason }, { status: 400 });
+    }
     params.set('discounts[0][coupon]', stripeCouponId);
   }
 
@@ -182,6 +191,10 @@ export async function handleUpgradeSubscription(request, env) {
       if (verify.error || !verify.active) {
         console.warn('[UPGRADE] promotion code rejected', { id: promotionCodeId, err: verify.error?.message });
         return Response.json({ success: false, error: 'Promotion code is no longer valid' }, { status: 400 });
+      }
+      if (!isCodeAllowedForEmail(verify.code, email)) {
+        console.warn('[UPGRADE] promo restricted to another account', { code: verify.code, email });
+        return Response.json({ success: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 400 });
       }
       params.set('discounts[0][promotion_code]', promotionCodeId);
       if (verify.code) params.set('subscription_data[metadata][promotionCode]', verify.code);
@@ -214,6 +227,10 @@ export async function handleUpgradeSubscription(request, env) {
       const promo = lookupData?.data?.[0];
       if (!promo || !promo.active) {
         return Response.json({ success: false, error: 'Invalid or expired coupon code' }, { status: 400 });
+      }
+      if (!isCodeAllowedForEmail(promo.code || couponCode, email)) {
+        console.warn('[UPGRADE] coupon restricted to another account', { code: promo.code || couponCode, email });
+        return Response.json({ success: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 400 });
       }
       params.set('discounts[0][promotion_code]', promo.id);
       params.set('subscription_data[metadata][promotionCode]', promo.code || couponCode);

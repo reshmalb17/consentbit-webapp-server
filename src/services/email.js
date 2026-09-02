@@ -693,3 +693,57 @@ ConsentBit Team
 }
 
 
+
+// ---------------------------------------------------------------------------
+// 8. Verify-your-email link — sent after direct password signup
+// ---------------------------------------------------------------------------
+
+/**
+ * The direct signup path (/api/auth/signup) creates the account without proving the
+ * address belongs to whoever registered it. This link is that proof, sent after the
+ * fact so signup stays one step; paid checkout stays blocked until it is clicked.
+ *
+ * @param {object} env
+ * @param {ExecutionContext|null} ctx
+ * @param {{ to: string, name: string, link: string, ttlHours: number }} opts
+ */
+export function sendVerifyEmailLink(env, ctx, { to, name, link, ttlHours = 24 }) {
+  const displayName = name || 'there';
+  const subject = 'Confirm your email address';
+
+  const html = layout(
+    'Confirm your email address to finish setting up ConsentBit.',
+    `
+    <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi ${displayName},</p>
+    <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
+      Your ConsentBit account is ready to use. Confirm this is your email address so you
+      can upgrade to a paid plan when you need to.
+    </p>
+
+    <p style="margin:0 0 24px;">
+      <a href="${link}" style="display:inline-block;background:#007aff;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:12px 22px;border-radius:8px;">Confirm email address</a>
+    </p>
+
+    <p style="margin:0 0 18px;color:#6b7280;font-size:14px;line-height:1.6;">
+      This link expires in ${ttlHours} hours. If the button does not work, copy this into
+      your browser:<br />
+      <span style="color:#374151;word-break:break-all;">${link}</span>
+    </p>
+
+    ${HR}
+
+    <p style="margin:0;color:#6b7280;font-size:14px;line-height:1.6;">
+      If you did not create a ConsentBit account, you can ignore this email — and we would
+      recommend securing the account at this address, since someone used it to sign up.
+    </p>
+    `,
+  );
+
+  const text = `Hi ${displayName},\n\nYour ConsentBit account is ready. Confirm your email address so you can upgrade to a paid plan when you need to:\n\n${link}\n\nThis link expires in ${ttlHours} hours.\n\nIf you did not create a ConsentBit account, you can ignore this email.\n\nBest regards,\nConsentBit Team\n`;
+
+  const send = sendBrevoEmail(env, { to, name, subject, html, text })
+    .catch(e => console.error('[Email] sendVerifyEmailLink failed:', e?.message));
+
+  if (ctx?.waitUntil) ctx.waitUntil(send);
+  return send;
+}

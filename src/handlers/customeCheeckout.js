@@ -33,7 +33,15 @@ import {
   buildEmbedScriptUrl,
   getSubscriptionByOrganization,
   normalizeDomain,
+  normalizeSignupSource,
+  getSessionById,
+  getUserById,
 } from '../services/db.js';
+import {
+  isRestrictedCode,
+  isCodeAllowedForEmail,
+  PROMO_NOT_ALLOWED_MESSAGE,
+} from '../services/promoRestrictions.js';
 import { injectScriptIntoWebflowHead } from './webflowFreeRegister.js';
 import { sendPaidPlanEmail } from '../services/email.js';
 import { addCustomerToClickUp, wasClickUpTaskCreated, markClickUpTaskCreated } from '../services/clickup.js';
@@ -241,7 +249,19 @@ async function provisionAccount(db, env, request, ctx, {
 }) {
   const [existingUser] = await Promise.all([getUserByEmail(db, email)]);
   const isNewUser = !existingUser;
-  const user = existingUser ?? await createUser(db, { email, name: null });
+  // This endpoint serves BOTH the webapp checkout and plugin checkouts — see the
+  // `platformSiteIdToStore` branch below, which stores a platformSiteId and assumes
+  // 'webflow' whenever wfSiteId is present. So `platform` being absent does NOT mean
+  // "webapp": a plugin checkout that simply didn't name its platform lands here too.
+  // wfSiteId is the tell. Only a checkout with no plugin site id at all is provably a
+  // webapp signup; a nameless plugin checkout leaves the origin unrecorded (null)
+  // rather than being mislabelled 'webapp'.
+  const checkoutSource = normalizeSignupSource(platform) || (wfSiteId ? null : 'webapp');
+  const user = existingUser ?? await createUser(db, { email, name: null, signupSource: checkoutSource });
+  // Origin to report to analytics: what the plugin declared, else the account's recorded
+  // signup source. Never a bare 'webapp' default — an unknown stays unknown (null).
+  const attributionPlatform =
+    normalizeSignupSource(platform) || normalizeSignupSource(existingUser?.signupSource) || (isNewUser ? checkoutSource : null);
 
   const orgName = user.name ? `${user.name}'s Organization` : 'My Organization';
   const org = await getOrCreateOrganizationForUser(db, { userId: user.id, organizationName: orgName });
@@ -267,7 +287,7 @@ async function provisionAccount(db, env, request, ctx, {
         site_id: site.id,
         domain: site.domain,
         plan_tier: planId,
-        platform: platform || 'webapp',
+        ...(attributionPlatform ? { platform: attributionPlatform } : {}),
         ...(site.id ? { $groups: { site: String(site.id) } } : {}),
       },
     });
@@ -788,6 +808,10 @@ export async function handleCustomCheckout(request, env, ctx) {
       if (verify.error || !verify.active) {
         return Response.json({ success: false, error: 'Promotion code is no longer valid' }, { status: 400 });
       }
+      if (!isCodeAllowedForEmail(verify.code, email)) {
+        console.warn('[CustomCheckout] promo restricted to another account', { code: verify.code, email });
+        return Response.json({ success: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 400 });
+      }
       subParams.set('discounts[0][promotion_code]', promotionCodeId);
       subParams.set('metadata[promotionCode]', verify.code || '');
     } catch (e) {
@@ -904,6 +928,43 @@ export async function handleCustomCheckout(request, env, ctx) {
   return Response.json({ success: false, error: `Unexpected subscription status: ${subStatus}` }, { status: 400 });
 }
 
+/**
+ * Best-effort identification of who is asking, for per-customer promo restrictions.
+ * Prefers the logged-in session; falls back to an ?email= hint from the embedded
+ * (Webflow/Framer) apps, which have no session cookie on this origin. The hint is
+ * advisory only — checkout re-checks against the account that actually pays.
+ */
+async function resolveCallerEmail(request, env) {
+  // Debug: identity resolution is the usual failure point for restricted codes.
+  // Cookie NAMES only — never log the sid value.
+  const cookie = request.headers.get('Cookie') || '';
+  const cookieNames = cookie ? cookie.split(';').map((c) => c.split('=')[0].trim()).filter(Boolean) : [];
+  const m = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
+  console.log('[ValidateCoupon] identity debug', {
+    origin: request.headers.get('Origin') || null,
+    referer: request.headers.get('Referer') || null,
+    hasCookieHeader: cookie.length > 0,
+    cookieNames,
+    hasSid: !!m,
+    emailHint: (new URL(request.url).searchParams.get('email') || '') ? 'present' : 'absent',
+  });
+  try {
+    if (m && env.CONSENT_WEBAPP) {
+      const session = await getSessionById(env.CONSENT_WEBAPP, m[1].trim());
+      console.log('[ValidateCoupon] session lookup', { sessionFound: !!session, userId: session ? (session.userId ?? session.user_id ?? null) : null });
+      if (session) {
+        const user = await getUserById(env.CONSENT_WEBAPP, session.userId ?? session.user_id);
+        console.log('[ValidateCoupon] user lookup', { userFound: !!user, email: user?.email ?? null });
+        if (user?.email) return String(user.email).trim().toLowerCase();
+      }
+    }
+  } catch (e) {
+    console.warn('[ValidateCoupon] session lookup failed', e?.message);
+  }
+  const hint = (new URL(request.url).searchParams.get('email') || '').trim().toLowerCase();
+  return hint || null;
+}
+
 // GET /api/validate-coupon?code=<customer-facing code>
 //
 // Looks up an active Stripe promotion code by its customer-facing string and
@@ -956,6 +1017,16 @@ export async function handleValidateCoupon(request, env) {
   if (!promo || !promo.active) {
     console.log('[ValidateCoupon] no active promo found', { found: !!promo, active: promo?.active ?? false });
     return Response.json({ valid: false, error: 'Invalid or expired code' }, { status: 200 });
+  }
+
+  // Per-customer promo restrictions (see services/promoRestrictions.js).
+  // Only costs a DB lookup for codes that are actually restricted.
+  if (isRestrictedCode(promo.code)) {
+    const callerEmail = await resolveCallerEmail(request, env);
+    if (!isCodeAllowedForEmail(promo.code, callerEmail)) {
+      console.warn('[ValidateCoupon] restricted code denied', { code: promo.code, callerEmail });
+      return Response.json({ valid: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 200 });
+    }
   }
 
   const c = promo.coupon || {};
