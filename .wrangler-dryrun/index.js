@@ -1034,6 +1034,7 @@ __export(db_exports, {
   addOrganizationMember: () => addOrganizationMember,
   buildEmbedScriptUrl: () => buildEmbedScriptUrl,
   calculateNextRunAt: () => calculateNextRunAt,
+  cancelPendingEmailVerifications: () => cancelPendingEmailVerifications,
   cancelPendingOwnershipTransfers: () => cancelPendingOwnershipTransfers,
   canonicalEmbedOrigin: () => canonicalEmbedOrigin,
   claimDueScheduledScan: () => claimDueScheduledScan,
@@ -1041,6 +1042,7 @@ __export(db_exports, {
   consumeEmailVerificationCode: () => consumeEmailVerificationCode,
   consumeWebflowOAuthState: () => consumeWebflowOAuthState,
   createEmailVerificationCode: () => createEmailVerificationCode,
+  createEmailVerificationToken: () => createEmailVerificationToken,
   createOrganization: () => createOrganization,
   createOwnershipTransfer: () => createOwnershipTransfer,
   createScanHistory: () => createScanHistory,
@@ -1066,6 +1068,7 @@ __export(db_exports, {
   getBannerCustomization: () => getBannerCustomization,
   getDueScheduledScans: () => getDueScheduledScans,
   getEffectivePlanForOrganization: () => getEffectivePlanForOrganization,
+  getEmailVerificationTokenById: () => getEmailVerificationTokenById,
   getLatestValidEmailVerificationCode: () => getLatestValidEmailVerificationCode,
   getLicenseActivation: () => getLicenseActivation,
   getLicenseActivationsByOrganization: () => getLicenseActivationsByOrganization,
@@ -1084,6 +1087,7 @@ __export(db_exports, {
   getScanUsageForSite: () => getScanUsageForSite,
   getScheduledScans: () => getScheduledScans,
   getSessionById: () => getSessionById,
+  getSignupSourceByEmail: () => getSignupSourceByEmail,
   getSiteByCdnId: () => getSiteByCdnId,
   getSiteByDomain: () => getSiteByDomain,
   getSiteById: () => getSiteById,
@@ -1109,18 +1113,23 @@ __export(db_exports, {
   inferTierPlanIdFromStripePriceId: () => inferTierPlanIdFromStripePriceId,
   insertScripts: () => insertScripts,
   invalidateWebflowOAuthToken: () => invalidateWebflowOAuthToken,
+  isEmailVerified: () => isEmailVerified,
+  isPasswordSet: () => isPasswordSet,
   isPromoValid: () => isPromoValid,
   listSites: () => listSites,
+  markEmailVerificationTokenUsed: () => markEmailVerificationTokenUsed,
   markOwnershipTransferAuthorized: () => markOwnershipTransferAuthorized,
   markPaymentIntentProcessed: () => markPaymentIntentProcessed,
   markScanLimitNotified: () => markScanLimitNotified,
   markSiteVerified: () => markSiteVerified,
   markSubscriptionQueueFailed: () => markSubscriptionQueueFailed,
   markTrialUsed: () => markTrialUsed,
+  markUserEmailVerified: () => markUserEmailVerified,
   migrateBannerConfigs: () => migrateBannerConfigs,
   migrateFramerBannerConfigs: () => migrateFramerBannerConfigs,
   migrateLegacyUsers: () => migrateLegacyUsers,
   normalizeDomain: () => normalizeDomain,
+  normalizeSignupSource: () => normalizeSignupSource,
   recordConsent: () => recordConsent,
   recordScanHistory: () => recordScanHistory,
   renameUserAccount: () => renameUserAccount,
@@ -1130,22 +1139,44 @@ __export(db_exports, {
   saveReportedScripts: () => saveReportedScripts,
   saveSubscription: () => saveSubscription,
   saveWebflowOAuthToken: () => saveWebflowOAuthToken,
+  setSignupSourceIfMissing: () => setSignupSourceIfMissing,
   setSiteCustomDomain: () => setSiteCustomDomain,
   setSiteStagingUrl: () => setSiteStagingUrl,
   updateScheduledScanAfterRun: () => updateScheduledScanAfterRun,
   updateSiteFromPatch: () => updateSiteFromPatch,
   updateSiteName: () => updateSiteName,
   updateUserBillingEmail: () => updateUserBillingEmail,
+  updateUserPasswordHash: () => updateUserPasswordHash,
   upsertCookie: () => upsertCookie,
   upsertCookies: () => upsertCookies,
   upsertLegacyEntry: () => upsertLegacyEntry,
   upsertScript: () => upsertScript,
   upsertScripts: () => upsertScripts,
-  verifyPassword: () => verifyPassword
+  validatePasswordPolicy: () => validatePasswordPolicy,
+  verifyPassword: () => verifyPassword,
+  verifyStoredPassword: () => verifyStoredPassword
 });
 async function ensureSchema(db) {
-  if (_schemaEnsured.get(db)) return;
-  _schemaEnsured.set(db, true);
+  const inflight = _schemaEnsured.get(db);
+  if (inflight) return inflight;
+  const p = _runEnsureSchema(db).catch((err) => {
+    _schemaEnsured.delete(db);
+    throw err;
+  });
+  _schemaEnsured.set(db, p);
+  return p;
+}
+async function _runEnsureSchema(db) {
+  const _schemaT0 = Date.now();
+  try {
+    const stamped = await db.prepare("SELECT version FROM SchemaVersion WHERE id = 1").first();
+    if (stamped && Number(stamped.version) === SCHEMA_VERSION) {
+      console.log(`[ensureSchema] \u2705 schema v${SCHEMA_VERSION} current \u2014 skipped full migration (${Date.now() - _schemaT0}ms)`);
+      return;
+    }
+  } catch (_) {
+  }
+  console.log("[ensureSchema] \u23F3 COLD START \u2014 running FULL schema migration");
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS Site (
       id TEXT PRIMARY KEY,
@@ -1471,6 +1502,10 @@ async function ensureSchema(db) {
   }
   try {
     await db.prepare(`ALTER TABLE BannerCustomization ADD COLUMN contentEditedFromWebapp INTEGER DEFAULT 0`).run();
+  } catch (e) {
+  }
+  try {
+    await db.prepare(`ALTER TABLE BannerCustomization ADD COLUMN hideBranding INTEGER DEFAULT 0`).run();
   } catch (e) {
   }
   await db.prepare(`
@@ -1821,6 +1856,7 @@ async function ensureSchema(db) {
       purpose TEXT NOT NULL, -- 'login' | 'signup'
       codeHash TEXT NOT NULL,
       name TEXT, -- only for signup
+      passwordHash TEXT, -- PBKDF2 hash of a signup password, moved to User on verify
       attempts INTEGER DEFAULT 0,
       consumedAt DATETIME,
       expiresAt DATETIME NOT NULL,
@@ -1833,6 +1869,10 @@ async function ensureSchema(db) {
   }
   try {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_evc_expires ON EmailVerificationCode(expiresAt)`).run();
+  } catch (e) {
+  }
+  try {
+    await db.prepare(`ALTER TABLE EmailVerificationCode ADD COLUMN passwordHash TEXT`).run();
   } catch (e) {
   }
   await db.prepare(`
@@ -1920,6 +1960,45 @@ async function ensureSchema(db) {
     await db.prepare(`ALTER TABLE User ADD COLUMN billingEmail TEXT`).run();
   } catch (e) {
   }
+  try {
+    await db.prepare(`ALTER TABLE User ADD COLUMN signupSource TEXT`).run();
+  } catch (e) {
+  }
+  let addedEmailVerifiedAt = false;
+  try {
+    await db.prepare(`ALTER TABLE User ADD COLUMN emailVerifiedAt TEXT`).run();
+    addedEmailVerifiedAt = true;
+  } catch (e) {
+  }
+  if (addedEmailVerifiedAt) {
+    try {
+      await db.prepare(`UPDATE User SET emailVerifiedAt = COALESCE(createdAt, datetime('now')) WHERE emailVerifiedAt IS NULL`).run();
+    } catch (e) {
+    }
+  }
+  try {
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS EmailVerificationToken (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        email TEXT NOT NULL,
+        tokenHash TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        createdAt TEXT NOT NULL,
+        expiresAt TEXT NOT NULL,
+        usedAt TEXT
+      )
+    `).run();
+  } catch (e) {
+  }
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_email_verif_user ON EmailVerificationToken(userId, status)`).run();
+  } catch (e) {
+  }
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_email_verif_expires ON EmailVerificationToken(expiresAt)`).run();
+  } catch (e) {
+  }
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS WebflowOAuthState (
       state TEXT PRIMARY KEY,
@@ -1958,6 +2037,18 @@ async function ensureSchema(db) {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_wf_oauth_site_userkey ON WebflowOAuthSite(userKey)`).run();
   } catch (e) {
   }
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS SchemaVersion (
+      id INTEGER PRIMARY KEY,
+      version INTEGER NOT NULL,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+  await db.prepare(
+    `INSERT INTO SchemaVersion (id, version, updatedAt) VALUES (1, ?1, datetime('now'))
+       ON CONFLICT(id) DO UPDATE SET version = ?1, updatedAt = datetime('now')`
+  ).bind(SCHEMA_VERSION).run();
+  console.log(`[ensureSchema] \u2705 FULL migration completed in ${Date.now() - _schemaT0}ms \u2014 stamped v${SCHEMA_VERSION}`);
 }
 function normalizeDomainStr(raw) {
   return (raw || "").replace(/^https?:\/\//, "").replace(/\/$/, "").toLowerCase().trim();
@@ -2423,11 +2514,19 @@ async function tagKvAsMigrated(kvByKey, entry) {
     console.warn(`[tagKvAsMigrated] Failed to tag "${entry.domain}":`, err?.message);
   }
 }
-async function createEmailVerificationCode(db, { email, purpose, codeHash, name, ttlMinutes = 10 } = {}) {
+async function createEmailVerificationCode(db, { email, purpose, codeHash, name, ttlMinutes = 10, passwordHash = null } = {}) {
   await ensureSchema(db);
   const id = crypto.randomUUID();
   const now = /* @__PURE__ */ new Date();
   const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1e3).toISOString();
+  try {
+    await db.prepare(
+      `INSERT INTO EmailVerificationCode (id, email, purpose, codeHash, name, passwordHash, attempts, consumedAt, expiresAt, createdAt)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, ?7, ?8)`
+    ).bind(id, email.trim().toLowerCase(), purpose, codeHash, name || null, passwordHash || null, expiresAt, now.toISOString()).run();
+    return { id, expiresAt };
+  } catch (e) {
+  }
   await db.prepare(
     `INSERT INTO EmailVerificationCode (id, email, purpose, codeHash, name, attempts, consumedAt, expiresAt, createdAt)
        VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, ?6, ?7)`
@@ -3341,13 +3440,78 @@ async function verifyPassword(plainPassword, storedSaltHash) {
   );
   return toHex(bits) === hashHex;
 }
+function validatePasswordPolicy(password) {
+  const p = typeof password === "string" ? password : "";
+  if (p.length < 8) return "Password must be at least 8 characters.";
+  if (!/[A-Za-z]/.test(p) || !/[0-9]/.test(p)) {
+    return "Password must contain at least one letter and one number.";
+  }
+  return null;
+}
+function isPasswordSet(stored) {
+  const s = typeof stored === "string" ? stored.trim() : "";
+  return s !== "" && s !== "passwordless";
+}
+async function verifyStoredPassword({ email, password, stored }) {
+  if (!isPasswordSet(stored)) return { valid: false, needsRehash: false };
+  const s = String(stored).trim();
+  if (s.startsWith("client:")) {
+    const expected = s.slice(7).toLowerCase();
+    const seed = `${(email || "").trim().toLowerCase()}|${(password || "").trim()}`;
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(seed));
+    const actual = Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+    return { valid: actual === expected, needsRehash: true };
+  }
+  if (s.includes(":")) return { valid: await verifyPassword(password, s), needsRehash: false };
+  return { valid: false, needsRehash: false };
+}
+async function updateUserPasswordHash(db, userId, passwordHash) {
+  try {
+    await db.prepare(`UPDATE User SET passwordHash = ?1, password_hash = ?1, updatedAt = datetime('now') WHERE id = ?2`).bind(passwordHash, userId).run();
+    return;
+  } catch (e) {
+  }
+  await db.prepare(`UPDATE User SET passwordHash = ?1, updatedAt = datetime('now') WHERE id = ?2`).bind(passwordHash, userId).run();
+}
 async function getUserByEmail(db, email) {
   const user = await db.prepare("SELECT * FROM User WHERE email = ?1").bind(email).first();
   return user || null;
 }
-async function createUser(db, { email, name, passwordHash = "passwordless" }) {
+function normalizeSignupSource(value) {
+  const v = String(value || "").trim().toLowerCase();
+  return SIGNUP_SOURCES.has(v) ? v : null;
+}
+async function getSignupSourceByEmail(db, email) {
+  if (!db || !email) return null;
+  try {
+    const row = await db.prepare("SELECT signupSource FROM User WHERE email = ?1 LIMIT 1").bind(String(email).trim().toLowerCase()).first();
+    return normalizeSignupSource(row?.signupSource);
+  } catch (e) {
+    return null;
+  }
+}
+async function setSignupSourceIfMissing(db, userId, source2) {
+  const normalized = normalizeSignupSource(source2);
+  if (!db || !userId || !normalized) return;
+  try {
+    await db.prepare(`UPDATE User SET signupSource = ?1 WHERE id = ?2 AND (signupSource IS NULL OR signupSource = '')`).bind(normalized, userId).run();
+  } catch (e) {
+  }
+}
+async function createUser(db, { email, name, passwordHash = "passwordless", signupSource = null }) {
   const id = crypto.randomUUID();
   const now = (/* @__PURE__ */ new Date()).toISOString();
+  const source2 = normalizeSignupSource(signupSource);
+  if (source2) {
+    try {
+      await db.prepare(
+        `INSERT INTO User (id, email, name, passwordHash, password_hash, signupSource, createdAt, updatedAt)
+           VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?6)`
+      ).bind(id, email.trim().toLowerCase(), (name || "").trim() || null, passwordHash, source2, now).run();
+      return { id, email: email.trim().toLowerCase(), name: (name || "").trim() || null, signupSource: source2 };
+    } catch (e) {
+    }
+  }
   try {
     await db.prepare(
       `INSERT INTO User (id, email, name, passwordHash, password_hash, createdAt, updatedAt)
@@ -3371,7 +3535,8 @@ async function createUser(db, { email, name, passwordHash = "passwordless" }) {
       now
     ).run();
   }
-  return { id, email: email.trim().toLowerCase(), name: (name || "").trim() || null };
+  if (source2) await setSignupSourceIfMissing(db, id, source2);
+  return { id, email: email.trim().toLowerCase(), name: (name || "").trim() || null, signupSource: source2 };
 }
 async function getUserById(db, id) {
   const user = await db.prepare("SELECT * FROM User WHERE id = ?1").bind(id).first();
@@ -3390,6 +3555,40 @@ async function renameUserAccount(db, userId, { email, name }) {
 async function deleteSessionsForUser(db, userId) {
   await db.prepare(`DELETE FROM Session WHERE userId = ?1`).bind(userId).run();
   return { deleted: true };
+}
+function isEmailVerified(user) {
+  if (!user) return false;
+  const v = user.emailVerifiedAt ?? user.emailverifiedat ?? null;
+  return typeof v === "string" && v.trim() !== "";
+}
+async function markUserEmailVerified(db, userId) {
+  try {
+    await db.prepare(`UPDATE User SET emailVerifiedAt = datetime('now'), updatedAt = datetime('now') WHERE id = ?1 AND (emailVerifiedAt IS NULL OR emailVerifiedAt = '')`).bind(userId).run();
+  } catch (e) {
+  }
+}
+async function cancelPendingEmailVerifications(db, userId) {
+  try {
+    await db.prepare(`UPDATE EmailVerificationToken SET status = 'cancelled' WHERE userId = ?1 AND status = 'pending'`).bind(userId).run();
+  } catch (e) {
+  }
+}
+async function createEmailVerificationToken(db, { userId, email, tokenHash, ttlMinutes = 1440 }) {
+  const id = crypto.randomUUID();
+  const now = /* @__PURE__ */ new Date();
+  const createdAt = now.toISOString();
+  const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1e3).toISOString();
+  await db.prepare(
+    `INSERT INTO EmailVerificationToken (id, userId, email, tokenHash, status, createdAt, expiresAt)
+       VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)`
+  ).bind(id, userId, String(email || "").trim().toLowerCase(), tokenHash, createdAt, expiresAt).run();
+  return { id, expiresAt };
+}
+async function getEmailVerificationTokenById(db, id) {
+  return db.prepare(`SELECT * FROM EmailVerificationToken WHERE id = ?1`).bind(id).first();
+}
+async function markEmailVerificationTokenUsed(db, id) {
+  await db.prepare(`UPDATE EmailVerificationToken SET status = 'used', usedAt = datetime('now') WHERE id = ?1`).bind(id).run();
 }
 async function cancelPendingOwnershipTransfers(db, userId) {
   await db.prepare(`UPDATE OwnershipTransfer SET status = 'cancelled' WHERE userId = ?1 AND status = 'pending'`).bind(userId).run();
@@ -4020,6 +4219,20 @@ async function saveBannerCustomization(db, siteId, customization) {
       now,
       now
     ).run();
+    if (customization.hideBranding !== void 0) {
+      const brandFlag = customization.hideBranding ? 1 : 0;
+      const writeBrandFlag = /* @__PURE__ */ __name(() => db.prepare(`UPDATE BannerCustomization SET hideBranding = ?1 WHERE siteId = ?2`).bind(brandFlag, siteId).run(), "writeBrandFlag");
+      try {
+        await writeBrandFlag();
+      } catch (_) {
+        try {
+          await db.prepare(`ALTER TABLE BannerCustomization ADD COLUMN hideBranding INTEGER DEFAULT 0`).run();
+          await writeBrandFlag();
+        } catch (brandErr) {
+          console.warn("[db] hideBranding write skipped:", brandErr?.message);
+        }
+      }
+    }
     return { success: true };
   } catch (error) {
     console.error("[db] Error saving banner customization:", error);
@@ -4147,13 +4360,15 @@ async function invalidateWebflowOAuthToken(db, kv, siteId) {
   } catch (_) {
   }
 }
-var _schemaEnsured, LICENSE_KEY_CHARS, PBKDF2_ITERATIONS, SALT_BYTES, HASH_BYTES;
+var _schemaEnsured, SCHEMA_VERSION, LICENSE_KEY_CHARS, PBKDF2_ITERATIONS, SALT_BYTES, HASH_BYTES, SIGNUP_SOURCES;
 var init_db = __esm({
   "src/services/db.js"() {
     init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
     init_performance2();
     _schemaEnsured = /* @__PURE__ */ new WeakMap();
+    SCHEMA_VERSION = 1;
     __name(ensureSchema, "ensureSchema");
+    __name(_runEnsureSchema, "_runEnsureSchema");
     __name(normalizeDomainStr, "normalizeDomainStr");
     __name(collectKvEntries, "collectKvEntries");
     __name(enrichFromLegacyDb, "enrichFromLegacyDb");
@@ -4233,12 +4448,26 @@ var init_db = __esm({
     __name(fromHex, "fromHex");
     __name(hashPassword, "hashPassword");
     __name(verifyPassword, "verifyPassword");
+    __name(validatePasswordPolicy, "validatePasswordPolicy");
+    __name(isPasswordSet, "isPasswordSet");
+    __name(verifyStoredPassword, "verifyStoredPassword");
+    __name(updateUserPasswordHash, "updateUserPasswordHash");
     __name(getUserByEmail, "getUserByEmail");
+    SIGNUP_SOURCES = /* @__PURE__ */ new Set(["webapp", "webflow", "framer"]);
+    __name(normalizeSignupSource, "normalizeSignupSource");
+    __name(getSignupSourceByEmail, "getSignupSourceByEmail");
+    __name(setSignupSourceIfMissing, "setSignupSourceIfMissing");
     __name(createUser, "createUser");
     __name(getUserById, "getUserById");
     __name(updateUserBillingEmail, "updateUserBillingEmail");
     __name(renameUserAccount, "renameUserAccount");
     __name(deleteSessionsForUser, "deleteSessionsForUser");
+    __name(isEmailVerified, "isEmailVerified");
+    __name(markUserEmailVerified, "markUserEmailVerified");
+    __name(cancelPendingEmailVerifications, "cancelPendingEmailVerifications");
+    __name(createEmailVerificationToken, "createEmailVerificationToken");
+    __name(getEmailVerificationTokenById, "getEmailVerificationTokenById");
+    __name(markEmailVerificationTokenUsed, "markEmailVerificationTokenUsed");
     __name(cancelPendingOwnershipTransfers, "cancelPendingOwnershipTransfers");
     __name(createOwnershipTransfer, "createOwnershipTransfer");
     __name(getOwnershipTransferById, "getOwnershipTransferById");
@@ -5751,6 +5980,13 @@ function getLoaderIabScript(customization, opts = {}, isGAC = false) {
   const c = customization || {};
   const o = opts || {};
   const isGoogleAC = isGAC === true;
+  const hideBranding = o.hideBranding === true || o.hideBranding === 1;
+  const brandFooterHtml = hideBranding ? "" : `<div class="cb-brand-footer">
+        <a href="https://consentbit.com" target="_blank" rel="noopener noreferrer" aria-label="Powered by ConsentBit">
+          <span class="cb-brand-credit">Powered by</span>
+          <span class="cb-brand-mark">\${CB_WORDMARK_SVG}</span>
+        </a>
+      </div>`;
   const colorsJson = JSON.stringify({
     bannerBg: c.backgroundColor || "#FFFFFF",
     textColor: c.textColor || "#000000",
@@ -6162,12 +6398,7 @@ function injectHTML() {
           <button aria-label="Save My Preferences" class="cb-btn cb-btn-preferences" id="cbSaveBtn">Save My Preferences</button>
 
         </div>
-      <div class="cb-brand-footer">
-        <a href="https://consentbit.com" target="_blank" rel="noopener noreferrer" aria-label="Powered by ConsentBit">
-          <span class="cb-brand-credit">Powered by</span>
-          <span class="cb-brand-mark">\${CB_WORDMARK_SVG}</span>
-        </a>
-      </div>
+      ${brandFooterHtml}
     </div>
   </div>
 </div>\`;
@@ -6486,7 +6717,7 @@ function cbClarityConsent(categories) {
     if (window.__cbClaritySignal === sg) return;
     window.__cbClaritySignal = sg;
     window.clarity = window.clarity || function () { (window.clarity.q = window.clarity.q || []).push(arguments); };
-    window.clarity('consentv2', { source: (cfg.clarityCmpId || 'consentbit'), ad_Storage: ad, analytics_Storage: an });
+    window.clarity('consentv2', { source: (cfg.clarityCmpId || 165), ad_Storage: ad, analytics_Storage: an });
   } catch (e) {}
 }
 
@@ -8783,7 +9014,7 @@ __name(getLoaderIabScript, "getLoaderIabScript");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 function getWebflowSetupScript() {
-  return `(function(){window.__CB_WEBFLOW_MODE__=true;(function(){try{var a=window.__CONSENT_SITE__||{};var b=(a.bannerType||'gdpr').toLowerCase();var c=b==='ccpa';var d=null;var e=false;var hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}/* GPC: honor navigator.globalPrivacyControl as a CCPA opt-out on first visit (no stored choice), BEFORE gtag default + script-block decision below. Stored choice wins. */try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}/* Microsoft Clarity Consent API v2. Emitted before the Google Consent Mode work below: Microsoft wants the signal as early as possible, and this IIFE has a single catch, so a throw in the gtag section would otherwise skip it. __cbCl() dedupes on the same __cbClaritySignal fingerprint the standard loader uses, and is reused by the consentUpdated listener at the bottom. Clarity's tag is deliberately NOT blocked (see the o()/src-setter skips) \u2014 denied consent makes Clarity run cookieless on its own. */try{if(a.clarityConsentMode!==false){window.clarity=window.clarity||function(){(window.clarity.q=window.clarity.q||[]).push(arguments);};window.__cbCl=function(ad,an){try{var sg=ad+'|'+an;if(window.__cbClaritySignal===sg)return;window.__cbClaritySignal=sg;window.clarity('consentv2',{source:(a.clarityCmpId||'consentbit'),ad_Storage:ad,analytics_Storage:an});}catch(_){}};window.__cbCl(c?(e?'denied':'granted'):(d&&d.marketing?'granted':'denied'),c?(e?'denied':'granted'):(d&&d.analytics?'granted':'denied'));}}catch(_){}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);if(!c){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else{window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}window.__cbConsentDefaultSet=true;var f=c?e:true;var g=a.scriptBlockProviders||[];var h=a.customCookieRules||[];var j=[{domain:'google-analytics.com',category:'analytics'},{domain:'googletagmanager.com',category:'analytics'},{domain:'gtag/js',category:'analytics'},{domain:'gtm.js',category:'analytics'},{domain:'hotjar.com',category:'analytics'},{domain:'clarity.ms',category:'analytics'},{domain:'scorecardresearch.com',category:'analytics'},{domain:'quantserve.com',category:'analytics'},{domain:'facebook.com',category:'marketing'},{domain:'facebook.net',category:'marketing'},{domain:'fbcdn.net',category:'marketing'},{domain:'doubleclick.net',category:'marketing'},{domain:'googleadservices.com',category:'marketing'},{domain:'googlesyndication.com',category:'marketing'},{domain:'bing.com',category:'marketing'},{domain:'bat.bing.com',category:'marketing'},{domain:'twitter.com',category:'marketing'},{domain:'analytics.twitter.com',category:'marketing'},{domain:'t.co',category:'marketing'},{domain:'linkedin.com',category:'marketing'},{domain:'ads.linkedin.com',category:'marketing'},{domain:'pinterest.com',category:'marketing'},{domain:'ct.pinterest.com',category:'marketing'},{domain:'tiktok.com',category:'marketing'},{domain:'analytics.tiktok.com',category:'marketing'},{domain:'outbrain.com',category:'marketing'},{domain:'taboola.com',category:'marketing'},{domain:'criteo.com',category:'marketing'},{domain:'criteo.net',category:'marketing'},{domain:'zemanta.com',category:'marketing'},{domain:'adroll.com',category:'marketing'},{domain:'d.adroll.com',category:'marketing'},{domain:'smartlook.com',category:'analytics'},{domain:'smartlookcloud.com',category:'analytics'},{domain:'rec.smartlook.com',category:'analytics'},{domain:'posthog.com',category:'analytics'},{domain:'app.posthog.com',category:'analytics'},{domain:'eu.posthog.com',category:'analytics'},{domain:'matomo.cloud',category:'analytics'},{domain:'matomo.js',category:'analytics'},{domain:'piwik.js',category:'analytics'},{domain:'piwik.php',category:'analytics'}];function k(z){var lo=(z||'').trim().toLowerCase();return lo==='necessary'||lo==='essential';}function m(z){var lo=z.trim().toLowerCase();if(lo==='advertising'||lo==='advertisement')return'marketing';if(lo==='functional'||lo==='performance'||lo==='personalization')return'preferences';return lo;}/* String(u), not u: under Trusted Types a script.src assignment carries a TrustedScriptURL object, not a string, and .toLowerCase() on it throws. The throw escapes the src setter into the caller \u2014 i.e. into GTM's own tag-injection code \u2014 so one non-string assignment kills the tag that made it. GTM only reaches this path now that it is allowed to load, which is why this stayed latent. The original value is still what reaches setAttribute; only matching is done on the coerced copy, so Trusted Types enforcement is preserved. */function n(u){if(!u)return null;var lo=String(u).toLowerCase();for(var bi=0;bi<j.length;bi++){if(lo.indexOf(j[bi].domain)!==-1)return j[bi].category;}for(var ki=0;ki<g.length;ki++){try{if(g[ki]&&g[ki].pattern&&new RegExp(g[ki].pattern,'i').test(u))return(g[ki].categories&&g[ki].categories[0])||'analytics';}catch(_){}}for(var li=0;li<h.length;li++){try{if(h[li]&&h[li].scriptUrlPattern&&new RegExp(h[li].scriptUrlPattern,'i').test(u))return h[li].category||'analytics';}catch(_){}}return null;}/* Google Consent Mode v2: the two Google loaders are governed by the consent SIGNAL, not by the script blocker \u2014 the same arrangement as Clarity above, and the one the standard loader's isGoogleAnalyticsUrl()/isConsentSignalGoverned() has always applied. Hard-blocking gtm.js kills the container before it can read the 'consent default' set a few lines up, so nothing honours the denial, no cookieless pings are sent, and the whole first pageview is lost even for visitors who then accept. Guarded on __cbConsentDefaultSet: if the gtag section above threw, the defaults were never published and there is no signal to govern by, so we fall back to blocking. google-analytics.com is deliberately NOT exempt \u2014 GA4 reaches it by fetch/beacon (which this blocker never governed), and the only scripts on that host are legacy UA, which has no Consent Mode v2 support. */function gGov(u){if(a.gtmConsentMode===false)return false;if(!u)return false;if(!window.__cbConsentDefaultSet)return false;var lo=String(u).toLowerCase();return lo.indexOf('googletagmanager.com/gtm.js')!==-1||lo.indexOf('googletagmanager.com/gtag/js')!==-1;}function o(el){if(!f)return;if(!el||el.nodeName!=='SCRIPT')return;var u=(el.getAttribute&&el.getAttribute('src'))||'';if(u.indexOf('consentbit')!==-1||u.indexOf('consent.js')!==-1)return;if(a.clarityConsentMode!==false&&(u.indexOf('clarity.ms')!==-1||u.indexOf('clarity.microsoft.com')!==-1))return;if(gGov(u))return;if(el.getAttribute&&el.getAttribute('type')==='text/plain')return;var t=el.getAttribute&&el.getAttribute('data-category');if(t){var cl=t.split(',').map(function(z){return z.trim().toLowerCase();});if(cl.every(k))return;if(!c&&d){if(cl.every(function(z){return k(z)||!!d[m(z)];}))return;}if(u){el.setAttribute('data-cb-blocked-src',u);el.removeAttribute('src');}el.setAttribute('type','text/plain');}else if(u){var r2=n(u);if(!r2)return;if(k(r2))return;if(!c&&d&&!!d[m(r2)])return;el.setAttribute('data-cb-blocked-src',u);el.setAttribute('data-category',r2);el.removeAttribute('src');el.setAttribute('type','text/plain');}}var p=document.createElement.bind(document);document.createElement=function(tag){var el=p(tag);if(typeof tag==='string'&&tag.toLowerCase()==='script'){var sv='';try{/* The native script.src getter ALWAYS returns a string. This override must honour that contract: consumers do el.src.includes(...) / .indexOf(...) on it, and Google Tag Assistant's own bin does exactly that while enumerating page scripts. Returning the raw assigned value leaked a TrustedScriptURL object (GTM assigns one when the page has a Trusted Types policy) and threw inside Tag Assistant, which is why it could connect but never render tags. Falling back to the attribute \u2014 including data-cb-blocked-src \u2014 keeps a blocked script reporting the URL it intends to load rather than an empty string. Writes are untouched: set still stores and forwards the ORIGINAL value, so Trusted Types enforcement still sees a TrustedScriptURL. */Object.defineProperty(el,'src',{configurable:true,enumerable:true,get:function(){if(sv!=null&&sv!=='')return String(sv);var av='';try{av=(el.getAttribute&&(el.getAttribute('src')||el.getAttribute('data-cb-blocked-src')))||'';}catch(_){}return String(av);},set:function(val){sv=val;if(!f){el.setAttribute('src',val);return;}if(a.clarityConsentMode!==false&&typeof val==='string'&&(val.indexOf('clarity.ms')!==-1||val.indexOf('clarity.microsoft.com')!==-1)){el.setAttribute('src',val);return;}if(gGov(val)){el.setAttribute('src',val);return;}var t=el.getAttribute('data-category');var r2=n(val);var blk=false;if(t){var cl=t.split(',').map(function(z){return z.trim().toLowerCase();});if(!cl.every(k)){blk=!(!c&&d&&cl.every(function(z){return k(z)||!!d[m(z)];}));}}else if(r2&&!k(r2)){blk=!(!c&&d&&!!d[m(r2)]);}if(blk){el.setAttribute('data-cb-blocked-src',val);if(!t&&r2)el.setAttribute('data-category',r2);el.setAttribute('type','text/plain');}else{el.setAttribute('src',val);}}});}catch(_){}}return el;};var q=new MutationObserver(function(ms){ms.forEach(function(mu){mu.addedNodes.forEach(o);});});q.observe(document.documentElement,{childList:true,subtree:true});function r(){q.disconnect();document.querySelectorAll('script[type="text/plain"]').forEach(function(el){var u=el.getAttribute('src')||'';if(u&&!el.getAttribute('data-cb-blocked-src')){el.setAttribute('data-cb-blocked-src',u);if(!el.getAttribute('data-category')){var t=n(u);if(t)el.setAttribute('data-category',t);else{var t2=el.getAttribute('data-consentbit-category')||el.getAttribute('data-category-cb');if(t2)el.setAttribute('data-category',t2.trim().toLowerCase());}}}if(!u&&!el.getAttribute('data-cb-inline-blocked')){el.setAttribute('data-cb-inline-blocked','1');if(!el.getAttribute('data-category')){var t2=el.getAttribute('data-consentbit-category')||el.getAttribute('data-category-cb');if(t2)el.setAttribute('data-category',t2.trim().toLowerCase());}}});}document.readyState==='loading'?document.addEventListener('DOMContentLoaded',r,{once:true}):r();document.addEventListener('consentUpdated',function(ev){var cats=(ev&&ev.detail)||{};if(c){var dns2=!!(cats.doNotSell||(cats.ccpa&&cats.ccpa.doNotSell));e=dns2;try{window.__cbCl&&window.__cbCl(dns2?'denied':'granted',dns2?'denied':'granted');}catch(_){}window.gtag&&window.gtag('consent','update',{ad_storage:dns2?'denied':'granted',analytics_storage:dns2?'denied':'granted',ad_user_data:dns2?'denied':'granted',ad_personalization:dns2?'denied':'granted',functionality_storage:dns2?'denied':'granted',personalization_storage:dns2?'denied':'granted'});if(dns2&&!f){f=true;document.querySelectorAll('script[data-cb-blocked-src]').forEach(o);return;}if(!dns2)f=false;}else{d={analytics:!!cats.analytics,marketing:!!cats.marketing,preferences:!!cats.preferences,essential:true};try{window.__cbCl&&window.__cbCl(cats.marketing?'granted':'denied',cats.analytics?'granted':'denied');}catch(_){}}function s(t){if(c)return cats.doNotSell===false;if(!t)return!!(cats.analytics||cats.marketing||cats.preferences);var dca=t.split(',').map(function(z){return z.trim().toLowerCase();});return dca.every(function(z){if(z==='necessary'||z==='essential')return true;if(z==='analytics')return!!cats.analytics;if(z==='marketing'||z==='advertising'||z==='advertisement')return!!cats.marketing;if(z==='preferences'||z==='functional'||z==='performance'||z==='personalization')return!!cats.preferences;return true;});}var bl=document.querySelectorAll('script[type="text/plain"][data-cb-blocked-src],script[type="text/plain"][data-cb-inline-blocked]');for(var ii=0;ii<bl.length;ii++){var s2=bl[ii];var bsrc=s2.getAttribute('data-cb-blocked-src')||'';var dc=s2.getAttribute('data-category')||'';var ok=s(dc);if(ok){try{var ns2=p('script');if(bsrc){ns2.src=bsrc;if(s2.hasAttribute('async'))ns2.async=true;if(s2.hasAttribute('defer'))ns2.defer=true;var at2=s2.attributes;for(var ai=0;ai<at2.length;ai++){var an2=at2[ai].name;if(an2!=='src'&&an2!=='type'&&an2!=='data-cb-blocked-src'&&an2!=='data-cb-inline-blocked')ns2.setAttribute(an2,at2[ai].value);}ns2.setAttribute('data-cb-released-src',bsrc);s2.parentNode?s2.parentNode.replaceChild(ns2,s2):document.head.appendChild(ns2);}else{var ic=s2.textContent||s2.innerHTML||'';var nl=String.fromCharCode(10);var ls=ic.split(nl);var si=0;while(si<ls.length&&si<10){var lt=ls[si].trim();if(lt.length===0||(lt.charAt(0)==='/'&&lt.charAt(1)==='/'))si++;else break;}var fc=(si<ls.length?ls.slice(si).join(nl):'').trim().charAt(0);if(fc!=='{'&&fc!=='['){ns2.textContent=ic;var at3=s2.attributes;for(var aj=0;aj<at3.length;aj++){var an3=at3[aj].name;if(an3!=='type'&&an3!=='data-cb-inline-blocked')ns2.setAttribute(an3,at3[aj].value);}ns2.setAttribute('data-cb-released-inline','1');s2.parentNode&&s2.parentNode.replaceChild(ns2,s2);}}}catch(_){}}}var rl=document.querySelectorAll('script[data-cb-released-src],script[data-cb-released-inline]');for(var ri=0;ri<rl.length;ri++){var rs=rl[ri];var rdc=rs.getAttribute('data-category')||'';var rok=s(rdc);if(!rok){try{var rb=p('script');rb.setAttribute('type','text/plain');if(rdc)rb.setAttribute('data-category',rdc);var rIsInline=rs.hasAttribute('data-cb-released-inline');if(rIsInline){rb.textContent=rs.textContent||rs.innerHTML||'';rb.setAttribute('data-cb-inline-blocked','1');}else{var rSrc=rs.getAttribute('data-cb-released-src')||'';rb.setAttribute('data-cb-blocked-src',rSrc);if(rs.hasAttribute('async'))rb.setAttribute('async','');if(rs.hasAttribute('defer'))rb.setAttribute('defer','');}rs.parentNode&&rs.parentNode.replaceChild(rb,rs);}catch(_){}}}});
+  return `(function(){window.__CB_WEBFLOW_MODE__=true;(function(){try{var a=window.__CONSENT_SITE__||{};var b=(a.bannerType||'gdpr').toLowerCase();var c=b==='ccpa';var d=null;var e=false;var hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}/* GPC: honor navigator.globalPrivacyControl as a CCPA opt-out on first visit (no stored choice), BEFORE gtag default + script-block decision below. Stored choice wins. */try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}/* Microsoft Clarity Consent API v2. Emitted before the Google Consent Mode work below: Microsoft wants the signal as early as possible, and this IIFE has a single catch, so a throw in the gtag section would otherwise skip it. __cbCl() dedupes on the same __cbClaritySignal fingerprint the standard loader uses, and is reused by the consentUpdated listener at the bottom. Clarity's tag is deliberately NOT blocked (see the o()/src-setter skips) \u2014 denied consent makes Clarity run cookieless on its own. */try{if(a.clarityConsentMode!==false){window.clarity=window.clarity||function(){(window.clarity.q=window.clarity.q||[]).push(arguments);};window.__cbCl=function(ad,an){try{var sg=ad+'|'+an;if(window.__cbClaritySignal===sg)return;window.__cbClaritySignal=sg;window.clarity('consentv2',{source:(a.clarityCmpId||165),ad_Storage:ad,analytics_Storage:an});}catch(_){}};window.__cbCl(c?(e?'denied':'granted'):(d&&d.marketing?'granted':'denied'),c?(e?'denied':'granted'):(d&&d.analytics?'granted':'denied'));}}catch(_){}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);if(!c){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else{window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}window.__cbConsentDefaultSet=true;var f=c?e:true;var g=a.scriptBlockProviders||[];var h=a.customCookieRules||[];var j=[{domain:'google-analytics.com',category:'analytics'},{domain:'googletagmanager.com',category:'analytics'},{domain:'gtag/js',category:'analytics'},{domain:'gtm.js',category:'analytics'},{domain:'hotjar.com',category:'analytics'},{domain:'clarity.ms',category:'analytics'},{domain:'scorecardresearch.com',category:'analytics'},{domain:'quantserve.com',category:'analytics'},{domain:'facebook.com',category:'marketing'},{domain:'facebook.net',category:'marketing'},{domain:'fbcdn.net',category:'marketing'},{domain:'doubleclick.net',category:'marketing'},{domain:'googleadservices.com',category:'marketing'},{domain:'googlesyndication.com',category:'marketing'},{domain:'bing.com',category:'marketing'},{domain:'bat.bing.com',category:'marketing'},{domain:'twitter.com',category:'marketing'},{domain:'analytics.twitter.com',category:'marketing'},{domain:'t.co',category:'marketing'},{domain:'linkedin.com',category:'marketing'},{domain:'ads.linkedin.com',category:'marketing'},{domain:'pinterest.com',category:'marketing'},{domain:'ct.pinterest.com',category:'marketing'},{domain:'tiktok.com',category:'marketing'},{domain:'analytics.tiktok.com',category:'marketing'},{domain:'outbrain.com',category:'marketing'},{domain:'taboola.com',category:'marketing'},{domain:'criteo.com',category:'marketing'},{domain:'criteo.net',category:'marketing'},{domain:'zemanta.com',category:'marketing'},{domain:'adroll.com',category:'marketing'},{domain:'d.adroll.com',category:'marketing'},{domain:'smartlook.com',category:'analytics'},{domain:'smartlookcloud.com',category:'analytics'},{domain:'rec.smartlook.com',category:'analytics'},{domain:'posthog.com',category:'analytics'},{domain:'app.posthog.com',category:'analytics'},{domain:'eu.posthog.com',category:'analytics'},{domain:'matomo.cloud',category:'analytics'},{domain:'matomo.js',category:'analytics'},{domain:'piwik.js',category:'analytics'},{domain:'piwik.php',category:'analytics'}];function k(z){var lo=(z||'').trim().toLowerCase();return lo==='necessary'||lo==='essential';}function m(z){var lo=z.trim().toLowerCase();if(lo==='advertising'||lo==='advertisement')return'marketing';if(lo==='functional'||lo==='performance'||lo==='personalization')return'preferences';return lo;}/* String(u), not u: under Trusted Types a script.src assignment carries a TrustedScriptURL object, not a string, and .toLowerCase() on it throws. The throw escapes the src setter into the caller \u2014 i.e. into GTM's own tag-injection code \u2014 so one non-string assignment kills the tag that made it. GTM only reaches this path now that it is allowed to load, which is why this stayed latent. The original value is still what reaches setAttribute; only matching is done on the coerced copy, so Trusted Types enforcement is preserved. */function n(u){if(!u)return null;var lo=String(u).toLowerCase();for(var bi=0;bi<j.length;bi++){if(lo.indexOf(j[bi].domain)!==-1)return j[bi].category;}for(var ki=0;ki<g.length;ki++){try{if(g[ki]&&g[ki].pattern&&new RegExp(g[ki].pattern,'i').test(u))return(g[ki].categories&&g[ki].categories[0])||'analytics';}catch(_){}}for(var li=0;li<h.length;li++){try{if(h[li]&&h[li].scriptUrlPattern&&new RegExp(h[li].scriptUrlPattern,'i').test(u))return h[li].category||'analytics';}catch(_){}}return null;}/* Google Consent Mode v2: the two Google loaders are governed by the consent SIGNAL, not by the script blocker \u2014 the same arrangement as Clarity above, and the one the standard loader's isGoogleAnalyticsUrl()/isConsentSignalGoverned() has always applied. Hard-blocking gtm.js kills the container before it can read the 'consent default' set a few lines up, so nothing honours the denial, no cookieless pings are sent, and the whole first pageview is lost even for visitors who then accept. Guarded on __cbConsentDefaultSet: if the gtag section above threw, the defaults were never published and there is no signal to govern by, so we fall back to blocking. google-analytics.com is deliberately NOT exempt \u2014 GA4 reaches it by fetch/beacon (which this blocker never governed), and the only scripts on that host are legacy UA, which has no Consent Mode v2 support. */function gGov(u){if(a.gtmConsentMode===false)return false;if(!u)return false;if(!window.__cbConsentDefaultSet)return false;var lo=String(u).toLowerCase();return lo.indexOf('googletagmanager.com/gtm.js')!==-1||lo.indexOf('googletagmanager.com/gtag/js')!==-1;}function o(el){if(!f)return;if(!el||el.nodeName!=='SCRIPT')return;var u=(el.getAttribute&&el.getAttribute('src'))||'';if(u.indexOf('consentbit')!==-1||u.indexOf('consent.js')!==-1)return;if(a.clarityConsentMode!==false&&(u.indexOf('clarity.ms')!==-1||u.indexOf('clarity.microsoft.com')!==-1))return;if(gGov(u))return;if(el.getAttribute&&el.getAttribute('type')==='text/plain')return;var t=el.getAttribute&&el.getAttribute('data-category');if(t){var cl=t.split(',').map(function(z){return z.trim().toLowerCase();});if(cl.every(k))return;if(!c&&d){if(cl.every(function(z){return k(z)||!!d[m(z)];}))return;}if(u){el.setAttribute('data-cb-blocked-src',u);el.removeAttribute('src');}el.setAttribute('type','text/plain');}else if(u){var r2=n(u);if(!r2)return;if(k(r2))return;if(!c&&d&&!!d[m(r2)])return;el.setAttribute('data-cb-blocked-src',u);el.setAttribute('data-category',r2);el.removeAttribute('src');el.setAttribute('type','text/plain');}}var p=document.createElement.bind(document);document.createElement=function(tag){var el=p(tag);if(typeof tag==='string'&&tag.toLowerCase()==='script'){var sv='';try{/* The native script.src getter ALWAYS returns a string. This override must honour that contract: consumers do el.src.includes(...) / .indexOf(...) on it, and Google Tag Assistant's own bin does exactly that while enumerating page scripts. Returning the raw assigned value leaked a TrustedScriptURL object (GTM assigns one when the page has a Trusted Types policy) and threw inside Tag Assistant, which is why it could connect but never render tags. Falling back to the attribute \u2014 including data-cb-blocked-src \u2014 keeps a blocked script reporting the URL it intends to load rather than an empty string. Writes are untouched: set still stores and forwards the ORIGINAL value, so Trusted Types enforcement still sees a TrustedScriptURL. */Object.defineProperty(el,'src',{configurable:true,enumerable:true,get:function(){if(sv!=null&&sv!=='')return String(sv);var av='';try{av=(el.getAttribute&&(el.getAttribute('src')||el.getAttribute('data-cb-blocked-src')))||'';}catch(_){}return String(av);},set:function(val){sv=val;if(!f){el.setAttribute('src',val);return;}if(a.clarityConsentMode!==false&&typeof val==='string'&&(val.indexOf('clarity.ms')!==-1||val.indexOf('clarity.microsoft.com')!==-1)){el.setAttribute('src',val);return;}if(gGov(val)){el.setAttribute('src',val);return;}var t=el.getAttribute('data-category');var r2=n(val);var blk=false;if(t){var cl=t.split(',').map(function(z){return z.trim().toLowerCase();});if(!cl.every(k)){blk=!(!c&&d&&cl.every(function(z){return k(z)||!!d[m(z)];}));}}else if(r2&&!k(r2)){blk=!(!c&&d&&!!d[m(r2)]);}if(blk){el.setAttribute('data-cb-blocked-src',val);if(!t&&r2)el.setAttribute('data-category',r2);el.setAttribute('type','text/plain');}else{el.setAttribute('src',val);}}});}catch(_){}}return el;};var q=new MutationObserver(function(ms){ms.forEach(function(mu){mu.addedNodes.forEach(o);});});q.observe(document.documentElement,{childList:true,subtree:true});function r(){q.disconnect();document.querySelectorAll('script[type="text/plain"]').forEach(function(el){var u=el.getAttribute('src')||'';if(u&&!el.getAttribute('data-cb-blocked-src')){el.setAttribute('data-cb-blocked-src',u);if(!el.getAttribute('data-category')){var t=n(u);if(t)el.setAttribute('data-category',t);else{var t2=el.getAttribute('data-consentbit-category')||el.getAttribute('data-category-cb');if(t2)el.setAttribute('data-category',t2.trim().toLowerCase());}}}if(!u&&!el.getAttribute('data-cb-inline-blocked')){el.setAttribute('data-cb-inline-blocked','1');if(!el.getAttribute('data-category')){var t2=el.getAttribute('data-consentbit-category')||el.getAttribute('data-category-cb');if(t2)el.setAttribute('data-category',t2.trim().toLowerCase());}}});}document.readyState==='loading'?document.addEventListener('DOMContentLoaded',r,{once:true}):r();document.addEventListener('consentUpdated',function(ev){var cats=(ev&&ev.detail)||{};if(c){var dns2=!!(cats.doNotSell||(cats.ccpa&&cats.ccpa.doNotSell));e=dns2;try{window.__cbCl&&window.__cbCl(dns2?'denied':'granted',dns2?'denied':'granted');}catch(_){}window.gtag&&window.gtag('consent','update',{ad_storage:dns2?'denied':'granted',analytics_storage:dns2?'denied':'granted',ad_user_data:dns2?'denied':'granted',ad_personalization:dns2?'denied':'granted',functionality_storage:dns2?'denied':'granted',personalization_storage:dns2?'denied':'granted'});if(dns2&&!f){f=true;document.querySelectorAll('script[data-cb-blocked-src]').forEach(o);return;}if(!dns2)f=false;}else{d={analytics:!!cats.analytics,marketing:!!cats.marketing,preferences:!!cats.preferences,essential:true};try{window.__cbCl&&window.__cbCl(cats.marketing?'granted':'denied',cats.analytics?'granted':'denied');}catch(_){}}function s(t){if(c)return cats.doNotSell===false;if(!t)return!!(cats.analytics||cats.marketing||cats.preferences);var dca=t.split(',').map(function(z){return z.trim().toLowerCase();});return dca.every(function(z){if(z==='necessary'||z==='essential')return true;if(z==='analytics')return!!cats.analytics;if(z==='marketing'||z==='advertising'||z==='advertisement')return!!cats.marketing;if(z==='preferences'||z==='functional'||z==='performance'||z==='personalization')return!!cats.preferences;return true;});}var bl=document.querySelectorAll('script[type="text/plain"][data-cb-blocked-src],script[type="text/plain"][data-cb-inline-blocked]');for(var ii=0;ii<bl.length;ii++){var s2=bl[ii];var bsrc=s2.getAttribute('data-cb-blocked-src')||'';var dc=s2.getAttribute('data-category')||'';var ok=s(dc);if(ok){try{var ns2=p('script');if(bsrc){ns2.src=bsrc;/* Assign both unconditionally: a createElement()d script has the force-async flag SET, and only writing .async clears it. The old conditional form never wrote false, so a script with no async attribute still ran async and order-dependent tags fired out of order. */ns2.async=s2.hasAttribute('async');ns2.defer=s2.hasAttribute('defer');var at2=s2.attributes;for(var ai=0;ai<at2.length;ai++){var an2=at2[ai].name;if(an2!=='src'&&an2!=='type'&&an2!=='data-cb-blocked-src'&&an2!=='data-cb-inline-blocked')ns2.setAttribute(an2,at2[ai].value);}ns2.setAttribute('data-cb-released-src',bsrc);s2.parentNode?s2.parentNode.replaceChild(ns2,s2):document.head.appendChild(ns2);}else{var ic=s2.textContent||s2.innerHTML||'';var nl=String.fromCharCode(10);var ls=ic.split(nl);var si=0;while(si<ls.length&&si<10){var lt=ls[si].trim();if(lt.length===0||(lt.charAt(0)==='/'&&lt.charAt(1)==='/'))si++;else break;}var fc=(si<ls.length?ls.slice(si).join(nl):'').trim().charAt(0);if(fc!=='{'&&fc!=='['){ns2.textContent=ic;var at3=s2.attributes;for(var aj=0;aj<at3.length;aj++){var an3=at3[aj].name;if(an3!=='type'&&an3!=='data-cb-inline-blocked')ns2.setAttribute(an3,at3[aj].value);}ns2.setAttribute('data-cb-released-inline','1');s2.parentNode&&s2.parentNode.replaceChild(ns2,s2);}}}catch(_){}}}var rl=document.querySelectorAll('script[data-cb-released-src],script[data-cb-released-inline]');for(var ri=0;ri<rl.length;ri++){var rs=rl[ri];var rdc=rs.getAttribute('data-category')||'';var rok=s(rdc);if(!rok){try{var rb=p('script');rb.setAttribute('type','text/plain');if(rdc)rb.setAttribute('data-category',rdc);var rIsInline=rs.hasAttribute('data-cb-released-inline');if(rIsInline){rb.textContent=rs.textContent||rs.innerHTML||'';rb.setAttribute('data-cb-inline-blocked','1');}else{var rSrc=rs.getAttribute('data-cb-released-src')||'';rb.setAttribute('data-cb-blocked-src',rSrc);if(rs.hasAttribute('async'))rb.setAttribute('async','');if(rs.hasAttribute('defer'))rb.setAttribute('defer','');}rs.parentNode&&rs.parentNode.replaceChild(rb,rs);}catch(_){}}}});
 }catch(_){}})();}());`;
 }
 __name(getWebflowSetupScript, "getWebflowSetupScript");
@@ -8812,10 +9043,6 @@ async function _handleCDNScript(request, env2, url) {
   }
   const db = env2.CONSENT_WEBAPP;
   const site = await db.prepare(
-    // SELECT * rather than a column list: this handler never calls
-    // ensureSchema (it is the hot path), so naming a column added by a later
-    // migration would fail every banner request until some other route ran the
-    // ALTER. Same single row either way.
     "SELECT * FROM Site WHERE cdnScriptId = ?1"
   ).bind(cdnScriptId).first();
   let resolvedSite = site;
@@ -8840,16 +9067,11 @@ async function _handleCDNScript(request, env2, url) {
       try {
         const sourceHost = new URL(sourceHeader).hostname.replace(/^www\./, "").toLowerCase();
         let stagingHost = null;
-        const platformSiteId = resolvedSite.platformSiteId ?? resolvedSite.platformsiteid ?? null;
-        if (platformSiteId && env2.WEBFLOW_AUTHENTICATION) {
+        const siteStagingUrl = resolvedSite.stagingUrl ?? resolvedSite.stagingurl ?? null;
+        if (siteStagingUrl && String(siteStagingUrl).trim().toLowerCase() !== "not published") {
           try {
-            const kvRaw = await env2.WEBFLOW_AUTHENTICATION.get(platformSiteId);
-            if (kvRaw) {
-              const kvData = JSON.parse(kvRaw);
-              if (kvData.stagingUrl) {
-                stagingHost = new URL(kvData.stagingUrl.startsWith("http") ? kvData.stagingUrl : `https://${kvData.stagingUrl}`).hostname.replace(/^www\./, "").toLowerCase();
-              }
-            }
+            const raw = String(siteStagingUrl).trim();
+            stagingHost = new URL(raw.startsWith("http") ? raw : `https://${raw}`).hostname.replace(/^www\./, "").toLowerCase();
           } catch {
           }
         }
@@ -8936,6 +9158,7 @@ async function _handleCDNScript(request, env2, url) {
   const cf = request.cf || {};
   const country = cf.country || null;
   const isEU = cf.isEUCountry === "1";
+  const regionCode = cf.regionCode || null;
   const regionMode = resolvedSite.region_mode || "gdpr";
   let effectiveBannerType = resolvedSite.banner_type || "gdpr";
   let bannerEnabled = true;
@@ -8960,6 +9183,27 @@ async function _handleCDNScript(request, env2, url) {
         bannerEnabled = false;
       }
     }
+  }
+  const US_STATE_LAWS = {
+    CA: { law: "CCPA", optOut: ["analytics", "marketing", "preferences"], gpcMandated: true },
+    VA: { law: "VCDPA", optOut: ["analytics", "marketing", "preferences"], gpcMandated: false },
+    CO: { law: "CPA", optOut: ["analytics", "marketing", "preferences"], gpcMandated: true },
+    CT: { law: "CTDPA", optOut: ["analytics", "marketing", "preferences"], gpcMandated: true },
+    UT: { law: "UCPA", optOut: ["marketing"], gpcMandated: false }
+  };
+  let usLaw = null;
+  if (country === "US" && String(effectiveBannerType).toLowerCase() === "ccpa") {
+    const matched = regionCode ? US_STATE_LAWS[String(regionCode).toUpperCase()] : null;
+    const profile = matched || US_STATE_LAWS.CA;
+    usLaw = {
+      law: profile.law,
+      state: regionCode || null,
+      optOut: profile.optOut,
+      gpcMandated: profile.gpcMandated,
+      // false when we defaulted because regionCode was absent or unmapped —
+      // lets the consent log distinguish "known California" from "assumed".
+      resolved: !!matched
+    };
   }
   let customStyles = null;
   let bannerLayoutVisualForConfig = "box";
@@ -9113,7 +9357,7 @@ async function _handleCDNScript(request, env2, url) {
       var ccpaWidthPx = Math.max(baseWidthPx, 600);
       initialSize = "width:" + ccpaWidthPx + "px!important;min-width:360px;max-width:min(" + ccpaWidthPx + "px,96vw)!important;max-height:min(80vh,660px);overflow:hidden;";
     }
-    customStyles = ".cb-banner{border:none !important;}#cb-initial-banner.cb-banner{" + initialSize + "background-color:" + bgColor + "!important;color:" + textColor + ";position:fixed!important;" + positionStyles + "padding:" + (layoutVisual === "banner" ? "28px 48px" : boxPadding) + "!important;border:1px solid #e2e8f0;" + initialRadius + "box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;align-items:stretch;font-family:" + fontFamilyCss + ";font-size:14px!important;line-height:1.5!important;font-weight:" + fontWeightStr + ";}#cb-initial-banner.cb-banner .cb-banner-body{flex:0 1 auto;min-width:0;min-height:0;overflow-y:auto;}#cb-initial-banner.cb-banner #cb-close-initial-btn,#cb-initial-banner.cb-banner [consentbit='close']{position:absolute!important;top:8px!important;right:20px!important;width:10px!important;height:10px!important;cursor:pointer!important;background:transparent!important;border:none!important;padding:0!important;z-index:10!important;display:" + (closeButtonEnabled ? "block" : "none") + "!important;}#cb-preferences-banner.cb-banner{width:600px;max-width:94vw;max-height:min(88vh,640px);min-height:0;overflow:hidden;background-color:" + bgColor + ";color:" + textColor + ";position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);padding:28px;border:1px solid #e2e8f0;border-radius:" + bannerRadius + ";box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;font-family:" + fontFamilyCss + ";font-size:14px!important;line-height:1.5!important;font-weight:" + fontWeightStr + ";}#cb-preferences-banner.cb-banner .cb-banner-body{flex:1 1 auto;min-height:0;overflow-y:auto;}.cb-banner h3{margin:0 0 8px;font-size:16px!important;line-height:1.4!important;font-weight:600;font-family:inherit;color:" + headingColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-weight:600!important;font-family:inherit!important;color:" + headingColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner .cb-banner-body h3,#cb-preferences-banner.cb-banner .cb-banner-body h3{padding-right:0!important;}.cb-gdpr-cat-label{color:" + headingColor + ";}#cb-preferences-banner.cb-banner .cb-gdpr-cat-label ~ div > span{color:" + textColor + "!important;}.cb-banner p{margin:0 0 12px;font-size:14px!important;line-height:1.5!important;color:" + textColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-gdpr-cat-desc{color:" + textColor + ";text-align:" + textAlign + "!important;opacity:0.92;width:100%;}.cb-banner button{padding:6px 12px;border-radius:" + buttonRadius + ";cursor:pointer;font-size:14px;font-weight:600;border:1px solid #e2e8f0;transition:opacity 0.2s;}.cb-banner button#cb-accept-all-btn{background-color:" + acceptBg + ";color:" + acceptTx + ";}.cb-banner button#cb-reject-all-btn{background-color:" + rejectBg + ";color:" + rejectTx + ";}.cb-banner button#cb-preferences-btn,.cb-banner button#cb-ccpa-donotsell-link{background-color:" + custBg + ";color:" + custTx + ";}.cb-banner button#cb-prefs-reject-btn{background-color:" + rejectBg + ";color:" + rejectTx + ";}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer{display:flex!important;flex-direction:row!important;gap:10px!important;width:100%!important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button{flex:1 1 0!important;width:0!important;min-width:0!important;white-space:nowrap!important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{background-color:" + acceptBg + ";color:" + acceptTx + ";}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-save-prefs-btn{background-color:" + saveBg + ";color:" + saveTx + ";}#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{background-color:" + saveBg + ";color:" + saveTx + ";}#cb-preferences-banner.cb-banner .cb-banner-footer button{padding:10px 36px!important;}#cb-initial-banner.cb-banner .cb-banner-footer{display:flex;flex-wrap:nowrap;gap:8px;justify-content:" + footerJustify + "!important;flex-shrink:0;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 0;min-width:" + perBtnPx + "px;white-space:nowrap;overflow:visible;text-overflow:clip;}" + (layoutVisual === "banner" ? "#cb-initial-banner.cb-banner{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-body{flex:1 1 auto!important;min-width:0!important;overflow-y:visible!important;padding:0!important;margin:0!important;}#cb-initial-banner.cb-banner .cb-banner-footer{position:relative!important;flex:0 0 auto!important;flex-wrap:nowrap!important;justify-content:" + bannerFooterJustify + "!important;padding:0!important;margin:0!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto!important;width:auto!important;min-width:" + perBtnPx + "px!important;max-width:none!important;white-space:nowrap!important;overflow:visible!important;text-overflow:clip!important;}@media(max-width:660px){#cb-initial-banner.cb-banner{left:0!important;right:0!important;}}" : "") + "#cb-initial-banner.cb-banner #cb-preferences-btn{background:" + custBg + "!important;color:" + custTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-reject-all-btn{background:" + rejectBg + "!important;color:" + rejectTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-accept-all-btn{background:" + acceptBg + "!important;color:" + acceptTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}.cb-gdpr-accordion{background-color:" + bgColor + ";}.cb-banner-footer{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex:0 0 auto;}#cb-preferences-banner.cb-banner .cb-brand-footer{flex:0 0 auto;box-sizing:border-box;height:44px;max-height:50px;width:calc(100% + 56px);margin:20px -28px -28px;padding:0 20px;display:flex;align-items:center;justify-content:flex-end;gap:8px;background:#F7F8FA!important;background-color:#F7F8FA!important;border-top:1px solid #EFF1F4!important;}#cb-preferences-banner.cb-banner .cb-brand-footer a{display:inline-flex!important;align-items:center;gap:7px;text-decoration:none!important;border-radius:6px;padding:4px 6px;margin-right:-6px;background:transparent!important;color:#A2ABBA!important;font-weight:500!important;transition:opacity .15s ease;}#cb-preferences-banner.cb-banner .cb-brand-footer a:hover{opacity:.7;}#cb-preferences-banner.cb-banner .cb-brand-credit{font-size:11px!important;font-weight:500!important;letter-spacing:.02em;line-height:1;white-space:nowrap;color:#A2ABBA!important;}#cb-preferences-banner.cb-banner .cb-brand-mark{display:flex;align-items:center;opacity:.85;}#cb-preferences-banner.cb-banner .cb-brand-mark svg{display:block;height:9.75px;width:auto;}@media(max-width:660px){#cb-initial-banner.cb-banner{width:100vw!important;max-width:100vw!important;min-width:0!important;left:0!important;right:0!important;bottom:0!important;transform:none!important;border-radius:0!important;border-left:none!important;border-right:none!important;border-bottom:none!important;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}#cb-preferences-banner.cb-banner{width:calc(100vw - 32px)!important;max-width:calc(100vw - 32px)!important;padding:20px!important;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-preferences-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}#cb-preferences-banner.cb-banner .cb-brand-footer{width:calc(100% + 40px)!important;margin:16px -20px -20px!important;padding:0 16px!important;}}";
+    customStyles = ".cb-banner{border:none !important;}.cb-banner *{font-family:inherit;}#cb-initial-banner.cb-banner{" + initialSize + "background-color:" + bgColor + "!important;color:" + textColor + ";position:fixed!important;" + positionStyles + "padding:" + (layoutVisual === "banner" ? "28px 48px" : boxPadding) + "!important;border:1px solid #e2e8f0;" + initialRadius + "box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;align-items:stretch;font-family:" + fontFamilyCss + ";font-size:14px!important;line-height:1.5!important;font-weight:" + fontWeightStr + ";}#cb-initial-banner.cb-banner .cb-banner-body{flex:0 1 auto;min-width:0;min-height:0;overflow-y:auto;}#cb-initial-banner.cb-banner #cb-close-initial-btn,#cb-initial-banner.cb-banner [consentbit='close']{position:absolute!important;top:8px!important;right:20px!important;width:10px!important;height:10px!important;cursor:pointer!important;background:transparent!important;border:none!important;padding:0!important;z-index:10!important;display:" + (closeButtonEnabled ? "block" : "none") + "!important;}#cb-preferences-banner.cb-banner{width:600px;max-width:94vw;max-height:min(88vh,640px);min-height:0;overflow:hidden;background-color:" + bgColor + ";color:" + textColor + ";position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);padding:28px;border:1px solid #e2e8f0;border-radius:" + bannerRadius + ";box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;font-family:" + fontFamilyCss + ";font-size:14px!important;line-height:1.5!important;font-weight:" + fontWeightStr + ";}#cb-preferences-banner.cb-banner .cb-banner-body{flex:1 1 auto;min-height:0;overflow-y:auto;}.cb-banner h3{margin:0 0 8px;font-size:16px!important;line-height:1.4!important;font-weight:600;color:" + headingColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-weight:600!important;color:" + headingColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner .cb-banner-body h3,#cb-preferences-banner.cb-banner .cb-banner-body h3{padding-right:0!important;}.cb-gdpr-cat-label{color:" + headingColor + ";}#cb-preferences-banner.cb-banner .cb-gdpr-cat-label ~ div > span{color:" + textColor + "!important;}.cb-banner p{margin:0 0 12px;font-size:14px!important;line-height:1.5!important;color:" + textColor + ";text-align:" + textAlign + "!important;width:100%;}#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-gdpr-cat-desc{color:" + textColor + ";text-align:" + textAlign + "!important;opacity:0.92;width:100%;}.cb-banner button{padding:6px 12px;border-radius:" + buttonRadius + ";cursor:pointer;font-size:14px;font-weight:600;border:1px solid #e2e8f0;transition:opacity 0.2s;}.cb-banner button#cb-accept-all-btn{background-color:" + acceptBg + ";color:" + acceptTx + ";}.cb-banner button#cb-reject-all-btn{background-color:" + rejectBg + ";color:" + rejectTx + ";}.cb-banner button#cb-preferences-btn,.cb-banner button#cb-ccpa-donotsell-link{background-color:" + custBg + ";color:" + custTx + ";}.cb-banner button#cb-prefs-reject-btn{background-color:" + rejectBg + ";color:" + rejectTx + ";}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer{display:flex!important;flex-direction:row!important;gap:10px!important;width:100%!important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button{flex:1 1 0!important;width:0!important;min-width:0!important;white-space:nowrap!important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{background-color:" + acceptBg + ";color:" + acceptTx + ";}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-save-prefs-btn{background-color:" + saveBg + ";color:" + saveTx + ";}#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{background-color:" + saveBg + ";color:" + saveTx + ";}#cb-preferences-banner.cb-banner .cb-banner-footer button{padding:10px 36px!important;}#cb-initial-banner.cb-banner .cb-banner-footer{display:flex;flex-wrap:nowrap;gap:8px;justify-content:" + footerJustify + "!important;flex-shrink:0;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 0;min-width:" + perBtnPx + "px;white-space:nowrap;overflow:visible;text-overflow:clip;}" + (layoutVisual === "banner" ? "#cb-initial-banner.cb-banner{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-body{flex:1 1 auto!important;min-width:0!important;overflow-y:visible!important;padding:0!important;margin:0!important;}#cb-initial-banner.cb-banner .cb-banner-footer{position:relative!important;flex:0 0 auto!important;flex-wrap:nowrap!important;justify-content:" + bannerFooterJustify + "!important;padding:0!important;margin:0!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto!important;width:auto!important;min-width:" + perBtnPx + "px!important;max-width:none!important;white-space:nowrap!important;overflow:visible!important;text-overflow:clip!important;}@media(max-width:660px){#cb-initial-banner.cb-banner{left:0!important;right:0!important;}}" : "") + "#cb-initial-banner.cb-banner #cb-preferences-btn{background:" + custBg + "!important;color:" + custTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-reject-all-btn{background:" + rejectBg + "!important;color:" + rejectTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-accept-all-btn{background:" + acceptBg + "!important;color:" + acceptTx + "!important;font-size:13px!important;padding:10px 32px!important;font-weight:600!important;}.cb-gdpr-accordion{background-color:" + bgColor + ";}.cb-banner-footer{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex:0 0 auto;}#cb-preferences-banner.cb-banner .cb-brand-footer{flex:0 0 auto;box-sizing:border-box;height:44px;max-height:50px;width:calc(100% + 56px);margin:20px -28px -28px;padding:0 20px;display:flex;align-items:center;justify-content:flex-end;gap:8px;background:#F7F8FA!important;background-color:#F7F8FA!important;border-top:1px solid #EFF1F4!important;}#cb-preferences-banner.cb-banner .cb-brand-footer a{display:inline-flex!important;align-items:center;gap:7px;text-decoration:none!important;border-radius:6px;padding:4px 6px;margin-right:-6px;background:transparent!important;color:#A2ABBA!important;font-weight:500!important;transition:opacity .15s ease;}#cb-preferences-banner.cb-banner .cb-brand-footer a:hover{opacity:.7;}#cb-preferences-banner.cb-banner .cb-brand-credit{font-size:11px!important;font-weight:500!important;letter-spacing:.02em;line-height:1;white-space:nowrap;color:#A2ABBA!important;}#cb-preferences-banner.cb-banner .cb-brand-mark{display:flex;align-items:center;opacity:.85;}#cb-preferences-banner.cb-banner .cb-brand-mark svg{display:block;height:9.75px;width:auto;}@media(max-width:660px){#cb-initial-banner.cb-banner{width:100vw!important;max-width:100vw!important;min-width:0!important;left:0!important;right:0!important;bottom:0!important;transform:none!important;border-radius:0!important;border-left:none!important;border-right:none!important;border-bottom:none!important;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}#cb-preferences-banner.cb-banner{width:calc(100vw - 32px)!important;max-width:calc(100vw - 32px)!important;padding:20px!important;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-preferences-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}#cb-preferences-banner.cb-banner .cb-brand-footer{width:calc(100% + 40px)!important;margin:16px -20px -20px!important;padding:0 16px!important;}}";
   }
   function jsonForInlineScript(value) {
     try {
@@ -9141,6 +9385,12 @@ async function _handleCDNScript(request, env2, url) {
     _enT.essential = _lb && _lb.essential ? _lb.essential : "Strictly Necessary";
     _enT.strictlyNecessary = "";
   }
+  if (translationsForScript && translationsForScript.en) {
+    const _ccpaT = translationsForScript.en;
+    if (_ccpaT.ccpaDescription && _ccpaT.ccpaDescription === _ccpaT.ccpaOptOutPreferenceIntro && String(_ccpaT.ccpaDescription).length > 320) {
+      _ccpaT.ccpaDescription = "";
+    }
+  }
   function resolveWorkerFloatingLogoUrl() {
     try {
       return new URL(request.url).origin + "/embed/floating-logo.svg";
@@ -9165,30 +9415,15 @@ async function _handleCDNScript(request, env2, url) {
   const siteConfigPayload = {
     id: resolvedSite.id,
     bannerType: effectiveBannerType,
+    // Which US statute applies to THIS request (null outside the US opt-out path).
+    // Additive: bannerType is untouched, so every existing runtime branch behaves
+    // exactly as before for sites/visitors that ignore this field.
+    usLaw,
     bannerEnabled,
     apiBase,
     gaId: GA_ID,
-    // Microsoft Clarity Consent API v2.
-    //   clarityCmpId — the partner "source" identifier Microsoft issues to a CMP (request
-    //     it from clarity-cmp@microsoft.com). Until one is assigned we send our own name,
-    //     which Clarity accepts but cannot attribute to a listed partner.
-    //   clarityConsentMode — escape hatch. Off means Clarity's tag is hard-blocked like
-    //     any other analytics script instead of being consent-gated. Defaults on; no DB
-    //     column is required for that default to hold.
-    clarityCmpId: resolvedSite.clarityCmpId || "consentbit",
+    clarityCmpId: resolvedSite.clarityCmpId || 165,
     clarityConsentMode: resolvedSite.clarityConsentMode !== 0 && resolvedSite.clarityConsentMode !== false,
-    // Google Consent Mode v2.
-    //   gtmConsentMode — the same arrangement as clarityConsentMode, for the two Google
-    //     loaders (gtm.js / gtag/js). On means they are governed by the consent SIGNAL
-    //     already published by the pre-blocker (consent default = denied, set before the
-    //     loader can run) instead of by the script blocker. Off restores hard-blocking.
-    //     Defaults on; no DB column is required for that default to hold.
-    //
-    //     The main runtime has always exempted these hosts — isGoogleAnalyticsUrl() /
-    //     isConsentSignalGoverned() below. The pre-blocker did not, so gtm.js was killed
-    //     before the container could read the consent defaults: no Container Loaded, no
-    //     Consent Initialisation, no cookieless pings, and nothing for Tag Assistant to
-    //     attach to. This flag closes that gap; it does not widen what the runtime allows.
     gtmConsentMode: resolvedSite.gtmConsentMode !== 0 && resolvedSite.gtmConsentMode !== false,
     platform: resolvedSite.platform || null,
     styles: customStyles || null,
@@ -9239,18 +9474,17 @@ async function _handleCDNScript(request, env2, url) {
       fontSize: Number((configTrans.bannerFontSize != null ? configTrans.bannerFontSize : enTrans && enTrans.bannerFontSize) || customization.fontSize || 14),
       textAlignment: String((configTrans.bannerTextAlign != null ? configTrans.bannerTextAlign : enTrans && enTrans.bannerTextAlign) || customization.textAlignment || "left"),
       bannerBg2: String((configTrans.bannerBg2 != null ? configTrans.bannerBg2 : enTrans && enTrans.bannerBg2) || customization.bannerBg2 || "#798EFF"),
-      stopScroll: customization.stopScroll === 1 || customization.stopScroll === true
+      stopScroll: customization.stopScroll === 1 || customization.stopScroll === true,
+      // "Powered by ConsentBit" footer removal — Growth-only. Re-checked against the
+      // live plan here (not just at save time) so a downgrade brings the footer back
+      // without needing the customer to re-save the banner.
+      hideBranding: effectivePlanId === "growth" && (customization.hideBranding === 1 || customization.hideBranding === true)
     } : null,
     floatingLogoUrl: resolveFloatingLogoUrl(),
     floatingLogoFallbackUrl: resolveWorkerFloatingLogoUrl(),
     scriptBlockProviders: SCRIPT_BLOCK_PROVIDERS,
     customCookieRules,
     pendingScan: resolvedSite.pendingScan === 1,
-    // The host this response was authorized for, not just the registered one —
-    // a site can legitimately run on its staging URL and its custom domain, and
-    // the in-page guard compares this against location.hostname. Falls back to
-    // the registered domain when the request carried no Origin/Referer, which is
-    // exactly the copied-embed case that guard exists to catch.
     registeredDomain: authorizedHost || resolvedSite.domain ? String(resolvedSite.domain).replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0].toLowerCase() : null
   };
   const inlineConfig = `
@@ -9259,9 +9493,9 @@ async function _handleCDNScript(request, env2, url) {
   const translationsVar = "var TRANSLATIONS = " + jsonForInlineScript(translationsForScript) + ";";
   const loader = `
 ${inlineConfig}
-!function(){if(!window.__cbBannerInit){window.__cbBannerInit=!0;var e=window.__CONSENT_SITE__||{};var t=!0;!function(){var n=e.registeredDomain;if(n)try{var r=window.location.hostname.replace(/^www./,"").toLowerCase();if(r!==n&&"webflow"!==e.platform&&!r.endsWith(".webflow.io")){window.__CONSENT_SITE__=null;t=!1}}catch(e){}}();if(t){var n=e.floatingLogoUrl||"";var r=e.floatingLogoFallbackUrl||"";var a=e.id||null;var i=e.bannerType||"gdpr";var o=!1!==e.bannerEnabled;var c=e.apiBase;var s=e.gaId||null;var l=!1!==e.clarityConsentMode;var d=e.clarityCmpId||"consentbit";var p=e.customization||null;var b=!0===e.pendingScan;var f=p&&p.bannerLayoutVisual||"box";var m=p?p.privacyPolicyUrl:null;var g=!!p&&p.stopScroll;var u=!p||!1!==p.animationEnabled;var y=p&&p.bannerEntranceAnimation||"fade-in";var v=p&&p.preferencePosition||"center";var h=p&&p.centerAnimationDirection||"fade";var x=p&&p.language||"en";var C=!!p&&!0===p.autoDetectLanguage;${translationsVar}var w=["customise","rejectAll","acceptAll","save","back","doNotSell","saveMyPreferences","confirmChoice","cancel","optOutPreference"];var k=30,_=320,E=20,S=30,O=200;var B=56;var L="consentbit_"+a;var A=void 0!==p&&p&&null!=p.cookieExpirationDays?Math.max(1,Math.min(365,Number(p.cookieExpirationDays)||30)):30;var I=ie();try{if(!(!0!==navigator.globalPrivacyControl||"ccpa"!==i||I&&I.accepted)){I={accepted:!0,timestamp:(new Date).toISOString(),ccpa:{doNotSell:!0},gpc:!0};try{localStorage.setItem(L,JSON.stringify(I))}catch(e){}le(I,{status:"rejected",consentMethod:"gpc"})}}catch(e){}var H="consentbit_prefs_"+(a||"");var T="cb_pv_over_limit_"+(a||"");var P=[];var z=!1;var N=null;var j=e.scriptBlockProviders||[];var V=e.customCookieRules||[];var M=[{domain:"facebook.com",category:"marketing"},{domain:"facebook.net",category:"marketing"},{domain:"adroll.com",category:"marketing"},{domain:"doubleclick.net",category:"marketing"},{domain:"googleadservices.com",category:"marketing"},{domain:"bing.com",category:"marketing"},{domain:"bat.bing.com",category:"marketing"},{domain:"twitter.com",category:"marketing"},{domain:"analytics.twitter.com",category:"marketing"},{domain:"t.co",category:"marketing"},{domain:"linkedin.com",category:"marketing"},{domain:"ads.linkedin.com",category:"marketing"},{domain:"pinterest.com",category:"marketing"},{domain:"ct.pinterest.com",category:"marketing"},{domain:"tiktok.com",category:"marketing"},{domain:"analytics.tiktok.com",category:"marketing"},{domain:"hotjar.com",category:"analytics"},{domain:"clarity.ms",category:"analytics"},{domain:"scorecardresearch.com",category:"analytics"},{domain:"outbrain.com",category:"marketing"},{domain:"taboola.com",category:"marketing"},{domain:"criteo.com",category:"marketing"},{domain:"criteo.net",category:"marketing"},{domain:"quantserve.com",category:"analytics"},{domain:"zemanta.com",category:"marketing"}];var D=".cb-banner,.cb-banner *{box-sizing:border-box;}#cb-initial-banner.cb-banner{width:440px;min-width:280px;max-width:min(440px,92vw);max-height:min(80vh,420px);min-height:0;overflow:hidden;overflow-x:hidden;background-color:#ffffff;color:#334155;position:fixed;bottom:32px;left:32px;right:auto;padding:16px;border:1px solid #e2e8f0;border-radius:0.375rem;box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:inline-flex;flex-direction:column;align-items:stretch;font-family:inherit;font-size:14px!important;line-height:1.5!important;}#cb-initial-banner.cb-banner .cb-banner-body{flex:0 1 auto;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;}#cb-preferences-banner.cb-banner{width:540px;max-width:92vw;max-height:min(85vh,580px);min-height:0;overflow:hidden;overflow-x:hidden;background-color:#ffffff;color:#334155;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);padding:20px;border:1px solid #e2e8f0;border-radius:0.375rem;box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;font-family:inherit;font-size:14px!important;line-height:1.5!important;}#cb-preferences-banner.cb-banner .cb-banner-body{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;}#cb-preferences-banner.cb-banner.prefs-left{left:32px;right:auto;top:50%;transform:translateY(-50%);}#cb-preferences-banner.cb-banner.prefs-right{right:32px;left:auto;top:50%;transform:translateY(-50%);}#cb-preferences-banner.cb-banner.prefs-center{left:50%;top:50%;transform:translate(-50%,-50%);}.cb-banner-body{overflow-y:auto;overflow-x:hidden;margin-bottom:12px;}.cb-banner h3{margin:0 0 8px;font-size:16px!important;line-height:1.4!important;font-weight:600;color:#0f172a;word-break:break-word;overflow-wrap:anywhere;max-width:100%;}#cb-initial-banner.cb-banner h3{font-size:16px!important;font-weight:600;color:rgba(0,0,0,0.8);padding-right:36px;}#cb-initial-banner.cb-banner .cb-banner-body > p{color:rgba(0,0,0,0.8);}.cb-gdpr-accordion{margin-top:4px;margin-bottom:4px;}.cb-gdpr-cat-label{color:#0f172a;}.cb-gdpr-cat-desc{color:#64748b;}.cb-banner p{margin:0 0 12px;font-size:14px!important;line-height:1.5!important;color:#334155;word-break:break-word;overflow-wrap:anywhere;max-width:100%;}.cb-banner-footer{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;align-items:center;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex:0 0 auto;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-wrap:wrap;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 auto;min-width:80px;}"+(p&&"banner"===p.bannerLayoutVisual?"#cb-initial-banner.cb-banner .cb-banner-footer{flex-wrap:nowrap;justify-content:flex-end;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto;width:auto;min-width:80px;max-width:140px;}":"")+".cb-banner button{padding:12px 32px;border-radius:0.375rem;cursor:pointer;font-size:14px;font-weight:600;border:1px solid #e2e8f0;transition:opacity 0.2s;white-space:normal;word-break:break-word;min-width:0;text-align:center;}@media (max-width:660px){#cb-initial-banner.cb-banner{width:100vw!important;max-width:100vw!important;left:0!important;right:0!important;bottom:0!important;transform:none!important;border-radius:0!important;border-left:none!important;border-right:none!important;border-bottom:none!important;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}#cb-preferences-banner.cb-banner{width:calc(100vw - 32px)!important;max-width:calc(100vw - 32px)!important;padding:20px!important;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-preferences-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}}@media (max-width:350px){#cb-initial-banner.cb-banner,#cb-preferences-banner.cb-banner{font-size:12px!important;}#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-size:13px!important;}#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,.cb-gdpr-cat-desc{font-size:12px!important;}#cb-initial-banner.cb-banner .cb-banner-footer button,#cb-preferences-banner.cb-banner .cb-banner-footer button{font-size:12px!important;padding:10px 16px!important;}}.cb-banner button:hover:not(.cb-pref-toggle-track){opacity:0.8;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track{display:block !important;width:40px !important;min-width:40px !important;height:22px !important;padding:0 !important;margin:0 !important;border:none !important;border-radius:11px !important;background:#d1d5db !important;box-shadow:none !important;flex-shrink:0 !important;position:relative !important;overflow:visible !important;box-sizing:border-box !important;cursor:pointer !important;appearance:none !important;-webkit-appearance:none !important;font-size:0 !important;line-height:0 !important;opacity:1 !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track[aria-checked='true']{background:#22c55e !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track::after{content:'' !important;position:absolute !important;top:2px !important;left:2px !important;width:18px !important;height:18px !important;border-radius:50% !important;background:#ffffff !important;box-shadow:0 1px 3px rgba(0,0,0,.2) !important;pointer-events:none !important;transition:left .15s ease !important;z-index:2 !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track[aria-checked='true']::after{left:20px !important;}.cb-banner button#cb-accept-all-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}.cb-banner button#cb-reject-all-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}.cb-banner button#cb-preferences-btn,.cb-banner button#cb-ccpa-donotsell-link{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}.cb-banner button#cb-prefs-reject-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}.cb-banner label{display:block;margin-bottom:6px;font-size:11px;}.cb-banner input[type='checkbox']{margin-right:6px;}.cb-banner a{color:#007aff !important;text-decoration:underline !important;font-size:inherit !important;display:inline !important;font-weight:inherit !important;white-space:normal;}@keyframes slideInFromLeft{from{transform:translateX(-100%);opacity:0;}to{transform:translateX(0);opacity:1;}}@keyframes slideInFromRight{from{transform:translateX(100%);opacity:0;}to{transform:translateX(0);opacity:1;}}@keyframes slideInFromTop{from{transform:translateY(-100%);opacity:0;}to{transform:translateY(0);opacity:1;}}@keyframes slideInFromBottom{from{transform:translateY(100%);opacity:0;}to{transform:translateY(0);opacity:1;}}@keyframes fadeIn{from{opacity:0;}to{opacity:1;}}@keyframes prefsSlideInFromLeft{from{transform:translate(-120%,-50%);opacity:0;}to{transform:translate(0,-50%);opacity:1;}}@keyframes prefsSlideInFromRight{from{transform:translate(120%,-50%);opacity:0;}to{transform:translate(0,-50%);opacity:1;}}@keyframes prefsSlideCenterFromBottom{from{transform:translate(-50%,calc(-50% + 28px));opacity:0;}to{transform:translate(-50%,-50%);opacity:1;}}@keyframes prefsSlideCenterFromTop{from{transform:translate(-50%,calc(-50% - 28px));opacity:0;}to{transform:translate(-50%,-50%);opacity:1;}}@keyframes zoomIn{from{transform:scale(0.85);opacity:0;}to{transform:scale(1);opacity:1;}}@keyframes cbInitialCenterSlideFromBottom{from{transform:translate(-50%,100%);opacity:0;}to{transform:translate(-50%,0);opacity:1;}}@keyframes cbInitialCenterSlideFromTop{from{transform:translate(-50%,-100%);opacity:0;}to{transform:translate(-50%,0);opacity:1;}}@keyframes cbInitialCenterZoomIn{from{transform:translateX(-50%) scale(0.85);opacity:0;}to{transform:translateX(-50%) scale(1);opacity:1;}}.cb-banner-animate-initial-center-bottom{animation:cbInitialCenterSlideFromBottom 0.35s ease-out;}.cb-banner-animate-initial-center-top{animation:cbInitialCenterSlideFromTop 0.35s ease-out;}.cb-banner-animate-initial-center-zoom{animation:cbInitialCenterZoomIn 0.3s ease-out;}@keyframes prefsZoomIn{from{transform:translate(-50%,-50%) scale(0.85);opacity:0;}to{transform:translate(-50%,-50%) scale(1);opacity:1;}}.cb-banner-animate-left{animation:slideInFromLeft 0.4s ease-out;}.cb-banner-animate-right{animation:slideInFromRight 0.4s ease-out;}.cb-banner-animate-top{animation:slideInFromTop 0.4s ease-out;}.cb-banner-animate-bottom{animation:slideInFromBottom 0.4s ease-out;}.cb-banner-animate-fade{animation:fadeIn 0.3s ease-out;}.cb-banner-animate-prefs-left{animation:prefsSlideInFromLeft 0.4s ease-out;}.cb-banner-animate-prefs-right{animation:prefsSlideInFromRight 0.4s ease-out;}.cb-banner-animate-center-top{animation:prefsSlideCenterFromTop 0.35s ease-out;}.cb-banner-animate-center-bottom{animation:prefsSlideCenterFromBottom 0.35s ease-out;}.cb-banner-animate-zoom-in{animation:zoomIn 0.3s ease-out;}.cb-banner-animate-prefs-zoom-in{animation:prefsZoomIn 0.3s ease-out;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-save-prefs-btn{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}#cb-initial-banner.cb-banner .cb-banner-footer{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;flex-shrink:0;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 auto;min-width:80px;}#cb-initial-banner.cb-banner #cb-preferences-btn{background:#ffffff!important;color:#334155!important;border:1px solid #334155!important;font-size:13px!important;padding:10px 12px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-reject-all-btn,#cb-initial-banner.cb-banner #cb-accept-all-btn{background:#007aff!important;color:#ffffff!important;border-color:#007aff!important;font-size:13px!important;padding:10px 12px!important;font-weight:600!important;}#cb-floating-trigger{position:fixed;z-index:2147483646!important;width:56px;height:56px;border:none;border-radius:9999px;background:transparent;cursor:pointer;padding:0;box-shadow:none;}#cb-floating-trigger img,#cb-floating-trigger svg{display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;}#cb-preferences-banner.cb-banner .cb-brand-footer{flex:0 0 auto;box-sizing:border-box;height:44px;max-height:50px;width:calc(100% + 40px);margin:16px -20px -20px;padding:0 16px;display:flex;align-items:center;justify-content:flex-end;gap:8px;background:#F7F8FA !important;background-color:#F7F8FA !important;border-top:1px solid #EFF1F4 !important;}#cb-preferences-banner.cb-banner .cb-brand-footer a{display:inline-flex !important;align-items:center;gap:7px;text-decoration:none !important;background:transparent !important;color:#A2ABBA !important;font-weight:500 !important;border-radius:6px;padding:4px 6px;margin-right:-6px;transition:opacity .15s ease;}#cb-preferences-banner.cb-banner .cb-brand-footer a:hover{opacity:.7;}#cb-preferences-banner.cb-banner .cb-brand-credit{font-size:11px !important;font-weight:500 !important;letter-spacing:.02em;line-height:1;white-space:nowrap;color:#A2ABBA !important;}#cb-preferences-banner.cb-banner .cb-brand-mark{display:flex;align-items:center;opacity:.85;}#cb-preferences-banner.cb-banner .cb-brand-mark svg{display:block;height:9.75px;width:auto;}";e.styles&&(D=D+"\\n"+e.styles);var F="cb-banner-animate-left cb-banner-animate-right cb-banner-animate-top cb-banner-animate-bottom cb-banner-animate-fade cb-banner-animate-prefs-left cb-banner-animate-prefs-right cb-banner-animate-center-top cb-banner-animate-center-bottom cb-banner-animate-zoom-in cb-banner-animate-prefs-zoom-in";Ue();"complete"===document.readyState||"interactive"===document.readyState?ut():window.addEventListener("DOMContentLoaded",ut)}var Z={analytics:["_ga","_ga_*","_gid","_gat","_gat_*","_gac_*","_hjid","_hjSessionUser_*","_hjSession_*","_hjAbsoluteSessionInProgress","_clck","_clsk"],marketing:["_fbp","_fbc","_gcl_au","_gcl_ls","_gcl_aw","_ttp","tt_webid_v2","_pin_unauth","_pinterest_ct_ua","li_sugr","bcookie","bscookie","lidc","_uetsid","_uetvid","IDE","test_cookie","fr"],preferences:[]}}function R(){if(C){var e=(navigator.language||navigator.userLanguage||"en").split("-")[0].toLowerCase();return TRANSLATIONS[e]?e:"en"}return x}function W(e){var t=R();var n=TRANSLATIONS[t]||TRANSLATIONS.en;var r=null!=n[e]?n[e]:null!=TRANSLATIONS.en[e]?TRANSLATIONS.en[e]:"";return""===r&&"title"===e?"We value your privacy":""===r&&"description"===e?"We use cookies to provide you with the best possible experience. They also allow us to analyze user behavior in order to constantly improve the website for you.":r}function U(e){var t=R();var n=(TRANSLATIONS[t]||TRANSLATIONS.en)[e];n&&n.length>80&&(n=TRANSLATIONS.en[e]||e);return n||TRANSLATIONS.en[e]||e}function q(e,t){var n=null==e?"":String(e);return n.length>t?n.slice(0,t):n}function J(e,t){return q(W(e),t)}function Y(){try{var e=R();var t=TRANSLATIONS.config||{};var n=null!=t.cookiePolicyLinkEnabled?t.cookiePolicyLinkEnabled:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).cookiePolicyLinkEnabled;return!1!==n&&"0"!==n&&"false"!==String(n).toLowerCase()}catch(e){return!0}}function X(){try{var e=R();var t=TRANSLATIONS.config||{};var n=null!=t.closeButtonEnabled?t.closeButtonEnabled:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).closeButtonEnabled;return!0===n||1===n||!1!==n&&"0"!==n&&"false"!==String(n).toLowerCase()}catch(e){return!0}}function $(){try{var e=R();var t=TRANSLATIONS.config||{};var n=null!=t.rejectButtonEnabled?t.rejectButtonEnabled:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).rejectButtonEnabled;return!0===n||1===n||!1!==n&&"0"!==n&&"false"!==String(n).toLowerCase()}catch(e){return!0}}function G(){try{var e=R();var t=TRANSLATIONS.config||{};var n=null!=t.customizeButtonEnabled?t.customizeButtonEnabled:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).customizeButtonEnabled;return!0===n||1===n||!1!==n&&"0"!==n&&"false"!==String(n).toLowerCase()}catch(e){return!0}}function K(e){var t=String(e||"bottom-left").trim().toLowerCase().replace(/_/g,"-");return"bottom-right"===t||"right"===t?"bottom-right":"bottom"===t||"bottom-center"===t?"bottom":"bottom-left"}function Q(e){if(e){e.style.marginLeft="";e.style.marginRight="";e.style.paddingLeft="";e.style.paddingRight="";if(ot()){var t=f||"box";var n=K(p&&p.position);var r=st();var a="56px";"banner"!==t?"left"===r?"bottom-center"!==t&&"popup"!==t&&"bottom"!==n||(e.style.marginLeft=a):"bottom-center"!==t&&"popup"!==t&&"bottom"!==n||(e.style.marginRight=a):"left"===r?e.style.paddingLeft=a:e.style.paddingRight=a}}}function ee(e){if(!e)return!1;var t=f||"box";var n=K(p&&p.position);e.style.left="";e.style.right="";e.style.top="";e.style.bottom="";e.style.transform="";e.style.width="";e.style.maxWidth="";e.style.marginLeft="";e.style.marginRight="";e.style.paddingLeft="";e.style.paddingRight="";if("banner"===t){e.style.left="0";e.style.right="0";e.style.bottom="0";e.style.transform="none";e.style.width="100%";e.style.maxWidth="none";e.setAttribute("data-cb-initial-centered","0");Q(e);return!1}if(window.innerWidth<=660){e.style.setProperty("left","0","important");e.style.setProperty("right","0","important");e.style.setProperty("bottom","0","important");e.style.setProperty("transform","none","important");e.style.setProperty("width","100vw","important");e.style.setProperty("max-width","100vw","important");e.style.setProperty("min-width","0","important");e.style.setProperty("border-radius","0","important");e.style.setProperty("border-left","none","important");e.style.setProperty("border-right","none","important");e.style.setProperty("border-bottom","none","important");e.setAttribute("data-cb-initial-centered","0");return!1}if("bottom-center"===t||"popup"===t||"bottom"===n){e.style.bottom="32px";e.style.left="50%";e.style.transform="translateX(-50%)";e.setAttribute("data-cb-initial-centered","1");Q(e);return!0}e.style.bottom="32px";"bottom-right"===n?e.style.right="32px":e.style.left="32px";e.style.transform="none";e.setAttribute("data-cb-initial-centered","0");Q(e);return!1}function te(e){var t=e;var n=t.indexOf("#");n>=0&&(t=t.slice(0,n));(n=t.indexOf("?"))>=0&&(t=t.slice(0,n));(n=t.indexOf("/"))>=0&&(t=t.slice(0,n));return t.trim()}function ne(e){var t=e.lastIndexOf(".");if(t<0)return!1;var n=e.slice(t).toLowerCase();return".js"===n||".mjs"===n||".css"===n||".png"===n||".jpg"===n||".jpeg"===n||".gif"===n||".svg"===n||".webp"===n||".pdf"===n||".json"===n||".xml"===n||".ico"===n||".woff"===n||".woff2"===n}function re(e){if(!e||"string"!=typeof e)return"";var t=e.trim();if(!t)return"";var n=t.toLowerCase();if(0===n.indexOf("mailto:")||0===n.indexOf("tel:"))return t;if(0===n.indexOf("http://")||0===n.indexOf("https://"))return t;if(0===t.indexOf("//"))return"https:"+t;if("/"===t.charAt(0)||0===t.indexOf("./")||0===t.indexOf("../")){try{if("undefined"!=typeof window&&window.location)return new URL(t,window.location.href).href}catch(e){}return t}var r=te(t);if(r.indexOf(".")>0&&!ne(r)){for(;t.length>0&&"/"===t.charAt(0);)t=t.slice(1);return"https://"+t}try{if("undefined"!=typeof window&&window.location)return new URL(t,window.location.href).href}catch(e){}return t}function ae(e,t){var n=re(t);if(n){e.href=n;e.target="_blank";e.rel="noopener noreferrer";e.addEventListener("click",function(e){e.stopPropagation&&e.stopPropagation();e.preventDefault&&e.preventDefault();try{window.open(n,"_blank","noopener,noreferrer")}catch(e){}},!0)}}function ie(){try{var e=localStorage.getItem(L);var t=e?JSON.parse(e):{accepted:!1,timestamp:null};if(!t||!t.accepted)return t||{accepted:!1,timestamp:null};var n=Date.now();var r=24*A*60*60*1e3;var a=t.expiresAt?new Date(t.expiresAt).getTime():t.timestamp?new Date(t.timestamp).getTime()+r:0;return a>0&&n>a?{accepted:!1,timestamp:null}:t}catch(e){return{accepted:!1,timestamp:null}}}function oe(e){try{var t=24*A*60*60*1e3;e.expiresAt=e.expiresAt||new Date(Date.now()+t).toISOString();localStorage.setItem(L,JSON.stringify(e));localStorage.removeItem(L+"_closed")}catch(e){}I=e;try{je()}catch(e){}}function ce(e){try{var t={analytics:!!e.analytics,preferences:!!e.preferences,marketing:!!e.marketing};var n=btoa(JSON.stringify(t));localStorage.setItem(H,n)}catch(e){}}function se(){try{var e=localStorage.getItem(H);if(!e)return null;var t=JSON.parse(atob(e));return t&&"object"==typeof t?{analytics:!!t.analytics,preferences:!!t.preferences,marketing:!!t.marketing}:null}catch(e){return null}}function le(e,t){if(a&&c){t=t||{};var n=e&&e.expiresAt||t.expiresAt||new Date(Date.now()+24*A*60*60*1e3).toISOString();var r={siteId:a,regulation:"gdpr"===i?"gdpr":"ccpa",bannerType:i,consentMethod:t.consentMethod||"banner",status:t.status||"given",expiresAt:n,consent:e};try{fetch(c+"/api/consent",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(r)}).catch(function(e){})}catch(e){}}}function de(){try{var e=localStorage.getItem(T);if(!e)return!1;var t=JSON.parse(e);var n=new Date;var r=n.getFullYear()+"-"+String(n.getMonth()+1).padStart(2,"0");return t.yearMonth===r&&!0===t.overLimit}catch(e){return!1}}function pe(e){try{localStorage.setItem(T,JSON.stringify({overLimit:!0,yearMonth:e}))}catch(e){}}function be(){if(a&&c&&!de())try{var e={siteId:a,pageUrl:"undefined"!=typeof window&&window.location?window.location.href:null};fetch(c+"/api/pageview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(e),keepalive:!0}).then(function(e){return e.json()}).then(function(e){if(e&&e.overLimit){var t=new Date;pe(e.yearMonth||t.getFullYear()+"-"+String(t.getMonth()+1).padStart(2,"0"))}}).catch(function(e){})}catch(e){}}function fe(){try{var e="undefined"!=typeof document&&document.cookie?document.cookie:"";return e?e.split(";").map(function(e){return e.trim()}).filter(Boolean):[]}catch(e){return[]}}function me(){try{var e=[];var t=document.getElementsByTagName("script");for(var n=0;n<t.length;n++){var r=t[n].src;r&&-1===r.indexOf("consentbit")&&-1===r.indexOf("client_data")&&e.push(r)}return e}catch(e){return[]}}function ge(e){try{var t=new URL(e).hostname;return-1!==t.indexOf("google-analytics.com")||-1!==e.indexOf("gtag/js")||-1!==t.indexOf("googletagmanager.com")?"analytics":-1!==t.indexOf("facebook.com")||-1!==t.indexOf("fbcdn.net")||-1!==t.indexOf("doubleclick.net")||0===t.indexOf("ads.")?"marketing":-1!==t.indexOf("hotjar.com")||-1!==t.indexOf("intercom.io")||-1!==t.indexOf("fullstory.com")?"behavioral":"uncategorized"}catch(e){return"uncategorized"}}function ue(){var e={};var t=[];var n=document.scripts;for(var r=0;r<n.length;r++){var a=n[r];if(a.src&&!e[a.src]){e[a.src]=!0;t.push(a)}}return t}function ye(e){if(!e||"string"!=typeof e)return!1;var t=e.toLowerCase();return-1!==t.indexOf("googletagmanager.com/gtag/js")||-1!==t.indexOf("googletagmanager.com/gtm.js")||-1!==t.indexOf("google-analytics.com")||-1!==t.indexOf("googlesyndication.com")||-1!==t.indexOf("googleadservices.com")||-1!==t.indexOf("googletagservices.com")||-1!==t.indexOf("securepubads.g.doubleclick.net")}function ve(){var e=document.scripts;for(var t=0;t<e.length;t++){var n=e[t];var r;if(ye(n.src||n.getAttribute("data-cb-blocked-src")||""))return!0}return!(!window.adsbygoogle&&!window.googletag)}function he(){window.dataLayer=window.dataLayer||[];window.gtag||(window.gtag=function(){dataLayer.push(arguments)});return window.gtag}function xe(){var e=he();e("set","ads_data_redaction",!0);e("set","url_passthrough",!0)}function Ce(e){if(!e||"string"!=typeof e)return!1;var t=e.toLowerCase();return-1!==t.indexOf("clarity.ms")||-1!==t.indexOf("clarity.microsoft.com")}function we(e,t){return!("analytics"!==e||!Oe(t))||l&&Ce(t)}function ke(){window.clarity||(window.clarity=function(){(window.clarity.q=window.clarity.q||[]).push(arguments)});return window.clarity}function _e(e){if(l)try{var t=e||{};var n=t.marketing?"granted":"denied";var r=t.analytics?"granted":"denied";var a=n+"|"+r;if(window.__cbClaritySignal===a)return;window.__cbClaritySignal=a;ke()("consentv2",{source:d,ad_Storage:n,analytics_Storage:r})}catch(e){}}function Ee(e,t){try{var n=e||{};window.dataLayer=window.dataLayer||[];window.dataLayer.push({event:"consentbit_consent_update",consentbit_regulation:i,consentbit_source:String(t||"banner").replace(/[[]]/g,"").toLowerCase(),consentbit_essential:!0,consentbit_analytics:!!n.analytics,consentbit_marketing:!!n.marketing,consentbit_preferences:!!n.preferences})}catch(e){}}function Se(e){return"analytics"===e||"marketing"===e||"behavioral"===e||"advertisement"===e||"functional"===e||"performance"===e}function Oe(e){if(!e||"string"!=typeof e)return!1;var t=e.toLowerCase();return-1!==t.indexOf("googletagmanager.com/gtag/js")||-1!==t.indexOf("googletagmanager.com/gtm.js")||-1!==t.indexOf("google-analytics.com")}function Be(e){var t=e;"behavioral"===t&&(t="analytics");if("essential"===t)return!0;if("ccpa"===i)return!(I&&I.accepted&&I.ccpa&&I.ccpa.doNotSell&&Se(t));if(!I||!I.accepted)return!1;var n=I.categories||{};return"analytics"===t?!!n.analytics:"marketing"===t||"advertisement"===t?!!n.marketing:"preferences"!==t&&"functional"!==t&&"performance"!==t||!!n.preferences}function Le(e){if(!e)return!1;var t=String(e).split(",");for(var n=0;n<t.length;n++){var r=String(t[n]||"").toLowerCase().trim();if(r){"personalization"===r&&(r="preferences");if(!Be(r))return!1}}return!0}function Ae(e){if(!e)return null;var t=String(e).toLowerCase().trim();return"analytics"===t||"marketing"===t||"behavioral"===t||"preferences"===t||"essential"===t?["essential"===t?"essential":t]:t.indexOf("necessary")>=0||t.indexOf("essential")>=0?["essential"]:t.indexOf("functional")>=0||t.indexOf("preference")>=0?["preferences"]:t.indexOf("analytics")>=0||t.indexOf("performance")>=0||t.indexOf("statistics")>=0?["analytics"]:t.indexOf("advertisement")>=0||t.indexOf("marketing")>=0||t.indexOf("ads")>=0||t.indexOf("social")>=0?["marketing"]:t.indexOf("other")>=0?["analytics"]:null}function Ie(e,t){if(t&&t.getAttribute){var n=Ae(t.getAttribute("data-consentbit"));if(n)return n;var r=t.getAttribute("data-consentbit-category");r||window.__CB_WEBFLOW_MODE__||(r=t.getAttribute("data-category"));if(r){var a=[];var i=String(r).split(",");for(var o=0;o<i.length;o++){var c=String(i[o]||"").toLowerCase().trim();if(c){var s=Ae("personalization"===c?"preferences":c);if(s)for(var l=0;l<s.length;l++)-1===a.indexOf(s[l])&&a.push(s[l])}}if(a.length)return a}var d=Ae(t.getAttribute("data-cookieyes"));if(d)return d}if(e&&j.length)for(var p=0;p<j.length;p++){var b=j[p];if(b&&b.pattern)try{if(new RegExp(b.pattern,"i").test(e))return b.categories&&b.categories.length?b.categories.slice():["analytics"]}catch(e){}}if(e&&V.length)for(var f=0;f<V.length;f++){var m=V[f];if(m&&m.scriptUrlPattern)try{if(new RegExp(m.scriptUrlPattern,"i").test(e))return[m.category||"uncategorized"]}catch(e){}}return[]}function He(e,t){if(z)return!1;if(!e||"string"!=typeof e)return!1;var n=e.toLowerCase();if(-1!==n.indexOf("consentbit")||-1!==n.indexOf("client_data"))return!1;var r=Ie(e,t);if(!r||0===r.length)return!1;if("ccpa"===i)return!!(I&&I.accepted&&I.ccpa&&I.ccpa.doNotSell);for(var a=0;a<r.length;a++){var o=r[a];if(Se(o)&&!we(o,e)&&!Be(o))return!0}return!1}function Te(e){return e&&"string"==typeof e?e.indexOf("fbq(")>=0||e.indexOf("fbq (")>=0||e.indexOf("connect.facebook.net")>=0||e.indexOf("ttq(")>=0||e.indexOf("ttq (")>=0||e.indexOf("analytics.tiktok.com")>=0||e.indexOf("pintrk(")>=0||e.indexOf("pintrk (")>=0||e.indexOf("ct.pinterest.com")>=0||e.indexOf("twq(")>=0||e.indexOf("twq (")>=0||e.indexOf("ads-twitter.com")>=0||e.indexOf("_linkedin_partner_id")>=0||e.indexOf("lintrk(")>=0||e.indexOf("lintrk (")>=0||e.indexOf("bat.bing.com")>=0?"marketing":e.indexOf("hotjar.com")>=0?"analytics":e.indexOf("window.clarity")>=0||e.indexOf("clarity.ms")>=0?l?null:"analytics":null:null}function Pe(e){if(e&&"SCRIPT"===e.nodeName&&(!e.getAttribute||"javascript/blocked"!==e.getAttribute("type"))){var t=e.getAttribute&&e.getAttribute("src")||e.src||"";if(t){if(He(t,e))try{e.setAttribute("data-cb-blocked-src",t);e.setAttribute("type","javascript/blocked");e.removeAttribute("src")}catch(e){}}else{var n=e.getAttribute&&(e.getAttribute("data-consentbit-category")||!window.__CB_WEBFLOW_MODE__&&e.getAttribute("data-category"))||Te(e.textContent||"");if(n&&!Be(n))try{e.__ci=e.textContent||"";var r=Object.getOwnPropertyDescriptor(Node.prototype,"textContent");r&&r.set?r.set.call(e,""):e.textContent="";e.setAttribute("type","javascript/blocked");e.setAttribute("data-cb-inline","1")}catch(e){}}}}function ze(e){if(e&&!e.__cp){e.__cp=!0;try{Object.defineProperty(e,"src",{configurable:!0,enumerable:!0,get:function(){return e.getAttribute("src")||""},set:function(t){if(He(t,e)){e.setAttribute("data-cb-blocked-src",t);e.setAttribute("type","javascript/blocked");e.removeAttribute("src")}else e.setAttribute("src",t)}})}catch(e){}try{Object.defineProperty(e,"type",{configurable:!0,enumerable:!0,get:function(){return e.getAttribute("type")||""},set:function(t){var n=t;He(e.getAttribute("src")||e.src||"",e)&&(n="javascript/blocked");e.setAttribute("type",n)}})}catch(e){}try{var t=Object.getOwnPropertyDescriptor(Node.prototype,"textContent");if(t&&t.set){var n=t.set;Object.defineProperty(e,"textContent",{configurable:!0,get:function(){return t.get?t.get.call(e):""},set:function(t){var r=e.getAttribute&&(e.getAttribute("data-consentbit-category")||!window.__CB_WEBFLOW_MODE__&&e.getAttribute("data-category"))||Te(t);if(r&&!Be(r)){e.__ci=t;e.setAttribute("type","javascript/blocked");e.setAttribute("data-cb-inline","1")}else n.call(e,t)}})}}catch(e){}}}function Ne(e){if(e&&1===e.nodeType)if("SCRIPT"!==e.nodeName){if(e.querySelectorAll){var t=e.querySelectorAll("script[src]");for(var n=0;n<t.length;n++)Pe(t[n])}}else Pe(e)}function je(e){if(window.__CB_WEBFLOW_MODE__)We(e||I&&I.categories||{analytics:!0,marketing:!0,preferences:!0,essential:!0});else{var t=document.querySelectorAll('script[type="javascript/blocked"][data-cb-blocked-src]');for(var n=0;n<t.length;n++){var r=t[n];var a=r.getAttribute("data-cb-blocked-src");if(a&&!He(a,r)){z=!0;try{var i=document.createElement("script");i.async=r.hasAttribute("async");i.defer=r.hasAttribute("defer");i.crossOrigin=r.crossOrigin||"";i.integrity=r.integrity||"";i.referrerPolicy=r.referrerPolicy||"";r.id&&(i.id=r.id);i.src=a;var o=r.attributes;for(var c=0;c<o.length;c++){var s=o[c].name;"src"!==s&&"type"!==s&&"data-cb-blocked-src"!==s&&i.setAttribute(s,o[c].value)}r.parentNode?r.parentNode.replaceChild(i,r):document.head.appendChild(i)}catch(e){}finally{z=!1}}}var l=document.querySelectorAll('script[type="text/plain"][data-consentbit-category],script[type="text/plain"][data-category]');for(var d=0;d<l.length;d++){var p=l[d];var b=p.getAttribute("data-consentbit-category")||p.getAttribute("data-category");if(b&&Le(b)){z=!0;try{var f=document.createElement("script");f.async=p.hasAttribute("async");f.defer=p.hasAttribute("defer");var m=p.getAttribute("src")||"";m?f.src=m:f.textContent=p.textContent;var g=p.attributes;for(var u=0;u<g.length;u++){var y=g[u].name;"type"!==y&&"src"!==y&&"data-consentbit-category"!==y&&"data-category"!==y&&f.setAttribute(y,g[u].value)}p.parentNode?p.parentNode.replaceChild(f,p):document.head.appendChild(f)}catch(e){}finally{z=!1}}}var v=document.querySelectorAll('script[type="javascript/blocked"][data-cb-inline="1"]');for(var h=0;h<v.length;h++){var x=v[h];var C=x.__ci||"";var w=x.getAttribute&&(x.getAttribute("data-consentbit-category")||x.getAttribute("data-category"))||Te(C);if(w&&Le(w)){z=!0;try{var k=document.createElement("script");C&&(k.textContent=C);x.parentNode?x.parentNode.replaceChild(k,x):document.head.appendChild(k)}catch(e){}finally{z=!1}}}}}function Ve(e){var t=window.location.hostname;var n=0===t.indexOf("www.")?t.slice(4):t;var r=[null,t,"."+t,n,"."+n,"www."+n,".www."+n];var a=["/",window.location.pathname];var i="Thu, 01 Jan 1970 00:00:00 GMT";for(var o=0;o<r.length;o++)for(var c=0;c<a.length;c++){var s=e+"=; expires="+i+"; path="+a[c];r[o]&&(s+="; domain="+r[o]);try{document.cookie=s}catch(e){}}}function Me(e){var t=e.indexOf("*");var n=t>=0?e.slice(0,t):null;var r=document.cookie.split(";").map(function(e){return e.trim().split("=")[0]});return n?r.filter(function(e){return e.startsWith(n)}):r.indexOf(e)>=0?[e]:[]}function De(e){for(var t in Z)if(e.indexOf(t)>=0){var n=Z[t];for(var r=0;r<n.length;r++){var a=Me(n[r]);for(var i=0;i<a.length;i++)Ve(a[i])}}for(var o=0;o<V.length;o++){var c=V[o];!c||!c.category||e.indexOf(c.category)<0||c.name&&Ve(c.name)}}function Fe(e){if(!e||"string"!=typeof e)return null;var t=e.toLowerCase();if(0!==t.indexOf("http"))return null;for(var n=0;n<M.length;n++)if(-1!==t.indexOf(M[n].domain))return M[n].category;for(var r=0;r<V.length;r++){var a=V[r];if(a&&a.scriptUrlPattern)try{if(new RegExp(a.scriptUrlPattern,"i").test(e))return a.category||"marketing"}catch(e){}}return null}function Ze(e){if(!e||"string"!=typeof e)return!1;var t=e.toLowerCase();if(-1!==t.indexOf("consentbit")||-1!==t.indexOf("client_data"))return!1;var n=Fe(e);return!(!n||!Se(n)||("ccpa"===i?!(I&&I.accepted&&I.ccpa&&I.ccpa.doNotSell):I&&I.accepted&&Be(n)))}function Re(e){if(e&&!e.__ip){e.__ip=!0;try{Object.defineProperty(e,"src",{configurable:!0,enumerable:!0,get:function(){return e.getAttribute("src")||""},set:function(t){if(Ze(t)){e.setAttribute("data-cb-blocked-src",t);e.removeAttribute("src")}else e.setAttribute("src",t)}})}catch(e){}}}function We(e){if(window.__CB_WEBFLOW_MODE__){var t=e||{};window.userConsent=t;try{document.dispatchEvent(new CustomEvent("consentUpdated",{detail:t,bubbles:!0}))}catch(e){}}}function Ue(){if(!window.__CB_WEBFLOW_MODE__&&!window.__ce){window.__ce=!0;try{N=document.createElement.bind(document)}catch(e){N=document.createElement}document.createElement=function(e){var t=N(e);var n=String(e||"").toLowerCase();"script"===n?ze(t):"iframe"===n&&Re(t);return t};var e=new MutationObserver(function(e){for(var t=0;t<e.length;t++){var n=e[t];if("childList"===n.type){var r=n.addedNodes;for(var a=0;a<r.length;a++)Ne(r[a])}else"attributes"===n.type&&"src"===n.attributeName&&n.target&&"SCRIPT"===n.target.nodeName&&Pe(n.target)}});try{e.observe(document.documentElement,{childList:!0,subtree:!0,attributes:!0,attributeFilter:["src"]})}catch(t){e.observe(document.documentElement,{childList:!0,subtree:!0})}window.__cm=e}}function qe(){if(window.__CB_WEBFLOW_MODE__)try{document.dispatchEvent(new CustomEvent("cbBlockScripts",{detail:{},bubbles:!0}))}catch(e){}else{var e=ue();for(var t=0;t<e.length;t++){var n=e[t];var r=n.src;if("javascript/blocked"!==n.getAttribute("type")){var a=Ie(r,n);var i=a.length>0?a[0]:"uncategorized";if(Se(i))if("analytics"===i&&s&&Oe(r));else if(l&&Ce(r));else if(Be(i));else try{n.setAttribute("data-cb-blocked-src",r);n.setAttribute("type","javascript/blocked");n.removeAttribute("src")}catch(e){}}}}}function Je(){if(P.length){var e=[];z=!0;try{for(var t=0;t<P.length;t++){var n=P[t];var r=n.cats||(n.category?[n.category]:[]);if(0===r.length||r.every(function(e){return!Se(e)||Be(e)})){var a=document.createElement("script");a.src=n.src;var i=n.attrs;for(var o in i)Object.prototype.hasOwnProperty.call(i,o)&&"src"!==o&&a.setAttribute(o,i[o]);document.head.appendChild(a)}else e.push(n)}}finally{z=!1}P=e}}function Ye(){if(s){z=!0;try{var e=!1;var t=document.scripts;for(var n=0;n<t.length;n++){var r=t[n].src||"";if(-1!==r.indexOf("googletagmanager.com/gtag/js")||-1!==r.indexOf("googletagmanager.com/gtm.js")||-1!==r.indexOf("google-analytics.com")){e=!0;break}}if(!e){var a=document.createElement("script");a.async=!0;a.src="https://www.googletagmanager.com/gtag/js?id="+s;document.head.appendChild(a)}window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)}window.gtag=gtag;xe();gtag("consent","default",{analytics_storage:"denied",ad_storage:"denied",ad_user_data:"denied",ad_personalization:"denied",functionality_storage:"denied",personalization_storage:"denied",security_storage:"granted",wait_for_update:500});gtag("js",new Date);gtag("config",s,{anonymize_ip:!0});gtag("event","page_view",{page_path:window.location.pathname,page_title:document.title||""})}finally{z=!1}}}function Xe(e,t){var n={analytics_storage:e.analytics?"granted":"denied",ad_storage:e.marketing?"granted":"denied",ad_user_data:e.marketing?"granted":"denied",ad_personalization:e.marketing?"granted":"denied",functionality_storage:e.preferences?"granted":"denied",personalization_storage:e.preferences?"granted":"denied"};he()("consent","update",n);_e(e);Ee(e,t)}function $e(e){var t={analytics_storage:e?"denied":"granted",ad_storage:e?"denied":"granted",ad_user_data:e?"denied":"granted",ad_personalization:e?"denied":"granted",functionality_storage:e?"denied":"granted",personalization_storage:e?"denied":"granted"};he()("consent","update",t);var n={analytics:!e,marketing:!e,preferences:!e};_e(n);Ee(n,"ccpa");try{window.dataLayer.push({consentbit_do_not_sell:!!e})}catch(e){}}function Ge(e){var t=String(e).replace("#","");3===t.length&&(t=t[0]+t[0]+t[1]+t[1]+t[2]+t[2]);var n;var r;var a;return.299*(parseInt(t.substr(0,2),16)||0)+.587*(parseInt(t.substr(2,2),16)||0)+.114*(parseInt(t.substr(4,2),16)||0)>128?"#0f172a":"#ffffff"}function Ke(){if(!document.getElementById("cb-styles")){var e="#cb-preferences-banner .cb-banner-footer button#cb-save-prefs-btn{background-color:"+(p&&p.saveButtonBg?String(p.saveButtonBg):"#ffffff")+" !important;color:"+(p&&p.saveButtonText?String(p.saveButtonText):"#334155")+" !important;border-color:#e2e8f0 !important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{background-color:"+(p&&p.acceptButtonBg?String(p.acceptButtonBg):"#ffffff")+" !important;color:"+(p&&p.acceptButtonText?String(p.acceptButtonText):"#334155")+" !important;border-color:"+(p&&p.acceptButtonBg?String(p.acceptButtonBg):"#e2e8f0")+" !important;}";var t="";if(p&&p.backgroundColor){var n=String(p.backgroundColor);t="#cb-initial-banner.cb-banner,#cb-preferences-banner.cb-banner{background-color:"+n+" !important;}.cb-gdpr-accordion{background-color:"+n+" !important;}"}var r="";if(p&&p.headingColor){var a=String(p.headingColor);r="#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{color:"+a+" !important;}.cb-gdpr-cat-label{color:"+a+" !important;}"}var i="";p&&p.textColor&&(i="#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-gdpr-cat-desc{color:"+String(p.textColor)+" !important;}");var o="";if(p&&p.bannerFontWeight){var c=String(p.bannerFontWeight);o="#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-weight:"+c+" !important;}.cb-gdpr-cat-label{font-weight:"+c+" !important;}.cb-gdpr-cat-desc{font-weight:"+c+" !important;}.cb-banner p{font-weight:"+c+" !important;}"}var s="#cb-preferences-banner.cb-banner h3{padding-right:36px !important;}#cb-preferences-banner.cb-banner.cb-ccpa-prefs h3{padding-right:0 !important;padding-top:16px !important;margin-bottom:14px !important;}#cb-preferences-banner.cb-banner.cb-ccpa-prefs .cb-banner-body>p{margin-bottom:16px !important;}";var l="#cb-preferences-banner.cb-banner .cb-banner-body{padding-right:4px;}#cb-preferences-banner.cb-banner .cb-gdpr-accordion > div{margin-right:2px;}";var d="";if(p&&p.acceptButtonBg){var b=String(p.acceptButtonBg);var f=p.acceptButtonText?String(p.acceptButtonText):"#ffffff";d=".cb-banner button#cb-accept-all-btn{background-color:"+b+" !important;color:"+f+" !important;}#cb-initial-banner.cb-banner #cb-accept-all-btn{background:"+b+" !important;color:"+f+" !important;}"}var m="";if(p&&p.acceptButtonBg){var g=String(p.acceptButtonBg);var u=p.acceptButtonText?String(p.acceptButtonText):"#ffffff";m=".cb-banner button#cb-reject-all-btn{background-color:"+g+" !important;color:"+u+" !important;}#cb-initial-banner.cb-banner #cb-reject-all-btn{background:"+g+" !important;color:"+u+" !important;}.cb-banner button#cb-prefs-reject-btn{background-color:"+g+" !important;color:"+u+" !important;}"}var y=document.createElement("style");y.id="cb-styles";y.type="text/css";var v="";p&&p.backgroundColor&&(v="#cb-close-initial-btn,#cb-close-prefs-btn{color:"+Ge(p.backgroundColor)+" !important;}");y.appendChild(document.createTextNode(D+"\\n"+e+"\\n"+t+"\\n"+r+"\\n"+i+"\\n"+o+"\\n"+s+"\\n"+l+"\\n"+d+"\\n"+m+"\\n"+v));document.head.appendChild(y)}}function Qe(e,t){if(X()){var n=document.createElement("button");n.type="button";n.id=t;n.setAttribute("aria-label","Close");n.textContent="\xD7";var r="#0f172a";p&&p.backgroundColor&&(r=Ge(p.backgroundColor));n.style.cssText="position:absolute;top:8px;right:24px;width:32px;height:32px;margin:0;padding:0;border:0;border-radius:6px;background:transparent;cursor:pointer;z-index:10;line-height:1;font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-size:22px;font-weight:400;color:"+r+";opacity:0.75;";e.appendChild(n)}}function et(e){if(X()){var t=document.createElement("button");t.type="button";t.id="cb-close-prefs-btn";t.setAttribute("aria-label","Close");t.textContent="\xD7";var n="#0f172a";p&&p.backgroundColor&&(n=Ge(p.backgroundColor));t.style.cssText="position:absolute;top:8px;right:30px;width:32px;height:32px;margin:0;padding:0;border:0;border-radius:6px;background:transparent;cursor:pointer;z-index:10;line-height:1;font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-size:22px;font-weight:400;color:"+n+";opacity:0.75;";e.appendChild(t)}}function tt(){return'<svg viewBox="0 0 735 90" role="img" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg"><g fill="#98A2B3"><path d="M234.357 89.2656C227.796 89.2656 222.045 87.925 217.107 85.2439C212.238 82.4923 208.464 78.647 205.782 73.7081C203.101 68.7692 201.761 62.9484 201.761 56.2456C201.761 49.5428 203.101 43.722 205.782 38.7831C208.464 33.8442 212.238 30.0342 217.107 27.3531C222.045 24.6014 227.796 23.2256 234.357 23.2256C241.131 23.2256 246.916 24.5661 251.714 27.2472C256.582 29.9284 260.322 33.7384 262.932 38.6772C265.614 43.6161 266.954 49.4722 266.954 56.2456C266.954 62.9484 265.614 68.8045 262.932 73.8139C260.322 78.7528 256.582 82.5628 251.714 85.2439C246.846 87.925 241.06 89.2656 234.357 89.2656ZM234.357 78.8939C240.919 78.8939 245.999 76.9184 249.597 72.9672C253.266 68.9456 255.101 63.3717 255.101 56.2456C255.101 49.0489 253.266 43.475 249.597 39.5239C245.999 35.5728 240.919 33.5972 234.357 33.5972C227.866 33.5972 222.786 35.6081 219.117 39.6298C215.449 43.5809 213.614 49.1195 213.614 56.2456C213.614 63.3717 215.449 68.9456 219.117 72.9672C222.786 76.9184 227.866 78.8939 234.357 78.8939Z"/><path d="M158.471 89.3708C149.793 89.3708 142.208 87.5717 135.717 83.9733C129.297 80.3044 124.322 75.1539 120.795 68.5217C117.267 61.8894 115.503 54.0931 115.503 45.1325C115.503 36.1719 117.267 28.4108 120.795 21.8492C124.322 15.2169 129.297 10.1017 135.717 6.50333C142.208 2.83444 149.793 1 158.471 1C165.103 1 170.96 2.09361 176.04 4.28083C181.19 6.3975 185.423 9.53722 188.74 13.7C192.056 17.7922 194.313 22.7664 195.513 28.6225H183.236C181.966 23.1897 179.179 18.9917 174.875 16.0283C170.642 13.065 165.174 11.5833 158.471 11.5833C148.805 11.5833 141.22 14.5819 135.717 20.5792C130.214 26.5764 127.462 34.7608 127.462 45.1325C127.462 55.5747 130.214 63.7944 135.717 69.7917C141.22 75.7183 148.805 78.6817 158.471 78.6817C165.174 78.6817 170.642 77.2353 174.875 74.3425C179.179 71.3792 181.966 67.1811 183.236 61.7483H195.513C194.313 67.5339 192.056 72.5081 188.74 76.6708C185.423 80.7631 181.19 83.9028 176.04 86.09C170.96 88.2772 165.103 89.3708 158.471 89.3708Z"/><path d="M372.231 89.2656C363.412 89.2656 356.462 87.4311 351.382 83.7623C346.302 80.0934 343.515 74.9781 343.021 68.4164H354.769C355.263 72.297 356.956 75.1545 359.849 76.9889C362.742 78.8234 367.01 79.7406 372.655 79.7406C382.533 79.7406 387.471 76.6361 387.471 70.4272C387.471 67.8872 386.695 65.947 385.143 64.6064C383.661 63.1953 381.121 62.1722 377.523 61.5372L363.659 58.9973C351.876 56.81 345.985 51.2009 345.985 42.1697C345.985 36.3136 348.207 31.6923 352.652 28.3056C357.097 24.9189 363.165 23.2256 370.856 23.2256C378.828 23.2256 385.143 24.9542 389.8 28.4114C394.527 31.8686 397.208 36.737 397.843 43.0164H386.307C385.602 39.4886 383.944 36.8781 381.333 35.1847C378.793 33.4914 375.195 32.6448 370.538 32.6448C366.234 32.6448 362.883 33.3856 360.484 34.8673C358.156 36.3489 356.991 38.5009 356.991 41.3231C356.991 43.5103 357.732 45.2389 359.214 46.5089C360.766 47.7084 363.236 48.6256 366.622 49.2606L380.486 51.9064C386.695 53.0353 391.246 55.0461 394.139 57.9389C397.032 60.8317 398.478 64.7122 398.478 69.5806C398.478 75.7895 396.22 80.6225 391.705 84.0798C387.189 87.537 380.698 89.2656 372.231 89.2656Z"/><path d="M437.465 89.2656C430.833 89.2656 425.083 87.925 420.215 85.2439C415.346 82.4923 411.572 78.6117 408.89 73.6022C406.28 68.5928 404.975 62.7367 404.975 56.0339C404.975 49.3311 406.28 43.5456 408.89 38.6772C411.572 33.7384 415.311 29.9284 420.109 27.2472C424.907 24.5661 430.516 23.2256 436.936 23.2256C443.075 23.2256 448.366 24.4603 452.811 26.9297C457.327 29.3992 460.819 32.8917 463.289 37.4073C465.758 41.9228 466.993 47.285 466.993 53.4939V58.2564H416.405C416.757 64.8886 418.768 70.0745 422.437 73.8139C426.177 77.4828 431.151 79.3172 437.36 79.3172C441.663 79.3172 445.297 78.4353 448.26 76.6714C451.224 74.837 453.27 72.1559 454.399 68.6281H466.464C464.912 75.1897 461.56 80.2697 456.41 83.8681C451.33 87.4664 445.015 89.2656 437.465 89.2656ZM416.828 49.5781H455.563C454.998 44.357 453.058 40.3 449.742 37.4073C446.497 34.5145 442.193 33.0681 436.83 33.0681C431.539 33.0681 427.129 34.5145 423.601 37.4073C420.073 40.3 417.816 44.357 416.828 49.5781Z"/><path d="M564.448 87.9953C561.061 87.9953 558.415 87.1486 556.51 85.4553C554.676 83.6914 553.759 81.0809 553.759 77.6236V33.597H541.905V24.4953H553.864V7.99512H565.506V24.4953H582.122V33.597H565.612V78.682H583.815V87.9953H564.448Z"/><path d="M672 88V35H687V88H672Z"/><path d="M671 23V8H687V23H671Z"/><path d="M716.594 87.9955C712.693 87.9955 709.652 87.0038 707.47 85.0205C705.355 83.0372 704.297 80.0291 704.297 75.9963L704.297 35.4985H693.785V23.9951H704.396L704.53 7.99512L718.875 7.99512L718.874 23.9951H735V35.4985H719.073L719.073 76.393H734.642V87.9955H716.594Z"/><path d="M283.197 33.4209H287.594C289.814 29.8402 292.857 27.1189 296.725 25.2568C300.592 23.3231 305.14 22.3565 310.368 22.3564C318.676 22.3564 325.229 24.7554 330.027 29.5537C334.826 34.2805 337.226 40.6188 337.226 48.5684V87.9951H325.193V50.6104C325.193 44.8093 323.618 40.4045 320.467 37.3965C317.387 34.3885 312.839 32.8838 306.823 32.8838C300.879 32.8838 296.331 34.3885 293.18 37.3965C290.029 40.4045 288.453 44.8093 288.453 50.6104V87.9951H276.421V36.2266H267.972V21H283.197V33.4209Z"/><path d="M486 34.2314H489.33C491.517 30.7038 494.516 28.0229 498.326 26.1885C502.136 24.2835 506.617 23.3311 511.768 23.3311C519.952 23.3311 526.408 25.6947 531.135 30.4219C535.862 35.0785 538.226 41.3227 538.226 49.1543V87.9951H526.372V51.165C526.372 45.4501 524.82 41.1108 521.716 38.1475C518.682 35.1841 514.201 33.7031 508.274 33.7031C502.419 33.7032 497.938 35.1843 494.834 38.1475C491.73 41.1108 490.177 45.4501 490.177 51.165V87.9951H478.324V36.9951H470V20.9951H486V34.2314Z"/><path d="M631.386 7.66992C636.211 7.66997 640.376 8.52936 643.88 10.248C647.45 11.9008 650.26 14.2815 652.31 17.3887C654.359 20.4297 655.384 23.9999 655.384 28.0986C655.384 32.2635 653.684 36.2398 652 38.9951C649.075 43.7811 645.5 44.7578 645.627 44.7578L648.988 45.1553C651.963 45.8164 654.673 47.0394 657.119 48.8242C659.631 50.6092 661.615 52.8569 663.069 55.5674C664.59 58.2779 665.351 61.4843 665.351 65.1865C665.351 69.7482 664.226 73.7478 661.979 77.1855C659.797 80.5572 656.723 83.2019 652.756 85.1191C648.855 87.0363 644.326 87.9951 639.17 87.9951H596.826V21H611.999V40.2959H629.303C632.807 40.2959 635.484 39.4691 637.335 37.8164C639.252 36.0975 640.211 33.6844 640.211 30.5771C640.211 27.3378 639.252 24.892 637.335 23.2393C635.484 21.5866 632.807 20.7598 629.303 20.7598H612V7.66992H631.386ZM611.999 74.9053H636.394C640.823 74.9053 644.227 73.9463 646.607 72.0293C648.987 70.046 650.178 67.2031 650.178 63.501C650.178 59.8649 648.987 57.1206 646.607 55.2695C644.228 53.3526 640.856 52.3946 636.493 52.3945H611.999V74.9053Z"/></g><path d="M32.7604 87.4506C32.0233 88.1831 30.8281 88.1831 30.0909 87.4506L8.45288 65.9485C-2.81763 54.7488 -2.81763 36.5904 8.45288 25.3907C8.97709 24.8698 9.827 24.8698 10.3512 25.3907L51.4471 66.2285C52.1843 66.961 52.1843 68.1487 51.4471 68.8813L32.7604 87.4506Z" fill="#B4BCC8"/><path d="M35.3829 43.3719C34.8671 42.8423 34.8732 41.9897 35.3966 41.4677L76.4272 0.544909C77.1632 -0.189157 78.3479 -0.180458 79.0733 0.564338L97.4615 19.4444C98.1869 20.1891 98.1783 21.388 97.4423 22.1221L75.8387 43.669C64.5861 54.892 46.4734 54.759 35.3829 43.3719Z" fill="#8C95A3"/></svg>'}function nt(e){var t=document.createElement("div");t.className="cb-brand-footer";var n=document.createElement("a");n.href="https://consentbit.com";n.target="_blank";n.rel="noopener noreferrer";n.setAttribute("aria-label","Powered by ConsentBit");var r=document.createElement("span");r.className="cb-brand-credit";r.textContent="Powered by";n.appendChild(r);var a=document.createElement("span");a.className="cb-brand-mark";a.innerHTML='<svg viewBox="0 0 735 90" role="img" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg"><g fill="#98A2B3"><path d="M234.357 89.2656C227.796 89.2656 222.045 87.925 217.107 85.2439C212.238 82.4923 208.464 78.647 205.782 73.7081C203.101 68.7692 201.761 62.9484 201.761 56.2456C201.761 49.5428 203.101 43.722 205.782 38.7831C208.464 33.8442 212.238 30.0342 217.107 27.3531C222.045 24.6014 227.796 23.2256 234.357 23.2256C241.131 23.2256 246.916 24.5661 251.714 27.2472C256.582 29.9284 260.322 33.7384 262.932 38.6772C265.614 43.6161 266.954 49.4722 266.954 56.2456C266.954 62.9484 265.614 68.8045 262.932 73.8139C260.322 78.7528 256.582 82.5628 251.714 85.2439C246.846 87.925 241.06 89.2656 234.357 89.2656ZM234.357 78.8939C240.919 78.8939 245.999 76.9184 249.597 72.9672C253.266 68.9456 255.101 63.3717 255.101 56.2456C255.101 49.0489 253.266 43.475 249.597 39.5239C245.999 35.5728 240.919 33.5972 234.357 33.5972C227.866 33.5972 222.786 35.6081 219.117 39.6298C215.449 43.5809 213.614 49.1195 213.614 56.2456C213.614 63.3717 215.449 68.9456 219.117 72.9672C222.786 76.9184 227.866 78.8939 234.357 78.8939Z"/><path d="M158.471 89.3708C149.793 89.3708 142.208 87.5717 135.717 83.9733C129.297 80.3044 124.322 75.1539 120.795 68.5217C117.267 61.8894 115.503 54.0931 115.503 45.1325C115.503 36.1719 117.267 28.4108 120.795 21.8492C124.322 15.2169 129.297 10.1017 135.717 6.50333C142.208 2.83444 149.793 1 158.471 1C165.103 1 170.96 2.09361 176.04 4.28083C181.19 6.3975 185.423 9.53722 188.74 13.7C192.056 17.7922 194.313 22.7664 195.513 28.6225H183.236C181.966 23.1897 179.179 18.9917 174.875 16.0283C170.642 13.065 165.174 11.5833 158.471 11.5833C148.805 11.5833 141.22 14.5819 135.717 20.5792C130.214 26.5764 127.462 34.7608 127.462 45.1325C127.462 55.5747 130.214 63.7944 135.717 69.7917C141.22 75.7183 148.805 78.6817 158.471 78.6817C165.174 78.6817 170.642 77.2353 174.875 74.3425C179.179 71.3792 181.966 67.1811 183.236 61.7483H195.513C194.313 67.5339 192.056 72.5081 188.74 76.6708C185.423 80.7631 181.19 83.9028 176.04 86.09C170.96 88.2772 165.103 89.3708 158.471 89.3708Z"/><path d="M372.231 89.2656C363.412 89.2656 356.462 87.4311 351.382 83.7623C346.302 80.0934 343.515 74.9781 343.021 68.4164H354.769C355.263 72.297 356.956 75.1545 359.849 76.9889C362.742 78.8234 367.01 79.7406 372.655 79.7406C382.533 79.7406 387.471 76.6361 387.471 70.4272C387.471 67.8872 386.695 65.947 385.143 64.6064C383.661 63.1953 381.121 62.1722 377.523 61.5372L363.659 58.9973C351.876 56.81 345.985 51.2009 345.985 42.1697C345.985 36.3136 348.207 31.6923 352.652 28.3056C357.097 24.9189 363.165 23.2256 370.856 23.2256C378.828 23.2256 385.143 24.9542 389.8 28.4114C394.527 31.8686 397.208 36.737 397.843 43.0164H386.307C385.602 39.4886 383.944 36.8781 381.333 35.1847C378.793 33.4914 375.195 32.6448 370.538 32.6448C366.234 32.6448 362.883 33.3856 360.484 34.8673C358.156 36.3489 356.991 38.5009 356.991 41.3231C356.991 43.5103 357.732 45.2389 359.214 46.5089C360.766 47.7084 363.236 48.6256 366.622 49.2606L380.486 51.9064C386.695 53.0353 391.246 55.0461 394.139 57.9389C397.032 60.8317 398.478 64.7122 398.478 69.5806C398.478 75.7895 396.22 80.6225 391.705 84.0798C387.189 87.537 380.698 89.2656 372.231 89.2656Z"/><path d="M437.465 89.2656C430.833 89.2656 425.083 87.925 420.215 85.2439C415.346 82.4923 411.572 78.6117 408.89 73.6022C406.28 68.5928 404.975 62.7367 404.975 56.0339C404.975 49.3311 406.28 43.5456 408.89 38.6772C411.572 33.7384 415.311 29.9284 420.109 27.2472C424.907 24.5661 430.516 23.2256 436.936 23.2256C443.075 23.2256 448.366 24.4603 452.811 26.9297C457.327 29.3992 460.819 32.8917 463.289 37.4073C465.758 41.9228 466.993 47.285 466.993 53.4939V58.2564H416.405C416.757 64.8886 418.768 70.0745 422.437 73.8139C426.177 77.4828 431.151 79.3172 437.36 79.3172C441.663 79.3172 445.297 78.4353 448.26 76.6714C451.224 74.837 453.27 72.1559 454.399 68.6281H466.464C464.912 75.1897 461.56 80.2697 456.41 83.8681C451.33 87.4664 445.015 89.2656 437.465 89.2656ZM416.828 49.5781H455.563C454.998 44.357 453.058 40.3 449.742 37.4073C446.497 34.5145 442.193 33.0681 436.83 33.0681C431.539 33.0681 427.129 34.5145 423.601 37.4073C420.073 40.3 417.816 44.357 416.828 49.5781Z"/><path d="M564.448 87.9953C561.061 87.9953 558.415 87.1486 556.51 85.4553C554.676 83.6914 553.759 81.0809 553.759 77.6236V33.597H541.905V24.4953H553.864V7.99512H565.506V24.4953H582.122V33.597H565.612V78.682H583.815V87.9953H564.448Z"/><path d="M672 88V35H687V88H672Z"/><path d="M671 23V8H687V23H671Z"/><path d="M716.594 87.9955C712.693 87.9955 709.652 87.0038 707.47 85.0205C705.355 83.0372 704.297 80.0291 704.297 75.9963L704.297 35.4985H693.785V23.9951H704.396L704.53 7.99512L718.875 7.99512L718.874 23.9951H735V35.4985H719.073L719.073 76.393H734.642V87.9955H716.594Z"/><path d="M283.197 33.4209H287.594C289.814 29.8402 292.857 27.1189 296.725 25.2568C300.592 23.3231 305.14 22.3565 310.368 22.3564C318.676 22.3564 325.229 24.7554 330.027 29.5537C334.826 34.2805 337.226 40.6188 337.226 48.5684V87.9951H325.193V50.6104C325.193 44.8093 323.618 40.4045 320.467 37.3965C317.387 34.3885 312.839 32.8838 306.823 32.8838C300.879 32.8838 296.331 34.3885 293.18 37.3965C290.029 40.4045 288.453 44.8093 288.453 50.6104V87.9951H276.421V36.2266H267.972V21H283.197V33.4209Z"/><path d="M486 34.2314H489.33C491.517 30.7038 494.516 28.0229 498.326 26.1885C502.136 24.2835 506.617 23.3311 511.768 23.3311C519.952 23.3311 526.408 25.6947 531.135 30.4219C535.862 35.0785 538.226 41.3227 538.226 49.1543V87.9951H526.372V51.165C526.372 45.4501 524.82 41.1108 521.716 38.1475C518.682 35.1841 514.201 33.7031 508.274 33.7031C502.419 33.7032 497.938 35.1843 494.834 38.1475C491.73 41.1108 490.177 45.4501 490.177 51.165V87.9951H478.324V36.9951H470V20.9951H486V34.2314Z"/><path d="M631.386 7.66992C636.211 7.66997 640.376 8.52936 643.88 10.248C647.45 11.9008 650.26 14.2815 652.31 17.3887C654.359 20.4297 655.384 23.9999 655.384 28.0986C655.384 32.2635 653.684 36.2398 652 38.9951C649.075 43.7811 645.5 44.7578 645.627 44.7578L648.988 45.1553C651.963 45.8164 654.673 47.0394 657.119 48.8242C659.631 50.6092 661.615 52.8569 663.069 55.5674C664.59 58.2779 665.351 61.4843 665.351 65.1865C665.351 69.7482 664.226 73.7478 661.979 77.1855C659.797 80.5572 656.723 83.2019 652.756 85.1191C648.855 87.0363 644.326 87.9951 639.17 87.9951H596.826V21H611.999V40.2959H629.303C632.807 40.2959 635.484 39.4691 637.335 37.8164C639.252 36.0975 640.211 33.6844 640.211 30.5771C640.211 27.3378 639.252 24.892 637.335 23.2393C635.484 21.5866 632.807 20.7598 629.303 20.7598H612V7.66992H631.386ZM611.999 74.9053H636.394C640.823 74.9053 644.227 73.9463 646.607 72.0293C648.987 70.046 650.178 67.2031 650.178 63.501C650.178 59.8649 648.987 57.1206 646.607 55.2695C644.228 53.3526 640.856 52.3946 636.493 52.3945H611.999V74.9053Z"/></g><path d="M32.7604 87.4506C32.0233 88.1831 30.8281 88.1831 30.0909 87.4506L8.45288 65.9485C-2.81763 54.7488 -2.81763 36.5904 8.45288 25.3907C8.97709 24.8698 9.827 24.8698 10.3512 25.3907L51.4471 66.2285C52.1843 66.961 52.1843 68.1487 51.4471 68.8813L32.7604 87.4506Z" fill="#B4BCC8"/><path d="M35.3829 43.3719C34.8671 42.8423 34.8732 41.9897 35.3966 41.4677L76.4272 0.544909C77.1632 -0.189157 78.3479 -0.180458 79.0733 0.564338L97.4615 19.4444C98.1869 20.1891 98.1783 21.388 97.4423 22.1221L75.8387 43.669C64.5861 54.892 46.4734 54.759 35.3829 43.3719Z" fill="#8C95A3"/></svg>';n.appendChild(a);t.appendChild(n);e.appendChild(t)}function rt(e){return e?"slide-up"===y?"cb-banner-animate-initial-center-bottom":"slide-down"===y?"cb-banner-animate-initial-center-top":"zoom-in"===y?"cb-banner-animate-initial-center-zoom":"cb-banner-animate-fade":"slide-up"===y?"cb-banner-animate-bottom":"slide-down"===y?"cb-banner-animate-top":"zoom-in"===y?"cb-banner-animate-zoom-in":"cb-banner-animate-fade"}function at(){if(!document.getElementById("cb-initial-banner"))if(document.body){var e="ccpa"===i;var t=document.createElement("div");if(e){var n=document.createElement("div");n.className="cb-banner";n.id="cb-initial-banner";n.style.display="none";var r=document.createElement("div");r.className="cb-banner-body";var a=document.createElement("h3");a.textContent=J("title",k);r.appendChild(a);var o=document.createElement("p");var c=q(W("description"),_);if(m&&Y()){o.appendChild(document.createTextNode(c+" "));var s=document.createElement("a");s.textContent=J("privacyPolicy",S);s.style.cssText="color:#007aff;text-decoration:underline;cursor:pointer;";ae(s,m);o.appendChild(s);o.appendChild(document.createTextNode("."))}else o.textContent=c;r.appendChild(o);var l=document.createElement("p");l.style.marginTop="20px";l.style.marginBottom="0";var d=document.createElement("button");d.id="cb-ccpa-donotsell-link";d.type="button";d.textContent=W("doNotSell");d.style.cssText="background:none;border:none;padding:0;margin:0;color:#007aff;text-decoration:underline;cursor:pointer;font:inherit;text-align:left;display:inline;";l.appendChild(d);r.appendChild(l);n.appendChild(r);Qe(n,"cb-close-initial-btn");t.appendChild(n);var p=document.createElement("div");p.className="cb-banner cb-ccpa-prefs";p.id="cb-preferences-banner";p.style.display="none";"left"===v?p.classList.add("prefs-left"):"right"===v?p.classList.add("prefs-right"):p.classList.add("prefs-center");var b=document.createElement("div");b.className="cb-banner-body";var f=document.createElement("h3");f.textContent=W("optOutPreference");b.appendChild(f);var y=document.createElement("p");var h=(W("ccpaOptOutPreferenceIntro")||W("ccpaOptOut")||"").replace(/s*More info.?s*$/i,"").trim();if(m&&Y()){y.appendChild(document.createTextNode(h+" "));var x=document.createElement("a");x.textContent=W("privacyPolicy");x.style.cssText="color:#007aff;text-decoration:underline;cursor:pointer;";ae(x,m);y.appendChild(x);y.appendChild(document.createTextNode("."))}else y.textContent=h;y.style.lineHeight="1.45";b.appendChild(y);var C=document.createElement("label");C.style.cssText="display:flex;align-items:flex-start;gap:12px;margin-top:20px;cursor:pointer;";var w=document.createElement("span");w.style.cssText="flex:1;line-height:1.45;";w.textContent=W("doNotSell");var O=document.createElement("input");O.type="checkbox";O.id="cb-ccpa-optout";O.style.cssText="flex-shrink:0;margin-top:2px;";O.checked=!!(I&&I.accepted&&I.ccpa&&I.ccpa.doNotSell);C.appendChild(O);C.appendChild(w);b.appendChild(C);p.appendChild(b);var B=document.createElement("div");B.className="cb-banner-footer";var L=document.createElement("button");L.id="cb-cancel-prefs-btn";L.textContent=U("cancel");B.appendChild(L);var A=document.createElement("button");A.id="cb-save-prefs-btn";A.textContent=W("saveMyPreferences")||W("save");B.appendChild(A);p.appendChild(B);nt(p);et(p);t.appendChild(p)}else{var H=function(e){var t=document.createElement("div");t.style.borderBottom="1px solid #e5e7eb";var n=document.createElement("div");n.style.cssText="display:flex;align-items:center;gap:14px;padding:12px 14px;min-height:44px;";var r=document.createElement("button");r.type="button";r.setAttribute("aria-expanded","false");r.textContent="+";r.style.cssText="flex-shrink:0;width:22px;height:22px;padding:0;border:1px solid #e5e7eb;border-radius:4px;background:#f3f4f6;color:#111827;font-size:14px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;";var a=document.createElement("span");a.className="cb-gdpr-cat-label";a.style.cssText="flex:1;font-size:11px;font-weight:600;";a.textContent=e.labelText;n.appendChild(r);n.appendChild(a);var i=document.createElement("div");i.style.flexShrink="0";if(e.alwaysActive){var o=document.createElement("span");o.style.cssText="font-size:11px;font-weight:600;color:#374151;";o.textContent=J("alwaysActive",20);i.appendChild(o)}else{var c=document.createElement("input");c.type="checkbox";c.id=e.checkboxId;e.defaultChecked&&(c.checked=!0);c.style.cssText="position:absolute;opacity:0;width:0;height:0;margin:0;pointer-events:none;";var s=document.createElement("button");s.type="button";s.className="cb-pref-toggle-track";s.setAttribute("role","switch");s.setAttribute("aria-label",e.labelText);var l=function(){s.setAttribute("aria-checked",c.checked?"true":"false")};s.addEventListener("click",function(){c.checked=!c.checked;l()});l();i.appendChild(c);i.appendChild(s)}n.appendChild(i);var d=document.createElement("div");d.className="cb-gdpr-cat-desc";d.style.cssText="display:grid;grid-template-rows:0fr;opacity:0;font-size:13px;line-height:1.5;transition:grid-template-rows .3s ease,opacity .25s ease;";var p=document.createElement("div");p.style.cssText="overflow:hidden;min-height:0;padding:0 12px 12px 44px;";p.textContent=e.descText;d.appendChild(p);var b=function(e){e.style.gridTemplateRows="1fr";e.style.opacity=""};var f=function(e){e.style.gridTemplateRows="0fr";e.style.opacity="0"};r.addEventListener("click",function(){var e="true"!==r.getAttribute("aria-expanded");var n=t.parentNode;if(n){var a=n.children;for(var i=0;i<a.length;i++){var o=a[i].querySelector(".cb-gdpr-cat-desc");var c=a[i].querySelector("button[aria-expanded]");if(o&&o!==d){f(o);if(c){c.textContent="+";c.setAttribute("aria-expanded","false")}}}}e?b(d):f(d);r.textContent=e?"\u2212":"+";r.setAttribute("aria-expanded",e?"true":"false")});t.appendChild(n);t.appendChild(d);return t};var T=document.createElement("div");T.className="cb-banner";T.id="cb-initial-banner";T.style.display="none";var P=document.createElement("div");P.className="cb-banner-body";var z=document.createElement("h3");z.textContent=W("title");P.appendChild(z);var N=document.createElement("p");var j=W("description");if(m&&Y()){N.appendChild(document.createTextNode(j+" "));var V=document.createElement("a");V.textContent=W("privacyPolicy");V.style.cssText="color:#007aff;text-decoration:underline;cursor:pointer;";ae(V,m);N.appendChild(V);N.appendChild(document.createTextNode("."))}else N.textContent=j;P.appendChild(N);T.appendChild(P);var M=document.createElement("div");M.className="cb-banner-footer";var D=document.createElement("button");D.id="cb-preferences-btn";D.textContent=q(U("customise"),E);G()&&M.appendChild(D);var F=document.createElement("button");F.id="cb-reject-all-btn";F.textContent=q(U("rejectAll"),E);$()&&M.appendChild(F);var Z=document.createElement("button");Z.id="cb-accept-all-btn";Z.textContent=q(U("acceptAll"),E);M.appendChild(Z);T.appendChild(M);Qe(T,"cb-close-initial-btn");t.appendChild(T);var R=document.createElement("div");R.className="cb-banner";R.id="cb-preferences-banner";R.style.display="none";"left"===v?R.classList.add("prefs-left"):"right"===v?R.classList.add("prefs-right"):R.classList.add("prefs-center");var X=document.createElement("div");X.className="cb-banner-body";var K=document.createElement("h3");K.textContent=J("cookiePreferences",k);X.appendChild(K);var Q=document.createElement("p");var te=(q(W("managePreferences"),_)||"").replace(/s*More info.?s*$/i,"").trim();if(m&&Y()){Q.appendChild(document.createTextNode(te+" "));var ne=document.createElement("a");ne.textContent=J("privacyPolicy",S);ne.style.cssText="color:#007aff;text-decoration:underline;cursor:pointer;";ae(ne,m);Q.appendChild(ne);Q.appendChild(document.createTextNode("."))}else Q.textContent=te;X.appendChild(Q);var re=document.createElement("div");re.className="cb-gdpr-accordion";re.style.cssText="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin-bottom:4px;";var ie=J("strictlyNecessary",20)||J("essential",20);re.appendChild(H({labelText:ie,alwaysActive:!0,descText:J("essentialDescription",300)}));var oe=se()||I&&I.accepted&&I.categories||{};re.appendChild(H({labelText:J("marketing",20),checkboxId:"cb-pref-marketing",defaultChecked:!!oe.marketing,descText:J("marketingDescription",300)}));re.appendChild(H({labelText:J("analytics",20),checkboxId:"cb-pref-analytics",defaultChecked:!!oe.analytics,descText:J("analyticsDescription",300)}));re.appendChild(H({labelText:J("preferences",20),checkboxId:"cb-pref-preferences",defaultChecked:!!oe.preferences,descText:J("preferencesDescription",300)}));re.lastChild&&(re.lastChild.style.borderBottom="none");X.appendChild(re);R.appendChild(X);var ce=document.createElement("div");ce.className="cb-banner-footer";var le=document.createElement("button");le.id="cb-prefs-reject-btn";le.textContent=q(U("rejectAll"),E);ce.appendChild(le);var de=document.createElement("button");de.id="cb-save-prefs-btn";de.textContent=q(U("saveMyPreferences")||U("save"),E);ce.appendChild(de);R.appendChild(ce);nt(R);et(R);t.appendChild(R)}document.body.appendChild(t);g&&(document.body.style.overflow="hidden");if(!window.__cbResizeInit){window.__cbResizeInit=!0;window.addEventListener("resize",function(){var e=document.getElementById("cb-initial-banner");e&&"none"!==e.style.display&&"hidden"!==e.style.visibility&&ee(e)})}var pe=document.getElementById("cb-initial-banner");if(pe){var be=ee(pe);pe.style.display="flex";pe.style.visibility="visible";pe.style.opacity="1";u&&pe.classList.add(rt(be))}}else setTimeout(at,100)}function it(){g&&(document.body.style.overflow="")}function ot(){try{if(p&&!1===p.showBannerLogo)return!1;if(p&&0===p.showBannerLogo)return!1;var e=R();var t=TRANSLATIONS.config||{};var n=null!=t.floatingButtonEnabled?t.floatingButtonEnabled:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).floatingButtonEnabled;return!1!==n&&"0"!==n&&"false"!==String(n).toLowerCase()}catch(e){return!0}}function ct(){try{var e=parseInt(localStorage.getItem(L+"_closed")||"0",10);if(!e)return!1;if(ot())return!0;if(Date.now()-e<864e5)return!0;localStorage.removeItem(L+"_closed");return!1}catch(e){return!1}}function st(){try{if(p&&p.bannerLogoPosition)return"right"===p.bannerLogoPosition?"right":"left";var e=R();var t=TRANSLATIONS.config||{};var n;return"right"===(null!=t.floatingButtonPosition?t.floatingButtonPosition:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).floatingButtonPosition)?"right":"left"}catch(e){return"left"}}function lt(){var e="http://www.w3.org/2000/svg";var t=document.createElementNS(e,"svg");t.setAttribute("xmlns",e);t.setAttribute("viewBox","0 0 40 40");t.setAttribute("width","44");t.setAttribute("height","44");t.setAttribute("aria-hidden","true");t.setAttribute("focusable","false");t.style.cssText="display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;";var n=document.createElementNS(e,"circle");n.setAttribute("cx","20");n.setAttribute("cy","20");n.setAttribute("r","18");n.setAttribute("fill","#007aff");t.appendChild(n);var r=[{cx:"14",cy:"14",r:"2.2"},{cx:"24",cy:"18",r:"2.5"},{cx:"17",cy:"25",r:"2"}];for(var a=0;a<r.length;a++){var i=document.createElementNS(e,"circle");i.setAttribute("cx",r[a].cx);i.setAttribute("cy",r[a].cy);i.setAttribute("r",r[a].r);i.setAttribute("fill","#ffffff");t.appendChild(i)}return t}function dt(){try{var e=document.getElementsByTagName("script");for(var t=e.length-1;t>=0;t--){var n=e[t].src||"";if(-1!==n.indexOf("/consentbit/")||-1!==n.indexOf("/client_data/"))return new URL(n).origin}}catch(e){}return""}function pt(){if(!document.getElementById("cb-floating-trigger")&&ot()){var e=st();var t=n||"";var a=r||"";if(!t){var i=dt();if(i){t=i+"/embed/floating-logo.svg";a||(a=t)}}var o=document.createElement("button");o.id="cb-floating-trigger";o.type="button";o.setAttribute("aria-label",W("cookiePreferences"));o.style.cssText="position:fixed;bottom:28px;"+("right"===e?"right:16px;":"left:16px;")+"z-index:2147483646;width:56px;height:56px;border:none;border-radius:9999px;background:transparent;cursor:pointer;padding:0;box-shadow:none;";if(t){var c=document.createElement("img");c.alt="";c.src=t;c.setAttribute("width","44");c.setAttribute("height","44");c.draggable=!1;c.style.cssText="display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;";var s=!1;c.addEventListener("error",function e(){if(s||!a||t===a){c.removeEventListener("error",e);c.parentNode&&c.parentNode.replaceChild(lt(),c)}else{s=!0;c.src=a}});o.appendChild(c)}else o.appendChild(lt());document.body.appendChild(o)}}function bt(){return u?"left"===v?"zoom-in"===y?"cb-banner-animate-prefs-zoom-in":"cb-banner-animate-prefs-left":"right"===v?"zoom-in"===y?"cb-banner-animate-prefs-zoom-in":"cb-banner-animate-prefs-right":"slide-up"===y?"cb-banner-animate-center-bottom":"slide-down"===y?"cb-banner-animate-center-top":"zoom-in"===y?"cb-banner-animate-prefs-zoom-in":"cb-banner-animate-fade":""}function ft(e){if(e){var t=F.split(" ");for(var n=0;n<t.length;n++)t[n]&&e.classList.remove(t[n])}}function mt(){Ke();at();pt();var e=document.getElementById("cb-initial-banner");var t=document.getElementById("cb-preferences-banner");var n=document.getElementById("cb-preferences-btn");var r=document.getElementById("cb-accept-all-btn");var a=document.getElementById("cb-reject-all-btn");var o=document.getElementById("cb-prefs-reject-btn");var c=document.getElementById("cb-cancel-prefs-btn");var s=document.getElementById("cb-save-prefs-btn");var l=document.getElementById("cb-ccpa-donotsell-link");var d="ccpa"===i;function p(){if(e){e.style.setProperty("display","none","important");e.classList.remove("cb-banner-animate-left","cb-banner-animate-right","cb-banner-animate-top","cb-banner-animate-bottom","cb-banner-animate-fade")}if(t){t.style.display="none";ft(t)}var n=document.getElementById("cb-floating-trigger");n&&(n.style.display="flex");it()}function b(){if(e){if(t){t.style.display="none";ft(t)}var n=ee(e);e.style.setProperty("display","flex","important");e.style.setProperty("visibility","visible","important");e.style.setProperty("opacity","1","important");e.classList.remove("cb-banner-animate-left","cb-banner-animate-right","cb-banner-animate-top","cb-banner-animate-bottom","cb-banner-animate-fade","cb-banner-animate-zoom-in");u&&e.classList.add(rt(n));g&&(document.body.style.overflow="hidden")}}function f(){e.style.display="none";var n=document.getElementById("cb-floating-trigger");n&&(n.style.display="none");t.style.display="flex";t.style.visibility="visible";t.style.opacity="1";ft(t);var r=bt();r&&t.classList.add(r)}var m=document.getElementById("cb-floating-trigger");m&&m.addEventListener("click",function(e){e&&e.preventDefault&&e.preventDefault();e&&e.stopPropagation&&e.stopPropagation();b()});n&&n.addEventListener("click",function(){if(e&&t){if(!d){var n=se()||I&&I.categories||{};var r=function(e,t){var n=document.getElementById(e);if(n){n.checked=!!t;var r=n.parentNode&&n.parentNode.querySelector("button.cb-pref-toggle-track");r&&r.setAttribute("aria-checked",n.checked?"true":"false")}};r("cb-pref-analytics",n.analytics);r("cb-pref-preferences",n.preferences);r("cb-pref-marketing",n.marketing)}e.classList.remove("cb-banner-animate-left","cb-banner-animate-right","cb-banner-animate-top","cb-banner-animate-bottom","cb-banner-animate-fade");f()}});o&&o.addEventListener("click",function(){var e={accepted:!0,timestamp:(new Date).toISOString(),categories:{essential:!0,analytics:!1,preferences:!1,marketing:!1}};De(["analytics","marketing","preferences"]);oe(e);le(e,{status:"rejected"});ce(e.categories);Xe(e.categories,"[PrefsReject]");We(e.categories);p()});var y=document.getElementById("cb-close-initial-btn");var v=document.getElementById("cb-close-prefs-btn");y&&y.addEventListener("click",function(){try{localStorage.setItem(L+"_closed",String(Date.now()))}catch(e){}p()});v&&v.addEventListener("click",function(){try{localStorage.setItem(L+"_closed",String(Date.now()))}catch(e){}p()});d&&l&&l.addEventListener("click",function(){e&&t&&f()});c&&c.addEventListener("click",function(){b()});a&&a.addEventListener("click",function(){if(!d){var e={accepted:!0,timestamp:(new Date).toISOString(),categories:{essential:!0,analytics:!1,preferences:!1,marketing:!1}};De(["analytics","marketing","preferences"]);oe(e);le(e,{status:"rejected"});ce(e.categories);Xe(e.categories,"[Reject]");We(e.categories)}p()});r&&r.addEventListener("click",function(){if(d){var e={accepted:!0,timestamp:(new Date).toISOString(),ccpa:{doNotSell:!1}};oe(e);le(e,{status:"given"});je({analytics:!0,marketing:!0,preferences:!0,essential:!0});$e(!1)}else{var t={accepted:!0,timestamp:(new Date).toISOString(),categories:{essential:!0,analytics:!0,preferences:!0,marketing:!0}};oe(t);le(t,{status:"given"});ce(t.categories);je(t.categories);Xe(t.categories,"[Accept]")}p()});s&&s.addEventListener("click",function(){if(d){var e=document.getElementById("cb-ccpa-optout");var t=!(!e||!e.checked);var n={accepted:!0,timestamp:(new Date).toISOString(),ccpa:{doNotSell:t}};oe(n);le(n,{status:t?"rejected":"given"});t||je({analytics:!0,marketing:!0,preferences:!0,essential:!0});$e(t)}else{var r=document.getElementById("cb-pref-analytics");var a=document.getElementById("cb-pref-preferences");var i=document.getElementById("cb-pref-marketing");var o={accepted:!0,timestamp:(new Date).toISOString(),categories:{essential:!0,analytics:!(!r||!r.checked),preferences:!(!a||!a.checked),marketing:!(!i||!i.checked)}};var c=[];o.categories.analytics||c.push("analytics");o.categories.marketing||c.push("marketing");o.categories.preferences||c.push("preferences");c.length&&De(c);oe(o);le(o,{status:"partial"});ce(o.categories);je(o.categories);Xe(o.categories,"[Save]");We(o.categories)}p()})}function gt(){mt();var e=document.getElementById("cb-initial-banner");if(e){e.style.display="flex";e.style.visibility="visible";e.style.opacity="1"}var t=document.getElementById("cb-floating-trigger");t&&(t.style.display="none")}function ut(){if("gdpr"===i){qe();if(!window.__cbConsentDefaultSet){xe();he()("consent","default",{analytics_storage:"denied",ad_storage:"denied",ad_user_data:"denied",ad_personalization:"denied",functionality_storage:"denied",personalization_storage:"denied",security_storage:"granted",wait_for_update:500});window.__cbConsentDefaultSet=!0}if(I.accepted)Xe(I.categories||{},"[Reload]");else{_e({});s&&Ye()}}else if("ccpa"===i){if(!window.__cbConsentDefaultSet){xe();he()("consent","default",{analytics_storage:"denied",ad_storage:"denied",ad_user_data:"denied",ad_personalization:"denied",functionality_storage:"denied",personalization_storage:"denied",security_storage:"granted",wait_for_update:500});window.__cbConsentDefaultSet=!0}s&&Ye();$e(!!(I&&I.accepted&&I.ccpa&&I.ccpa.doNotSell))}if(window.__CB_WEBFLOW_MODE__){mt();if(I.accepted||ct()){var e=document.getElementById("cb-initial-banner");if(e){e.style.setProperty("display","none","important");e.style.setProperty("visibility","hidden","important")}var t=document.getElementById("cb-preferences-banner");t&&t.style.setProperty("display","none","important");var n=document.getElementById("cb-floating-trigger");n&&(n.style.display="flex")}else if(o){var r=document.getElementById("cb-initial-banner");if(r){r.style.display="flex";r.style.setProperty("visibility","visible","important");r.style.setProperty("opacity","1","important")}var a=document.getElementById("cb-floating-trigger");a&&(a.style.display="none")}else{var c=document.getElementById("cb-initial-banner");if(c){c.style.setProperty("display","none","important");c.style.setProperty("visibility","hidden","important")}var l=document.getElementById("cb-floating-trigger");l&&l.style.setProperty("display","none","important")}}else if(o)if(I.accepted||ct()){mt();var d=document.getElementById("cb-floating-trigger");d&&(d.style.display="flex");var p=document.getElementById("cb-initial-banner");if(p){p.style.setProperty("display","none","important");p.style.setProperty("visibility","hidden","important")}}else gt();try{be()}catch(e){}function b(){document.addEventListener("click",function(e){var t=e.target;for(;t&&t!==document.body;){var n=t.hasAttribute&&t.hasAttribute("data-consentbit-trigger");var r=t.hasAttribute&&t.hasAttribute("data-consentbit-banner");if(n||r){e.preventDefault();e.stopPropagation();if(n)try{localStorage.removeItem(L);localStorage.removeItem(L+"_closed");I={accepted:!1,timestamp:null}}catch(e){}var a=document.getElementById("cb-initial-banner");if(a){a.style.display="flex";a.style.visibility="visible";a.style.opacity="1";g&&(document.body.style.overflow="hidden");var i=document.getElementById("cb-floating-trigger");i&&(i.style.display="none");a.scrollIntoView({behavior:"smooth",block:"start"})}else{gt();setTimeout(function(){var e=document.getElementById("cb-initial-banner");e&&e.scrollIntoView({behavior:"smooth",block:"start"})},100)}return!1}t=t.parentElement}},!0)}"loading"===document.readyState?document.addEventListener("DOMContentLoaded",b):b()}}();
+!function(){if(!window.__cbBannerInit){window.__cbBannerInit=!0;var e=window.__CONSENT_SITE__||{};var t=!0;!function(){var n=e.registeredDomain;if(n)try{var r=window.location.hostname.replace(/^www./,"").toLowerCase();if(r!==n&&"webflow"!==e.platform&&!r.endsWith(".webflow.io")){window.__CONSENT_SITE__=null;t=!1}}catch(e){}}();if(t){var n=e.floatingLogoUrl||"";var r=e.floatingLogoFallbackUrl||"";var a=e.id||null;var i=e.bannerType||"gdpr";var cbLaw=e.usLaw||null;var o=!1!==e.bannerEnabled;var c=e.apiBase;var s=e.gaId||null;var l=!1!==e.clarityConsentMode;var d=e.clarityCmpId||165;var p=e.customization||null;var cbHideBrand=!(!p||!p.hideBranding);var b=!0===e.pendingScan;var f=p&&p.bannerLayoutVisual||"box";var m=p?p.privacyPolicyUrl:null;var g=!!p&&p.stopScroll;var u=!p||!1!==p.animationEnabled;var y=p&&p.bannerEntranceAnimation||"fade-in";var v=p&&p.preferencePosition||"center";var h=p&&p.centerAnimationDirection||"fade";var x=p&&p.language||"en";var C=!!p&&!0===p.autoDetectLanguage;${translationsVar}var w=["customise","rejectAll","acceptAll","save","back","doNotSell","saveMyPreferences","confirmChoice","cancel","optOutPreference"];var k=30,_=320,E=20,S=30,O=200;var B=56;var L="consentbit_"+a;var A=void 0!==p&&p&&null!=p.cookieExpirationDays?Math.max(1,Math.min(365,Number(p.cookieExpirationDays)||30)):30;var I=ie();try{if(!(!0!==navigator.globalPrivacyControl||"ccpa"!==i||I&&I.accepted)){I={accepted:!0,timestamp:(new Date).toISOString(),ccpa:{doNotSell:!0},gpc:!0};try{localStorage.setItem(L,JSON.stringify(I))}catch(e){}le(I,{status:"rejected",consentMethod:"gpc"})}}catch(e){}var H="consentbit_prefs_"+(a||"");var T="cb_pv_over_limit_"+(a||"");var P=[];var z=!1;var N=null;var j=e.scriptBlockProviders||[];var V=e.customCookieRules||[];var M=[{domain:"facebook.com",category:"marketing"},{domain:"facebook.net",category:"marketing"},{domain:"adroll.com",category:"marketing"},{domain:"doubleclick.net",category:"marketing"},{domain:"googleadservices.com",category:"marketing"},{domain:"bing.com",category:"marketing"},{domain:"bat.bing.com",category:"marketing"},{domain:"twitter.com",category:"marketing"},{domain:"analytics.twitter.com",category:"marketing"},{domain:"t.co",category:"marketing"},{domain:"linkedin.com",category:"marketing"},{domain:"ads.linkedin.com",category:"marketing"},{domain:"pinterest.com",category:"marketing"},{domain:"ct.pinterest.com",category:"marketing"},{domain:"tiktok.com",category:"marketing"},{domain:"analytics.tiktok.com",category:"marketing"},{domain:"hotjar.com",category:"analytics"},{domain:"clarity.ms",category:"analytics"},{domain:"scorecardresearch.com",category:"analytics"},{domain:"outbrain.com",category:"marketing"},{domain:"taboola.com",category:"marketing"},{domain:"criteo.com",category:"marketing"},{domain:"criteo.net",category:"marketing"},{domain:"quantserve.com",category:"analytics"},{domain:"zemanta.com",category:"marketing"}];var D=".cb-banner,.cb-banner *{box-sizing:border-box;}.cb-banner *{font-family:inherit;}#cb-initial-banner.cb-banner{width:440px;min-width:280px;max-width:min(440px,92vw);max-height:min(80vh,420px);min-height:0;overflow:hidden;overflow-x:hidden;background-color:#ffffff;color:#334155;position:fixed;bottom:32px;left:32px;right:auto;padding:16px;border:1px solid #e2e8f0;border-radius:0.375rem;box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:inline-flex;flex-direction:column;align-items:stretch;font-family:inherit;font-size:14px!important;line-height:1.5!important;}#cb-initial-banner.cb-banner .cb-banner-body{flex:0 1 auto;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;}#cb-preferences-banner.cb-banner{width:540px;max-width:92vw;max-height:min(85vh,580px);min-height:0;overflow:hidden;overflow-x:hidden;background-color:#ffffff;color:#334155;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);padding:20px;border:1px solid #e2e8f0;border-radius:0.375rem;box-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);z-index:2147483647;display:flex;flex-direction:column;font-family:inherit;font-size:14px!important;line-height:1.5!important;}#cb-preferences-banner.cb-banner .cb-banner-body{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;}#cb-preferences-banner.cb-banner.prefs-left{left:32px;right:auto;top:50%;transform:translateY(-50%);}#cb-preferences-banner.cb-banner.prefs-right{right:32px;left:auto;top:50%;transform:translateY(-50%);}#cb-preferences-banner.cb-banner.prefs-center{left:50%;top:50%;transform:translate(-50%,-50%);}.cb-banner-body{overflow-y:auto;overflow-x:hidden;margin-bottom:12px;}.cb-banner h3{margin:0 0 8px;font-size:16px!important;line-height:1.4!important;font-weight:600;color:#0f172a;word-break:break-word;overflow-wrap:anywhere;max-width:100%;}#cb-initial-banner.cb-banner h3{font-size:16px!important;font-weight:600;color:rgba(0,0,0,0.8);padding-right:36px;}#cb-initial-banner.cb-banner .cb-banner-body > p{color:rgba(0,0,0,0.8);}.cb-gdpr-accordion{margin-top:4px;margin-bottom:4px;}.cb-gdpr-cat-label{color:#0f172a;}.cb-gdpr-cat-desc{color:#64748b;}.cb-banner p{margin:0 0 12px;font-size:14px!important;line-height:1.5!important;color:#334155;word-break:break-word;overflow-wrap:anywhere;max-width:100%;}.cb-banner-footer{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;align-items:center;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex:0 0 auto;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-wrap:wrap;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 auto;min-width:80px;}"+(p&&"banner"===p.bannerLayoutVisual?"#cb-initial-banner.cb-banner .cb-banner-footer{flex-wrap:nowrap;justify-content:flex-end;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:0 0 auto;width:auto;min-width:80px;max-width:140px;}":"")+".cb-banner button{padding:12px 32px;border-radius:0.375rem;cursor:pointer;font-size:14px;font-weight:600;border:1px solid #e2e8f0;transition:opacity 0.2s;white-space:normal;word-break:break-word;min-width:0;text-align:center;}@media (max-width:660px){#cb-initial-banner.cb-banner{width:100vw!important;max-width:100vw!important;left:0!important;right:0!important;bottom:0!important;transform:none!important;border-radius:0!important;border-left:none!important;border-right:none!important;border-bottom:none!important;}#cb-initial-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-initial-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}#cb-preferences-banner.cb-banner{width:calc(100vw - 32px)!important;max-width:calc(100vw - 32px)!important;padding:20px!important;}#cb-preferences-banner.cb-banner .cb-banner-footer{flex-direction:column!important;align-items:stretch!important;}#cb-preferences-banner.cb-banner .cb-banner-footer button{width:100%!important;min-width:0!important;box-sizing:border-box!important;}}@media (max-width:350px){#cb-initial-banner.cb-banner,#cb-preferences-banner.cb-banner{font-size:12px!important;}#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-size:13px!important;}#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,.cb-gdpr-cat-desc{font-size:12px!important;}#cb-initial-banner.cb-banner .cb-banner-footer button,#cb-preferences-banner.cb-banner .cb-banner-footer button{font-size:12px!important;padding:10px 16px!important;}}.cb-banner button:hover:not(.cb-pref-toggle-track){opacity:0.8;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track{display:block !important;width:40px !important;min-width:40px !important;height:22px !important;padding:0 !important;margin:0 !important;border:none !important;border-radius:11px !important;background:#d1d5db !important;box-shadow:none !important;flex-shrink:0 !important;position:relative !important;overflow:visible !important;box-sizing:border-box !important;cursor:pointer !important;appearance:none !important;-webkit-appearance:none !important;font-size:0 !important;line-height:0 !important;opacity:1 !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track[aria-checked='true']{background:#22c55e !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track::after{content:'' !important;position:absolute !important;top:2px !important;left:2px !important;width:18px !important;height:18px !important;border-radius:50% !important;background:#ffffff !important;box-shadow:0 1px 3px rgba(0,0,0,.2) !important;pointer-events:none !important;transition:left .15s ease !important;z-index:2 !important;}#cb-preferences-banner.cb-banner button.cb-pref-toggle-track[aria-checked='true']::after{left:20px !important;}.cb-banner button#cb-accept-all-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}.cb-banner button#cb-reject-all-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}.cb-banner button#cb-preferences-btn,.cb-banner button#cb-ccpa-donotsell-link{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}.cb-banner button#cb-prefs-reject-btn{background-color:#007aff;color:#ffffff;border-color:#007aff;}#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}.cb-banner label{display:block;margin-bottom:6px;font-size:11px;}.cb-banner input[type='checkbox']{margin-right:6px;}.cb-banner a{color:#007aff !important;text-decoration:underline !important;font-size:inherit !important;display:inline !important;font-weight:inherit !important;white-space:normal;}@keyframes slideInFromLeft{from{transform:translateX(-100%);opacity:0;}to{transform:translateX(0);opacity:1;}}@keyframes slideInFromRight{from{transform:translateX(100%);opacity:0;}to{transform:translateX(0);opacity:1;}}@keyframes slideInFromTop{from{transform:translateY(-100%);opacity:0;}to{transform:translateY(0);opacity:1;}}@keyframes slideInFromBottom{from{transform:translateY(100%);opacity:0;}to{transform:translateY(0);opacity:1;}}@keyframes fadeIn{from{opacity:0;}to{opacity:1;}}@keyframes prefsSlideInFromLeft{from{transform:translate(-120%,-50%);opacity:0;}to{transform:translate(0,-50%);opacity:1;}}@keyframes prefsSlideInFromRight{from{transform:translate(120%,-50%);opacity:0;}to{transform:translate(0,-50%);opacity:1;}}@keyframes prefsSlideCenterFromBottom{from{transform:translate(-50%,calc(-50% + 28px));opacity:0;}to{transform:translate(-50%,-50%);opacity:1;}}@keyframes prefsSlideCenterFromTop{from{transform:translate(-50%,calc(-50% - 28px));opacity:0;}to{transform:translate(-50%,-50%);opacity:1;}}@keyframes zoomIn{from{transform:scale(0.85);opacity:0;}to{transform:scale(1);opacity:1;}}@keyframes cbInitialCenterSlideFromBottom{from{transform:translate(-50%,100%);opacity:0;}to{transform:translate(-50%,0);opacity:1;}}@keyframes cbInitialCenterSlideFromTop{from{transform:translate(-50%,-100%);opacity:0;}to{transform:translate(-50%,0);opacity:1;}}@keyframes cbInitialCenterZoomIn{from{transform:translateX(-50%) scale(0.85);opacity:0;}to{transform:translateX(-50%) scale(1);opacity:1;}}.cb-banner-animate-initial-center-bottom{animation:cbInitialCenterSlideFromBottom 0.35s ease-out;}.cb-banner-animate-initial-center-top{animation:cbInitialCenterSlideFromTop 0.35s ease-out;}.cb-banner-animate-initial-center-zoom{animation:cbInitialCenterZoomIn 0.3s ease-out;}@keyframes prefsZoomIn{from{transform:translate(-50%,-50%) scale(0.85);opacity:0;}to{transform:translate(-50%,-50%) scale(1);opacity:1;}}.cb-banner-animate-left{animation:slideInFromLeft 0.4s ease-out;}.cb-banner-animate-right{animation:slideInFromRight 0.4s ease-out;}.cb-banner-animate-top{animation:slideInFromTop 0.4s ease-out;}.cb-banner-animate-bottom{animation:slideInFromBottom 0.4s ease-out;}.cb-banner-animate-fade{animation:fadeIn 0.3s ease-out;}.cb-banner-animate-prefs-left{animation:prefsSlideInFromLeft 0.4s ease-out;}.cb-banner-animate-prefs-right{animation:prefsSlideInFromRight 0.4s ease-out;}.cb-banner-animate-center-top{animation:prefsSlideCenterFromTop 0.35s ease-out;}.cb-banner-animate-center-bottom{animation:prefsSlideCenterFromBottom 0.35s ease-out;}.cb-banner-animate-zoom-in{animation:zoomIn 0.3s ease-out;}.cb-banner-animate-prefs-zoom-in{animation:prefsZoomIn 0.3s ease-out;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-save-prefs-btn{background-color:#ffffff;color:#334155;border-color:#e2e8f0;}#cb-initial-banner.cb-banner .cb-banner-footer{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;flex-shrink:0;}#cb-initial-banner.cb-banner .cb-banner-footer button{flex:1 1 auto;min-width:80px;}#cb-initial-banner.cb-banner #cb-preferences-btn{background:#ffffff!important;color:#334155!important;border:1px solid #334155!important;font-size:13px!important;padding:10px 12px!important;font-weight:600!important;}#cb-initial-banner.cb-banner #cb-reject-all-btn,#cb-initial-banner.cb-banner #cb-accept-all-btn{background:#007aff!important;color:#ffffff!important;border-color:#007aff!important;font-size:13px!important;padding:10px 12px!important;font-weight:600!important;}#cb-floating-trigger{position:fixed;z-index:2147483646!important;width:56px;height:56px;border:none;border-radius:9999px;background:transparent;cursor:pointer;padding:0;box-shadow:none;}#cb-floating-trigger img,#cb-floating-trigger svg{display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;}#cb-preferences-banner.cb-banner .cb-brand-footer{flex:0 0 auto;box-sizing:border-box;height:44px;max-height:50px;width:calc(100% + 40px);margin:16px -20px -20px;padding:0 16px;display:flex;align-items:center;justify-content:flex-end;gap:8px;background:#F7F8FA !important;background-color:#F7F8FA !important;border-top:1px solid #EFF1F4 !important;}#cb-preferences-banner.cb-banner .cb-brand-footer a{display:inline-flex !important;align-items:center;gap:7px;text-decoration:none !important;background:transparent !important;color:#A2ABBA !important;font-weight:500 !important;border-radius:6px;padding:4px 6px;margin-right:-6px;transition:opacity .15s ease;}#cb-preferences-banner.cb-banner .cb-brand-footer a:hover{opacity:.7;}#cb-preferences-banner.cb-banner .cb-brand-credit{font-size:11px !important;font-weight:500 !important;letter-spacing:.02em;line-height:1;white-space:nowrap;color:#A2ABBA !important;}#cb-preferences-banner.cb-banner .cb-brand-mark{display:flex;align-items:center;opacity:.85;}#cb-preferences-banner.cb-banner .cb-brand-mark svg{display:block;height:9.75px;width:auto;}";e.styles&&(D=D+"\\n"+e.styles);var F="cb-banner-animate-left cb-banner-animate-right cb-banner-animate-top cb-banner-animate-bottom cb-banner-animate-fade cb-banner-animate-prefs-left cb-banner-animate-prefs-right cb-banner-animate-center-top cb-banner-animate-center-bottom cb-banner-animate-zoom-in cb-banner-animate-prefs-zoom-in";Ue();"complete"===document.readyState||"interactive"===document.readyState?ut():window.addEventListener("DOMContentLoaded",ut)}var Z={analytics:["_ga","_ga_*","_gid","_gat","_gat_*","_gac_*","_hjid","_hjSessionUser_*","_hjSession_*","_hjAbsoluteSessionInProgress","_clck","_clsk"],marketing:["_fbp","_fbc","_gcl_au","_gcl_ls","_gcl_aw","_ttp","tt_webid_v2","_pin_unauth","_pinterest_ct_ua","li_sugr","bcookie","bscookie","lidc","_uetsid","_uetvid","IDE","test_cookie","fr"],preferences:[]}}function R(){if(C){var e=(navigator.language||navigator.userLanguage||"en").split("-")[0].toLowerCase();return TRANSLATIONS[e]?e:"en"}return x}function W(e){var t=R();var n=TRANSLATIONS[t]||TRANSLATIONS.en;var r=null!=n[e]?n[e]:null!=TRANSLATIONS.en[e]?TRANSLATIONS.en[e]:"";return""===r&&"title"===e?"We value your privacy":""===r&&"description"===e?"We use cookies to provide you with the best possible experience. They also allow us to analyze user behavior in order to constantly improve the website for you.":r}function U(e){var t=R();var n=(TRANSLATIONS[t]||TRANSLATIONS.en)[e];n&&n.length>80&&(n=TRANSLATIONS.en[e]||e);return n||TRANSLATIONS.en[e]||e}function q(e,t){var n=null==e?"":String(e);return n.length>t?n.slice(0,t):n}function J(e,t){return q(W(e),t)}function Y(){try{var e=R();var t=TRANSLATIONS.config||{};var n=null!=t.cookiePolicyLinkEnabled?t.cookiePolicyLinkEnabled:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).cookiePolicyLinkEnabled;return!1!==n&&"0"!==n&&"false"!==String(n).toLowerCase()}catch(e){return!0}}function X(){try{var e=R();var t=TRANSLATIONS.config||{};var n=null!=t.closeButtonEnabled?t.closeButtonEnabled:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).closeButtonEnabled;return!0===n||1===n||!1!==n&&"0"!==n&&"false"!==String(n).toLowerCase()}catch(e){return!0}}function $(){try{var e=R();var t=TRANSLATIONS.config||{};var n=null!=t.rejectButtonEnabled?t.rejectButtonEnabled:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).rejectButtonEnabled;return!0===n||1===n||!1!==n&&"0"!==n&&"false"!==String(n).toLowerCase()}catch(e){return!0}}function G(){try{var e=R();var t=TRANSLATIONS.config||{};var n=null!=t.customizeButtonEnabled?t.customizeButtonEnabled:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).customizeButtonEnabled;return!0===n||1===n||!1!==n&&"0"!==n&&"false"!==String(n).toLowerCase()}catch(e){return!0}}function K(e){var t=String(e||"bottom-left").trim().toLowerCase().replace(/_/g,"-");return"bottom-right"===t||"right"===t?"bottom-right":"bottom"===t||"bottom-center"===t?"bottom":"bottom-left"}function Q(e){if(e){e.style.marginLeft="";e.style.marginRight="";e.style.paddingLeft="";e.style.paddingRight="";if(ot()){var t=f||"box";var n=K(p&&p.position);var r=st();var a="56px";"banner"!==t?"left"===r?"bottom-center"!==t&&"popup"!==t&&"bottom"!==n||(e.style.marginLeft=a):"bottom-center"!==t&&"popup"!==t&&"bottom"!==n||(e.style.marginRight=a):"left"===r?e.style.paddingLeft=a:e.style.paddingRight=a}}}function ee(e){if(!e)return!1;var t=f||"box";var n=K(p&&p.position);e.style.left="";e.style.right="";e.style.top="";e.style.bottom="";e.style.transform="";e.style.width="";e.style.maxWidth="";e.style.marginLeft="";e.style.marginRight="";e.style.paddingLeft="";e.style.paddingRight="";if("banner"===t){e.style.left="0";e.style.right="0";e.style.bottom="0";e.style.transform="none";e.style.width="100%";e.style.maxWidth="none";e.setAttribute("data-cb-initial-centered","0");Q(e);return!1}if(window.innerWidth<=660){e.style.setProperty("left","0","important");e.style.setProperty("right","0","important");e.style.setProperty("bottom","0","important");e.style.setProperty("transform","none","important");e.style.setProperty("width","100vw","important");e.style.setProperty("max-width","100vw","important");e.style.setProperty("min-width","0","important");e.style.setProperty("border-radius","0","important");e.style.setProperty("border-left","none","important");e.style.setProperty("border-right","none","important");e.style.setProperty("border-bottom","none","important");e.setAttribute("data-cb-initial-centered","0");return!1}if("bottom-center"===t||"popup"===t||"bottom"===n){e.style.bottom="32px";e.style.left="50%";e.style.transform="translateX(-50%)";e.setAttribute("data-cb-initial-centered","1");Q(e);return!0}e.style.bottom="32px";"bottom-right"===n?e.style.right="32px":e.style.left="32px";e.style.transform="none";e.setAttribute("data-cb-initial-centered","0");Q(e);return!1}function te(e){var t=e;var n=t.indexOf("#");n>=0&&(t=t.slice(0,n));(n=t.indexOf("?"))>=0&&(t=t.slice(0,n));(n=t.indexOf("/"))>=0&&(t=t.slice(0,n));return t.trim()}function ne(e){var t=e.lastIndexOf(".");if(t<0)return!1;var n=e.slice(t).toLowerCase();return".js"===n||".mjs"===n||".css"===n||".png"===n||".jpg"===n||".jpeg"===n||".gif"===n||".svg"===n||".webp"===n||".pdf"===n||".json"===n||".xml"===n||".ico"===n||".woff"===n||".woff2"===n}function re(e){if(!e||"string"!=typeof e)return"";var t=e.trim();if(!t)return"";var n=t.toLowerCase();if(0===n.indexOf("mailto:")||0===n.indexOf("tel:"))return t;if(0===n.indexOf("http://")||0===n.indexOf("https://"))return t;if(0===t.indexOf("//"))return"https:"+t;if("/"===t.charAt(0)||0===t.indexOf("./")||0===t.indexOf("../")){try{if("undefined"!=typeof window&&window.location)return new URL(t,window.location.href).href}catch(e){}return t}var r=te(t);if(r.indexOf(".")>0&&!ne(r)){for(;t.length>0&&"/"===t.charAt(0);)t=t.slice(1);return"https://"+t}try{if("undefined"!=typeof window&&window.location)return new URL(t,window.location.href).href}catch(e){}return t}function ae(e,t){var n=re(t);if(n){e.href=n;e.target="_blank";e.rel="noopener noreferrer";e.addEventListener("click",function(e){e.stopPropagation&&e.stopPropagation();e.preventDefault&&e.preventDefault();try{window.open(n,"_blank","noopener,noreferrer")}catch(e){}},!0)}}function ie(){try{var e=localStorage.getItem(L);var t=e?JSON.parse(e):{accepted:!1,timestamp:null};if(!t||!t.accepted)return t||{accepted:!1,timestamp:null};var n=Date.now();var r=24*A*60*60*1e3;var a=t.expiresAt?new Date(t.expiresAt).getTime():t.timestamp?new Date(t.timestamp).getTime()+r:0;return a>0&&n>a?{accepted:!1,timestamp:null}:t}catch(e){return{accepted:!1,timestamp:null}}}function oe(e){try{var t=24*A*60*60*1e3;e.expiresAt=e.expiresAt||new Date(Date.now()+t).toISOString();localStorage.setItem(L,JSON.stringify(e));localStorage.removeItem(L+"_closed")}catch(e){}I=e;try{je()}catch(e){}}function ce(e){try{var t={analytics:!!e.analytics,preferences:!!e.preferences,marketing:!!e.marketing};var n=btoa(JSON.stringify(t));localStorage.setItem(H,n)}catch(e){}}function se(){try{var e=localStorage.getItem(H);if(!e)return null;var t=JSON.parse(atob(e));return t&&"object"==typeof t?{analytics:!!t.analytics,preferences:!!t.preferences,marketing:!!t.marketing}:null}catch(e){return null}}function le(e,t){if(a&&c){t=t||{};var n=e&&e.expiresAt||t.expiresAt||new Date(Date.now()+24*A*60*60*1e3).toISOString();var r={siteId:a,regulation:"gdpr"===i?"gdpr":"ccpa",bannerType:i,consentMethod:t.consentMethod||"banner",status:t.status||"given",expiresAt:n,consent:e};try{fetch(c+"/api/consent",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(r)}).catch(function(e){})}catch(e){}}}function de(){try{var e=localStorage.getItem(T);if(!e)return!1;var t=JSON.parse(e);var n=new Date;var r=n.getFullYear()+"-"+String(n.getMonth()+1).padStart(2,"0");return t.yearMonth===r&&!0===t.overLimit}catch(e){return!1}}function pe(e){try{localStorage.setItem(T,JSON.stringify({overLimit:!0,yearMonth:e}))}catch(e){}}function be(){if(a&&c&&!de())try{var e={siteId:a,pageUrl:"undefined"!=typeof window&&window.location?window.location.href:null};fetch(c+"/api/pageview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(e),keepalive:!0}).then(function(e){return e.json()}).then(function(e){if(e&&e.overLimit){var t=new Date;pe(e.yearMonth||t.getFullYear()+"-"+String(t.getMonth()+1).padStart(2,"0"))}}).catch(function(e){})}catch(e){}}function fe(){try{var e="undefined"!=typeof document&&document.cookie?document.cookie:"";return e?e.split(";").map(function(e){return e.trim()}).filter(Boolean):[]}catch(e){return[]}}function me(){try{var e=[];var t=document.getElementsByTagName("script");for(var n=0;n<t.length;n++){var r=t[n].src;r&&-1===r.indexOf("consentbit")&&-1===r.indexOf("client_data")&&e.push(r)}return e}catch(e){return[]}}function ge(e){try{var t=new URL(e).hostname;return-1!==t.indexOf("google-analytics.com")||-1!==e.indexOf("gtag/js")||-1!==t.indexOf("googletagmanager.com")?"analytics":-1!==t.indexOf("facebook.com")||-1!==t.indexOf("fbcdn.net")||-1!==t.indexOf("doubleclick.net")||0===t.indexOf("ads.")?"marketing":-1!==t.indexOf("hotjar.com")||-1!==t.indexOf("intercom.io")||-1!==t.indexOf("fullstory.com")?"behavioral":"uncategorized"}catch(e){return"uncategorized"}}function ue(){var t=[];var n=document.scripts;for(var r=0;r<n.length;r++){var a=n[r];if(a.src)t.push(a)}return t}function ye(e){if(!e||"string"!=typeof e)return!1;var t=e.toLowerCase();return-1!==t.indexOf("googletagmanager.com/gtag/js")||-1!==t.indexOf("googletagmanager.com/gtm.js")||-1!==t.indexOf("google-analytics.com")||-1!==t.indexOf("googlesyndication.com")||-1!==t.indexOf("googleadservices.com")||-1!==t.indexOf("googletagservices.com")||-1!==t.indexOf("securepubads.g.doubleclick.net")}function ve(){var e=document.scripts;for(var t=0;t<e.length;t++){var n=e[t];var r;if(ye(n.src||n.getAttribute("data-cb-blocked-src")||""))return!0}return!(!window.adsbygoogle&&!window.googletag)}function he(){window.dataLayer=window.dataLayer||[];window.gtag||(window.gtag=function(){dataLayer.push(arguments)});return window.gtag}function xe(){var e=he();e("set","ads_data_redaction",!0);e("set","url_passthrough",!0)}function Ce(e){if(!e||"string"!=typeof e)return!1;var t=e.toLowerCase();return-1!==t.indexOf("clarity.ms")||-1!==t.indexOf("clarity.microsoft.com")}function we(e,t){return!("analytics"!==e||!Oe(t))||l&&Ce(t)}function ke(){window.clarity||(window.clarity=function(){(window.clarity.q=window.clarity.q||[]).push(arguments)});return window.clarity}function _e(e){if(l)try{var t=e||{};var n=t.marketing?"granted":"denied";var r=t.analytics?"granted":"denied";var a=n+"|"+r;if(window.__cbClaritySignal===a)return;window.__cbClaritySignal=a;ke()("consentv2",{source:d,ad_Storage:n,analytics_Storage:r})}catch(e){}}function Ee(e,t){try{var n=e||{};window.dataLayer=window.dataLayer||[];window.dataLayer.push({event:"consentbit_consent_update",consentbit_regulation:i,consentbit_source:String(t||"banner").replace(/[[]]/g,"").toLowerCase(),consentbit_essential:!0,consentbit_analytics:!!n.analytics,consentbit_marketing:!!n.marketing,consentbit_preferences:!!n.preferences})}catch(e){}}function Se(e){return"analytics"===e||"marketing"===e||"behavioral"===e||"advertisement"===e||"functional"===e||"performance"===e}function Oe(e){if(!e||"string"!=typeof e)return!1;var t=e.toLowerCase();return-1!==t.indexOf("googletagmanager.com/gtag/js")||-1!==t.indexOf("googletagmanager.com/gtm.js")||-1!==t.indexOf("google-analytics.com")}function Be(e){var t=e;"behavioral"===t&&(t="analytics");if("essential"===t)return!0;if("ccpa"===i)return!(I&&I.accepted&&I.ccpa&&I.ccpa.doNotSell&&Se(t));if(!I||!I.accepted)return!1;var n=I.categories||{};return"analytics"===t?!!n.analytics:"marketing"===t||"advertisement"===t?!!n.marketing:"preferences"!==t&&"functional"!==t&&"performance"!==t||!!n.preferences}function Le(e){if(!e)return!1;var t=String(e).split(",");for(var n=0;n<t.length;n++){var r=String(t[n]||"").toLowerCase().trim();if(r){"personalization"===r&&(r="preferences");if(!Be(r))return!1}}return!0}function Ae(e){if(!e)return null;var t=String(e).toLowerCase().trim();return"analytics"===t||"marketing"===t||"behavioral"===t||"preferences"===t||"essential"===t?["essential"===t?"essential":t]:t.indexOf("necessary")>=0||t.indexOf("essential")>=0?["essential"]:t.indexOf("functional")>=0||t.indexOf("preference")>=0?["preferences"]:t.indexOf("analytics")>=0||t.indexOf("performance")>=0||t.indexOf("statistics")>=0?["analytics"]:t.indexOf("advertisement")>=0||t.indexOf("marketing")>=0||t.indexOf("ads")>=0||t.indexOf("social")>=0?["marketing"]:t.indexOf("other")>=0?["analytics"]:null}function Ie(e,t){if(t&&t.getAttribute){var n=Ae(t.getAttribute("data-consentbit"));if(n)return n;var r=t.getAttribute("data-consentbit-category");r||window.__CB_WEBFLOW_MODE__||(r=t.getAttribute("data-category"));if(r){var a=[];var i=String(r).split(",");for(var o=0;o<i.length;o++){var c=String(i[o]||"").toLowerCase().trim();if(c){var s=Ae("personalization"===c?"preferences":c);if(s)for(var l=0;l<s.length;l++)-1===a.indexOf(s[l])&&a.push(s[l])}}if(a.length)return a}var d=Ae(t.getAttribute("data-cookieyes"));if(d)return d}if(e&&j.length)for(var p=0;p<j.length;p++){var b=j[p];if(b&&b.pattern)try{if(new RegExp(b.pattern,"i").test(e))return b.categories&&b.categories.length?b.categories.slice():["analytics"]}catch(e){}}if(e&&V.length)for(var f=0;f<V.length;f++){var m=V[f];if(m&&m.scriptUrlPattern)try{if(new RegExp(m.scriptUrlPattern,"i").test(e))return[m.category||"uncategorized"]}catch(e){}}return[]}function He(e,t){if(z)return!1;if(!e)return!1;if("string"!=typeof e){try{e=String(e)}catch(__cbTT){return!1}}var n=e.toLowerCase();if(-1!==n.indexOf("consentbit")||-1!==n.indexOf("client_data"))return!1;var r=Ie(e,t);if(!r||0===r.length)return!1;if("ccpa"===i)return!!(I&&I.accepted&&I.ccpa&&I.ccpa.doNotSell);for(var a=0;a<r.length;a++){var o=r[a];if(Se(o)&&!we(o,e)&&!Be(o))return!0}return!1}function Te(e){return e&&"string"==typeof e?e.indexOf("fbq(")>=0||e.indexOf("fbq (")>=0||e.indexOf("connect.facebook.net")>=0||e.indexOf("ttq(")>=0||e.indexOf("ttq (")>=0||e.indexOf("analytics.tiktok.com")>=0||e.indexOf("pintrk(")>=0||e.indexOf("pintrk (")>=0||e.indexOf("ct.pinterest.com")>=0||e.indexOf("twq(")>=0||e.indexOf("twq (")>=0||e.indexOf("ads-twitter.com")>=0||e.indexOf("_linkedin_partner_id")>=0||e.indexOf("lintrk(")>=0||e.indexOf("lintrk (")>=0||e.indexOf("bat.bing.com")>=0?"marketing":e.indexOf("hotjar.com")>=0?"analytics":e.indexOf("window.clarity")>=0||e.indexOf("clarity.ms")>=0?l?null:"analytics":null:null}function Pe(e){if(e&&"SCRIPT"===e.nodeName&&(!e.getAttribute||"javascript/blocked"!==e.getAttribute("type"))){var t=e.getAttribute&&e.getAttribute("src")||e.src||"";if(t){if(He(t,e))try{var Ot=e.getAttribute("type")||"";Ot&&"javascript/blocked"!==Ot&&e.setAttribute("data-cb-orig-type",Ot);e.setAttribute("data-cb-blocked-src",t);e.setAttribute("type","javascript/blocked");e.removeAttribute("src")}catch(e){}}else{var n=e.getAttribute&&(e.getAttribute("data-consentbit-category")||!window.__CB_WEBFLOW_MODE__&&e.getAttribute("data-category"))||Te(e.textContent||"");if(n&&!Be(n))try{e.__ci=e.textContent||"";var r=Object.getOwnPropertyDescriptor(Node.prototype,"textContent");r&&r.set?r.set.call(e,""):e.textContent="";e.setAttribute("type","javascript/blocked");e.setAttribute("data-cb-inline","1")}catch(e){}}}}function ze(e){if(e&&!e.__cp){e.__cp=!0;var Sv="";try{Object.defineProperty(e,"src",{configurable:!0,enumerable:!0,get:function(){if(Sv)return String(Sv);var v="";try{v=e.getAttribute&&(e.getAttribute("src")||e.getAttribute("data-cb-blocked-src"))||""}catch(n){}return String(v)},set:function(t){Sv=t;if(He(t,e)){var Ot=e.getAttribute("type")||"";Ot&&"javascript/blocked"!==Ot&&!e.getAttribute("data-cb-orig-type")&&e.setAttribute("data-cb-orig-type",Ot);e.setAttribute("data-cb-blocked-src",t);e.setAttribute("type","javascript/blocked");e.removeAttribute("src")}else e.setAttribute("src",t)}})}catch(e){}try{Object.defineProperty(e,"type",{configurable:!0,enumerable:!0,get:function(){return e.getAttribute("type")||""},set:function(t){var n=t;if(He(e.getAttribute("src")||e.src||"",e)){t&&"javascript/blocked"!==t&&e.setAttribute("data-cb-orig-type",t);n="javascript/blocked"}e.setAttribute("type",n)}})}catch(e){}try{var t=Object.getOwnPropertyDescriptor(Node.prototype,"textContent");if(t&&t.set){var n=t.set;Object.defineProperty(e,"textContent",{configurable:!0,get:function(){return t.get?t.get.call(e):""},set:function(t){var r=e.getAttribute&&(e.getAttribute("data-consentbit-category")||!window.__CB_WEBFLOW_MODE__&&e.getAttribute("data-category"))||Te(t);if(r&&!Be(r)){e.__ci=t;e.setAttribute("type","javascript/blocked");e.setAttribute("data-cb-inline","1")}else n.call(e,t)}})}}catch(e){}}}function Ne(e){if(e&&1===e.nodeType)if("SCRIPT"!==e.nodeName){if(e.querySelectorAll){var t=e.querySelectorAll("script[src]");for(var n=0;n<t.length;n++)Pe(t[n])}}else Pe(e)}function je(e){if(window.__CB_WEBFLOW_MODE__)We(e||I&&I.categories||{analytics:!0,marketing:!0,preferences:!0,essential:!0});else{var t=document.querySelectorAll('script[type="javascript/blocked"][data-cb-blocked-src]');for(var n=0;n<t.length;n++){var r=t[n];var a=r.getAttribute("data-cb-blocked-src");if(a&&!He(a,r)){z=!0;try{var i=document.createElement("script");i.async=r.hasAttribute("async");i.defer=r.hasAttribute("defer");r.id&&(i.id=r.id);i.src=a;var o=r.attributes;for(var c=0;c<o.length;c++){var s=o[c].name;"src"!==s&&"type"!==s&&"data-cb-blocked-src"!==s&&"data-cb-orig-type"!==s&&"nonce"!==s&&i.setAttribute(s,o[c].value)}var Ty=r.getAttribute("data-cb-orig-type");Ty&&(i.type=Ty);var Nz=r.nonce||r.getAttribute("nonce")||"";if(Nz)try{i.nonce=Nz}catch(e){}r.parentNode?r.parentNode.replaceChild(i,r):document.head.appendChild(i)}catch(e){}finally{z=!1}}}var l=document.querySelectorAll('script[type="text/plain"][data-consentbit-category],script[type="text/plain"][data-category]');for(var d=0;d<l.length;d++){var p=l[d];var b=p.getAttribute("data-consentbit-category")||p.getAttribute("data-category");if(b&&Le(b)){z=!0;try{var f=document.createElement("script");f.async=p.hasAttribute("async");f.defer=p.hasAttribute("defer");var m=p.getAttribute("src")||"";m?f.src=m:f.textContent=p.textContent;var g=p.attributes;for(var u=0;u<g.length;u++){var y=g[u].name;"type"!==y&&"src"!==y&&"data-consentbit-category"!==y&&"data-category"!==y&&f.setAttribute(y,g[u].value)}p.parentNode?p.parentNode.replaceChild(f,p):document.head.appendChild(f)}catch(e){}finally{z=!1}}}var v=document.querySelectorAll('script[type="javascript/blocked"][data-cb-inline="1"]');for(var h=0;h<v.length;h++){var x=v[h];var C=x.__ci||"";var w=x.getAttribute&&(x.getAttribute("data-consentbit-category")||x.getAttribute("data-category"))||Te(C);if(w&&Le(w)){z=!0;try{var k=document.createElement("script");C&&(k.textContent=C);var Nz2=x.nonce||x.getAttribute&&x.getAttribute("nonce")||"";if(Nz2)try{k.nonce=Nz2}catch(e){}x.parentNode?x.parentNode.replaceChild(k,x):document.head.appendChild(k)}catch(e){}finally{z=!1}}}var Fr=document.querySelectorAll("iframe[data-cb-blocked-src]");for(var Fi=0;Fi<Fr.length;Fi++){var Ff=Fr[Fi];var Fs=Ff.getAttribute("data-cb-blocked-src");if(Fs&&!Ze(Fs))try{Ff.removeAttribute("data-cb-blocked-src");Ff.setAttribute("src",Fs)}catch(e){}}}}function Ve(e){var t=window.location.hostname;var n=0===t.indexOf("www.")?t.slice(4):t;var r=[null,t,"."+t,n,"."+n,"www."+n,".www."+n];var a=["/",window.location.pathname];var i="Thu, 01 Jan 1970 00:00:00 GMT";for(var o=0;o<r.length;o++)for(var c=0;c<a.length;c++){var s=e+"=; expires="+i+"; path="+a[c];r[o]&&(s+="; domain="+r[o]);try{document.cookie=s}catch(e){}}}function Me(e){var t=e.indexOf("*");var n=t>=0?e.slice(0,t):null;var r=document.cookie.split(";").map(function(e){return e.trim().split("=")[0]});return n?r.filter(function(e){return e.startsWith(n)}):r.indexOf(e)>=0?[e]:[]}function De(e){for(var t in Z)if(e.indexOf(t)>=0){var n=Z[t];for(var r=0;r<n.length;r++){var a=Me(n[r]);for(var i=0;i<a.length;i++)Ve(a[i])}}for(var o=0;o<V.length;o++){var c=V[o];!c||!c.category||e.indexOf(c.category)<0||c.name&&Ve(c.name)}}function Fe(e){if(!e||"string"!=typeof e)return null;var t=e.toLowerCase();if(0!==t.indexOf("http"))return null;for(var n=0;n<M.length;n++)if(-1!==t.indexOf(M[n].domain))return M[n].category;for(var r=0;r<V.length;r++){var a=V[r];if(a&&a.scriptUrlPattern)try{if(new RegExp(a.scriptUrlPattern,"i").test(e))return a.category||"marketing"}catch(e){}}return null}function Ze(e){if(!e)return!1;if("string"!=typeof e){try{e=String(e)}catch(__cbTT){return!1}}var t=e.toLowerCase();if(-1!==t.indexOf("consentbit")||-1!==t.indexOf("client_data"))return!1;var n=Fe(e);return!(!n||!Se(n)||("ccpa"===i?!(I&&I.accepted&&I.ccpa&&I.ccpa.doNotSell):I&&I.accepted&&Be(n)))}function Re(e){if(e&&!e.__ip){e.__ip=!0;var Iv="";try{Object.defineProperty(e,"src",{configurable:!0,enumerable:!0,get:function(){if(Iv)return String(Iv);var n="";try{n=e.getAttribute&&(e.getAttribute("src")||e.getAttribute("data-cb-blocked-src"))||""}catch(r){}return String(n)},set:function(t){Iv=t;if(Ze(t)){e.setAttribute("data-cb-blocked-src",t);e.removeAttribute("src")}else e.setAttribute("src",t)}})}catch(e){}}}function We(e){if(window.__CB_WEBFLOW_MODE__){var t=e||{};window.userConsent=t;try{document.dispatchEvent(new CustomEvent("consentUpdated",{detail:t,bubbles:!0}))}catch(e){}}}function Ue(){if(!window.__CB_WEBFLOW_MODE__&&!window.__ce){window.__ce=!0;try{N=document.createElement.bind(document)}catch(e){N=document.createElement}document.createElement=function(e,r){var t=arguments.length>1?N(e,r):N(e);var n=String(e||"").toLowerCase();"script"===n?ze(t):"iframe"===n&&Re(t);return t};var e=new MutationObserver(function(e){for(var t=0;t<e.length;t++){var n=e[t];if("childList"===n.type){var r=n.addedNodes;for(var a=0;a<r.length;a++)Ne(r[a])}else"attributes"===n.type&&"src"===n.attributeName&&n.target&&"SCRIPT"===n.target.nodeName&&Pe(n.target)}});try{e.observe(document.documentElement,{childList:!0,subtree:!0,attributes:!0,attributeFilter:["src"]})}catch(t){e.observe(document.documentElement,{childList:!0,subtree:!0})}window.__cm=e}}function qe(){if(window.__CB_WEBFLOW_MODE__)try{document.dispatchEvent(new CustomEvent("cbBlockScripts",{detail:{},bubbles:!0}))}catch(e){}else{var e=ue();for(var t=0;t<e.length;t++){var n=e[t];var r=n.src;if("javascript/blocked"!==n.getAttribute("type")){var a=Ie(r,n);var i=a.length>0?a[0]:"uncategorized";if(Se(i))if("analytics"===i&&s&&Oe(r));else if(l&&Ce(r));else if(Be(i));else try{var Ot=n.getAttribute("type")||"";Ot&&"javascript/blocked"!==Ot&&n.setAttribute("data-cb-orig-type",Ot);n.setAttribute("data-cb-blocked-src",r);n.setAttribute("type","javascript/blocked");n.removeAttribute("src")}catch(e){}}}}}function Je(){if(P.length){var e=[];z=!0;try{for(var t=0;t<P.length;t++){var n=P[t];var r=n.cats||(n.category?[n.category]:[]);if(0===r.length||r.every(function(e){return!Se(e)||Be(e)})){var a=document.createElement("script");a.src=n.src;var i=n.attrs;for(var o in i)Object.prototype.hasOwnProperty.call(i,o)&&"src"!==o&&a.setAttribute(o,i[o]);document.head.appendChild(a)}else e.push(n)}}finally{z=!1}P=e}}function Ye(){if(s){z=!0;try{var e=!1;var t=document.scripts;for(var n=0;n<t.length;n++){var r=t[n].src||"";if(-1!==r.indexOf("googletagmanager.com/gtag/js")||-1!==r.indexOf("googletagmanager.com/gtm.js")||-1!==r.indexOf("google-analytics.com")){e=!0;break}}if(!e){var a=document.createElement("script");a.async=!0;a.src="https://www.googletagmanager.com/gtag/js?id="+s;document.head.appendChild(a)}window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)}window.gtag=gtag;xe();gtag("consent","default",{analytics_storage:"denied",ad_storage:"denied",ad_user_data:"denied",ad_personalization:"denied",functionality_storage:"denied",personalization_storage:"denied",security_storage:"granted",wait_for_update:500});gtag("js",new Date);gtag("config",s,{anonymize_ip:!0});gtag("event","page_view",{page_path:window.location.pathname,page_title:document.title||""})}finally{z=!1}}}function Xe(e,t){var n={analytics_storage:e.analytics?"granted":"denied",ad_storage:e.marketing?"granted":"denied",ad_user_data:e.marketing?"granted":"denied",ad_personalization:e.marketing?"granted":"denied",functionality_storage:e.preferences?"granted":"denied",personalization_storage:e.preferences?"granted":"denied"};he()("consent","update",n);_e(e);Ee(e,t)}function $e(e){var oo=cbLaw&&cbLaw.optOut||["analytics","marketing","preferences"];var ca=!!e&&oo.indexOf("analytics")>=0;var cm=!!e&&oo.indexOf("marketing")>=0;var cp=!!e&&oo.indexOf("preferences")>=0;var t={analytics_storage:ca?"denied":"granted",ad_storage:cm?"denied":"granted",ad_user_data:cm?"denied":"granted",ad_personalization:cm?"denied":"granted",functionality_storage:cp?"denied":"granted",personalization_storage:cp?"denied":"granted"};he()("consent","update",t);var n={analytics:!ca,marketing:!cm,preferences:!cp};_e(n);Ee(n,"ccpa");try{window.dataLayer.push({consentbit_do_not_sell:!!e,consentbit_us_law:cbLaw&&cbLaw.law||null})}catch(e){}}function Ge(e){var t=String(e).replace("#","");3===t.length&&(t=t[0]+t[0]+t[1]+t[1]+t[2]+t[2]);var n;var r;var a;return.299*(parseInt(t.substr(0,2),16)||0)+.587*(parseInt(t.substr(2,2),16)||0)+.114*(parseInt(t.substr(4,2),16)||0)>128?"#0f172a":"#ffffff"}function Ke(){if(!document.getElementById("cb-styles")){var e="#cb-preferences-banner .cb-banner-footer button#cb-save-prefs-btn{background-color:"+(p&&p.saveButtonBg?String(p.saveButtonBg):"#ffffff")+" !important;color:"+(p&&p.saveButtonText?String(p.saveButtonText):"#334155")+" !important;border-color:#e2e8f0 !important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{background-color:"+(p&&p.acceptButtonBg?String(p.acceptButtonBg):"#ffffff")+" !important;color:"+(p&&p.acceptButtonText?String(p.acceptButtonText):"#334155")+" !important;border-color:"+(p&&p.acceptButtonBg?String(p.acceptButtonBg):"#e2e8f0")+" !important;}";var t="";if(p&&p.backgroundColor){var n=String(p.backgroundColor);t="#cb-initial-banner.cb-banner,#cb-preferences-banner.cb-banner{background-color:"+n+" !important;}.cb-gdpr-accordion{background-color:"+n+" !important;}"}var r="";if(p&&p.headingColor){var a=String(p.headingColor);r="#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{color:"+a+" !important;}.cb-gdpr-cat-label{color:"+a+" !important;}"}var i="";p&&p.textColor&&(i="#cb-initial-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-banner-body > p,#cb-preferences-banner.cb-banner .cb-gdpr-cat-desc{color:"+String(p.textColor)+" !important;}");var o="";if(p&&p.bannerFontWeight){var c=String(p.bannerFontWeight);o="#cb-initial-banner.cb-banner h3,#cb-preferences-banner.cb-banner h3{font-weight:"+c+" !important;}.cb-gdpr-cat-label{font-weight:"+c+" !important;}.cb-gdpr-cat-desc{font-weight:"+c+" !important;}.cb-banner p{font-weight:"+c+" !important;}"}var s="#cb-preferences-banner.cb-banner h3{padding-right:36px !important;}#cb-preferences-banner.cb-banner.cb-ccpa-prefs h3{padding-right:0 !important;padding-top:16px !important;margin-bottom:14px !important;}#cb-preferences-banner.cb-banner.cb-ccpa-prefs .cb-banner-body>p{margin-bottom:16px !important;}";var l="#cb-preferences-banner.cb-banner .cb-banner-body{padding-right:4px;}#cb-preferences-banner.cb-banner .cb-gdpr-accordion > div{margin-right:2px;}";var d="";if(p&&p.acceptButtonBg){var b=String(p.acceptButtonBg);var f=p.acceptButtonText?String(p.acceptButtonText):"#ffffff";d=".cb-banner button#cb-accept-all-btn{background-color:"+b+" !important;color:"+f+" !important;}#cb-initial-banner.cb-banner #cb-accept-all-btn{background:"+b+" !important;color:"+f+" !important;}"}var m="";if(p&&p.acceptButtonBg){var g=String(p.acceptButtonBg);var u=p.acceptButtonText?String(p.acceptButtonText):"#ffffff";m=".cb-banner button#cb-reject-all-btn{background-color:"+g+" !important;color:"+u+" !important;}#cb-initial-banner.cb-banner #cb-reject-all-btn{background:"+g+" !important;color:"+u+" !important;}.cb-banner button#cb-prefs-reject-btn{background-color:"+g+" !important;color:"+u+" !important;}"}var y=document.createElement("style");y.id="cb-styles";y.type="text/css";var v="";p&&p.backgroundColor&&(v="#cb-close-initial-btn,#cb-close-prefs-btn{color:"+Ge(p.backgroundColor)+" !important;}");y.appendChild(document.createTextNode(D+"\\n"+e+"\\n"+t+"\\n"+r+"\\n"+i+"\\n"+o+"\\n"+s+"\\n"+l+"\\n"+d+"\\n"+m+"\\n"+v));document.head.appendChild(y)}}function Qe(e,t){if(X()){var n=document.createElement("button");n.type="button";n.id=t;n.setAttribute("aria-label","Close");n.textContent="\xD7";var r="#0f172a";p&&p.backgroundColor&&(r=Ge(p.backgroundColor));n.style.cssText="position:absolute;top:8px;right:24px;width:32px;height:32px;margin:0;padding:0;border:0;border-radius:6px;background:transparent;cursor:pointer;z-index:10;line-height:1;font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-size:22px;font-weight:400;color:"+r+";opacity:0.75;";e.appendChild(n)}}function et(e){if(X()){var t=document.createElement("button");t.type="button";t.id="cb-close-prefs-btn";t.setAttribute("aria-label","Close");t.textContent="\xD7";var n="#0f172a";p&&p.backgroundColor&&(n=Ge(p.backgroundColor));t.style.cssText="position:absolute;top:8px;right:30px;width:32px;height:32px;margin:0;padding:0;border:0;border-radius:6px;background:transparent;cursor:pointer;z-index:10;line-height:1;font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-size:22px;font-weight:400;color:"+n+";opacity:0.75;";e.appendChild(t)}}function tt(){return'<svg viewBox="0 0 735 90" role="img" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg"><g fill="#98A2B3"><path d="M234.357 89.2656C227.796 89.2656 222.045 87.925 217.107 85.2439C212.238 82.4923 208.464 78.647 205.782 73.7081C203.101 68.7692 201.761 62.9484 201.761 56.2456C201.761 49.5428 203.101 43.722 205.782 38.7831C208.464 33.8442 212.238 30.0342 217.107 27.3531C222.045 24.6014 227.796 23.2256 234.357 23.2256C241.131 23.2256 246.916 24.5661 251.714 27.2472C256.582 29.9284 260.322 33.7384 262.932 38.6772C265.614 43.6161 266.954 49.4722 266.954 56.2456C266.954 62.9484 265.614 68.8045 262.932 73.8139C260.322 78.7528 256.582 82.5628 251.714 85.2439C246.846 87.925 241.06 89.2656 234.357 89.2656ZM234.357 78.8939C240.919 78.8939 245.999 76.9184 249.597 72.9672C253.266 68.9456 255.101 63.3717 255.101 56.2456C255.101 49.0489 253.266 43.475 249.597 39.5239C245.999 35.5728 240.919 33.5972 234.357 33.5972C227.866 33.5972 222.786 35.6081 219.117 39.6298C215.449 43.5809 213.614 49.1195 213.614 56.2456C213.614 63.3717 215.449 68.9456 219.117 72.9672C222.786 76.9184 227.866 78.8939 234.357 78.8939Z"/><path d="M158.471 89.3708C149.793 89.3708 142.208 87.5717 135.717 83.9733C129.297 80.3044 124.322 75.1539 120.795 68.5217C117.267 61.8894 115.503 54.0931 115.503 45.1325C115.503 36.1719 117.267 28.4108 120.795 21.8492C124.322 15.2169 129.297 10.1017 135.717 6.50333C142.208 2.83444 149.793 1 158.471 1C165.103 1 170.96 2.09361 176.04 4.28083C181.19 6.3975 185.423 9.53722 188.74 13.7C192.056 17.7922 194.313 22.7664 195.513 28.6225H183.236C181.966 23.1897 179.179 18.9917 174.875 16.0283C170.642 13.065 165.174 11.5833 158.471 11.5833C148.805 11.5833 141.22 14.5819 135.717 20.5792C130.214 26.5764 127.462 34.7608 127.462 45.1325C127.462 55.5747 130.214 63.7944 135.717 69.7917C141.22 75.7183 148.805 78.6817 158.471 78.6817C165.174 78.6817 170.642 77.2353 174.875 74.3425C179.179 71.3792 181.966 67.1811 183.236 61.7483H195.513C194.313 67.5339 192.056 72.5081 188.74 76.6708C185.423 80.7631 181.19 83.9028 176.04 86.09C170.96 88.2772 165.103 89.3708 158.471 89.3708Z"/><path d="M372.231 89.2656C363.412 89.2656 356.462 87.4311 351.382 83.7623C346.302 80.0934 343.515 74.9781 343.021 68.4164H354.769C355.263 72.297 356.956 75.1545 359.849 76.9889C362.742 78.8234 367.01 79.7406 372.655 79.7406C382.533 79.7406 387.471 76.6361 387.471 70.4272C387.471 67.8872 386.695 65.947 385.143 64.6064C383.661 63.1953 381.121 62.1722 377.523 61.5372L363.659 58.9973C351.876 56.81 345.985 51.2009 345.985 42.1697C345.985 36.3136 348.207 31.6923 352.652 28.3056C357.097 24.9189 363.165 23.2256 370.856 23.2256C378.828 23.2256 385.143 24.9542 389.8 28.4114C394.527 31.8686 397.208 36.737 397.843 43.0164H386.307C385.602 39.4886 383.944 36.8781 381.333 35.1847C378.793 33.4914 375.195 32.6448 370.538 32.6448C366.234 32.6448 362.883 33.3856 360.484 34.8673C358.156 36.3489 356.991 38.5009 356.991 41.3231C356.991 43.5103 357.732 45.2389 359.214 46.5089C360.766 47.7084 363.236 48.6256 366.622 49.2606L380.486 51.9064C386.695 53.0353 391.246 55.0461 394.139 57.9389C397.032 60.8317 398.478 64.7122 398.478 69.5806C398.478 75.7895 396.22 80.6225 391.705 84.0798C387.189 87.537 380.698 89.2656 372.231 89.2656Z"/><path d="M437.465 89.2656C430.833 89.2656 425.083 87.925 420.215 85.2439C415.346 82.4923 411.572 78.6117 408.89 73.6022C406.28 68.5928 404.975 62.7367 404.975 56.0339C404.975 49.3311 406.28 43.5456 408.89 38.6772C411.572 33.7384 415.311 29.9284 420.109 27.2472C424.907 24.5661 430.516 23.2256 436.936 23.2256C443.075 23.2256 448.366 24.4603 452.811 26.9297C457.327 29.3992 460.819 32.8917 463.289 37.4073C465.758 41.9228 466.993 47.285 466.993 53.4939V58.2564H416.405C416.757 64.8886 418.768 70.0745 422.437 73.8139C426.177 77.4828 431.151 79.3172 437.36 79.3172C441.663 79.3172 445.297 78.4353 448.26 76.6714C451.224 74.837 453.27 72.1559 454.399 68.6281H466.464C464.912 75.1897 461.56 80.2697 456.41 83.8681C451.33 87.4664 445.015 89.2656 437.465 89.2656ZM416.828 49.5781H455.563C454.998 44.357 453.058 40.3 449.742 37.4073C446.497 34.5145 442.193 33.0681 436.83 33.0681C431.539 33.0681 427.129 34.5145 423.601 37.4073C420.073 40.3 417.816 44.357 416.828 49.5781Z"/><path d="M564.448 87.9953C561.061 87.9953 558.415 87.1486 556.51 85.4553C554.676 83.6914 553.759 81.0809 553.759 77.6236V33.597H541.905V24.4953H553.864V7.99512H565.506V24.4953H582.122V33.597H565.612V78.682H583.815V87.9953H564.448Z"/><path d="M672 88V35H687V88H672Z"/><path d="M671 23V8H687V23H671Z"/><path d="M716.594 87.9955C712.693 87.9955 709.652 87.0038 707.47 85.0205C705.355 83.0372 704.297 80.0291 704.297 75.9963L704.297 35.4985H693.785V23.9951H704.396L704.53 7.99512L718.875 7.99512L718.874 23.9951H735V35.4985H719.073L719.073 76.393H734.642V87.9955H716.594Z"/><path d="M283.197 33.4209H287.594C289.814 29.8402 292.857 27.1189 296.725 25.2568C300.592 23.3231 305.14 22.3565 310.368 22.3564C318.676 22.3564 325.229 24.7554 330.027 29.5537C334.826 34.2805 337.226 40.6188 337.226 48.5684V87.9951H325.193V50.6104C325.193 44.8093 323.618 40.4045 320.467 37.3965C317.387 34.3885 312.839 32.8838 306.823 32.8838C300.879 32.8838 296.331 34.3885 293.18 37.3965C290.029 40.4045 288.453 44.8093 288.453 50.6104V87.9951H276.421V36.2266H267.972V21H283.197V33.4209Z"/><path d="M486 34.2314H489.33C491.517 30.7038 494.516 28.0229 498.326 26.1885C502.136 24.2835 506.617 23.3311 511.768 23.3311C519.952 23.3311 526.408 25.6947 531.135 30.4219C535.862 35.0785 538.226 41.3227 538.226 49.1543V87.9951H526.372V51.165C526.372 45.4501 524.82 41.1108 521.716 38.1475C518.682 35.1841 514.201 33.7031 508.274 33.7031C502.419 33.7032 497.938 35.1843 494.834 38.1475C491.73 41.1108 490.177 45.4501 490.177 51.165V87.9951H478.324V36.9951H470V20.9951H486V34.2314Z"/><path d="M631.386 7.66992C636.211 7.66997 640.376 8.52936 643.88 10.248C647.45 11.9008 650.26 14.2815 652.31 17.3887C654.359 20.4297 655.384 23.9999 655.384 28.0986C655.384 32.2635 653.684 36.2398 652 38.9951C649.075 43.7811 645.5 44.7578 645.627 44.7578L648.988 45.1553C651.963 45.8164 654.673 47.0394 657.119 48.8242C659.631 50.6092 661.615 52.8569 663.069 55.5674C664.59 58.2779 665.351 61.4843 665.351 65.1865C665.351 69.7482 664.226 73.7478 661.979 77.1855C659.797 80.5572 656.723 83.2019 652.756 85.1191C648.855 87.0363 644.326 87.9951 639.17 87.9951H596.826V21H611.999V40.2959H629.303C632.807 40.2959 635.484 39.4691 637.335 37.8164C639.252 36.0975 640.211 33.6844 640.211 30.5771C640.211 27.3378 639.252 24.892 637.335 23.2393C635.484 21.5866 632.807 20.7598 629.303 20.7598H612V7.66992H631.386ZM611.999 74.9053H636.394C640.823 74.9053 644.227 73.9463 646.607 72.0293C648.987 70.046 650.178 67.2031 650.178 63.501C650.178 59.8649 648.987 57.1206 646.607 55.2695C644.228 53.3526 640.856 52.3946 636.493 52.3945H611.999V74.9053Z"/></g><path d="M32.7604 87.4506C32.0233 88.1831 30.8281 88.1831 30.0909 87.4506L8.45288 65.9485C-2.81763 54.7488 -2.81763 36.5904 8.45288 25.3907C8.97709 24.8698 9.827 24.8698 10.3512 25.3907L51.4471 66.2285C52.1843 66.961 52.1843 68.1487 51.4471 68.8813L32.7604 87.4506Z" fill="#B4BCC8"/><path d="M35.3829 43.3719C34.8671 42.8423 34.8732 41.9897 35.3966 41.4677L76.4272 0.544909C77.1632 -0.189157 78.3479 -0.180458 79.0733 0.564338L97.4615 19.4444C98.1869 20.1891 98.1783 21.388 97.4423 22.1221L75.8387 43.669C64.5861 54.892 46.4734 54.759 35.3829 43.3719Z" fill="#8C95A3"/></svg>'}function nt(e){if(cbHideBrand)return;var t=document.createElement("div");t.className="cb-brand-footer";var n=document.createElement("a");n.href="https://consentbit.com";n.target="_blank";n.rel="noopener noreferrer";n.setAttribute("aria-label","Powered by ConsentBit");var r=document.createElement("span");r.className="cb-brand-credit";r.textContent="Powered by";n.appendChild(r);var a=document.createElement("span");a.className="cb-brand-mark";a.innerHTML='<svg viewBox="0 0 735 90" role="img" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg"><g fill="#98A2B3"><path d="M234.357 89.2656C227.796 89.2656 222.045 87.925 217.107 85.2439C212.238 82.4923 208.464 78.647 205.782 73.7081C203.101 68.7692 201.761 62.9484 201.761 56.2456C201.761 49.5428 203.101 43.722 205.782 38.7831C208.464 33.8442 212.238 30.0342 217.107 27.3531C222.045 24.6014 227.796 23.2256 234.357 23.2256C241.131 23.2256 246.916 24.5661 251.714 27.2472C256.582 29.9284 260.322 33.7384 262.932 38.6772C265.614 43.6161 266.954 49.4722 266.954 56.2456C266.954 62.9484 265.614 68.8045 262.932 73.8139C260.322 78.7528 256.582 82.5628 251.714 85.2439C246.846 87.925 241.06 89.2656 234.357 89.2656ZM234.357 78.8939C240.919 78.8939 245.999 76.9184 249.597 72.9672C253.266 68.9456 255.101 63.3717 255.101 56.2456C255.101 49.0489 253.266 43.475 249.597 39.5239C245.999 35.5728 240.919 33.5972 234.357 33.5972C227.866 33.5972 222.786 35.6081 219.117 39.6298C215.449 43.5809 213.614 49.1195 213.614 56.2456C213.614 63.3717 215.449 68.9456 219.117 72.9672C222.786 76.9184 227.866 78.8939 234.357 78.8939Z"/><path d="M158.471 89.3708C149.793 89.3708 142.208 87.5717 135.717 83.9733C129.297 80.3044 124.322 75.1539 120.795 68.5217C117.267 61.8894 115.503 54.0931 115.503 45.1325C115.503 36.1719 117.267 28.4108 120.795 21.8492C124.322 15.2169 129.297 10.1017 135.717 6.50333C142.208 2.83444 149.793 1 158.471 1C165.103 1 170.96 2.09361 176.04 4.28083C181.19 6.3975 185.423 9.53722 188.74 13.7C192.056 17.7922 194.313 22.7664 195.513 28.6225H183.236C181.966 23.1897 179.179 18.9917 174.875 16.0283C170.642 13.065 165.174 11.5833 158.471 11.5833C148.805 11.5833 141.22 14.5819 135.717 20.5792C130.214 26.5764 127.462 34.7608 127.462 45.1325C127.462 55.5747 130.214 63.7944 135.717 69.7917C141.22 75.7183 148.805 78.6817 158.471 78.6817C165.174 78.6817 170.642 77.2353 174.875 74.3425C179.179 71.3792 181.966 67.1811 183.236 61.7483H195.513C194.313 67.5339 192.056 72.5081 188.74 76.6708C185.423 80.7631 181.19 83.9028 176.04 86.09C170.96 88.2772 165.103 89.3708 158.471 89.3708Z"/><path d="M372.231 89.2656C363.412 89.2656 356.462 87.4311 351.382 83.7623C346.302 80.0934 343.515 74.9781 343.021 68.4164H354.769C355.263 72.297 356.956 75.1545 359.849 76.9889C362.742 78.8234 367.01 79.7406 372.655 79.7406C382.533 79.7406 387.471 76.6361 387.471 70.4272C387.471 67.8872 386.695 65.947 385.143 64.6064C383.661 63.1953 381.121 62.1722 377.523 61.5372L363.659 58.9973C351.876 56.81 345.985 51.2009 345.985 42.1697C345.985 36.3136 348.207 31.6923 352.652 28.3056C357.097 24.9189 363.165 23.2256 370.856 23.2256C378.828 23.2256 385.143 24.9542 389.8 28.4114C394.527 31.8686 397.208 36.737 397.843 43.0164H386.307C385.602 39.4886 383.944 36.8781 381.333 35.1847C378.793 33.4914 375.195 32.6448 370.538 32.6448C366.234 32.6448 362.883 33.3856 360.484 34.8673C358.156 36.3489 356.991 38.5009 356.991 41.3231C356.991 43.5103 357.732 45.2389 359.214 46.5089C360.766 47.7084 363.236 48.6256 366.622 49.2606L380.486 51.9064C386.695 53.0353 391.246 55.0461 394.139 57.9389C397.032 60.8317 398.478 64.7122 398.478 69.5806C398.478 75.7895 396.22 80.6225 391.705 84.0798C387.189 87.537 380.698 89.2656 372.231 89.2656Z"/><path d="M437.465 89.2656C430.833 89.2656 425.083 87.925 420.215 85.2439C415.346 82.4923 411.572 78.6117 408.89 73.6022C406.28 68.5928 404.975 62.7367 404.975 56.0339C404.975 49.3311 406.28 43.5456 408.89 38.6772C411.572 33.7384 415.311 29.9284 420.109 27.2472C424.907 24.5661 430.516 23.2256 436.936 23.2256C443.075 23.2256 448.366 24.4603 452.811 26.9297C457.327 29.3992 460.819 32.8917 463.289 37.4073C465.758 41.9228 466.993 47.285 466.993 53.4939V58.2564H416.405C416.757 64.8886 418.768 70.0745 422.437 73.8139C426.177 77.4828 431.151 79.3172 437.36 79.3172C441.663 79.3172 445.297 78.4353 448.26 76.6714C451.224 74.837 453.27 72.1559 454.399 68.6281H466.464C464.912 75.1897 461.56 80.2697 456.41 83.8681C451.33 87.4664 445.015 89.2656 437.465 89.2656ZM416.828 49.5781H455.563C454.998 44.357 453.058 40.3 449.742 37.4073C446.497 34.5145 442.193 33.0681 436.83 33.0681C431.539 33.0681 427.129 34.5145 423.601 37.4073C420.073 40.3 417.816 44.357 416.828 49.5781Z"/><path d="M564.448 87.9953C561.061 87.9953 558.415 87.1486 556.51 85.4553C554.676 83.6914 553.759 81.0809 553.759 77.6236V33.597H541.905V24.4953H553.864V7.99512H565.506V24.4953H582.122V33.597H565.612V78.682H583.815V87.9953H564.448Z"/><path d="M672 88V35H687V88H672Z"/><path d="M671 23V8H687V23H671Z"/><path d="M716.594 87.9955C712.693 87.9955 709.652 87.0038 707.47 85.0205C705.355 83.0372 704.297 80.0291 704.297 75.9963L704.297 35.4985H693.785V23.9951H704.396L704.53 7.99512L718.875 7.99512L718.874 23.9951H735V35.4985H719.073L719.073 76.393H734.642V87.9955H716.594Z"/><path d="M283.197 33.4209H287.594C289.814 29.8402 292.857 27.1189 296.725 25.2568C300.592 23.3231 305.14 22.3565 310.368 22.3564C318.676 22.3564 325.229 24.7554 330.027 29.5537C334.826 34.2805 337.226 40.6188 337.226 48.5684V87.9951H325.193V50.6104C325.193 44.8093 323.618 40.4045 320.467 37.3965C317.387 34.3885 312.839 32.8838 306.823 32.8838C300.879 32.8838 296.331 34.3885 293.18 37.3965C290.029 40.4045 288.453 44.8093 288.453 50.6104V87.9951H276.421V36.2266H267.972V21H283.197V33.4209Z"/><path d="M486 34.2314H489.33C491.517 30.7038 494.516 28.0229 498.326 26.1885C502.136 24.2835 506.617 23.3311 511.768 23.3311C519.952 23.3311 526.408 25.6947 531.135 30.4219C535.862 35.0785 538.226 41.3227 538.226 49.1543V87.9951H526.372V51.165C526.372 45.4501 524.82 41.1108 521.716 38.1475C518.682 35.1841 514.201 33.7031 508.274 33.7031C502.419 33.7032 497.938 35.1843 494.834 38.1475C491.73 41.1108 490.177 45.4501 490.177 51.165V87.9951H478.324V36.9951H470V20.9951H486V34.2314Z"/><path d="M631.386 7.66992C636.211 7.66997 640.376 8.52936 643.88 10.248C647.45 11.9008 650.26 14.2815 652.31 17.3887C654.359 20.4297 655.384 23.9999 655.384 28.0986C655.384 32.2635 653.684 36.2398 652 38.9951C649.075 43.7811 645.5 44.7578 645.627 44.7578L648.988 45.1553C651.963 45.8164 654.673 47.0394 657.119 48.8242C659.631 50.6092 661.615 52.8569 663.069 55.5674C664.59 58.2779 665.351 61.4843 665.351 65.1865C665.351 69.7482 664.226 73.7478 661.979 77.1855C659.797 80.5572 656.723 83.2019 652.756 85.1191C648.855 87.0363 644.326 87.9951 639.17 87.9951H596.826V21H611.999V40.2959H629.303C632.807 40.2959 635.484 39.4691 637.335 37.8164C639.252 36.0975 640.211 33.6844 640.211 30.5771C640.211 27.3378 639.252 24.892 637.335 23.2393C635.484 21.5866 632.807 20.7598 629.303 20.7598H612V7.66992H631.386ZM611.999 74.9053H636.394C640.823 74.9053 644.227 73.9463 646.607 72.0293C648.987 70.046 650.178 67.2031 650.178 63.501C650.178 59.8649 648.987 57.1206 646.607 55.2695C644.228 53.3526 640.856 52.3946 636.493 52.3945H611.999V74.9053Z"/></g><path d="M32.7604 87.4506C32.0233 88.1831 30.8281 88.1831 30.0909 87.4506L8.45288 65.9485C-2.81763 54.7488 -2.81763 36.5904 8.45288 25.3907C8.97709 24.8698 9.827 24.8698 10.3512 25.3907L51.4471 66.2285C52.1843 66.961 52.1843 68.1487 51.4471 68.8813L32.7604 87.4506Z" fill="#B4BCC8"/><path d="M35.3829 43.3719C34.8671 42.8423 34.8732 41.9897 35.3966 41.4677L76.4272 0.544909C77.1632 -0.189157 78.3479 -0.180458 79.0733 0.564338L97.4615 19.4444C98.1869 20.1891 98.1783 21.388 97.4423 22.1221L75.8387 43.669C64.5861 54.892 46.4734 54.759 35.3829 43.3719Z" fill="#8C95A3"/></svg>';n.appendChild(a);t.appendChild(n);e.appendChild(t)}function rt(e){return e?"slide-up"===y?"cb-banner-animate-initial-center-bottom":"slide-down"===y?"cb-banner-animate-initial-center-top":"zoom-in"===y?"cb-banner-animate-initial-center-zoom":"cb-banner-animate-fade":"slide-up"===y?"cb-banner-animate-bottom":"slide-down"===y?"cb-banner-animate-top":"zoom-in"===y?"cb-banner-animate-zoom-in":"cb-banner-animate-fade"}function at(){if(!document.getElementById("cb-initial-banner"))if(document.body){var e="ccpa"===i;var t=document.createElement("div");if(e){var n=document.createElement("div");n.className="cb-banner";n.id="cb-initial-banner";n.style.display="none";var r=document.createElement("div");r.className="cb-banner-body";var a=document.createElement("h3");a.textContent=J("title",k);r.appendChild(a);var o=document.createElement("p");var c=q(W("ccpaDescription")||W("description"),_);if(m&&Y()){o.appendChild(document.createTextNode(c+" "));var s=document.createElement("a");s.textContent=J("privacyPolicy",S);s.style.cssText="color:#007aff;text-decoration:underline;cursor:pointer;";ae(s,m);o.appendChild(s);o.appendChild(document.createTextNode("."))}else o.textContent=c;r.appendChild(o);var l=document.createElement("p");l.style.marginTop="20px";l.style.marginBottom="0";var d=document.createElement("button");d.id="cb-ccpa-donotsell-link";d.type="button";d.textContent=W("doNotSell");d.style.cssText="background:none;border:none;padding:0;margin:0;color:#007aff;text-decoration:underline;cursor:pointer;font:inherit;text-align:left;display:inline;";l.appendChild(d);r.appendChild(l);n.appendChild(r);Qe(n,"cb-close-initial-btn");t.appendChild(n);var p=document.createElement("div");p.className="cb-banner cb-ccpa-prefs";p.id="cb-preferences-banner";p.style.display="none";"left"===v?p.classList.add("prefs-left"):"right"===v?p.classList.add("prefs-right"):p.classList.add("prefs-center");var b=document.createElement("div");b.className="cb-banner-body";var f=document.createElement("h3");f.textContent=W("optOutPreference");b.appendChild(f);var y=document.createElement("p");var h=(W("ccpaOptOutPreferenceIntro")||W("ccpaOptOut")||"").replace(/s*More info.?s*$/i,"").trim();if(m&&Y()){y.appendChild(document.createTextNode(h+" "));var x=document.createElement("a");x.textContent=W("privacyPolicy");x.style.cssText="color:#007aff;text-decoration:underline;cursor:pointer;";ae(x,m);y.appendChild(x);y.appendChild(document.createTextNode("."))}else y.textContent=h;y.style.lineHeight="1.45";b.appendChild(y);var C=document.createElement("label");C.style.cssText="display:flex;align-items:flex-start;gap:12px;margin-top:20px;cursor:pointer;";var w=document.createElement("span");w.style.cssText="flex:1;line-height:1.45;";w.textContent=W("doNotSell");var O=document.createElement("input");O.type="checkbox";O.id="cb-ccpa-optout";O.style.cssText="flex-shrink:0;margin-top:2px;";O.checked=!!(I&&I.accepted&&I.ccpa&&I.ccpa.doNotSell);C.appendChild(O);C.appendChild(w);b.appendChild(C);p.appendChild(b);var B=document.createElement("div");B.className="cb-banner-footer";var L=document.createElement("button");L.id="cb-cancel-prefs-btn";L.textContent=U("cancel");B.appendChild(L);var A=document.createElement("button");A.id="cb-save-prefs-btn";A.textContent=W("saveMyPreferences")||W("save");B.appendChild(A);p.appendChild(B);nt(p);et(p);t.appendChild(p)}else{var H=function(e){var t=document.createElement("div");t.style.borderBottom="1px solid #e5e7eb";var n=document.createElement("div");n.style.cssText="display:flex;align-items:center;gap:14px;padding:12px 14px;min-height:44px;";var r=document.createElement("button");r.type="button";r.setAttribute("aria-expanded","false");r.textContent="+";r.style.cssText="flex-shrink:0;width:22px;height:22px;padding:0;border:1px solid #e5e7eb;border-radius:4px;background:#f3f4f6;color:#111827;font-size:14px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;";var a=document.createElement("span");a.className="cb-gdpr-cat-label";a.style.cssText="flex:1;font-size:11px;font-weight:600;";a.textContent=e.labelText;n.appendChild(r);n.appendChild(a);var i=document.createElement("div");i.style.flexShrink="0";if(e.alwaysActive){var o=document.createElement("span");o.style.cssText="font-size:11px;font-weight:600;color:#374151;";o.textContent=J("alwaysActive",20);i.appendChild(o)}else{var c=document.createElement("input");c.type="checkbox";c.id=e.checkboxId;e.defaultChecked&&(c.checked=!0);c.style.cssText="position:absolute;opacity:0;width:0;height:0;margin:0;pointer-events:none;";var s=document.createElement("button");s.type="button";s.className="cb-pref-toggle-track";s.setAttribute("role","switch");s.setAttribute("aria-label",e.labelText);var l=function(){s.setAttribute("aria-checked",c.checked?"true":"false")};s.addEventListener("click",function(){c.checked=!c.checked;l()});l();i.appendChild(c);i.appendChild(s)}n.appendChild(i);var d=document.createElement("div");d.className="cb-gdpr-cat-desc";d.style.cssText="display:grid;grid-template-rows:0fr;opacity:0;font-size:13px;line-height:1.5;transition:grid-template-rows .3s ease,opacity .25s ease;";var p=document.createElement("div");p.style.cssText="overflow:hidden;min-height:0;padding:0 12px 12px 44px;";p.textContent=e.descText;d.appendChild(p);var b=function(e){e.style.gridTemplateRows="1fr";e.style.opacity=""};var f=function(e){e.style.gridTemplateRows="0fr";e.style.opacity="0"};r.addEventListener("click",function(){var e="true"!==r.getAttribute("aria-expanded");var n=t.parentNode;if(n){var a=n.children;for(var i=0;i<a.length;i++){var o=a[i].querySelector(".cb-gdpr-cat-desc");var c=a[i].querySelector("button[aria-expanded]");if(o&&o!==d){f(o);if(c){c.textContent="+";c.setAttribute("aria-expanded","false")}}}}e?b(d):f(d);r.textContent=e?"\u2212":"+";r.setAttribute("aria-expanded",e?"true":"false")});t.appendChild(n);t.appendChild(d);return t};var T=document.createElement("div");T.className="cb-banner";T.id="cb-initial-banner";T.style.display="none";var P=document.createElement("div");P.className="cb-banner-body";var z=document.createElement("h3");z.textContent=W("title");P.appendChild(z);var N=document.createElement("p");var j=W("description");if(m&&Y()){N.appendChild(document.createTextNode(j+" "));var V=document.createElement("a");V.textContent=W("privacyPolicy");V.style.cssText="color:#007aff;text-decoration:underline;cursor:pointer;";ae(V,m);N.appendChild(V);N.appendChild(document.createTextNode("."))}else N.textContent=j;P.appendChild(N);T.appendChild(P);var M=document.createElement("div");M.className="cb-banner-footer";var D=document.createElement("button");D.id="cb-preferences-btn";D.textContent=q(U("customise"),E);G()&&M.appendChild(D);var F=document.createElement("button");F.id="cb-reject-all-btn";F.textContent=q(U("rejectAll"),E);$()&&M.appendChild(F);var Z=document.createElement("button");Z.id="cb-accept-all-btn";Z.textContent=q(U("acceptAll"),E);M.appendChild(Z);T.appendChild(M);Qe(T,"cb-close-initial-btn");t.appendChild(T);var R=document.createElement("div");R.className="cb-banner";R.id="cb-preferences-banner";R.style.display="none";"left"===v?R.classList.add("prefs-left"):"right"===v?R.classList.add("prefs-right"):R.classList.add("prefs-center");var X=document.createElement("div");X.className="cb-banner-body";var K=document.createElement("h3");K.textContent=J("cookiePreferences",k);X.appendChild(K);var Q=document.createElement("p");var te=(q(W("managePreferences"),_)||"").replace(/s*More info.?s*$/i,"").trim();if(m&&Y()){Q.appendChild(document.createTextNode(te+" "));var ne=document.createElement("a");ne.textContent=J("privacyPolicy",S);ne.style.cssText="color:#007aff;text-decoration:underline;cursor:pointer;";ae(ne,m);Q.appendChild(ne);Q.appendChild(document.createTextNode("."))}else Q.textContent=te;X.appendChild(Q);var re=document.createElement("div");re.className="cb-gdpr-accordion";re.style.cssText="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin-bottom:4px;";var ie=J("strictlyNecessary",20)||J("essential",20);re.appendChild(H({labelText:ie,alwaysActive:!0,descText:J("essentialDescription",300)}));var oe=se()||I&&I.accepted&&I.categories||{};re.appendChild(H({labelText:J("marketing",20),checkboxId:"cb-pref-marketing",defaultChecked:!!oe.marketing,descText:J("marketingDescription",300)}));re.appendChild(H({labelText:J("analytics",20),checkboxId:"cb-pref-analytics",defaultChecked:!!oe.analytics,descText:J("analyticsDescription",300)}));re.appendChild(H({labelText:J("preferences",20),checkboxId:"cb-pref-preferences",defaultChecked:!!oe.preferences,descText:J("preferencesDescription",300)}));re.lastChild&&(re.lastChild.style.borderBottom="none");X.appendChild(re);R.appendChild(X);var ce=document.createElement("div");ce.className="cb-banner-footer";var le=document.createElement("button");le.id="cb-prefs-reject-btn";le.textContent=q(U("rejectAll"),E);ce.appendChild(le);var de=document.createElement("button");de.id="cb-save-prefs-btn";de.textContent=q(U("saveMyPreferences")||U("save"),E);ce.appendChild(de);R.appendChild(ce);nt(R);et(R);t.appendChild(R)}document.body.appendChild(t);g&&(document.body.style.overflow="hidden");if(!window.__cbResizeInit){window.__cbResizeInit=!0;window.addEventListener("resize",function(){var e=document.getElementById("cb-initial-banner");e&&"none"!==e.style.display&&"hidden"!==e.style.visibility&&ee(e)})}var pe=document.getElementById("cb-initial-banner");if(pe){var be=ee(pe);pe.style.display="flex";pe.style.visibility="visible";pe.style.opacity="1";u&&pe.classList.add(rt(be))}}else setTimeout(at,100)}function it(){g&&(document.body.style.overflow="")}function ot(){try{if(p&&!1===p.showBannerLogo)return!1;if(p&&0===p.showBannerLogo)return!1;var e=R();var t=TRANSLATIONS.config||{};var n=null!=t.floatingButtonEnabled?t.floatingButtonEnabled:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).floatingButtonEnabled;return!1!==n&&"0"!==n&&"false"!==String(n).toLowerCase()}catch(e){return!0}}function ct(){try{var e=parseInt(localStorage.getItem(L+"_closed")||"0",10);if(!e)return!1;if(ot())return!0;if(Date.now()-e<864e5)return!0;localStorage.removeItem(L+"_closed");return!1}catch(e){return!1}}function st(){try{if(p&&p.bannerLogoPosition)return"right"===p.bannerLogoPosition?"right":"left";var e=R();var t=TRANSLATIONS.config||{};var n;return"right"===(null!=t.floatingButtonPosition?t.floatingButtonPosition:(TRANSLATIONS[e]||TRANSLATIONS.en||{}).floatingButtonPosition)?"right":"left"}catch(e){return"left"}}function lt(){var e="http://www.w3.org/2000/svg";var t=document.createElementNS(e,"svg");t.setAttribute("xmlns",e);t.setAttribute("viewBox","0 0 40 40");t.setAttribute("width","44");t.setAttribute("height","44");t.setAttribute("aria-hidden","true");t.setAttribute("focusable","false");t.style.cssText="display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;";var n=document.createElementNS(e,"circle");n.setAttribute("cx","20");n.setAttribute("cy","20");n.setAttribute("r","18");n.setAttribute("fill","#007aff");t.appendChild(n);var r=[{cx:"14",cy:"14",r:"2.2"},{cx:"24",cy:"18",r:"2.5"},{cx:"17",cy:"25",r:"2"}];for(var a=0;a<r.length;a++){var i=document.createElementNS(e,"circle");i.setAttribute("cx",r[a].cx);i.setAttribute("cy",r[a].cy);i.setAttribute("r",r[a].r);i.setAttribute("fill","#ffffff");t.appendChild(i)}return t}function dt(){try{var e=document.getElementsByTagName("script");for(var t=e.length-1;t>=0;t--){var n=e[t].src||"";if(-1!==n.indexOf("/consentbit/")||-1!==n.indexOf("/client_data/"))return new URL(n).origin}}catch(e){}return""}function pt(){if(!document.getElementById("cb-floating-trigger")&&ot()){var e=st();var t=n||"";var a=r||"";if(!t){var i=dt();if(i){t=i+"/embed/floating-logo.svg";a||(a=t)}}var o=document.createElement("button");o.id="cb-floating-trigger";o.type="button";o.setAttribute("aria-label",W("cookiePreferences"));o.style.cssText="position:fixed;bottom:28px;"+("right"===e?"right:16px;":"left:16px;")+"z-index:2147483646;width:56px;height:56px;border:none;border-radius:9999px;background:transparent;cursor:pointer;padding:0;box-shadow:none;";if(t){var c=document.createElement("img");c.alt="";c.src=t;c.setAttribute("width","44");c.setAttribute("height","44");c.draggable=!1;c.style.cssText="display:block;width:44px;height:44px;object-fit:contain;margin:auto;pointer-events:none;";var s=!1;c.addEventListener("error",function e(){if(s||!a||t===a){c.removeEventListener("error",e);c.parentNode&&c.parentNode.replaceChild(lt(),c)}else{s=!0;c.src=a}});o.appendChild(c)}else o.appendChild(lt());document.body.appendChild(o)}}function bt(){return u?"left"===v?"zoom-in"===y?"cb-banner-animate-prefs-zoom-in":"cb-banner-animate-prefs-left":"right"===v?"zoom-in"===y?"cb-banner-animate-prefs-zoom-in":"cb-banner-animate-prefs-right":"slide-up"===y?"cb-banner-animate-center-bottom":"slide-down"===y?"cb-banner-animate-center-top":"zoom-in"===y?"cb-banner-animate-prefs-zoom-in":"cb-banner-animate-fade":""}function ft(e){if(e){var t=F.split(" ");for(var n=0;n<t.length;n++)t[n]&&e.classList.remove(t[n])}}function mt(){Ke();at();pt();var e=document.getElementById("cb-initial-banner");var t=document.getElementById("cb-preferences-banner");var n=document.getElementById("cb-preferences-btn");var r=document.getElementById("cb-accept-all-btn");var a=document.getElementById("cb-reject-all-btn");var o=document.getElementById("cb-prefs-reject-btn");var c=document.getElementById("cb-cancel-prefs-btn");var s=document.getElementById("cb-save-prefs-btn");var l=document.getElementById("cb-ccpa-donotsell-link");var d="ccpa"===i;function p(){if(e){e.style.setProperty("display","none","important");e.classList.remove("cb-banner-animate-left","cb-banner-animate-right","cb-banner-animate-top","cb-banner-animate-bottom","cb-banner-animate-fade")}if(t){t.style.display="none";ft(t)}var n=document.getElementById("cb-floating-trigger");n&&(n.style.display="flex");it()}function b(){if(e){if(t){t.style.display="none";ft(t)}var n=ee(e);e.style.setProperty("display","flex","important");e.style.setProperty("visibility","visible","important");e.style.setProperty("opacity","1","important");e.classList.remove("cb-banner-animate-left","cb-banner-animate-right","cb-banner-animate-top","cb-banner-animate-bottom","cb-banner-animate-fade","cb-banner-animate-zoom-in");u&&e.classList.add(rt(n));g&&(document.body.style.overflow="hidden")}}function f(){e.style.display="none";var n=document.getElementById("cb-floating-trigger");n&&(n.style.display="none");t.style.display="flex";t.style.visibility="visible";t.style.opacity="1";ft(t);var r=bt();r&&t.classList.add(r)}var m=document.getElementById("cb-floating-trigger");m&&m.addEventListener("click",function(e){e&&e.preventDefault&&e.preventDefault();e&&e.stopPropagation&&e.stopPropagation();b()});n&&n.addEventListener("click",function(){if(e&&t){if(!d){var n=se()||I&&I.categories||{};var r=function(e,t){var n=document.getElementById(e);if(n){n.checked=!!t;var r=n.parentNode&&n.parentNode.querySelector("button.cb-pref-toggle-track");r&&r.setAttribute("aria-checked",n.checked?"true":"false")}};r("cb-pref-analytics",n.analytics);r("cb-pref-preferences",n.preferences);r("cb-pref-marketing",n.marketing)}e.classList.remove("cb-banner-animate-left","cb-banner-animate-right","cb-banner-animate-top","cb-banner-animate-bottom","cb-banner-animate-fade");f()}});o&&o.addEventListener("click",function(){var e={accepted:!0,timestamp:(new Date).toISOString(),categories:{essential:!0,analytics:!1,preferences:!1,marketing:!1}};De(["analytics","marketing","preferences"]);oe(e);le(e,{status:"rejected"});ce(e.categories);Xe(e.categories,"[PrefsReject]");We(e.categories);p()});var y=document.getElementById("cb-close-initial-btn");var v=document.getElementById("cb-close-prefs-btn");y&&y.addEventListener("click",function(){try{localStorage.setItem(L+"_closed",String(Date.now()))}catch(e){}p()});v&&v.addEventListener("click",function(){try{localStorage.setItem(L+"_closed",String(Date.now()))}catch(e){}p()});d&&l&&l.addEventListener("click",function(){e&&t&&f()});c&&c.addEventListener("click",function(){b()});a&&a.addEventListener("click",function(){if(!d){var e={accepted:!0,timestamp:(new Date).toISOString(),categories:{essential:!0,analytics:!1,preferences:!1,marketing:!1}};De(["analytics","marketing","preferences"]);oe(e);le(e,{status:"rejected"});ce(e.categories);Xe(e.categories,"[Reject]");We(e.categories)}p()});r&&r.addEventListener("click",function(){if(d){var e={accepted:!0,timestamp:(new Date).toISOString(),ccpa:{doNotSell:!1}};oe(e);le(e,{status:"given"});je({analytics:!0,marketing:!0,preferences:!0,essential:!0});$e(!1)}else{var t={accepted:!0,timestamp:(new Date).toISOString(),categories:{essential:!0,analytics:!0,preferences:!0,marketing:!0}};oe(t);le(t,{status:"given"});ce(t.categories);je(t.categories);Xe(t.categories,"[Accept]")}p()});s&&s.addEventListener("click",function(){if(d){var e=document.getElementById("cb-ccpa-optout");var t=!(!e||!e.checked);var n={accepted:!0,timestamp:(new Date).toISOString(),ccpa:{doNotSell:t}};oe(n);le(n,{status:t?"rejected":"given"});t||je({analytics:!0,marketing:!0,preferences:!0,essential:!0});$e(t)}else{var r=document.getElementById("cb-pref-analytics");var a=document.getElementById("cb-pref-preferences");var i=document.getElementById("cb-pref-marketing");var o={accepted:!0,timestamp:(new Date).toISOString(),categories:{essential:!0,analytics:!(!r||!r.checked),preferences:!(!a||!a.checked),marketing:!(!i||!i.checked)}};var c=[];o.categories.analytics||c.push("analytics");o.categories.marketing||c.push("marketing");o.categories.preferences||c.push("preferences");c.length&&De(c);oe(o);le(o,{status:"partial"});ce(o.categories);je(o.categories);Xe(o.categories,"[Save]");We(o.categories)}p()})}function gt(){mt();var e=document.getElementById("cb-initial-banner");if(e){e.style.display="flex";e.style.visibility="visible";e.style.opacity="1"}var t=document.getElementById("cb-floating-trigger");t&&(t.style.display="none")}function ut(){if("gdpr"===i){qe();if(!window.__cbConsentDefaultSet){xe();he()("consent","default",{analytics_storage:"denied",ad_storage:"denied",ad_user_data:"denied",ad_personalization:"denied",functionality_storage:"denied",personalization_storage:"denied",security_storage:"granted",wait_for_update:500});window.__cbConsentDefaultSet=!0}if(I.accepted)Xe(I.categories||{},"[Reload]");else{_e({});s&&Ye()}}else if("ccpa"===i){if(!window.__cbConsentDefaultSet){xe();he()("consent","default",{analytics_storage:"denied",ad_storage:"denied",ad_user_data:"denied",ad_personalization:"denied",functionality_storage:"denied",personalization_storage:"denied",security_storage:"granted",wait_for_update:500});window.__cbConsentDefaultSet=!0}s&&Ye();$e(!!(I&&I.accepted&&I.ccpa&&I.ccpa.doNotSell))}if(!window.__CB_WEBFLOW_MODE__)try{je()}catch(e){}if(window.__CB_WEBFLOW_MODE__){mt();if(I.accepted||ct()){var e=document.getElementById("cb-initial-banner");if(e){e.style.setProperty("display","none","important");e.style.setProperty("visibility","hidden","important")}var t=document.getElementById("cb-preferences-banner");t&&t.style.setProperty("display","none","important");var n=document.getElementById("cb-floating-trigger");n&&(n.style.display="flex")}else if(o){var r=document.getElementById("cb-initial-banner");if(r){r.style.display="flex";r.style.setProperty("visibility","visible","important");r.style.setProperty("opacity","1","important")}var a=document.getElementById("cb-floating-trigger");a&&(a.style.display="none")}else{var c=document.getElementById("cb-initial-banner");if(c){c.style.setProperty("display","none","important");c.style.setProperty("visibility","hidden","important")}var l=document.getElementById("cb-floating-trigger");l&&l.style.setProperty("display","none","important")}}else if(o)if(I.accepted||ct()){mt();var d=document.getElementById("cb-floating-trigger");d&&(d.style.display="flex");var p=document.getElementById("cb-initial-banner");if(p){p.style.setProperty("display","none","important");p.style.setProperty("visibility","hidden","important")}}else gt();try{be()}catch(e){}function b(){document.addEventListener("click",function(e){var t=e.target;for(;t&&t!==document.body;){var n=t.hasAttribute&&t.hasAttribute("data-consentbit-trigger");var r=t.hasAttribute&&t.hasAttribute("data-consentbit-banner");if(n||r){e.preventDefault();e.stopPropagation();if(n)try{localStorage.removeItem(L);localStorage.removeItem(L+"_closed");I={accepted:!1,timestamp:null}}catch(e){}var a=document.getElementById("cb-initial-banner");if(a){a.style.display="flex";a.style.visibility="visible";a.style.opacity="1";g&&(document.body.style.overflow="hidden");var i=document.getElementById("cb-floating-trigger");i&&(i.style.display="none");a.scrollIntoView({behavior:"smooth",block:"start"})}else{gt();setTimeout(function(){var e=document.getElementById("cb-initial-banner");e&&e.scrollIntoView({behavior:"smooth",block:"start"})},100)}return!1}t=t.parentElement}},!0)}"loading"===document.readyState?document.addEventListener("DOMContentLoaded",b):b()}}();
 `;
-  const SCRIPT_VERSION = "2026-08-13-system-font-only";
+  const SCRIPT_VERSION = "2026-08-22-script-recreation-fixes";
   const customizationUpdatedAt = customization?.updatedAt || customization?.updated_at || "";
   const translationsSig = await (async () => {
     try {
@@ -9287,7 +9521,7 @@ ${inlineConfig}
   const isGoogleAc = enTrans?.isGoogleAc === true || enTrans?.isGoogleAc === 1 || enTrans?.isGoogleAc === "1" || String(enTrans?.isGoogleAc || "").toLowerCase() === "true";
   const loaderIab = `
 ${inlineConfig}
-${getLoaderIabScript(customization, { rawPos: customization?.position || "bottom-left", bannerLayoutVisual: enTrans?.bannerLayoutVisual, textAlign: typeof textAlign !== "undefined" && (textAlign === "center" || textAlign === "right") ? textAlign : "left", bannerEntranceAnimation: siteConfigPayload?.customization?.bannerEntranceAnimation }, isGoogleAc)}
+${getLoaderIabScript(customization, { rawPos: customization?.position || "bottom-left", bannerLayoutVisual: enTrans?.bannerLayoutVisual, textAlign: typeof textAlign !== "undefined" && (textAlign === "center" || textAlign === "right") ? textAlign : "left", bannerEntranceAnimation: siteConfigPayload?.customization?.bannerEntranceAnimation, hideBranding: siteConfigPayload?.customization?.hideBranding === true }, isGoogleAc)}
 `;
   const loaderCore = loader.replace(inlineConfig, "");
   const loaderWebflow = `${inlineConfig}${getWebflowSetupScript()}
@@ -9319,7 +9553,7 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || "bottom
     bannerEnabled
   };
   const bannerIsCcpa = String(effectiveBannerType || "").toLowerCase() === "ccpa";
-  const clarityCmpSource = String(siteConfigPayload.clarityCmpId || "consentbit");
+  const clarityCmpSource = siteConfigPayload.clarityCmpId || 165;
   const clarityBootstrap = siteConfigPayload.clarityConsentMode === false ? "" : `try{window.clarity=window.clarity||function(){(window.clarity.q=window.clarity.q||[]).push(arguments);};var ca=c?(e?'denied':'granted'):(d&&d.analytics?'granted':'denied');var cm=c?(e?'denied':'granted'):(d&&d.marketing?'granted':'denied');window.clarity('consentv2',{source:${JSON.stringify(clarityCmpSource)},ad_Storage:cm,analytics_Storage:ca});window.__cbClaritySignal=cm+'|'+ca;}catch(_){}`;
   const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? "true" : "false"};var d=null,e=false,hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}${clarityBootstrap}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);if(!c){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else{window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}window.__cbConsentDefaultSet=true;}catch(_){}})();
 `;
@@ -10846,6 +11080,12 @@ __name(captureGa4Event, "captureGa4Event");
 
 // src/services/posthog.js
 var PLUGIN_PLATFORMS = /* @__PURE__ */ new Set(["webflow", "framer"]);
+var PLATFORM_TAGS = /* @__PURE__ */ new Set(["webapp", "webflow", "framer"]);
+function normalizePlatformTag(value) {
+  const v = String(value || "").trim().toLowerCase();
+  return PLATFORM_TAGS.has(v) ? v : null;
+}
+__name(normalizePlatformTag, "normalizePlatformTag");
 function pinPlatformPersonProperty(properties = {}) {
   const set = properties.$set;
   if (!set || typeof set !== "object") return properties;
@@ -10898,14 +11138,14 @@ async function captureInstallationVerified(env2, db, siteId, domain2) {
   if (!env2.POSTHOG_API_KEY && !env2.GA4_API_SECRET || !siteId || !db) return;
   try {
     const row = await db.prepare(
-      `SELECT u.email AS email, s.platform AS platform FROM User u
+      `SELECT u.email AS email, s.platform AS platform, u.signupSource AS signupSource FROM User u
          JOIN OrganizationMember om ON om.userId = u.id
          JOIN Site s ON s.organizationId = om.organizationId
         WHERE s.id = ?1 LIMIT 1`
     ).bind(siteId).first();
     const email = row?.email || null;
     if (!email) return;
-    const platform2 = row?.platform || "webapp";
+    const platform2 = normalizePlatformTag(row?.platform) || normalizePlatformTag(row?.signupSource);
     await capturePostHogEvent(env2, email, "installation_verified", {
       site_id: String(siteId),
       domain: domain2 || null,
@@ -10916,7 +11156,7 @@ async function captureInstallationVerified(env2, db, siteId, domain2) {
       site_id: String(siteId),
       domain: domain2 || null,
       source: "backend_detect",
-      platform: platform2
+      ...platform2 ? { platform: platform2 } : {}
     });
   } catch (e) {
     console.warn("[PostHog] installation_verified failed:", e?.message);
@@ -32200,6 +32440,7 @@ async function handleWebflowFreeRegister(request, env2) {
            VALUES (?1, ?2, ?3, 'webflow:no-password', ?4, ?4)`
       ).bind(userId, email, nameGuess, now).run();
     }
+    await setSignupSourceIfMissing(db, userId, "webflow");
     user = await db.prepare("SELECT * FROM User WHERE id = ?1").bind(userId).first();
   }
   if (!user) {
@@ -32582,6 +32823,7 @@ __name(injectScriptIntoWebflowHead, "injectScriptIntoWebflowHead");
 // src/handlers/bannerCustomization.js
 var PAID_TIERS = ["basic", "essential", "growth"];
 var BOTH_REGIONS_PLANS = ["essential", "growth"];
+var REMOVE_BRANDING_PLANS = ["growth"];
 async function resolveEffectivePlanId(db, env2, siteId) {
   try {
     const subscription = await getSubscriptionBySiteId(db, siteId);
@@ -32812,6 +33054,15 @@ async function handleBannerCustomization(request, env2) {
     }
     if (!customization) {
       return Response.json({ success: false, error: "customization is required" }, { status: 400 });
+    }
+    if (customization.hideBranding === 1 || customization.hideBranding === true) {
+      const brandingPlanId = await resolveEffectivePlanId(db, env2, siteId);
+      if (brandingPlanId !== null && !REMOVE_BRANDING_PLANS.includes(brandingPlanId)) {
+        console.warn(
+          `[BannerCustomization][POST] hideBranding not available on plan '${brandingPlanId}' for site ${siteId} \u2014 saving as 0`
+        );
+        customization.hideBranding = 0;
+      }
     }
     try {
       await saveBannerCustomization(db, siteId, customization);
@@ -33318,6 +33569,107 @@ __name(handleConsentLogs, "handleConsentLogs");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
+
+// src/services/promoRestrictions.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+var RESTRICTED_CODES = {
+  consent35: ["rodrigo.rejman@platanhotels.pl"],
+  demo100: ["reshma@seattlenewmedia.com"]
+};
+var norm = /* @__PURE__ */ __name((v) => v == null ? "" : String(v).trim().toLowerCase(), "norm");
+function isRestrictedCode(code) {
+  return Object.prototype.hasOwnProperty.call(RESTRICTED_CODES, norm(code));
+}
+__name(isRestrictedCode, "isRestrictedCode");
+function isCodeAllowedForEmail(code, email) {
+  const allowed = RESTRICTED_CODES[norm(code)];
+  if (!allowed) return true;
+  return allowed.includes(norm(email));
+}
+__name(isCodeAllowedForEmail, "isCodeAllowedForEmail");
+var PROMO_NOT_ALLOWED_MESSAGE = "This promo code is not available for your account";
+async function isPromotionCodeAllowedForEmail(secret, promotionCodeId, email) {
+  if (!promotionCodeId) return { allowed: true, code: null };
+  try {
+    const res = await fetch(
+      `https://api.stripe.com/v1/promotion_codes/${encodeURIComponent(promotionCodeId)}`,
+      { headers: { Authorization: `Bearer ${secret}` } }
+    );
+    const promo = await res.json();
+    if (promo.error) {
+      console.warn("[PromoRestrictions] lookup error", promo.error?.message);
+      return { allowed: false, reason: "Promotion code could not be verified", code: null };
+    }
+    const code = promo.code || null;
+    if (!isCodeAllowedForEmail(code, email)) {
+      console.warn("[PromoRestrictions] denied", { code, email, promotionCodeId });
+      return { allowed: false, reason: PROMO_NOT_ALLOWED_MESSAGE, code };
+    }
+    return { allowed: true, code };
+  } catch (e) {
+    console.error("[PromoRestrictions] lookup failed", e?.message);
+    return { allowed: false, reason: "Promotion code could not be verified", code: null };
+  }
+}
+__name(isPromotionCodeAllowedForEmail, "isPromotionCodeAllowedForEmail");
+async function isCouponIdAllowedForEmail(secret, couponId, email) {
+  if (!couponId) return { allowed: true };
+  try {
+    const params = new URLSearchParams({ coupon: couponId, limit: "100" });
+    const res = await fetch(
+      `https://api.stripe.com/v1/promotion_codes?${params.toString()}`,
+      { headers: { Authorization: `Bearer ${secret}` } }
+    );
+    const data = await res.json();
+    if (data.error) {
+      console.warn("[PromoRestrictions] coupon lookup error", data.error?.message);
+      return { allowed: false, reason: "Coupon could not be verified" };
+    }
+    const codes = Array.isArray(data.data) ? data.data.map((pc) => pc.code) : [];
+    const blocking = codes.find((c) => isRestrictedCode(c) && !isCodeAllowedForEmail(c, email));
+    if (blocking) {
+      console.warn("[PromoRestrictions] denied raw coupon", { couponId, blocking, email });
+      return { allowed: false, reason: PROMO_NOT_ALLOWED_MESSAGE };
+    }
+    return { allowed: true };
+  } catch (e) {
+    console.error("[PromoRestrictions] coupon lookup failed", e?.message);
+    return { allowed: false, reason: "Coupon could not be verified" };
+  }
+}
+__name(isCouponIdAllowedForEmail, "isCouponIdAllowedForEmail");
+
+// src/handlers/validatePromo.js
+async function resolveCallerEmail(request, env2, body) {
+  const cookie = request.headers.get("Cookie") || "";
+  const cookieNames = cookie ? cookie.split(";").map((c) => c.split("=")[0].trim()).filter(Boolean) : [];
+  const m = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
+  console.log("[ValidatePromo] identity debug", {
+    origin: request.headers.get("Origin") || null,
+    referer: request.headers.get("Referer") || null,
+    hasCookieHeader: cookie.length > 0,
+    cookieNames,
+    hasSid: !!m,
+    emailHint: body?.email || "" ? "present" : "absent"
+  });
+  try {
+    if (m && env2.CONSENT_WEBAPP) {
+      const session = await getSessionById(env2.CONSENT_WEBAPP, m[1].trim());
+      console.log("[ValidatePromo] session lookup", { sessionFound: !!session, userId: session ? session.userId ?? session.user_id ?? null : null });
+      if (session) {
+        const user = await getUserById(env2.CONSENT_WEBAPP, session.userId ?? session.user_id);
+        console.log("[ValidatePromo] user lookup", { userFound: !!user, email: user?.email ?? null });
+        if (user?.email) return String(user.email).trim().toLowerCase();
+      }
+    }
+  } catch (e) {
+    console.warn("[ValidatePromo] session lookup failed", e?.message);
+  }
+  const hint = (body?.email || "").toString().trim().toLowerCase();
+  return hint || null;
+}
+__name(resolveCallerEmail, "resolveCallerEmail");
 var PRICES = { monthly: 800, yearly: 7200 };
 async function findStripePromoByCode(secret, code) {
   if (!secret || !code) return null;
@@ -33360,6 +33712,14 @@ async function handleValidatePromo(request, env2) {
   const stripePromo = await findStripePromoByCode(stripeSecret, code);
   if (!stripePromo) {
     return Response.json({ success: true, valid: false, message: "Invalid promo code" });
+  }
+  const promoCodeString = stripePromo.promotionCode?.code || code;
+  if (isRestrictedCode(promoCodeString)) {
+    const callerEmail = await resolveCallerEmail(request, env2, body);
+    if (!isCodeAllowedForEmail(promoCodeString, callerEmail)) {
+      console.warn("[ValidatePromo] restricted code denied", { code: promoCodeString, callerEmail });
+      return Response.json({ success: true, valid: false, message: PROMO_NOT_ALLOWED_MESSAGE });
+    }
   }
   const coupon = stripePromo.coupon;
   const couponId = coupon.id || stripePromo.promotionCode.coupon;
@@ -33641,6 +34001,10 @@ async function handleCreateCheckoutSession(request, env2) {
     }
   }
   if (stripeCouponId) {
+    const rawOk = await isCouponIdAllowedForEmail(secret, stripeCouponId, email);
+    if (!rawOk.allowed) {
+      return Response.json({ success: false, error: rawOk.reason }, { status: 400 });
+    }
     params.set("discounts[0][coupon]", stripeCouponId);
   }
   if (promotionCodeId) {
@@ -33653,6 +34017,10 @@ async function handleCreateCheckoutSession(request, env2) {
       if (verify.error || !verify.active) {
         console.warn("[CreateCheckout] promotion code rejected", { id: promotionCodeId, err: verify.error?.message });
         return Response.json({ success: false, error: "Promotion code is no longer valid" }, { status: 400 });
+      }
+      if (!isCodeAllowedForEmail(verify.code, email)) {
+        console.warn("[CreateCheckout] promo restricted to another account", { code: verify.code, email });
+        return Response.json({ success: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 400 });
       }
       params.set("discounts[0][promotion_code]", promotionCodeId);
       if (verify.code) params.set("subscription_data[metadata][promotionCode]", verify.code);
@@ -33689,6 +34057,10 @@ async function handleCreateCheckoutSession(request, env2) {
       if (!promo || !promo.active) {
         return Response.json({ success: false, error: "Invalid or expired coupon code" }, { status: 400 });
       }
+      if (!isCodeAllowedForEmail(promo.code || couponCode, email)) {
+        console.warn("[CreateCheckout] coupon restricted to another account", { code: promo.code || couponCode, email });
+        return Response.json({ success: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 400 });
+      }
       params.set("discounts[0][promotion_code]", promo.id);
       params.set("subscription_data[metadata][promotionCode]", promo.code || couponCode);
       console.log("[CreateCheckout] coupon attached to session", { promoId: promo.id, code: promo.code });
@@ -33696,9 +34068,6 @@ async function handleCreateCheckoutSession(request, env2) {
       console.error("[CreateCheckout] coupon code resolution failed", e?.message);
       return Response.json({ success: false, error: "Coupon validation failed" }, { status: 400 });
     }
-  }
-  if (!params.has("discounts[0][promotion_code]") && !params.has("discounts[0][coupon]")) {
-    params.set("allow_promotion_codes", "true");
   }
   if (params.has("discounts[0][promotion_code]") || params.has("discounts[0][coupon]")) {
     console.log("[CreateCheckout] discount params being sent to Stripe", {
@@ -33708,7 +34077,7 @@ async function handleCreateCheckoutSession(request, env2) {
       hasTrial: params.has("subscription_data[trial_period_days]")
     });
   } else {
-    console.log("[CreateCheckout] no discount being applied to Stripe session (allow_promotion_codes=true)");
+    console.log("[CreateCheckout] no discount being applied to Stripe session");
   }
   console.log("[CreateCheckout] creating Stripe checkout session \u2014 plan:", planId || "legacy", "| interval:", body.interval === "yearly" ? "yearly" : "monthly");
   const res = await fetch("https://api.stripe.com/v1/checkout/sessions", {
@@ -34707,6 +35076,54 @@ ConsentBit Team
   if (ctx?.waitUntil) ctx.waitUntil(send2);
 }
 __name(sendScanLimitEmail, "sendScanLimitEmail");
+function sendVerifyEmailLink(env2, ctx, { to, name, link, ttlHours = 24 }) {
+  const displayName = name || "there";
+  const subject = "Confirm your email address";
+  const html = layout(
+    "Confirm your email address to finish setting up ConsentBit.",
+    `
+    <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi ${displayName},</p>
+    <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
+      Your ConsentBit account is ready to use. Confirm this is your email address so you
+      can upgrade to a paid plan when you need to.
+    </p>
+
+    <p style="margin:0 0 24px;">
+      <a href="${link}" style="display:inline-block;background:#007aff;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:12px 22px;border-radius:8px;">Confirm email address</a>
+    </p>
+
+    <p style="margin:0 0 18px;color:#6b7280;font-size:14px;line-height:1.6;">
+      This link expires in ${ttlHours} hours. If the button does not work, copy this into
+      your browser:<br />
+      <span style="color:#374151;word-break:break-all;">${link}</span>
+    </p>
+
+    ${HR}
+
+    <p style="margin:0;color:#6b7280;font-size:14px;line-height:1.6;">
+      If you did not create a ConsentBit account, you can ignore this email \u2014 and we would
+      recommend securing the account at this address, since someone used it to sign up.
+    </p>
+    `
+  );
+  const text = `Hi ${displayName},
+
+Your ConsentBit account is ready. Confirm your email address so you can upgrade to a paid plan when you need to:
+
+${link}
+
+This link expires in ${ttlHours} hours.
+
+If you did not create a ConsentBit account, you can ignore this email.
+
+Best regards,
+ConsentBit Team
+`;
+  const send2 = sendBrevoEmail(env2, { to, name, subject, html, text }).catch((e) => console.error("[Email] sendVerifyEmailLink failed:", e?.message));
+  if (ctx?.waitUntil) ctx.waitUntil(send2);
+  return send2;
+}
+__name(sendVerifyEmailLink, "sendVerifyEmailLink");
 
 // src/services/syncLegacy.js
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
@@ -35967,16 +36384,17 @@ async function handleStripeWebhook(request, env2, ctx) {
               try {
                 const _sgEmail = (session.customer_email || session.customer_details?.email || "").trim().toLowerCase();
                 if (_sgEmail) {
+                  const _sgPlatform = normalizeSignupSource(platform2) || await getSignupSourceByEmail(db, _sgEmail);
                   await capturePostHogEvent2(env2, _sgEmail, "script_generated", {
                     site_id: createdSite.id,
                     domain: createdSite.domain,
-                    platform: platform2 || "webapp",
+                    ..._sgPlatform ? { platform: _sgPlatform } : {},
                     ...createdSite.id ? { $groups: { site: String(createdSite.id) } } : {}
                   });
                   await captureGa4Event(env2, _sgEmail, "script_generated", {
                     site_id: createdSite.id,
                     domain: createdSite.domain,
-                    platform: platform2 || "webapp"
+                    ..._sgPlatform ? { platform: _sgPlatform } : {}
                   });
                 }
               } catch (phErr) {
@@ -36031,15 +36449,17 @@ async function handleStripeWebhook(request, env2, ctx) {
         });
         if (orgId) {
           const _phEmail = (session.customer_email || session.customer_details?.email || "").trim().toLowerCase() || null;
-          let _phPlatform = platform2 || null;
+          let _phPlatform = normalizeSignupSource(platform2);
           if (!_phPlatform && siteId && db) {
             try {
               const _phSiteRow = await db.prepare("SELECT platform FROM Site WHERE id = ?1 LIMIT 1").bind(siteId).first();
-              _phPlatform = _phSiteRow?.platform || null;
+              _phPlatform = normalizeSignupSource(_phSiteRow?.platform);
             } catch (e) {
             }
           }
-          _phPlatform = _phPlatform || "webapp";
+          if (!_phPlatform && _phEmail && db) {
+            _phPlatform = await getSignupSourceByEmail(db, _phEmail);
+          }
           if (_phEmail) {
             await capturePostHogEvent2(env2, _phEmail, "subscription_activated", {
               status: subscriptionStatus,
@@ -36062,7 +36482,7 @@ async function handleStripeWebhook(request, env2, ctx) {
               currency: (session.currency || "usd").toUpperCase(),
               status: subscriptionStatus,
               site_id: siteId || null,
-              platform: _phPlatform || "webapp"
+              ..._phPlatform ? { platform: _phPlatform } : {}
             });
             if (siteId) {
               await identifyPostHogSite2(env2, _phEmail, siteId, {
@@ -36604,7 +37024,7 @@ async function handleStripeWebhook(request, env2, ctx) {
           ).bind(orgIdFinal).first();
           _phEmail = _phUser?.email || null;
           const _phSite = existing?.siteId ?? existing?.siteid ? await db.prepare("SELECT platform FROM Site WHERE id = ?1 LIMIT 1").bind(existing.siteId ?? existing.siteid).first() : null;
-          _phPlatform = _phSite?.platform || sub.metadata?.platform || "webapp";
+          _phPlatform = normalizeSignupSource(_phSite?.platform) || normalizeSignupSource(sub.metadata?.platform) || await getSignupSourceByEmail(db, _phEmail);
         } catch (e) {
         }
         if (_phEmail) {
@@ -36631,7 +37051,7 @@ async function handleStripeWebhook(request, env2, ctx) {
                 currency: (_subPrice?.currency || "usd").toUpperCase(),
                 status: "active",
                 site_id: existing?.siteId ?? existing?.siteid ?? null,
-                platform: _phPlatform || "webapp"
+                ..._phPlatform ? { platform: _phPlatform } : {}
               });
             }
             if (sub.status === "trialing" && sub.cancel_at_period_end === true && (event.data.previous_attributes || {}).cancel_at_period_end === false) {
@@ -36640,7 +37060,7 @@ async function handleStripeWebhook(request, env2, ctx) {
                 interval: intervalFromSub,
                 site_id: existing?.siteId ?? existing?.siteid ?? null,
                 org_id: orgIdFinal,
-                platform: _phPlatform,
+                ..._phPlatform ? { platform: _phPlatform } : {},
                 $set: { did_cancel_in_trial: true, trial_cancelled_at: (/* @__PURE__ */ new Date()).toISOString() }
               });
             }
@@ -37916,6 +38336,10 @@ async function handleUpgradeSubscription(request, env2) {
     bodyKeys: Object.keys(body || {})
   });
   if (stripeCouponId) {
+    const rawOk = await isCouponIdAllowedForEmail(secret, stripeCouponId, email);
+    if (!rawOk.allowed) {
+      return Response.json({ success: false, error: rawOk.reason }, { status: 400 });
+    }
     params.set("discounts[0][coupon]", stripeCouponId);
   }
   if (promotionCodeId) {
@@ -37928,6 +38352,10 @@ async function handleUpgradeSubscription(request, env2) {
       if (verify.error || !verify.active) {
         console.warn("[UPGRADE] promotion code rejected", { id: promotionCodeId, err: verify.error?.message });
         return Response.json({ success: false, error: "Promotion code is no longer valid" }, { status: 400 });
+      }
+      if (!isCodeAllowedForEmail(verify.code, email)) {
+        console.warn("[UPGRADE] promo restricted to another account", { code: verify.code, email });
+        return Response.json({ success: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 400 });
       }
       params.set("discounts[0][promotion_code]", promotionCodeId);
       if (verify.code) params.set("subscription_data[metadata][promotionCode]", verify.code);
@@ -37957,6 +38385,10 @@ async function handleUpgradeSubscription(request, env2) {
       const promo = lookupData?.data?.[0];
       if (!promo || !promo.active) {
         return Response.json({ success: false, error: "Invalid or expired coupon code" }, { status: 400 });
+      }
+      if (!isCodeAllowedForEmail(promo.code || couponCode, email)) {
+        console.warn("[UPGRADE] coupon restricted to another account", { code: promo.code || couponCode, email });
+        return Response.json({ success: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 400 });
       }
       params.set("discounts[0][promotion_code]", promo.id);
       params.set("subscription_data[metadata][promotionCode]", promo.code || couponCode);
@@ -38466,6 +38898,14 @@ async function prepareChange(request, env2) {
   if (!planId) return { error: fail2("planId must be basic, essential, or growth", 400) };
   const member = await getOrganizationMember(db, userId, organizationId);
   if (!member) return { error: fail2("Not allowed for this organization", 403) };
+  if (promotionCodeId) {
+    const promoOk = await isPromotionCodeAllowedForEmail(
+      env2.STRIPE_SECRET_KEY,
+      promotionCodeId,
+      user.email
+    );
+    if (!promoOk.allowed) return { error: fail2(promoOk.reason, 400) };
+  }
   const sub = (siteId ? await getSubscriptionBySiteId(db, siteId) : null) || await getSubscriptionByOrganization(db, organizationId);
   if (!sub) return { error: fail2("No active subscription found", 404) };
   const stripeSubId = sub.stripeSubscriptionId ?? sub.stripesubscriptionid;
@@ -45453,12 +45893,111 @@ __name(handleAuthDashboardInit, "handleAuthDashboardInit");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-async function computeClientHash(email, password) {
-  const s = `${(email || "").trim().toLowerCase()}|${(password || "").trim()}`;
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
-  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+
+// src/utils/pwDebug.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+function describeStored(stored) {
+  if (stored === null || stored === void 0) return "null";
+  const s = String(stored).trim();
+  if (s === "") return "empty";
+  if (s === "passwordless") return "sentinel-passwordless";
+  if (s.startsWith("client:")) return "legacy-client-sha256";
+  if (/^[0-9a-f]{32}:[0-9a-f]{64}$/i.test(s)) return "pbkdf2-salt:hash";
+  if (s.includes(":")) return "colon-other";
+  return `unknown(len=${s.length})`;
 }
-__name(computeClientHash, "computeClientHash");
+__name(describeStored, "describeStored");
+function pwDebug(event, data) {
+  try {
+    console.log(`[PwAuth:DEBUG] ${event}`, JSON.stringify(data));
+  } catch (e) {
+    console.log(`[PwAuth:DEBUG] ${event} <unserialisable>`);
+  }
+}
+__name(pwDebug, "pwDebug");
+
+// src/utils/authCrypto.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+var AuthCryptoError = class extends Error {
+  static {
+    __name(this, "AuthCryptoError");
+  }
+};
+var cachedKey = null;
+var cachedRaw = null;
+function readJwk(env2) {
+  const raw = env2 && env2.AUTH_RSA_PRIVATE_JWK;
+  if (!raw || typeof raw !== "string" || !raw.trim()) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    console.error("[AuthCrypto] AUTH_RSA_PRIVATE_JWK is not valid JSON");
+    return null;
+  }
+}
+__name(readJwk, "readJwk");
+async function getPrivateKey(env2) {
+  const raw = env2 && env2.AUTH_RSA_PRIVATE_JWK;
+  if (!raw) return null;
+  if (cachedKey && cachedRaw === raw) return cachedKey;
+  const jwk = readJwk(env2);
+  if (!jwk) return null;
+  const key = await crypto.subtle.importKey(
+    "jwk",
+    jwk,
+    { name: "RSA-OAEP", hash: "SHA-256" },
+    false,
+    ["decrypt"]
+  );
+  cachedKey = key;
+  cachedRaw = raw;
+  return key;
+}
+__name(getPrivateKey, "getPrivateKey");
+function getPublicJwk(env2) {
+  const jwk = readJwk(env2);
+  if (!jwk || !jwk.n || !jwk.e) return null;
+  return {
+    kty: jwk.kty || "RSA",
+    n: jwk.n,
+    e: jwk.e,
+    alg: "RSA-OAEP-256",
+    ext: true,
+    key_ops: ["encrypt"]
+  };
+}
+__name(getPublicJwk, "getPublicJwk");
+async function resolvePasswordField(env2, { enc, plain } = {}) {
+  if (typeof enc === "string" && enc.length > 0) {
+    const key = await getPrivateKey(env2);
+    if (!key) {
+      throw new AuthCryptoError("Password encryption is not configured on this server.");
+    }
+    let bytes;
+    try {
+      const bin = atob(enc);
+      bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+    } catch (e) {
+      throw new AuthCryptoError("Malformed encrypted password.");
+    }
+    let buf;
+    try {
+      buf = await crypto.subtle.decrypt({ name: "RSA-OAEP" }, key, bytes);
+    } catch (e) {
+      throw new AuthCryptoError(
+        "Could not decrypt the password. The page may be holding an old key \u2014 reload and try again."
+      );
+    }
+    return { password: new TextDecoder().decode(buf), encrypted: true };
+  }
+  return { password: typeof plain === "string" ? plain : "", encrypted: false };
+}
+__name(resolvePasswordField, "resolvePasswordField");
+
+// src/handlers/authLogin.js
 async function handleAuthLogin(request, env2) {
   const db = env2.CONSENT_WEBAPP;
   if (request.method !== "POST") {
@@ -45468,57 +46007,64 @@ async function handleAuthLogin(request, env2) {
   try {
     body = await request.json();
   } catch {
-    return Response.json(
-      { success: false, error: "Invalid JSON body" },
-      { status: 400 }
-    );
+    return Response.json({ success: false, error: "Invalid JSON body" }, { status: 400 });
   }
   const email = (body.email || "").trim().toLowerCase();
-  let passwordHash = (body.passwordHash || "").trim();
-  const password = (body.password || "").trim();
+  let password = "";
+  let encrypted = false;
+  try {
+    ({ password, encrypted } = await resolvePasswordField(env2, { enc: body.passwordEnc, plain: body.password }));
+  } catch (e) {
+    if (e instanceof AuthCryptoError) {
+      pwDebug("login:decrypt-failed", { email, reason: e.message });
+      return Response.json({ success: false, error: e.message, code: "PASSWORD_ENC_FAILED" }, { status: 400 });
+    }
+    throw e;
+  }
+  pwDebug("login:request", { email, passwordProvided: !!password, passwordLen: password.length, encrypted, legacyHashFieldSent: body.passwordHash !== void 0 });
   if (!email) {
-    return Response.json(
-      { success: false, error: "email required" },
-      { status: 400 }
-    );
+    return Response.json({ success: false, error: "email required" }, { status: 400 });
   }
-  if (password && !passwordHash) {
-    passwordHash = await computeClientHash(email, password);
-  }
-  if (!passwordHash) {
-    return Response.json(
-      { success: false, error: "passwordHash required" },
-      { status: 400 }
-    );
+  if (!password) {
+    return Response.json({ success: false, error: "password required" }, { status: 400 });
   }
   const user = await getUserByEmail(db, email);
   const passKey = user && Object.keys(user).find((k) => k.toLowerCase() === "passwordhash");
   const stored = user && (user.passwordHash ?? user.password_hash ?? user.passwordhash ?? (passKey ? user[passKey] : void 0));
-  if (!user || !stored) {
+  pwDebug("login:lookup", { email, userFound: !!user, userId: user?.id ?? null, storedFormat: describeStored(stored), storedColumn: passKey ?? null });
+  if (!user) {
+    return Response.json({ success: false, error: "Invalid credentials" }, { status: 401 });
+  }
+  if (!isPasswordSet(stored)) {
+    pwDebug("login:no-password-set", { email, userId: user.id, storedFormat: describeStored(stored) });
     return Response.json(
-      { success: false, error: "Invalid credentials" },
+      {
+        success: false,
+        passwordNotSet: true,
+        error: "This account has no password yet. Sign in with an email code, then set one from your profile."
+      },
       { status: 401 }
     );
   }
-  const storedPrefix = typeof stored === "string" ? stored.slice(0, 7) : "n/a";
-  const storedHashLen = typeof stored === "string" && stored.startsWith("client:") ? stored.length - 7 : 0;
-  let valid = false;
-  if (stored.startsWith("client:")) {
-    const storedHash = stored.slice(7).toLowerCase();
-    valid = passwordHash.toLowerCase() === storedHash;
-  } else {
-    return Response.json(
-      { success: false, error: "This account uses an older sign-in method. Please use \u201CForgot password\u201D to set a new password." },
-      { status: 401 }
-    );
-  }
+  const { valid, needsRehash } = await verifyStoredPassword({ email, password, stored });
+  pwDebug("login:verify", { email, userId: user.id, valid, needsRehash, storedFormat: describeStored(stored) });
   if (!valid) {
-    return Response.json(
-      { success: false, error: "Invalid credentials" },
-      { status: 401 }
-    );
+    return Response.json({ success: false, error: "Invalid credentials" }, { status: 401 });
+  }
+  if (needsRehash) {
+    try {
+      await updateUserPasswordHash(db, user.id, await hashPassword(password));
+      pwDebug("login:rehashed", { userId: user.id, from: "legacy-client-sha256", to: "pbkdf2" });
+    } catch (e) {
+      pwDebug("login:rehash-failed", { userId: user.id, error: e?.message || String(e) });
+      console.error("[AuthLogin] password rehash failed", {
+        userId: user.id,
+        error: e?.message || String(e)
+      });
+    }
   }
   const session = await createSession(db, { userId: user.id });
+  pwDebug("login:success", { userId: user.id, email, sessionCreated: true });
   const isProd = env2.NODE_ENV === "production";
   const cookieFlags = isProd ? "Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000" : "Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000";
   return new Response(
@@ -45539,7 +46085,124 @@ init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
 init_db();
-async function handleAuthSignup(request, env2) {
+
+// src/handlers/authVerifyEmail.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+init_db();
+var TTL_MINUTES = 24 * 60;
+async function sha256Hex2(s) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(sha256Hex2, "sha256Hex");
+function randomToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(randomToken, "randomToken");
+function getSessionIdFromCookie19(request) {
+  const cookie = request.headers.get("Cookie") || "";
+  const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
+  return match ? match[1].trim() : null;
+}
+__name(getSessionIdFromCookie19, "getSessionIdFromCookie");
+function appOrigin(env2) {
+  return (env2.WEBAPP_PUBLIC_URL || "https://accounts.consentbit.com").replace(/\/$/, "");
+}
+__name(appOrigin, "appOrigin");
+async function issueEmailVerification(env2, ctx, db, user) {
+  if (!user?.id || !user?.email) return false;
+  if (isEmailVerified(user)) return false;
+  await cancelPendingEmailVerifications(db, user.id);
+  const secret = randomToken();
+  const tokenHash = await sha256Hex2(secret);
+  const row = await createEmailVerificationToken(db, {
+    userId: user.id,
+    email: user.email,
+    tokenHash,
+    ttlMinutes: TTL_MINUTES
+  });
+  const token = `${row.id}.${secret}`;
+  const link = `${appOrigin(env2)}/verify-email?token=${encodeURIComponent(token)}`;
+  sendVerifyEmailLink(env2, ctx, {
+    to: user.email,
+    name: user.name || "",
+    link,
+    ttlHours: Math.round(TTL_MINUTES / 60)
+  });
+  return true;
+}
+__name(issueEmailVerification, "issueEmailVerification");
+async function handleAuthVerifyEmail(request, env2, ctx) {
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) return Response.json({ success: false, error: "Database not available" }, { status: 503 });
+  let token = "";
+  if (request.method === "POST") {
+    try {
+      const body = await request.json();
+      token = String(body?.token || "").trim();
+    } catch {
+    }
+  }
+  if (!token) {
+    try {
+      token = String(new URL(request.url).searchParams.get("token") || "").trim();
+    } catch {
+    }
+  }
+  if (!token || !token.includes(".")) {
+    return Response.json({ success: false, error: "Invalid or missing verification token" }, { status: 400 });
+  }
+  const [id, secret] = token.split(".");
+  const row = await getEmailVerificationTokenById(db, id);
+  if (!row) {
+    return Response.json({ success: false, error: "This verification link is not valid" }, { status: 400 });
+  }
+  const computed = secret ? await sha256Hex2(secret) : "";
+  if (!secret || computed !== row.tokenHash) {
+    return Response.json({ success: false, error: "This verification link is not valid" }, { status: 400 });
+  }
+  if (row.status === "used") {
+    return Response.json({ success: true, alreadyVerified: true });
+  }
+  if (row.status !== "pending") {
+    return Response.json({ success: false, error: "This verification link is no longer valid" }, { status: 400 });
+  }
+  if (row.expiresAt && new Date(row.expiresAt).getTime() < Date.now()) {
+    return Response.json(
+      { success: false, expired: true, error: "This verification link has expired. Request a new one from your profile." },
+      { status: 400 }
+    );
+  }
+  await markUserEmailVerified(db, row.userId);
+  await markEmailVerificationTokenUsed(db, row.id);
+  console.log("[VerifyEmail] verified", { userId: row.userId, email: row.email });
+  return Response.json({ success: true, email: row.email });
+}
+__name(handleAuthVerifyEmail, "handleAuthVerifyEmail");
+async function handleAuthVerifyEmailResend(request, env2, ctx) {
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) return Response.json({ success: false, error: "Database not available" }, { status: 503 });
+  if (request.method !== "POST") {
+    return Response.json({ success: false, error: "Method not allowed" }, { status: 405 });
+  }
+  const sid = getSessionIdFromCookie19(request);
+  if (!sid) return Response.json({ success: false, error: "Login required" }, { status: 401 });
+  const session = await getSessionById(db, sid);
+  if (!session) return Response.json({ success: false, error: "Login required" }, { status: 401 });
+  const user = await getUserById(db, session.userId ?? session.user_id);
+  if (!user) return Response.json({ success: false, error: "Login required" }, { status: 401 });
+  if (isEmailVerified(user)) {
+    return Response.json({ success: true, alreadyVerified: true });
+  }
+  const sent = await issueEmailVerification(env2, ctx, db, user);
+  return Response.json({ success: true, sent });
+}
+__name(handleAuthVerifyEmailResend, "handleAuthVerifyEmailResend");
+
+// src/handlers/authSignup.js
+async function handleAuthSignup(request, env2, ctx) {
   const db = env2.CONSENT_WEBAPP;
   if (!db) {
     return Response.json({ success: false, error: "Database not configured" }, { status: 503 });
@@ -45571,24 +46234,32 @@ async function handleAuthSignup(request, env2) {
       return Response.json({ success: false, error: "Invalid password format" }, { status: 400 });
     }
     storedHash = "client:" + passwordHash;
-  } else if (password && confirmPassword) {
+  } else if (password) {
     if (password.length < 8) {
       return Response.json({ success: false, error: "Password must be at least 8 characters" }, { status: 400 });
     }
-    if (password !== confirmPassword) {
+    if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
+      return Response.json({ success: false, error: "Password must contain at least one letter and one number" }, { status: 400 });
+    }
+    if (confirmPassword && password !== confirmPassword) {
       return Response.json({ success: false, error: "Password and confirm password do not match" }, { status: 400 });
     }
     storedHash = await hashPassword(password);
   } else {
-    return Response.json({ success: false, error: "passwordHash + confirmPasswordHash or password + confirmPassword required" }, { status: 400 });
+    return Response.json({ success: false, error: "password required" }, { status: 400 });
   }
   await ensureSchema(db);
   const existing = await getUserByEmail(db, email);
   if (existing) {
     return Response.json({ success: false, error: "An account with this email already exists" }, { status: 409 });
   }
-  const user = await createUser(db, { email, name: name || null, passwordHash: storedHash });
+  const user = await createUser(db, { email, name: name || null, passwordHash: storedHash, signupSource: "webapp" });
   const session = await createSession(db, { userId: user.id });
+  try {
+    await issueEmailVerification(env2, ctx, db, user);
+  } catch (e) {
+    console.error("[AuthSignup] verification email failed", e?.message || String(e));
+  }
   const isProd = env2.NODE_ENV === "production";
   const cookieFlags = isProd ? "Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000" : "Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000";
   return Response.json(
@@ -45608,15 +46279,15 @@ __name(handleAuthSignup, "handleAuthSignup");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie19(request) {
+function getSessionIdFromCookie20(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie19, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie20, "getSessionIdFromCookie");
 async function handleAuthMe(request, env2) {
   const db = env2.CONSENT_WEBAPP;
-  const sid = getSessionIdFromCookie19(request);
+  const sid = getSessionIdFromCookie20(request);
   if (!sid) {
     return Response.json({ authenticated: false }, { status: 200 });
   }
@@ -45645,7 +46316,15 @@ async function handleAuthMe(request, env2) {
         id: user.id,
         email: user.email,
         name: user.name,
-        billingEmail: user.billingEmail ?? null
+        billingEmail: user.billingEmail ?? null,
+        // Drives the profile password panel: "Set a password" for accounts that sign in
+        // by emailed code only, "Change password" (which then requires the current one)
+        // for accounts that already have one. Never send the hash itself — only whether
+        // one exists. D1 casing varies by how the row was written, so check every
+        // spelling before concluding there is no password.
+        hasPassword: isPasswordSet(
+          user.passwordHash ?? user.password_hash ?? user.passwordhash ?? null
+        )
       },
       organizations: orgs
     },
@@ -45658,12 +46337,12 @@ __name(handleAuthMe, "handleAuthMe");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie20(request) {
+function getSessionIdFromCookie21(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie20, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie21, "getSessionIdFromCookie");
 function isValidEmail(email) {
   return typeof email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 }
@@ -45673,7 +46352,7 @@ async function handleAuthProfile(request, env2) {
   if (request.method !== "PATCH") {
     return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
   }
-  const sid = getSessionIdFromCookie20(request);
+  const sid = getSessionIdFromCookie21(request);
   if (!sid) {
     return Response.json({ success: false, error: "Login required" }, { status: 401 });
   }
@@ -45709,31 +46388,430 @@ async function handleAuthProfile(request, env2) {
 }
 __name(handleAuthProfile, "handleAuthProfile");
 
-// src/handlers/authTransferOwnership.js
+// src/handlers/authSetPassword.js
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie21(request) {
+function getSessionIdFromCookie22(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie21, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie22, "getSessionIdFromCookie");
+async function handleAuthSetPassword(request, env2) {
+  const db = env2.CONSENT_WEBAPP;
+  if (request.method !== "POST") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const sid = getSessionIdFromCookie22(request);
+  if (!sid) {
+    pwDebug("set-password:no-cookie", { hasCookieHeader: !!request.headers.get("Cookie") });
+    return Response.json({ success: false, error: "Login required" }, { status: 401 });
+  }
+  const session = await getSessionById(db, sid);
+  if (!session) {
+    pwDebug("set-password:session-not-found", {});
+    return Response.json({ success: false, error: "Login required" }, { status: 401 });
+  }
+  const user = await getUserById(db, session.userId ?? session.user_id);
+  if (!user) {
+    pwDebug("set-password:user-not-found", { userId: session.userId ?? session.user_id });
+    return Response.json({ success: false, error: "Login required" }, { status: 401 });
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ success: false, error: "Invalid JSON body" }, { status: 400 });
+  }
+  let newPassword = "";
+  let confirmPassword = "";
+  let currentPassword = "";
+  let encrypted = false;
+  try {
+    const np = await resolvePasswordField(env2, { enc: body?.newPasswordEnc, plain: body?.newPassword });
+    const cp = await resolvePasswordField(env2, { enc: body?.confirmPasswordEnc, plain: body?.confirmPassword });
+    const op = await resolvePasswordField(env2, { enc: body?.currentPasswordEnc, plain: body?.currentPassword });
+    newPassword = np.password;
+    confirmPassword = cp.password;
+    currentPassword = op.password;
+    encrypted = np.encrypted;
+  } catch (e) {
+    if (e instanceof AuthCryptoError) {
+      pwDebug("set-password:decrypt-failed", { userId: user.id, reason: e.message });
+      return Response.json({ success: false, error: e.message, code: "PASSWORD_ENC_FAILED" }, { status: 400 });
+    }
+    throw e;
+  }
+  const policyError = validatePasswordPolicy(newPassword);
+  if (policyError) {
+    pwDebug("set-password:policy-rejected", { userId: user.id, reason: policyError, newLen: newPassword.length });
+    return Response.json({ success: false, error: policyError }, { status: 400 });
+  }
+  if (confirmPassword && newPassword !== confirmPassword) {
+    pwDebug("set-password:confirm-mismatch", { userId: user.id });
+    return Response.json({ success: false, error: "Passwords do not match" }, { status: 400 });
+  }
+  const passKey = Object.keys(user).find((k) => k.toLowerCase() === "passwordhash");
+  const stored = user.passwordHash ?? user.password_hash ?? user.passwordhash ?? (passKey ? user[passKey] : void 0);
+  pwDebug("set-password:input", { userId: user.id, email: user.email, storedFormat: describeStored(stored), hasExistingPassword: isPasswordSet(stored), newLen: newPassword.length, confirmProvided: !!confirmPassword, currentProvided: !!currentPassword, encrypted });
+  if (isPasswordSet(stored)) {
+    if (!currentPassword) {
+      pwDebug("set-password:current-required", { userId: user.id });
+      return Response.json(
+        { success: false, error: "Current password is required to change your password." },
+        { status: 400 }
+      );
+    }
+    const { valid } = await verifyStoredPassword({
+      email: user.email,
+      password: currentPassword,
+      stored
+    });
+    pwDebug("set-password:current-verified", { userId: user.id, valid });
+    if (!valid) {
+      return Response.json(
+        { success: false, error: "Current password is incorrect." },
+        { status: 401 }
+      );
+    }
+    if (newPassword === currentPassword) {
+      pwDebug("set-password:unchanged", { userId: user.id });
+      return Response.json(
+        { success: false, error: "New password must be different from your current password." },
+        { status: 400 }
+      );
+    }
+  }
+  await updateUserPasswordHash(db, user.id, await hashPassword(newPassword));
+  pwDebug("set-password:updated", { userId: user.id, email: user.email, storedFormatNow: "pbkdf2-salt:hash" });
+  return Response.json(
+    { success: true, hasPassword: true, message: "Password updated." },
+    { status: 200 }
+  );
+}
+__name(handleAuthSetPassword, "handleAuthSetPassword");
+async function handleAuthVerifyPassword(request, env2) {
+  const db = env2.CONSENT_WEBAPP;
+  if (request.method !== "POST") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const sid = getSessionIdFromCookie22(request);
+  if (!sid) return Response.json({ success: false, error: "Login required" }, { status: 401 });
+  const session = await getSessionById(db, sid);
+  if (!session) return Response.json({ success: false, error: "Login required" }, { status: 401 });
+  const user = await getUserById(db, session.userId ?? session.user_id);
+  if (!user) return Response.json({ success: false, error: "Login required" }, { status: 401 });
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ success: false, error: "Invalid JSON body" }, { status: 400 });
+  }
+  let currentPassword = "";
+  try {
+    const op = await resolvePasswordField(env2, {
+      enc: body?.currentPasswordEnc,
+      plain: body?.currentPassword
+    });
+    currentPassword = op.password;
+  } catch (e) {
+    if (e instanceof AuthCryptoError) {
+      return Response.json({ success: false, error: e.message, code: "PASSWORD_ENC_FAILED" }, { status: 400 });
+    }
+    throw e;
+  }
+  const stored = user.passwordHash ?? user.password_hash ?? user.passwordhash ?? null;
+  if (!isPasswordSet(stored)) {
+    return Response.json({ success: true, valid: false, passwordNotSet: true });
+  }
+  if (!currentPassword) {
+    return Response.json({ success: false, error: "Enter your current password" }, { status: 400 });
+  }
+  const { valid } = await verifyStoredPassword({
+    email: user.email,
+    password: currentPassword,
+    stored
+  });
+  pwDebug("verify-password:result", { userId: user.id, valid, storedFormat: describeStored(stored) });
+  return Response.json({ success: true, valid });
+}
+__name(handleAuthVerifyPassword, "handleAuthVerifyPassword");
+
+// src/handlers/authPassword.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+init_db();
+function validatePasswordPolicy2(password) {
+  if (!password || password.length < 8) {
+    return "Password must be at least 8 characters";
+  }
+  if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
+    return "Password must contain at least one letter and one number";
+  }
+  return null;
+}
+__name(validatePasswordPolicy2, "validatePasswordPolicy");
+function sessionCookie(env2, sessionId) {
+  const isProd = env2.NODE_ENV === "production";
+  const flags = isProd ? "Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000" : "Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000";
+  return `sid=${sessionId}; ${flags}`;
+}
+__name(sessionCookie, "sessionCookie");
+async function readPassword(env2, body, tag) {
+  try {
+    const { password, encrypted } = await resolvePasswordField(env2, {
+      enc: body.passwordEnc,
+      plain: body.password
+    });
+    return { password, encrypted };
+  } catch (e) {
+    if (e instanceof AuthCryptoError) {
+      pwDebug(`${tag}:decrypt-failed`, { reason: e.message });
+      return {
+        error: Response.json(
+          { success: false, error: e.message, code: "PASSWORD_ENC_FAILED" },
+          { status: 400 }
+        )
+      };
+    }
+    throw e;
+  }
+}
+__name(readPassword, "readPassword");
+async function handlePasswordSignup(request, env2, ctx) {
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) return Response.json({ success: false, error: "Database not available" }, { status: 503 });
+  if (request.method !== "POST") {
+    return Response.json({ success: false, error: "Method not allowed" }, { status: 405 });
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ success: false, error: "Invalid JSON body" }, { status: 400 });
+  }
+  const name = (body.name || "").trim();
+  const email = (body.email || "").trim().toLowerCase();
+  if (!email || !email.includes("@")) {
+    return Response.json({ success: false, error: "Valid email is required" }, { status: 400 });
+  }
+  const read = await readPassword(env2, body, "password-signup");
+  if (read.error) return read.error;
+  const password = read.password;
+  const policyError = validatePasswordPolicy2(password);
+  if (policyError) {
+    return Response.json({ success: false, error: policyError }, { status: 400 });
+  }
+  const confirmRead = await readPassword(
+    env2,
+    { passwordEnc: body.confirmPasswordEnc, password: body.confirmPassword ?? body.confirm_password ?? "" },
+    "password-signup-confirm"
+  );
+  if (confirmRead.error) return confirmRead.error;
+  const confirmPassword = confirmRead.password;
+  if (confirmPassword && password !== confirmPassword) {
+    return Response.json(
+      { success: false, error: "Password and confirm password do not match" },
+      { status: 400 }
+    );
+  }
+  await ensureSchema(db);
+  const existing = await getUserByEmail(db, email);
+  if (existing) {
+    return Response.json(
+      { success: false, emailTaken: true, error: "An account with this email already exists. Log in instead." },
+      { status: 409 }
+    );
+  }
+  const storedHash = await hashPassword(password);
+  const user = await createUser(db, {
+    email,
+    name: name || null,
+    passwordHash: storedHash,
+    signupSource: "webapp"
+  });
+  pwDebug("password-signup:created", { userId: user.id, email, storedFormat: describeStored(storedHash) });
+  const session = await createSession(db, { userId: user.id });
+  try {
+    await issueEmailVerification(env2, ctx, db, user);
+  } catch (e) {
+    console.error("[PasswordSignup] verification email failed", e?.message || String(e));
+  }
+  return Response.json(
+    {
+      success: true,
+      emailVerificationSent: true,
+      user: { id: user.id, email: user.email, name: user.name }
+    },
+    { status: 201, headers: { "Set-Cookie": sessionCookie(env2, session.id) } }
+  );
+}
+__name(handlePasswordSignup, "handlePasswordSignup");
+async function handlePasswordLogin(request, env2) {
+  const db = env2.CONSENT_WEBAPP;
+  if (!db) return Response.json({ success: false, error: "Database not available" }, { status: 503 });
+  if (request.method !== "POST") {
+    return Response.json({ success: false, error: "Method not allowed" }, { status: 405 });
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ success: false, error: "Invalid JSON body" }, { status: 400 });
+  }
+  const email = (body.email || "").trim().toLowerCase();
+  if (!email) return Response.json({ success: false, error: "email required" }, { status: 400 });
+  const read = await readPassword(env2, body, "password-login");
+  if (read.error) return read.error;
+  const password = read.password;
+  if (!password) return Response.json({ success: false, error: "password required" }, { status: 400 });
+  const user = await getUserByEmail(db, email);
+  const passKey = user && Object.keys(user).find((k) => k.toLowerCase() === "passwordhash");
+  const stored = user && (user.passwordHash ?? user.password_hash ?? user.passwordhash ?? (passKey ? user[passKey] : void 0));
+  pwDebug("password-login:lookup", { email, userFound: !!user, storedFormat: describeStored(stored) });
+  if (!user) {
+    return Response.json({ success: false, error: "Invalid credentials" }, { status: 401 });
+  }
+  if (!isPasswordSet(stored)) {
+    return Response.json(
+      {
+        success: false,
+        passwordNotSet: true,
+        error: "This account has no password yet. Sign in with an email code, then set one from your profile."
+      },
+      { status: 401 }
+    );
+  }
+  const { valid, needsRehash } = await verifyStoredPassword({ email, password, stored });
+  pwDebug("password-login:verify", { email, userId: user.id, valid, needsRehash });
+  if (!valid) {
+    return Response.json({ success: false, error: "Invalid credentials" }, { status: 401 });
+  }
+  if (needsRehash) {
+    try {
+      await updateUserPasswordHash(db, user.id, await hashPassword(password));
+      pwDebug("password-login:rehashed", { userId: user.id });
+    } catch (e) {
+      console.error("[PasswordLogin] rehash failed", e?.message || String(e));
+    }
+  }
+  const session = await createSession(db, { userId: user.id });
+  pwDebug("password-login:success", { userId: user.id, email });
+  return Response.json(
+    { success: true, user: { id: user.id, email: user.email, name: user.name } },
+    { status: 200, headers: { "Set-Cookie": sessionCookie(env2, session.id) } }
+  );
+}
+__name(handlePasswordLogin, "handlePasswordLogin");
+
+// src/handlers/authPublicKey.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+async function handleAuthPublicKey(request, env2) {
+  if (request.method !== "GET") {
+    return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
+  }
+  const jwk = getPublicJwk(env2);
+  if (!jwk) {
+    return Response.json({ success: true, enabled: false }, { status: 200 });
+  }
+  return Response.json(
+    { success: true, enabled: true, alg: "RSA-OAEP-256", publicKey: jwk },
+    {
+      status: 200,
+      // Deliberately NOT cached. This was max-age=300, which meant a browser could keep
+      // encrypting with a key the server no longer had — after a key rotation, or after
+      // the same URL was repointed at a different worker — and every sign-in failed hard
+      // for the life of the cache entry. The response is a few hundred bytes once per
+      // page load; correctness is worth far more than that here.
+      headers: { "Cache-Control": "no-store" }
+    }
+  );
+}
+__name(handleAuthPublicKey, "handleAuthPublicKey");
+
+// src/handlers/authTransferOwnership.js
+init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
+init_performance2();
+init_db();
+async function moveBillingIdentity(db, env2, userId, newEmail, newName) {
+  const result = { billingEmailUpdated: false, stripeCustomersUpdated: 0, errors: [] };
+  try {
+    await updateUserBillingEmail(db, userId, newEmail);
+    result.billingEmailUpdated = true;
+  } catch (e) {
+    result.errors.push("billingEmail: " + (e?.message || e));
+  }
+  const secret = env2.STRIPE_SECRET_KEY;
+  if (!secret) {
+    result.errors.push("stripe: STRIPE_SECRET_KEY not configured");
+    return result;
+  }
+  let customerIds = [];
+  try {
+    const orgs = await getOrganizationsForUser(db, userId);
+    const seen = /* @__PURE__ */ new Set();
+    for (const org of orgs) {
+      const subs = await getSubscriptionsByOrganization(db, org.id);
+      for (const sub of subs) {
+        const cid = sub?.stripeCustomerId;
+        if (cid && !seen.has(cid)) {
+          seen.add(cid);
+          customerIds.push(cid);
+        }
+      }
+    }
+  } catch (e) {
+    result.errors.push("subscription lookup: " + (e?.message || e));
+    return result;
+  }
+  for (const customerId of customerIds) {
+    try {
+      const body = new URLSearchParams({ email: newEmail });
+      if (newName) body.set("name", newName);
+      const res = await fetch(`https://api.stripe.com/v1/customers/${customerId}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${secret}`,
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: body.toString()
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.error) {
+        result.errors.push(`stripe ${customerId}: ${data?.error?.message || res.status}`);
+        continue;
+      }
+      result.stripeCustomersUpdated++;
+    } catch (e) {
+      result.errors.push(`stripe ${customerId}: ${e?.message || e}`);
+    }
+  }
+  return result;
+}
+__name(moveBillingIdentity, "moveBillingIdentity");
+function getSessionIdFromCookie23(request) {
+  const cookie = request.headers.get("Cookie") || "";
+  const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
+  return match ? match[1].trim() : null;
+}
+__name(getSessionIdFromCookie23, "getSessionIdFromCookie");
 function isValidEmail2(email) {
   const e = (email || "").trim().toLowerCase();
   return e.includes("@") && e.includes(".") && e.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 }
 __name(isValidEmail2, "isValidEmail");
-async function sha256Hex2(s) {
+async function sha256Hex3(s) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-__name(sha256Hex2, "sha256Hex");
-function randomToken() {
+__name(sha256Hex3, "sha256Hex");
+function randomToken2() {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-__name(randomToken, "randomToken");
+__name(randomToken2, "randomToken");
 async function sendEmailViaBrevo(env2, { to, name, subject, text, html }) {
   const apiKey = env2.BREVO_API_KEY;
   const fromEmail = env2.BREVO_FROM_EMAIL;
@@ -45819,7 +46897,7 @@ async function handleTransferOwnershipRequest(request, env2, ctx) {
   if (request.method !== "POST") {
     return Response.json({ success: false, error: "Method Not Allowed" }, { status: 405 });
   }
-  const sid = getSessionIdFromCookie21(request);
+  const sid = getSessionIdFromCookie23(request);
   if (!sid) return Response.json({ success: false, error: "Login required" }, { status: 401 });
   const session = await getSessionById(db, sid);
   if (!session) return Response.json({ success: false, error: "Login required" }, { status: 401 });
@@ -45853,7 +46931,7 @@ async function processTransferRequest(request, env2, ctx, owner, opts = {}) {
   }
   const newEmail = String(body?.newEmail || "").trim().toLowerCase();
   const newName = String(body?.newName || "").trim();
-  const appOrigin = String(body?.appOrigin || "").trim();
+  const appOrigin2 = String(body?.appOrigin || "").trim();
   if (!isValidEmail2(newEmail)) {
     return Response.json({ success: false, error: "A valid new owner email is required" }, { status: 400 });
   }
@@ -45868,8 +46946,8 @@ async function processTransferRequest(request, env2, ctx, owner, opts = {}) {
     return Response.json({ success: false, error: "That email already has a ConsentBit account. Ownership can only be transferred to an email without an existing account." }, { status: 409 });
   }
   await cancelPendingOwnershipTransfers(db, userId);
-  const secret = randomToken();
-  const tokenHash = await sha256Hex2(secret);
+  const secret = randomToken2();
+  const tokenHash = await sha256Hex3(secret);
   const ttlMinutes = Number(env2.OWNERSHIP_TRANSFER_TTL_MINUTES || 60) || 60;
   const row = await createOwnershipTransfer(db, {
     userId,
@@ -45890,7 +46968,7 @@ async function processTransferRequest(request, env2, ctx, owner, opts = {}) {
     }
   }
   const token = `${row.id}.${secret}`;
-  const origin = resolveAppOrigin(request, env2, appOrigin);
+  const origin = resolveAppOrigin(request, env2, appOrigin2);
   const link = `${origin}/transfer-ownership/authorize?token=${encodeURIComponent(token)}`;
   const subject = "Authorize the ownership transfer of your ConsentBit account";
   const text = `Hello${owner.name ? ` ${owner.name}` : ""},
@@ -45962,7 +47040,7 @@ async function handleTransferOwnershipAuthorize(request, env2) {
   if (new Date(row.expiresAt).getTime() <= Date.now()) {
     return Response.json({ success: false, error: "This authorization link has expired. Please start the transfer again." }, { status: 410 });
   }
-  const computed = await sha256Hex2(secret || "");
+  const computed = await sha256Hex3(secret || "");
   if (!secret || computed !== row.tokenHash) {
     await incrementOwnershipTransferAttempts(db, id);
     return Response.json({ success: false, error: "This authorization link is invalid." }, { status: 400 });
@@ -45973,6 +47051,15 @@ async function handleTransferOwnershipAuthorize(request, env2) {
   }
   const updated = await renameUserAccount(db, row.userId, { email: row.newEmail, name: row.newName });
   await markOwnershipTransferAuthorized(db, id);
+  const billing = await moveBillingIdentity(db, env2, row.userId, row.newEmail, row.newName);
+  if (billing.errors.length) {
+    console.warn("[TransferOwnership] billing identity partially moved", {
+      userId: row.userId,
+      billingEmailUpdated: billing.billingEmailUpdated,
+      stripeCustomersUpdated: billing.stripeCustomersUpdated,
+      errors: billing.errors
+    });
+  }
   await deleteSessionsForUser(db, row.userId);
   return Response.json(
     {
@@ -45998,11 +47085,11 @@ function generateCode() {
   return String(Math.floor(1e5 + Math.random() * 9e5));
 }
 __name(generateCode, "generateCode");
-async function sha256Hex3(s) {
+async function sha256Hex4(s) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-__name(sha256Hex3, "sha256Hex");
+__name(sha256Hex4, "sha256Hex");
 async function sendEmailViaBrevo2(env2, { to, subject, text, html }) {
   const apiKey = env2.BREVO_API_KEY;
   const fromEmail = env2.BREVO_FROM_EMAIL;
@@ -46030,6 +47117,8 @@ async function sendEmailViaBrevo2(env2, { to, subject, text, html }) {
     console.error("[AuthRequestCode] Brevo non-200", { status: res.status, bodySnippet: t.slice(0, 400) });
     throw new Error(`Brevo send failed: ${res.status} ${t}`.slice(0, 300));
   }
+  const body = await res.json().catch(() => null);
+  return body?.messageId || null;
 }
 __name(sendEmailViaBrevo2, "sendEmailViaBrevo");
 async function handleAuthRequestCode(request, env2, ctx) {
@@ -46053,13 +47142,42 @@ async function handleAuthRequestCode(request, env2, ctx) {
   if (purpose === "signup" && !name) {
     return Response.json({ success: false, error: "name is required for signup" }, { status: 400 });
   }
+  let signupPassword = "";
+  let signupConfirm = "";
+  let signupEncrypted = false;
+  if (purpose === "signup") {
+    try {
+      const pw = await resolvePasswordField(env2, { enc: body?.passwordEnc, plain: body?.password });
+      const cf = await resolvePasswordField(env2, { enc: body?.confirmPasswordEnc, plain: body?.confirmPassword });
+      signupPassword = pw.password;
+      signupConfirm = cf.password;
+      signupEncrypted = pw.encrypted;
+    } catch (e) {
+      if (e instanceof AuthCryptoError) {
+        pwDebug("request-code:decrypt-failed", { email, reason: e.message });
+        return Response.json({ success: false, error: e.message, code: "PASSWORD_ENC_FAILED" }, { status: 400 });
+      }
+      throw e;
+    }
+  }
+  if (signupPassword) {
+    if (signupConfirm && signupPassword !== signupConfirm) {
+      return Response.json({ success: false, error: "Passwords do not match" }, { status: 400 });
+    }
+    const policyError = validatePasswordPolicy(signupPassword);
+    if (policyError) {
+      pwDebug("request-code:policy-rejected", { email, reason: policyError, passwordLen: signupPassword.length });
+      return Response.json({ success: false, error: policyError }, { status: 400 });
+    }
+  }
+  pwDebug("request-code:input", { email, purpose, hasPassword: !!signupPassword, passwordLen: signupPassword.length, confirmProvided: !!signupConfirm, encrypted: signupEncrypted });
   const code = generateCode();
   const salt = env2.OTP_SECRET || "dev-otp-secret";
   const testEmail = (env2.TEST_LOGIN_EMAIL || "").trim().toLowerCase();
   const testCode = (env2.TEST_LOGIN_CODE || "").trim();
   if (testEmail && testCode && email === testEmail && purpose === "login") {
     const ttlMinutes2 = Number(env2.OTP_TTL_MINUTES || 10) || 10;
-    const fixedHash = await sha256Hex3(`${purpose}|${email}|${testCode}|${salt}`);
+    const fixedHash = await sha256Hex4(`${purpose}|${email}|${testCode}|${salt}`);
     const fixedRow = await createEmailVerificationCode(db, { email, purpose, codeHash: fixedHash, name: null, ttlMinutes: ttlMinutes2 });
     console.log("[AuthRequestCode] test-login: issued fixed code (email skipped) for", email, "requestId", fixedRow.id);
     return Response.json(
@@ -46067,10 +47185,18 @@ async function handleAuthRequestCode(request, env2, ctx) {
       { status: 200 }
     );
   }
+  const lookupT0 = Date.now();
   const [existingUser, codeHash] = await Promise.all([
     getUserByEmail(db, email),
-    sha256Hex3(`${purpose}|${email}|${code}|${salt}`)
+    sha256Hex4(`${purpose}|${email}|${code}|${salt}`)
   ]);
+  console.log("[AuthRequestCode] user lookup", {
+    email,
+    purpose,
+    userFound: !!existingUser,
+    userId: existingUser?.id || null,
+    lookupMs: Date.now() - lookupT0
+  });
   if (purpose === "login" && !existingUser) {
     return Response.json({ success: false, error: "No account found with this email. Please sign up first." }, { status: 404 });
   }
@@ -46080,7 +47206,22 @@ async function handleAuthRequestCode(request, env2, ctx) {
   const loginUser = purpose === "login" ? existingUser : null;
   const displayName = name || loginUser?.name || "";
   const ttlMinutes = Number(env2.OTP_TTL_MINUTES || 10) || 10;
-  const row = await createEmailVerificationCode(db, { email, purpose, codeHash, name, ttlMinutes });
+  const insertT0 = Date.now();
+  const signupPasswordHash = signupPassword ? await hashPassword(signupPassword) : null;
+  const row = await createEmailVerificationCode(db, {
+    email,
+    purpose,
+    codeHash,
+    name,
+    ttlMinutes,
+    passwordHash: signupPasswordHash
+  });
+  pwDebug("request-code:parked", { requestId: row.id, purpose, parkedHash: !!signupPasswordHash, hashLen: signupPasswordHash ? signupPasswordHash.length : 0 });
+  console.log("[AuthRequestCode] code row written", {
+    requestId: row.id,
+    expiresAt: row.expiresAt,
+    insertMs: Date.now() - insertT0
+  });
   const subject = `Your ConsentBit verification code`;
   const text = `Hello${displayName ? ` ${displayName}` : ""},
 
@@ -46130,11 +47271,24 @@ ConsentBit Team
     );
   }
   console.log("[AuthRequestCode] dispatching Brevo email to:", email);
+  const brevoT0 = Date.now();
   ctx.waitUntil(
-    sendEmailViaBrevo2(env2, { to: email, subject, text, html }).then(() => {
-      console.log("[AuthRequestCode] \u2705 Brevo email sent to:", email);
+    sendEmailViaBrevo2(env2, { to: email, subject, text, html }).then((messageId) => {
+      console.log("[AuthRequestCode] \u2705 Brevo ACCEPTED for delivery (not proof of inbox delivery)", {
+        to: email,
+        emailDomain,
+        messageId,
+        requestId: row.id,
+        brevoMs: Date.now() - brevoT0
+      });
     }).catch((e) => {
-      console.error("[AuthRequestCode] \u274C Brevo send failed:", e?.message || e);
+      console.error("[AuthRequestCode] \u274C Brevo send FAILED", {
+        to: email,
+        emailDomain,
+        requestId: row.id,
+        brevoMs: Date.now() - brevoT0,
+        error: e?.message || String(e)
+      });
     })
   );
   return Response.json(
@@ -46252,16 +47406,17 @@ __name(likeToRegExp, "likeToRegExp");
 var GROUP_RES = STAGING_GROUPS.map((g) => ({ key: g.key, res: g.patterns.map(likeToRegExp) }));
 
 // src/handlers/authVerifyCode.js
+init_db();
 function isValidEmail4(email) {
   const e = (email || "").trim().toLowerCase();
   return e.includes("@") && e.includes(".") && e.length <= 320;
 }
 __name(isValidEmail4, "isValidEmail");
-async function sha256Hex4(s) {
+async function sha256Hex5(s) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-__name(sha256Hex4, "sha256Hex");
+__name(sha256Hex5, "sha256Hex");
 async function handleAuthVerifyCode(request, env2, ctx) {
   const db = env2.CONSENT_WEBAPP;
   if (request.method !== "POST") {
@@ -46291,7 +47446,7 @@ async function handleAuthVerifyCode(request, env2, ctx) {
     const [row2, userPrefetch, computed2] = await Promise.all([
       getLatestValidEmailVerificationCode(db, { email, purpose }),
       getUserByEmail(db, email),
-      sha256Hex4(`${purpose}|${email}|${code}|${salt}`)
+      sha256Hex5(`${purpose}|${email}|${code}|${salt}`)
     ]);
     if (!row2?.id) return Response.json({ success: false, error: "Code expired or not found" }, { status: 400 });
     const attempts2 = Number(row2.attempts ?? row2.Attempts ?? 0);
@@ -46305,7 +47460,11 @@ async function handleAuthVerifyCode(request, env2, ctx) {
     if (!userPrefetch) return Response.json({ success: false, error: "No account found for this email. Please sign up." }, { status: 404 });
     const [, session2] = await Promise.all([
       consumeEmailVerificationCode(db, row2.id),
-      createSession(db, { userId: userPrefetch.id })
+      createSession(db, { userId: userPrefetch.id }),
+      // Logging in by emailed code proves the address just as signup does — clears the
+      // unverified flag for anyone who signed up with a password and never clicked.
+      markUserEmailVerified(db, userPrefetch.id).catch(() => {
+      })
     ]);
     if (scanId && ctx?.waitUntil) {
       ctx.waitUntil(sendScanReportForId(env2, { to: email, name: userPrefetch.name || "", scanId }));
@@ -46325,7 +47484,7 @@ async function handleAuthVerifyCode(request, env2, ctx) {
   }
   const [row, computed] = await Promise.all([
     getLatestValidEmailVerificationCode(db, { email, purpose }),
-    sha256Hex4(`${purpose}|${email}|${code}|${salt}`)
+    sha256Hex5(`${purpose}|${email}|${code}|${salt}`)
   ]);
   if (!row?.id) return Response.json({ success: false, error: "Code expired or not found" }, { status: 400 });
   const attempts = Number(row.attempts ?? row.Attempts ?? 0);
@@ -46337,10 +47496,27 @@ async function handleAuthVerifyCode(request, env2, ctx) {
     return Response.json({ success: false, error: "Invalid code" }, { status: 400 });
   }
   const name = (row.name || "").trim() || (body?.name || "").trim() || null;
+  const parkedPasswordHash = (row.passwordHash ?? row.passwordhash) || null;
+  pwDebug("verify-code:row", { email, rowId: row.id, purpose, hasParkedHash: !!parkedPasswordHash, hashLen: parkedPasswordHash ? String(parkedPasswordHash).length : 0 });
   const [, user] = await Promise.all([
     consumeEmailVerificationCode(db, row.id),
-    createUser(db, { email, name })
+    // Reached only when no account existed, so this OTP is the account's creation.
+    // /api/auth/request-code + /verify-code are the webapp's own login flow; the
+    // plugins register through SyncPlugin / webflowFreeRegister instead.
+    createUser(db, {
+      email,
+      name,
+      signupSource: "webapp",
+      // Omitted entirely when absent so createUser keeps its 'passwordless' default.
+      ...parkedPasswordHash ? { passwordHash: parkedPasswordHash } : {}
+    })
   ]);
+  pwDebug("verify-code:user-created", { userId: user.id, email: user.email, passwordSet: !!parkedPasswordHash });
+  try {
+    await markUserEmailVerified(db, user.id);
+  } catch (e) {
+    console.error("[VerifyCode] markUserEmailVerified failed", e?.message || String(e));
+  }
   const session = await createSession(db, { userId: user.id });
   sendWelcomeEmail(env2, ctx, { to: user.email, name: user.name || "" });
   if (scanId && ctx?.waitUntil) {
@@ -46365,18 +47541,18 @@ __name(handleAuthVerifyCode, "handleAuthVerifyCode");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie22(request) {
+function getSessionIdFromCookie24(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie22, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie24, "getSessionIdFromCookie");
 async function handleAuthLogout(request, env2) {
   const db = env2.CONSENT_WEBAPP;
   if (request.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405 });
   }
-  const sid = getSessionIdFromCookie22(request);
+  const sid = getSessionIdFromCookie24(request);
   if (sid) {
     await deleteSessionById(db, sid);
   }
@@ -46396,18 +47572,18 @@ __name(handleAuthLogout, "handleAuthLogout");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie23(request) {
+function getSessionIdFromCookie25(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie23, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie25, "getSessionIdFromCookie");
 async function handleOnboardingFirstSetup(request, env2, ctx) {
   const db = env2.CONSENT_WEBAPP;
   if (request.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405 });
   }
-  const sid = getSessionIdFromCookie23(request);
+  const sid = getSessionIdFromCookie25(request);
   if (!sid) {
     return Response.json({ success: false, error: "Not authenticated" }, { status: 401 });
   }
@@ -46484,20 +47660,21 @@ async function handleOnboardingFirstSetup(request, env2, ctx) {
   }
   const scriptUrl = site.embedScriptUrl || buildEmbedScriptUrl(embedOrigin || new URL(request.url).origin, site.cdnScriptId) || `${new URL(request.url).origin}/consentbit/${site.cdnScriptId}/script.js`;
   if (user.email && site._created) {
+    const signupSource = normalizeSignupSource(user.signupSource);
     try {
       await capturePostHogEvent(env2, user.email, "script_generated", {
         site_id: site.id,
         domain: site.domain,
         script_url: scriptUrl,
         plan_tier: "free",
-        platform: "webapp",
+        ...signupSource ? { platform: signupSource } : {},
         ...site.id ? { $groups: { site: String(site.id) } } : {}
       });
       await captureGa4Event(env2, user.email, "script_generated", {
         site_id: site.id,
         domain: site.domain,
         plan_tier: "free",
-        platform: "webapp"
+        ...signupSource ? { platform: signupSource } : {}
       });
     } catch (e) {
     }
@@ -46525,12 +47702,12 @@ __name(handleOnboardingFirstSetup, "handleOnboardingFirstSetup");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie24(request) {
+function getSessionIdFromCookie26(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie24, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie26, "getSessionIdFromCookie");
 function isActiveSubscription(sub) {
   const status = sub ? String(sub.status || "").toLowerCase() : "";
   return status === "active" || status === "trialing";
@@ -46541,7 +47718,7 @@ async function handleCheckDomainAvailability(request, env2) {
   if (request.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405 });
   }
-  const sid = getSessionIdFromCookie24(request);
+  const sid = getSessionIdFromCookie26(request);
   if (!sid) {
     return Response.json({ success: false, error: "Not authenticated" }, { status: 401 });
   }
@@ -46637,12 +47814,12 @@ __name(handleCheckDomainAvailability, "handleCheckDomainAvailability");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie25(request) {
+function getSessionIdFromCookie27(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie25, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie27, "getSessionIdFromCookie");
 function isActiveSubscription2(sub) {
   const status = sub ? String(sub.status || "").toLowerCase() : "";
   return status === "active" || status === "trialing";
@@ -46714,7 +47891,7 @@ async function handleRenameDomain(request, env2) {
   if (request.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405 });
   }
-  const sid = getSessionIdFromCookie25(request);
+  const sid = getSessionIdFromCookie27(request);
   if (!sid) {
     return Response.json({ success: false, error: "Not authenticated" }, { status: 401 });
   }
@@ -46846,12 +48023,12 @@ __name(handleRenameDomain, "handleRenameDomain");
 init_virtual_unenv_global_polyfill_cloudflare_unenv_preset_node_process();
 init_performance2();
 init_db();
-function getSessionIdFromCookie26(request) {
+function getSessionIdFromCookie28(request) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
   return match ? match[1].trim() : null;
 }
-__name(getSessionIdFromCookie26, "getSessionIdFromCookie");
+__name(getSessionIdFromCookie28, "getSessionIdFromCookie");
 async function handleFeedback(request, env2) {
   const db = env2.CONSENT_WEBAPP;
   await ensureSchema(db);
@@ -46871,7 +48048,7 @@ async function handleFeedback(request, env2) {
   }
   if (request.method === "POST") {
     let userId = null;
-    const sid = getSessionIdFromCookie26(request);
+    const sid = getSessionIdFromCookie28(request);
     if (sid) {
       try {
         const session = await getSessionById(db, sid);
@@ -47090,7 +48267,9 @@ async function provisionAccount(db, env2, request, ctx, {
 }) {
   const [existingUser] = await Promise.all([getUserByEmail(db, email)]);
   const isNewUser = !existingUser;
-  const user = existingUser ?? await createUser(db, { email, name: null });
+  const checkoutSource = normalizeSignupSource(platform2) || (wfSiteId ? null : "webapp");
+  const user = existingUser ?? await createUser(db, { email, name: null, signupSource: checkoutSource });
+  const attributionPlatform = normalizeSignupSource(platform2) || normalizeSignupSource(existingUser?.signupSource) || (isNewUser ? checkoutSource : null);
   const orgName = user.name ? `${user.name}'s Organization` : "My Organization";
   const org = await getOrCreateOrganizationForUser(db, { userId: user.id, organizationName: orgName });
   const organizationId = org?.id ?? org?.organizationId;
@@ -47111,7 +48290,7 @@ async function provisionAccount(db, env2, request, ctx, {
         site_id: site.id,
         domain: site.domain,
         plan_tier: planId,
-        platform: platform2 || "webapp",
+        ...attributionPlatform ? { platform: attributionPlatform } : {},
         ...site.id ? { $groups: { site: String(site.id) } } : {}
       }
     });
@@ -47539,6 +48718,10 @@ async function handleCustomCheckout(request, env2, ctx) {
       if (verify.error || !verify.active) {
         return Response.json({ success: false, error: "Promotion code is no longer valid" }, { status: 400 });
       }
+      if (!isCodeAllowedForEmail(verify.code, email)) {
+        console.warn("[CustomCheckout] promo restricted to another account", { code: verify.code, email });
+        return Response.json({ success: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 400 });
+      }
       subParams.set("discounts[0][promotion_code]", promotionCodeId);
       subParams.set("metadata[promotionCode]", verify.code || "");
     } catch (e) {
@@ -47650,6 +48833,35 @@ async function handleCustomCheckout(request, env2, ctx) {
   return Response.json({ success: false, error: `Unexpected subscription status: ${subStatus}` }, { status: 400 });
 }
 __name(handleCustomCheckout, "handleCustomCheckout");
+async function resolveCallerEmail2(request, env2) {
+  const cookie = request.headers.get("Cookie") || "";
+  const cookieNames = cookie ? cookie.split(";").map((c) => c.split("=")[0].trim()).filter(Boolean) : [];
+  const m = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
+  console.log("[ValidateCoupon] identity debug", {
+    origin: request.headers.get("Origin") || null,
+    referer: request.headers.get("Referer") || null,
+    hasCookieHeader: cookie.length > 0,
+    cookieNames,
+    hasSid: !!m,
+    emailHint: new URL(request.url).searchParams.get("email") || "" ? "present" : "absent"
+  });
+  try {
+    if (m && env2.CONSENT_WEBAPP) {
+      const session = await getSessionById(env2.CONSENT_WEBAPP, m[1].trim());
+      console.log("[ValidateCoupon] session lookup", { sessionFound: !!session, userId: session ? session.userId ?? session.user_id ?? null : null });
+      if (session) {
+        const user = await getUserById(env2.CONSENT_WEBAPP, session.userId ?? session.user_id);
+        console.log("[ValidateCoupon] user lookup", { userFound: !!user, email: user?.email ?? null });
+        if (user?.email) return String(user.email).trim().toLowerCase();
+      }
+    }
+  } catch (e) {
+    console.warn("[ValidateCoupon] session lookup failed", e?.message);
+  }
+  const hint = (new URL(request.url).searchParams.get("email") || "").trim().toLowerCase();
+  return hint || null;
+}
+__name(resolveCallerEmail2, "resolveCallerEmail");
 async function handleValidateCoupon(request, env2) {
   console.log("[ValidateCoupon] request received", { method: request.method, url: request.url });
   const secret = trimEnv5(env2.STRIPE_SECRET_KEY);
@@ -47690,6 +48902,13 @@ async function handleValidateCoupon(request, env2) {
   if (!promo || !promo.active) {
     console.log("[ValidateCoupon] no active promo found", { found: !!promo, active: promo?.active ?? false });
     return Response.json({ valid: false, error: "Invalid or expired code" }, { status: 200 });
+  }
+  if (isRestrictedCode(promo.code)) {
+    const callerEmail = await resolveCallerEmail2(request, env2);
+    if (!isCodeAllowedForEmail(promo.code, callerEmail)) {
+      console.warn("[ValidateCoupon] restricted code denied", { code: promo.code, callerEmail });
+      return Response.json({ valid: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 200 });
+    }
   }
   const c = promo.coupon || {};
   console.log("[ValidateCoupon] valid promo", {
@@ -47934,7 +49153,7 @@ async function handleSyncPlugin(request, env2) {
   let user = await getUserByEmail(db, email);
   const isNewUser = !user;
   if (!user) {
-    user = await createUser(db, { email, name: null });
+    user = await createUser(db, { email, name: null, signupSource: "framer" });
   }
   const orgName = user.name ? `${user.name}'s Organization` : "My Organization";
   const org = await getOrCreateOrganizationForUser(db, { userId: user.id, organizationName: orgName });
@@ -49549,6 +50768,14 @@ async function prepareChange2(request, env2) {
   const site = await resolveSite4(db, siteId);
   const auth = await requireFramerAuth(request, env2, site);
   if (!auth.ok) return { error: auth.res };
+  if (promotionCodeId) {
+    const promoOk = await isPromotionCodeAllowedForEmail(
+      env2.STRIPE_SECRET_KEY,
+      promotionCodeId,
+      auth.email
+    );
+    if (!promoOk.allowed) return { error: fail3(promoOk.reason, 400) };
+  }
   const sub = await resolveSubscription3(db, site);
   if (!sub) return { error: fail3("No active subscription found", 404) };
   const stripeSubId = pick3(sub, "stripeSubscriptionId", "stripesubscriptionid");
@@ -50302,6 +51529,14 @@ async function prepareChange3(request, env2, identity2, label) {
   log(rid, `body: siteId=${siteId || "-"} planId=${body.planId || "-"} interval=${body.interval || "-"} promo=${promotionCodeId ? "yes" : "no"} pm=${paymentMethodId ? "yes" : "no"}`);
   if (!siteId) return { error: failLog(rid, "siteId required", 400) };
   if (!planId) return { error: failLog(rid, "planId must be basic, essential, or growth", 400) };
+  if (promotionCodeId) {
+    const promoOk = await isPromotionCodeAllowedForEmail(
+      env2.STRIPE_SECRET_KEY,
+      promotionCodeId,
+      id.email
+    );
+    if (!promoOk.allowed) return { error: failLog(rid, promoOk.reason, 400) };
+  }
   const site = await resolveSite5(db, siteId);
   if (!site) return { error: failLog(rid, "Site not found", 404) };
   if (!siteBelongsToWebflowSite(site, id.webflowSiteId)) {
@@ -50825,16 +52060,16 @@ function isValidEmail7(email) {
   return e.includes("@") && e.includes(".") && e.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 }
 __name(isValidEmail7, "isValidEmail");
-async function sha256Hex5(s) {
+async function sha256Hex6(s) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-__name(sha256Hex5, "sha256Hex");
-function randomToken2() {
+__name(sha256Hex6, "sha256Hex");
+function randomToken3() {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-__name(randomToken2, "randomToken");
+__name(randomToken3, "randomToken");
 function resolveAccountsOrigin(env2) {
   const configured = (env2.WEBAPP_PUBLIC_URL || "").trim().replace(/\/+$/, "");
   if (configured) {
@@ -50948,8 +52183,8 @@ async function handleFramerTransferOwnershipRequest(request, env2, ctx) {
   }
   const userId = owner.id ?? owner.userId;
   await cancelPendingOwnershipTransfers(db, userId);
-  const secret = randomToken2();
-  const tokenHash = await sha256Hex5(secret);
+  const secret = randomToken3();
+  const tokenHash = await sha256Hex6(secret);
   const ttlMinutes = Number(env2.OWNERSHIP_TRANSFER_TTL_MINUTES || 60) || 60;
   const row = await createOwnershipTransfer(db, {
     userId,
@@ -52164,6 +53399,9 @@ __name(withSecurityHeaders, "withSecurityHeaders");
 // src/index.js
 init_db();
 var PUBLIC_PATHS = /* @__PURE__ */ new Set([
+  // A public key is not a secret, and the login page must be able to read it before
+  // anyone is signed in.
+  "/api/auth/public-key",
   "/api/consent",
   "/api/framer-consent",
   "/api/scan-scripts",
@@ -52264,6 +53502,10 @@ var AUTH_RATE_PATHS = /* @__PURE__ */ new Set([
   "/api/auth/signup",
   "/api/auth/request-code",
   "/api/auth/verify-code",
+  "/api/auth/password-signup",
+  "/api/auth/password-login",
+  // Arrives from a mail client: no session cookie, no XHR header.
+  "/api/auth/verify-email",
   "/api/auth/transfer-ownership/authorize",
   "/api/onboarding/first-setup"
 ]);
@@ -52342,7 +53584,22 @@ async function dispatchApiRoute(pathname, request, env2, ctx) {
       response = await handleAuthLogin(request, env2);
       break;
     case "/api/auth/signup":
-      response = await handleAuthSignup(request, env2);
+      response = await handleAuthSignup(request, env2, ctx);
+      break;
+    // Clicked from an email, so it must work without a session or a CSRF header.
+    // Dedicated password flow — one scheme only (PBKDF2, hashed server-side).
+    // The older /api/auth/signup and /api/auth/login stay for existing clients.
+    case "/api/auth/password-signup":
+      response = await handlePasswordSignup(request, env2, ctx);
+      break;
+    case "/api/auth/password-login":
+      response = await handlePasswordLogin(request, env2);
+      break;
+    case "/api/auth/verify-email":
+      response = await handleAuthVerifyEmail(request, env2, ctx);
+      break;
+    case "/api/auth/verify-email/resend":
+      response = await handleAuthVerifyEmailResend(request, env2, ctx);
       break;
     case "/api/auth/request-code":
       response = await handleAuthRequestCode(request, env2, ctx);
@@ -52361,6 +53618,19 @@ async function dispatchApiRoute(pathname, request, env2, ctx) {
       break;
     case "/api/auth/profile":
       response = await handleAuthProfile(request, env2);
+      break;
+    // Deliberately NOT in AUTH_RATE_PATHS: everything in that set is also CSRF-exempt,
+    // and this endpoint changes a credential from an existing session, so the CSRF
+    // check matters more here than the looser rate limit would.
+    case "/api/auth/set-password":
+      response = await handleAuthSetPassword(request, env2);
+      break;
+    // Same CSRF reasoning as set-password — see the note on that case above.
+    case "/api/auth/verify-password":
+      response = await handleAuthVerifyPassword(request, env2);
+      break;
+    case "/api/auth/public-key":
+      response = await handleAuthPublicKey(request, env2);
       break;
     case "/api/auth/transfer-ownership/request":
       response = await handleTransferOwnershipRequest(request, env2, ctx);
@@ -53030,8 +54300,17 @@ var index_default = {
       try {
         wfResp = await handler(req, env2, ctx, auth.identity);
       } catch (err) {
-        console.error("[Worker] /api/wf handler error:", err);
-        wfResp = Response.json({ success: false, error: "Internal server error" }, { status: 500 });
+        const ref2 = crypto.randomUUID().slice(0, 8);
+        console.error(`[Worker] /api/wf handler error: ref=${ref2} path=${pathname}`, err?.stack || err?.message || err);
+        wfResp = Response.json(
+          {
+            success: false,
+            error: "Our server is busy right now. Please try again in a moment.",
+            code: "SERVER_BUSY",
+            ref: ref2
+          },
+          { status: 500 }
+        );
       }
       return withCors(withSecurityHeaders(wfResp), request, env2);
     }
@@ -53087,8 +54366,17 @@ var index_default = {
     try {
       ({ response, isPublic } = await dispatchApiRoute(pathname, request, env2, ctx));
     } catch (err) {
-      console.error("[Worker] Unhandled error:", err);
-      response = Response.json({ success: false, error: "Internal server error" }, { status: 500 });
+      const ref2 = crypto.randomUUID().slice(0, 8);
+      console.error(`[Worker] Unhandled error: ref=${ref2} path=${pathname}`, err?.stack || err?.message || err);
+      response = Response.json(
+        {
+          success: false,
+          error: "Our server is busy right now. Please try again in a moment.",
+          code: "SERVER_BUSY",
+          ref: ref2
+        },
+        { status: 500 }
+      );
       isPublic = PUBLIC_PATHS.has(pathname);
     }
     response = withSecurityHeaders(response);
