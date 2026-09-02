@@ -55,6 +55,7 @@ import {
   getUserById,
   getOrganizationsForUser,
   getOrCreateOrganizationForUser,
+  isPasswordSet,
 } from '../services/db.js';
 
 function getSessionIdFromCookie(request) {
@@ -103,6 +104,14 @@ export async function handleAuthMe(request, env) {
         email: user.email,
         name: user.name,
         billingEmail: user.billingEmail ?? null,
+        // Drives the profile password panel: "Set a password" for accounts that sign in
+        // by emailed code only, "Change password" (which then requires the current one)
+        // for accounts that already have one. Never send the hash itself — only whether
+        // one exists. D1 casing varies by how the row was written, so check every
+        // spelling before concluding there is no password.
+        hasPassword: isPasswordSet(
+          user.passwordHash ?? user.password_hash ?? user.passwordhash ?? null,
+        ),
       },
       organizations: orgs,
     },

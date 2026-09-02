@@ -9,18 +9,18 @@ const _schemaEnsured = new WeakMap();
 // The stamped version is what lets a cold start skip all 108 DDL statements. If you
 // add a CREATE/ALTER below and DO NOT bump this, the new statement will never run on
 // any environment that is already stamped at the current version.
-// v2 (2026-09-01) added User.emailVerifiedAt + EmailVerificationToken. Those objects are
-// ALREADY APPLIED to consent-webapp-eu (verified directly), so this is deliberately held
-// at 1 while the production worker is still running v1 code against the SAME database.
+// HELD AT 1 ON PURPOSE — do not bump without deploying BOTH workers together.
 //
-// Why: the two scripts share one SchemaVersion row. With them disagreeing, each cold start
-// read the other's stamp, re-ran all ~108 DDL statements (~17s) and re-stamped its own
-// number — so signups intermittently blew past serverFetch's 20s abort and failed with a
-// cancel or a 500, while warm isolates worked fine.
+// consent-webapp-manager and consent-webapp-manager-production are separate scripts that
+// share ONE database, so they share this stamp. Bumping it and deploying only one made
+// them disagree: each cold start read the other's number, re-ran all ~108 DDL statements
+// (~17s) and re-stamped its own. That blew past serverFetch's 20s abort and surfaced as
+// intermittent 500s and cancelled signups, while warm isolates worked fine.
 //
-// RESTORE TO 2 when production is deployed with this same code, in the same session, so
-// both scripts agree. Leaving it at 1 is only safe because this database already has the
-// v2 objects; a FRESH database stamped at 1 would silently skip them.
+// The v2 additions (User.emailVerifiedAt, EmailVerificationToken) are ALREADY APPLIED to
+// consent-webapp-eu — verified directly — so holding at 1 loses nothing. A brand-new
+// database is unaffected either way: with no SchemaVersion row at all the full migration
+// still runs and creates everything below, including those two.
 const SCHEMA_VERSION = 1;
 
 /**

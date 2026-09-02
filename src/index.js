@@ -85,7 +85,7 @@ import { handleAuthLogin } from './handlers/authLogin.js';
 import { handleAuthSignup } from './handlers/authSignup.js';
 import { handleAuthMe } from './handlers/authMe.js';
 import { handleAuthProfile } from './handlers/authProfile.js';
-import { handleAuthSetPassword } from './handlers/authSetPassword.js';
+import { handleAuthSetPassword, handleAuthVerifyPassword } from './handlers/authSetPassword.js';
 import { handleAuthVerifyEmail, handleAuthVerifyEmailResend } from './handlers/authVerifyEmail.js';
 import { handlePasswordSignup, handlePasswordLogin } from './handlers/authPassword.js';
 import { handleAuthPublicKey } from './handlers/authPublicKey.js';
@@ -430,6 +430,9 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     // check matters more here than the looser rate limit would.
     case '/api/auth/set-password':
       response = await handleAuthSetPassword(request, env); break;
+    // Same CSRF reasoning as set-password — see the note on that case above.
+    case '/api/auth/verify-password':
+      response = await handleAuthVerifyPassword(request, env); break;
     case '/api/auth/public-key':
       response = await handleAuthPublicKey(request, env); break;
     case '/api/auth/transfer-ownership/request':
