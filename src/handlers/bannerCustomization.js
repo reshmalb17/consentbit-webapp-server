@@ -13,12 +13,7 @@ const PAID_TIERS = ['basic', 'essential', 'growth'];
 // Running GDPR *and* CCPA on one site (Site.region_mode='both') is an Essential/Growth
 // entitlement — matches the pricing table and the Designer app's UI gate in
 // Consentbit-Webflow-App-New -Design/src/lib/planGate.js.
-const BOTH_REGIONS_PLANS = ['essential', 'growth'];
-// Removing the "Powered by ConsentBit" footer from the preference banner is a
-// Growth-only entitlement. The webapp only renders the checkbox for Growth, but this
-// endpoint is callable directly, so the value is re-checked here on save and again
-// against the live plan in handlers/cdnM.js when the script is served.
-const REMOVE_BRANDING_PLANS = ['growth'];
+export const BOTH_REGIONS_PLANS = ['essential', 'growth'];
 
 // Resolve the site's effective paid tier. Deliberately mirrors the resolution in
 // handlers/cdn.js (site subscription → Stripe price-id inference → organization
@@ -28,7 +23,7 @@ const REMOVE_BRANDING_PLANS = ['growth'];
 // failed. Callers must treat null as "unknown" and NOT downgrade — silently demoting
 // a paying site's compliance coverage because of a transient D1 error is worse than
 // letting one save through.
-async function resolveEffectivePlanId(db, env, siteId) {
+export async function resolveEffectivePlanId(db, env, siteId) {
   try {
     const subscription = await getSubscriptionBySiteId(db, siteId);
     let planId = subscription ? (subscription.planId ?? subscription.planid ?? null) : null;
