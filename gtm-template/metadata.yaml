@@ -10,7 +10,9 @@ versions:
     changeNotes: |-
       Initial release.
       - Loads the ConsentBit consent banner from a Script ID.
-      - Sets the Google Consent Mode v2 defaults before any other tag fires,
-        one command per row of the region table (ISO 3166-2 codes), defaulting
-        to all denied except security_storage worldwide.
-      - Sets the ConsentBit developer ID via gtagSet.
+      - Sets the Google Consent Mode v2 defaults before any other tag fires, one
+        command per row of the region table (ISO 3166-2 codes, or "All"),
+        defaulting to everything but security_storage denied worldwide.
+      - Sets the ConsentBit developer ID, ads_data_redaction and url_passthrough
+        via gtagSet.
+      - Configurable wait_for_update (default 500ms).

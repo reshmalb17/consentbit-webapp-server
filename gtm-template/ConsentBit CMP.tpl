@@ -8,13 +8,14 @@ Google may provide), as modified from time to time.
 
 ___INFO___
 
+
 {
   "type": "TAG",
   "id": "cvt_temp_public_id",
   "version": 1,
   "securityGroups": [],
   "displayName": "ConsentBit CMP",
-  "description": "Loads the ConsentBit consent banner from your Script ID and sets the Google Consent Mode v2 default (all denied) before any other tag fires. Requires a ConsentBit account.",
+  "description": "Loads the ConsentBit consent banner from your Script ID and publishes the Google Consent Mode v2 default — per region, or all denied worldwide — before any other tag fires. Requires a ConsentBit account.",
   "categories": [
     "UTILITY",
     "PERSONALIZATION"
@@ -33,6 +34,36 @@ ___INFO___
 }
 
 
+___VENDOR_DETAILS___
+
+{
+  "preview": [],
+  "vendorName": "ConsentBit",
+  "description": "<p><b>ConsentBit</b> is a consent management platform for the <b>GDPR</b> and <b>US state privacy laws</b>. It sets the Consent Mode v2 default and blocks non-consented scripts and cookies.</p>",
+  "homepageUrl": "https://consentbit.com",
+  "termsAndConditionsUrl": "https://consentbit.com",
+  "freeTrial": "<p><b>14-day free trial</b> on every paid plan.</p>",
+  "freeTier": "Free plan for one website, 7,500 pageviews a month",
+  "price": "<p><b>Free</b> plan available for one website.</p><p>Paid plans start at <b>Basic: $9/month</b> ($86/year). <b>Essential: $20/month</b> adds IAB TCF support and GDPR + US state law coverage on one site. <b>Growth: $56/month</b> raises the limits to 2,000,000 pageviews and 10,000 scans.</p>",
+  "countries": "No limitations",
+  "languages": [
+    "de",
+    "en",
+    "es",
+    "fr",
+    "it",
+    "nl",
+    "pl",
+    "pt",
+    "sv"
+  ],
+  "platforms": [
+    "WEB"
+  ],
+  "defaultSettingsUrl": "https://consentbit.com"
+}
+
+
 ___TEMPLATE_PARAMETERS___
 
 [
@@ -41,7 +72,7 @@ ___TEMPLATE_PARAMETERS___
     "name": "scriptId",
     "displayName": "ConsentBit Script ID",
     "simpleValueType": true,
-    "help": "Copy this from your ConsentBit dashboard under \u003cstrong\u003eInstall\u003c/strong\u003e. It is the ID in the middle of your install snippet:\u003cbr\u003e\u003ccode\u003ehttps://manager.consentbit.com/consentbit/\u003cstrong\u003e{SCRIPT ID}\u003c/strong\u003e/script.js\u003c/code\u003e\u003cbr\u003ePaste the ID only, not the whole URL.",
+    "help": "Copy this from your ConsentBit dashboard under <strong>Install</strong>. It is the ID in the middle of your install snippet:<br><code>https://manager.consentbit.com/consentbit/<strong>{SCRIPT ID}</strong>/script.js</code><br>Paste the ID only, not the whole URL.",
     "valueValidators": [
       {
         "type": "NON_EMPTY"
@@ -54,88 +85,197 @@ ___TEMPLATE_PARAMETERS___
         "errorMessage": "Enter the Script ID on its own (for example 3f2b9c10-8a4e-4d51-9b77-2c6d0e1a5f88), not the full script URL."
       }
     ],
+    "notSetText": "This field is required.",
     "alwaysInSummary": true
   },
   {
-    "type": "SELECT",
-    "name": "regionSetup",
-    "displayName": "Which privacy law applies?",
-    "macrosInSelect": false,
-    "selectItems": [
+    "type": "GROUP",
+    "name": "defaultConsentGroup",
+    "displayName": "Default consent state",
+    "groupStyle": "ZIPPY_OPEN",
+    "subParams": [
       {
-        "value": "gdpr",
-        "displayValue": "GDPR — worldwide (recommended)"
-      },
-      {
-        "value": "ccpa",
-        "displayValue": "CCPA — United States only"
-      },
-      {
-        "value": "custom",
-        "displayValue": "Custom — set the default state per region"
-      }
-    ],
-    "simpleValueType": true,
-    "defaultValue": "gdpr",
-    "help": "Sets the Google Consent Mode v2 default and tells your ConsentBit dashboard which banner to serve.<br><strong>GDPR</strong> denies every storage type until the visitor chooses, everywhere.<br><strong>CCPA</strong> is an opt-out regime: storage is granted until the visitor opts out.<br>Running <strong>both</strong> (GDPR in the EEA, CCPA in the US) is an Essential/Growth feature and is configured in your ConsentBit dashboard, not here.",
-    "alwaysInSummary": true
-  },
-  {
-    "type": "CHECKBOX",
-    "name": "syncRegionToDashboard",
-    "checkboxText": "Save this choice to my ConsentBit dashboard",
-    "simpleValueType": true,
-    "defaultValue": true,
-    "help": "Sends the selected law to ConsentBit once, so the banner your visitors see matches this tag. Sent only when the value changes — not on every page. Sites already set to run GDPR and CCPA together are never changed by this.",
-    "enablingConditions": [
-      {
-        "paramName": "regionSetup",
-        "paramValue": "custom",
-        "type": "NOT_EQUALS"
+        "type": "PARAM_TABLE",
+        "name": "regionSettings",
+        "displayName": "Consent Mode v2 defaults by region",
+        "paramTableColumns": [
+          {
+            "param": {
+              "type": "TEXT",
+              "name": "regions",
+              "displayName": "Regions",
+              "simpleValueType": true,
+              "defaultValue": "All",
+              "help": "Comma-separated <a href=\"https://en.wikipedia.org/wiki/ISO_3166-2\">ISO 3166-2</a> codes, for example <code>DE,FR,GB</code> or <code>US-CA</code>. Enter <code>All</code> to apply this row to every visitor not covered by another row."
+            },
+            "isUnique": false
+          },
+          {
+            "param": {
+              "type": "SELECT",
+              "name": "analytics",
+              "displayName": "Analytics",
+              "macrosInSelect": true,
+              "selectItems": [
+                {
+                  "value": "granted",
+                  "displayValue": "Granted"
+                },
+                {
+                  "value": "denied",
+                  "displayValue": "Denied"
+                }
+              ],
+              "simpleValueType": true,
+              "defaultValue": "denied"
+            },
+            "isUnique": false
+          },
+          {
+            "param": {
+              "type": "SELECT",
+              "name": "advertisement",
+              "displayName": "Advertising",
+              "macrosInSelect": true,
+              "selectItems": [
+                {
+                  "value": "granted",
+                  "displayValue": "Granted"
+                },
+                {
+                  "value": "denied",
+                  "displayValue": "Denied"
+                }
+              ],
+              "simpleValueType": true,
+              "defaultValue": "denied"
+            },
+            "isUnique": false
+          },
+          {
+            "param": {
+              "type": "SELECT",
+              "name": "adUserData",
+              "displayName": "Share user data with Google",
+              "macrosInSelect": true,
+              "selectItems": [
+                {
+                  "value": "granted",
+                  "displayValue": "Granted"
+                },
+                {
+                  "value": "denied",
+                  "displayValue": "Denied"
+                }
+              ],
+              "simpleValueType": true,
+              "defaultValue": "denied"
+            },
+            "isUnique": false
+          },
+          {
+            "param": {
+              "type": "SELECT",
+              "name": "adPersonal",
+              "displayName": "Use data for ads personalization",
+              "macrosInSelect": true,
+              "selectItems": [
+                {
+                  "value": "granted",
+                  "displayValue": "Granted"
+                },
+                {
+                  "value": "denied",
+                  "displayValue": "Denied"
+                }
+              ],
+              "simpleValueType": true,
+              "defaultValue": "denied"
+            },
+            "isUnique": false
+          },
+          {
+            "param": {
+              "type": "SELECT",
+              "name": "functional",
+              "displayName": "Preferences",
+              "macrosInSelect": true,
+              "selectItems": [
+                {
+                  "value": "granted",
+                  "displayValue": "Granted"
+                },
+                {
+                  "value": "denied",
+                  "displayValue": "Denied"
+                }
+              ],
+              "simpleValueType": true,
+              "defaultValue": "denied"
+            },
+            "isUnique": false
+          },
+          {
+            "param": {
+              "type": "SELECT",
+              "name": "security",
+              "displayName": "Strictly necessary",
+              "macrosInSelect": true,
+              "selectItems": [
+                {
+                  "value": "granted",
+                  "displayValue": "Granted"
+                },
+                {
+                  "value": "denied",
+                  "displayValue": "Denied"
+                }
+              ],
+              "simpleValueType": true,
+              "defaultValue": "granted"
+            },
+            "isUnique": false
+          }
+        ],
+        "newRowButtonText": "Add region",
+        "help": "The consent state that applies <strong>before</strong> the visitor answers the banner. Each row becomes one <code>gtag('consent','default')</code> command, and the most specific matching region wins — a <code>US-CA</code> row overrides a <code>US</code> row.<br><br>Leave the table empty and everything except <strong>Strictly necessary</strong> is denied worldwide, which is what GDPR requires. For an opt-out regime such as the US state privacy laws, add a row with the relevant regions and set the categories to <strong>Granted</strong>.<br><br>The visitor's real choice is applied afterwards by the ConsentBit banner. Which banner a visitor sees, and which law applies to them, is configured in your ConsentBit dashboard."
       }
     ]
   },
   {
-    "type": "SIMPLE_TABLE",
-    "name": "defaultSettings",
-    "displayName": "Consent Mode v2 default state by region",
-    "enablingConditions": [
+    "type": "GROUP",
+    "name": "otherSettingsGroup",
+    "displayName": "Other settings",
+    "groupStyle": "ZIPPY_CLOSED",
+    "subParams": [
       {
-        "paramName": "regionSetup",
-        "paramValue": "custom",
-        "type": "EQUALS"
-      }
-    ],
-    "help": "Each row is one <code>gtag('consent','default')</code> command. Leave <strong>Region</strong> empty for the fallback that applies everywhere else; otherwise enter comma-separated <a href=\"https://en.wikipedia.org/wiki/ISO_3166-2\">ISO 3166-2</a> codes (for example <code>GB,DE,FR</code> or <code>US-CA</code>). The most specific matching region wins, so a <code>US-CA</code> row overrides a <code>US</code> row. <br>List consent types comma-separated in <strong>Granted</strong> / <strong>Denied</strong>: <code>ad_storage, ad_user_data, ad_personalization, analytics_storage, functionality_storage, personalization_storage, security_storage</code>. <br>If the table is left empty, everything except <code>security_storage</code> is denied worldwide. The visitor's actual choice is applied afterwards by the ConsentBit banner.",
-    "simpleTableColumns": [
-      {
-        "defaultValue": "",
-        "displayName": "Region",
-        "name": "region",
         "type": "TEXT",
-        "valueHint": "Empty = all other regions"
+        "name": "waitForTime",
+        "displayName": "Wait for update (milliseconds)",
+        "simpleValueType": true,
+        "defaultValue": 500,
+        "valueValidators": [
+          {
+            "type": "POSITIVE_NUMBER"
+          }
+        ],
+        "help": "How long Google's tags wait for the visitor's choice before running with the default state above. 500 matches the value the ConsentBit banner itself uses."
       },
       {
-        "defaultValue": "",
-        "displayName": "Granted",
-        "name": "granted",
-        "type": "TEXT",
-        "valueHint": "security_storage"
+        "type": "CHECKBOX",
+        "name": "adsRedaction",
+        "checkboxText": "Redact ads data while consent is denied",
+        "simpleValueType": true,
+        "defaultValue": true,
+        "help": "When advertising consent is denied, Google's ad tags drop advertising identifiers from the requests they send. On by default, matching the ConsentBit script's own behaviour."
       },
       {
-        "defaultValue": "",
-        "displayName": "Denied",
-        "name": "denied",
-        "type": "TEXT",
-        "valueHint": "ad_storage,analytics_storage"
-      }
-    ],
-    "newRowButtonText": "Add region",
-    "defaultValue": [
-      {
-        "region": "",
-        "granted": "security_storage",
-        "denied": "ad_storage,ad_user_data,ad_personalization,analytics_storage,functionality_storage,personalization_storage"
+        "type": "CHECKBOX",
+        "name": "urlPassThrough",
+        "checkboxText": "Pass ad click and session information in URLs",
+        "simpleValueType": true,
+        "defaultValue": true,
+        "help": "While consent is pending, ad click and session identifiers (gclid, dclid, gclsrc, _gl) are carried between your pages in the URL instead of in cookies. On by default, matching the ConsentBit script's own behaviour."
       }
     ]
   }
@@ -148,66 +288,25 @@ const injectScript = require('injectScript');
 const setDefaultConsentState = require('setDefaultConsentState');
 const gtagSet = require('gtagSet');
 const setInWindow = require('setInWindow');
-const sendPixel = require('sendPixel');
-const localStorage = require('localStorage');
 const encodeUriComponent = require('encodeUriComponent');
+const makeInteger = require('makeInteger');
 const log = require('logToConsole');
 
 // The banner is always served from ConsentBit's own origin. Pinned here because
 // the inject_script permission has to declare the URL prefix in advance.
 const CDN_ORIGIN = 'https://manager.consentbit.com';
 
-// Developer ID issued to ConsentBit by Google for the CMP Partner Program. It
-// identifies the CMP behind the consent signals, so it is set before anything
-// else runs. Keep it in sync with the write_data_layer permission.
-const DEVELOPER_ID = 'dN2Q3Yj';
+// Matches the value the ConsentBit banner itself uses when it publishes a default.
+const DEFAULT_WAIT_FOR_UPDATE = 500;
 
-// Consent types this template may write. Matches the "Accesses consent state"
-// permission — anything else typed into the region table is ignored rather than
-// throwing a permission error.
-const CONSENT_TYPES = [
-  'ad_storage',
-  'ad_user_data',
-  'ad_personalization',
-  'analytics_storage',
-  'functionality_storage',
-  'personalization_storage',
-  'security_storage'
-];
-
-// Matches the value the banner itself uses.
-const WAIT_FOR_UPDATE = 500;
-
-// localStorage key remembering the last region sent to the dashboard. Must stay a
-// fixed literal — see the note at the sync block at the bottom of this file.
-const SYNC_KEY = 'cb_gtm_region';
-
-const ALL_TYPES = 'ad_storage,ad_user_data,ad_personalization,analytics_storage,' +
-                  'functionality_storage,personalization_storage';
-
-// EEA + the two European regimes that follow it closely enough to treat the same
-// way: the UK (UK GDPR) and Switzerland (revised FADP). ConsentBit itself routes
-// every non-US visitor to the GDPR banner, so the trailing region-less row below
-// covers the rest of the world identically — this list states the jurisdictions
-// the choice is actually about.
-const EEA_REGIONS = 'AT,BE,BG,HR,CY,CZ,DK,EE,FI,FR,DE,GR,HU,IE,IT,LV,LI,LT,LU,MT,' +
-                    'NL,PL,PT,RO,SK,SI,ES,SE,IS,NO,GB,CH';
-
-// GDPR: opt-in. Nothing but security_storage until the visitor chooses, everywhere.
-const GDPR_ROWS = [
-  {region: EEA_REGIONS, granted: 'security_storage', denied: ALL_TYPES},
-  {region: '', granted: 'security_storage', denied: ALL_TYPES}
-];
-
-// CCPA: opt-out. Storage is granted until the visitor asks not to be sold/shared —
-// the banner applies that with gtag("consent","update") the moment they do. Mirrors
-// the default ConsentBit itself publishes for a CCPA site.
-const CCPA_ROWS = [
-  {region: 'US', granted: 'security_storage,' + ALL_TYPES, denied: ''},
-  {region: '', granted: 'security_storage,' + ALL_TYPES, denied: ''}
-];
-
-gtagSet('developer_id.' + DEVELOPER_ID, true);
+// developer_id.dN2Q3Yj is the ID Google issued to ConsentBit for the CMP Partner
+// Program; it identifies the CMP behind these consent signals. The three keys here
+// must match the write_data_layer permission.
+gtagSet({
+  ads_data_redaction: !!data.adsRedaction,
+  url_passthrough: !!data.urlPassThrough,
+  'developer_id.dN2Q3Yj': true
+});
 
 const scriptId = data.scriptId ? data.scriptId.trim() : '';
 
@@ -216,14 +315,25 @@ if (!scriptId) {
   return data.gtmOnFailure();
 }
 
-// --- Google Consent Mode v2 defaults -----------------------------------------
-// Runs from the "Consent Initialization - All Pages" trigger, so these land
-// before any measurement tag in this container. One setDefaultConsentState call
-// per row of the region table: rows with regions apply to those ISO 3166-2
-// codes only, the row without one covers every other visitor. The banner then
-// applies the visitor's real choice with gtag("consent","update").
+const waitForUpdate = data.waitForTime ?
+    makeInteger(data.waitForTime) : DEFAULT_WAIT_FOR_UPDATE;
 
-function splitList(value) {
+// --- Google Consent Mode v2 defaults -----------------------------------------
+// This tag runs from the "Consent Initialization - All Pages" trigger, so these
+// land before any measurement tag in the container. One setDefaultConsentState
+// call per row: rows naming regions apply to those ISO 3166-2 codes only, and a
+// row set to "All" covers every visitor no other row matched.
+//
+// The default only governs the window between page load and the visitor's answer.
+// Once they choose, the ConsentBit banner publishes the real state with
+// gtag("consent","update"), which is global by design.
+
+/** SELECT columns can be bound to variables, so anything unrecognised is denied. */
+function consentValue(raw) {
+  return raw === 'granted' ? 'granted' : 'denied';
+}
+
+function splitRegions(value) {
   const out = [];
   if (!value) return out;
   const parts = value.split(',');
@@ -234,60 +344,56 @@ function splitList(value) {
   return out;
 }
 
-function assignTypes(state, list, status) {
-  let assigned = 0;
-  for (let i = 0; i < list.length; i++) {
-    const consentType = list[i];
-    if (CONSENT_TYPES.indexOf(consentType) === -1) {
-      log('ConsentBit: ignoring unknown consent type "' + consentType + '".');
-    } else {
-      state[consentType] = status;
-      assigned++;
-    }
+const regionSettings = data.regionSettings || [];
+// True until some row claims every remaining visitor, at which point the
+// all-denied fallback at the bottom would be a duplicate.
+let needsGlobalFallback = true;
+
+for (let i = 0; i < regionSettings.length; i++) {
+  const row = regionSettings[i];
+  const state = {
+    ad_storage: consentValue(row.advertisement),
+    ad_user_data: consentValue(row.adUserData),
+    ad_personalization: consentValue(row.adPersonal),
+    analytics_storage: consentValue(row.analytics),
+    functionality_storage: consentValue(row.functional),
+    personalization_storage: consentValue(row.functional),
+    security_storage: consentValue(row.security),
+    wait_for_update: waitForUpdate
+  };
+
+  const regions = splitRegions(row.regions);
+  if (regions.length > 0 && regions[0].toLowerCase() !== 'all') {
+    state.region = regions;
+  } else {
+    needsGlobalFallback = false;
   }
-  return assigned;
-}
-
-function applyRow(row) {
-  const state = {wait_for_update: WAIT_FOR_UPDATE};
-  let assigned = 0;
-
-  assigned += assignTypes(state, splitList(row.denied), 'denied');
-  assigned += assignTypes(state, splitList(row.granted), 'granted');
-
-  if (assigned === 0) return;
-
-  const regions = splitList(row.region);
-  if (regions.length > 0) state.region = regions;
 
   setDefaultConsentState(state);
 }
 
-const regionSetup = data.regionSetup ? data.regionSetup : 'gdpr';
-
-let rows;
-if (regionSetup === 'ccpa') {
-  rows = CCPA_ROWS;
-} else if (regionSetup === 'custom') {
-  // An empty table falls back to the strictest thing we can do.
-  rows = (data.defaultSettings && data.defaultSettings.length > 0) ?
-      data.defaultSettings : GDPR_ROWS;
-} else {
-  rows = GDPR_ROWS;
+// Nothing configured, or nothing claiming the rest of the world: deny everything
+// but strictly necessary storage, everywhere. This is also what an existing tag
+// configuration does, since its stored settings predate the table.
+if (needsGlobalFallback) {
+  setDefaultConsentState({
+    ad_storage: 'denied',
+    ad_user_data: 'denied',
+    ad_personalization: 'denied',
+    analytics_storage: 'denied',
+    functionality_storage: 'denied',
+    personalization_storage: 'denied',
+    security_storage: 'granted',
+    wait_for_update: waitForUpdate
+  });
 }
 
-for (let i = 0; i < rows.length; i++) {
-  applyRow(rows[i]);
-}
-
-// Let the banner see which law this tag was configured for. It knows the site's
-// real setting (and its plan) server-side, so it can reconcile the two rather than
-// trusting whatever the container says.
-setInWindow('__cbGtmRegionMode', regionSetup, true);
-
-// Tell the banner the default has already been published, so its boot() skips the
-// duplicate gtag("consent","default") push. The banner checks this flag.
+// Tell the banner a default has already been published, so it does not overwrite
+// the region-scoped state above with an unscoped one of its own.
 setInWindow('__cbConsentDefaultSet', true, true);
+// Marks this page as a GTM install. The banner reads it to know the defaults came
+// from this tag rather than from its own inline bootstrap.
+setInWindow('__cbGtmInstall', true, true);
 
 // --- Load the banner ---------------------------------------------------------
 // The banner reads its own configuration (regulation, geo, styling, blocking
@@ -296,28 +402,6 @@ setInWindow('__cbConsentDefaultSet', true, true);
 const url = CDN_ORIGIN + '/consentbit/' + encodeUriComponent(scriptId) + '/script.js';
 
 injectScript(url, data.gtmOnSuccess, data.gtmOnFailure, url);
-
-// --- Save the choice to the ConsentBit dashboard ------------------------------
-// LAST on purpose: the banner is the job, this is bookkeeping. A denied permission
-// here throws in the sandbox, and anything after it would never run.
-//
-// One GET, only when the value changes — SYNC_KEY is a fixed literal because the
-// access_local_storage permission matches keys exactly (no wildcards), so a key
-// built from the Script ID would be denied. Sites configured to run GDPR and CCPA
-// together are never touched: the endpoint refuses to downgrade them.
-if (data.syncRegionToDashboard && (regionSetup === 'gdpr' || regionSetup === 'ccpa')) {
-  if (localStorage.getItem(SYNC_KEY) !== regionSetup) {
-    const syncUrl = CDN_ORIGIN + '/api/gtm/region?scriptId=' +
-        encodeUriComponent(scriptId) + '&mode=' + encodeUriComponent(regionSetup);
-    sendPixel(syncUrl, () => {
-      // Only remember it once it actually went out, so a failed send retries on the
-      // next page rather than being silently dropped.
-      localStorage.setItem(SYNC_KEY, regionSetup);
-    }, () => {
-      log('ConsentBit: could not save the region setting to your dashboard.');
-    });
-  }
-}
 
 
 ___WEB_PERMISSIONS___
@@ -683,7 +767,7 @@ ___WEB_PERMISSIONS___
                 "mapValue": [
                   {
                     "type": 1,
-                    "string": "__cbGtmRegionMode"
+                    "string": "__cbGtmInstall"
                   },
                   {
                     "type": 8,
@@ -712,92 +796,6 @@ ___WEB_PERMISSIONS___
   {
     "instance": {
       "key": {
-        "publicId": "send_pixel",
-        "versionId": "1"
-      },
-      "param": [
-        {
-          "key": "allowedUrls",
-          "value": {
-            "type": 1,
-            "string": "specific"
-          }
-        },
-        {
-          "key": "urls",
-          "value": {
-            "type": 2,
-            "listItem": [
-              {
-                "type": 1,
-                "string": "https://manager.consentbit.com/api/gtm/region*"
-              }
-            ]
-          }
-        }
-      ]
-    },
-    "clientAnnotations": {
-      "isEditedByUser": true
-    },
-    "isRequired": true
-  },
-  {
-    "instance": {
-      "key": {
-        "publicId": "access_local_storage",
-        "versionId": "1"
-      },
-      "param": [
-        {
-          "key": "keys",
-          "value": {
-            "type": 2,
-            "listItem": [
-              {
-                "type": 3,
-                "mapKey": [
-                  {
-                    "type": 1,
-                    "string": "key"
-                  },
-                  {
-                    "type": 1,
-                    "string": "read"
-                  },
-                  {
-                    "type": 1,
-                    "string": "write"
-                  }
-                ],
-                "mapValue": [
-                  {
-                    "type": 1,
-                    "string": "cb_gtm_region"
-                  },
-                  {
-                    "type": 8,
-                    "boolean": true
-                  },
-                  {
-                    "type": 8,
-                    "boolean": true
-                  }
-                ]
-              }
-            ]
-          }
-        }
-      ]
-    },
-    "clientAnnotations": {
-      "isEditedByUser": true
-    },
-    "isRequired": true
-  },
-  {
-    "instance": {
-      "key": {
         "publicId": "write_data_layer",
         "versionId": "1"
       },
@@ -810,6 +808,14 @@ ___WEB_PERMISSIONS___
               {
                 "type": 1,
                 "string": "developer_id.dN2Q3Yj"
+              },
+              {
+                "type": 1,
+                "string": "ads_data_redaction"
+              },
+              {
+                "type": 1,
+                "string": "url_passthrough"
               }
             ]
           }
@@ -845,43 +851,97 @@ scenarios:
       'https://manager.consentbit.com/consentbit/3f2b9c10-8a4e-4d51-9b77-2c6d0e1a5f88/script.js'
     );
     assertApi('gtmOnSuccess').wasCalled();
-- name: Sets an all-denied consent default before injecting
+- name: With no region rows, denies everything worldwide
   code: |-
     const mockData = {
       scriptId: 'abcd1234'
     };
 
-    let defaults;
-    mock('setDefaultConsentState', state => {
-      defaults = state;
-    });
+    const states = [];
+    mock('setDefaultConsentState', state => states.push(state));
     mock('injectScript', (url, onSuccess) => onSuccess());
 
     runCode(mockData);
 
-    assertThat(defaults.ad_storage).isEqualTo('denied');
-    assertThat(defaults.ad_user_data).isEqualTo('denied');
-    assertThat(defaults.ad_personalization).isEqualTo('denied');
-    assertThat(defaults.analytics_storage).isEqualTo('denied');
-    assertThat(defaults.functionality_storage).isEqualTo('denied');
-    assertThat(defaults.personalization_storage).isEqualTo('denied');
-    assertThat(defaults.security_storage).isEqualTo('granted');
-    assertThat(defaults.wait_for_update).isEqualTo(500);
-- name: Sets one default per region row, most specific region last
+    assertThat(states.length).isEqualTo(1);
+    assertThat(states[0].region).isEqualTo(undefined);
+    assertThat(states[0].ad_storage).isEqualTo('denied');
+    assertThat(states[0].ad_user_data).isEqualTo('denied');
+    assertThat(states[0].ad_personalization).isEqualTo('denied');
+    assertThat(states[0].analytics_storage).isEqualTo('denied');
+    assertThat(states[0].functionality_storage).isEqualTo('denied');
+    assertThat(states[0].personalization_storage).isEqualTo('denied');
+    assertThat(states[0].security_storage).isEqualTo('granted');
+    assertThat(states[0].wait_for_update).isEqualTo(500);
+- name: Sets one default per region row, plus the worldwide fallback
   code: |-
     const mockData = {
       scriptId: 'abcd1234',
-      regionSetup: 'custom',
-      defaultSettings: [
+      regionSettings: [
         {
-          region: '',
-          granted: 'security_storage',
-          denied: 'ad_storage,analytics_storage'
+          regions: 'DE, FR,GB',
+          analytics: 'denied',
+          advertisement: 'denied',
+          adUserData: 'denied',
+          adPersonal: 'denied',
+          functional: 'denied',
+          security: 'granted'
         },
         {
-          region: 'US-CA, BR',
-          granted: 'analytics_storage',
-          denied: 'ad_storage'
+          regions: 'US-CA',
+          analytics: 'granted',
+          advertisement: 'granted',
+          adUserData: 'granted',
+          adPersonal: 'denied',
+          functional: 'granted',
+          security: 'granted'
+        }
+      ]
+    };
+
+    const states = [];
+    mock('setDefaultConsentState', state => states.push(state));
+    mock('injectScript', (url, onSuccess) => onSuccess());
+
+    runCode(mockData);
+
+    // Two configured rows, then the all-denied fallback for everyone else.
+    assertThat(states.length).isEqualTo(3);
+
+    assertThat(states[0].region).isEqualTo(['DE', 'FR', 'GB']);
+    assertThat(states[0].analytics_storage).isEqualTo('denied');
+
+    assertThat(states[1].region).isEqualTo(['US-CA']);
+    assertThat(states[1].analytics_storage).isEqualTo('granted');
+    assertThat(states[1].ad_storage).isEqualTo('granted');
+    assertThat(states[1].ad_personalization).isEqualTo('denied');
+    assertThat(states[1].functionality_storage).isEqualTo('granted');
+    assertThat(states[1].personalization_storage).isEqualTo('granted');
+
+    assertThat(states[2].region).isEqualTo(undefined);
+    assertThat(states[2].ad_storage).isEqualTo('denied');
+- name: An All row replaces the worldwide fallback instead of duplicating it
+  code: |-
+    const mockData = {
+      scriptId: 'abcd1234',
+      regionSettings: [
+        {
+          regions: 'DE',
+          analytics: 'denied',
+          advertisement: 'denied',
+          adUserData: 'denied',
+          adPersonal: 'denied',
+          functional: 'denied',
+          security: 'granted'
+        },
+        {
+          regions: 'all',
+          analytics: 'granted',
+          advertisement: 'granted',
+          adUserData: 'granted',
+          adPersonal: 'granted',
+          functional: 'granted',
+          security: 'granted'
         }
       ]
     };
@@ -893,22 +953,23 @@ scenarios:
     runCode(mockData);
 
     assertThat(states.length).isEqualTo(2);
-
-    assertThat(states[0].region).isEqualTo(undefined);
-    assertThat(states[0].ad_storage).isEqualTo('denied');
-    assertThat(states[0].analytics_storage).isEqualTo('denied');
-    assertThat(states[0].security_storage).isEqualTo('granted');
-
-    assertThat(states[1].region).isEqualTo(['US-CA', 'BR']);
-    assertThat(states[1].ad_storage).isEqualTo('denied');
+    assertThat(states[0].region).isEqualTo(['DE']);
+    assertThat(states[1].region).isEqualTo(undefined);
     assertThat(states[1].analytics_storage).isEqualTo('granted');
-- name: Ignores consent types the template may not write
+- name: Anything other than granted is treated as denied
   code: |-
     const mockData = {
       scriptId: 'abcd1234',
-      regionSetup: 'custom',
-      defaultSettings: [
-        {region: 'DE', granted: '', denied: 'ad_storage, not_a_consent_type'}
+      regionSettings: [
+        {
+          regions: 'All',
+          analytics: 'yes',
+          advertisement: undefined,
+          adUserData: '',
+          adPersonal: 'GRANTED',
+          functional: 'granted',
+          security: 'granted'
+        }
       ]
     };
 
@@ -920,116 +981,61 @@ scenarios:
 
     runCode(mockData);
 
+    assertThat(state.analytics_storage).isEqualTo('denied');
     assertThat(state.ad_storage).isEqualTo('denied');
-    assertThat(state.not_a_consent_type).isEqualTo(undefined);
-- name: CCPA grants storage by default and names the US region
+    assertThat(state.ad_user_data).isEqualTo('denied');
+    assertThat(state.ad_personalization).isEqualTo('denied');
+    assertThat(state.functionality_storage).isEqualTo('granted');
+    assertThat(state.security_storage).isEqualTo('granted');
+- name: Uses the configured wait for update
   code: |-
     const mockData = {
       scriptId: 'abcd1234',
-      regionSetup: 'ccpa',
-      syncRegionToDashboard: false
+      waitForTime: '2000'
     };
 
-    const states = [];
-    mock('setDefaultConsentState', state => states.push(state));
-    mock('injectScript', (url, onSuccess) => onSuccess());
-
-    runCode(mockData);
-
-    assertThat(states.length).isEqualTo(2);
-    assertThat(states[0].region).isEqualTo(['US']);
-    assertThat(states[0].ad_storage).isEqualTo('granted');
-    assertThat(states[0].analytics_storage).isEqualTo('granted');
-    assertThat(states[1].region).isEqualTo(undefined);
-    assertThat(states[1].ad_storage).isEqualTo('granted');
-- name: GDPR denies everything in the EEA and everywhere else
-  code: |-
-    const mockData = {
-      scriptId: 'abcd1234',
-      regionSetup: 'gdpr',
-      syncRegionToDashboard: false
-    };
-
-    const states = [];
-    mock('setDefaultConsentState', state => states.push(state));
-    mock('injectScript', (url, onSuccess) => onSuccess());
-
-    runCode(mockData);
-
-    assertThat(states.length).isEqualTo(2);
-    assertThat(states[0].region).isEqualTo([
-      'AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','HU','IE','IT',
-      'LV','LI','LT','LU','MT','NL','PL','PT','RO','SK','SI','ES','SE','IS','NO',
-      'GB','CH'
-    ]);
-    assertThat(states[0].ad_storage).isEqualTo('denied');
-    assertThat(states[0].security_storage).isEqualTo('granted');
-    assertThat(states[1].region).isEqualTo(undefined);
-    assertThat(states[1].analytics_storage).isEqualTo('denied');
-- name: Saves the region to the dashboard once, then not again
-  code: |-
-    const mockData = {
-      scriptId: 'abcd1234',
-      regionSetup: 'ccpa',
-      syncRegionToDashboard: true
-    };
-
-    let stored = null;
-    let pixelUrl;
-    mock('localStorage', {
-      getItem: () => stored,
-      setItem: (key, value) => {
-        stored = value;
-      }
-    });
-    mock('sendPixel', (url, onSuccess) => {
-      pixelUrl = url;
-      onSuccess();
+    let state;
+    mock('setDefaultConsentState', s => {
+      state = s;
     });
     mock('injectScript', (url, onSuccess) => onSuccess());
 
     runCode(mockData);
 
-    assertThat(pixelUrl).isEqualTo(
-      'https://manager.consentbit.com/api/gtm/region?scriptId=abcd1234&mode=ccpa'
-    );
-    assertThat(stored).isEqualTo('ccpa');
-
-    // Second run with the value already remembered: no second beacon.
-    pixelUrl = undefined;
-    runCode(mockData);
-    assertThat(pixelUrl).isEqualTo(undefined);
-- name: Does not contact the dashboard when the sync is switched off
+    assertThat(state.wait_for_update).isEqualTo(2000);
+- name: Sets the developer ID, ads redaction and URL passthrough
   code: |-
     const mockData = {
       scriptId: 'abcd1234',
-      regionSetup: 'gdpr',
-      syncRegionToDashboard: false
+      adsRedaction: true,
+      urlPassThrough: false
     };
 
-    mock('sendPixel', () => fail('sendPixel must not run when the sync is off'));
+    let settings;
+    mock('gtagSet', values => {
+      settings = values;
+    });
     mock('injectScript', (url, onSuccess) => onSuccess());
 
     runCode(mockData);
 
-    assertApi('gtmOnSuccess').wasCalled();
-- name: Sets the ConsentBit developer ID
+    assertThat(settings['developer_id.dN2Q3Yj']).isEqualTo(true);
+    assertThat(settings.ads_data_redaction).isEqualTo(true);
+    assertThat(settings.url_passthrough).isEqualTo(false);
+- name: Tells the banner the default is already published
   code: |-
     const mockData = {scriptId: 'abcd1234'};
 
-    let developerIdKey;
-    let developerIdValue;
-    mock('gtagSet', (key, value) => {
-      developerIdKey = key;
-      developerIdValue = value;
+    const globals = {};
+    mock('setInWindow', (key, value) => {
+      globals[key] = value;
     });
     mock('injectScript', (url, onSuccess) => onSuccess());
 
     runCode(mockData);
 
-    assertThat(developerIdKey.indexOf('developer_id.')).isEqualTo(0);
-    assertThat(developerIdKey.length).isGreaterThan('developer_id.'.length);
-    assertThat(developerIdValue).isEqualTo(true);
+    assertThat(globals.__cbConsentDefaultSet).isEqualTo(true);
+    assertThat(globals.__cbGtmInstall).isEqualTo(true);
 - name: Fails cleanly when no Script ID is set
   code: |-
     const mockData = {scriptId: ''};
@@ -1043,6 +1049,7 @@ scenarios:
 
 
 ___NOTES___
+
 
 Created on 2026-07-24
 

@@ -4,7 +4,10 @@
       "PowerShell($f = \"c:\\\\Users\\\\naren\\\\OneDrive\\\\Desktop\\\\settlenewmedia\\\\consentbit-webapp-server\\\\src\\\\handlers\\\\cdn.js\"; $lines = Get-Content -LiteralPath $f; for \\($i = 805; $i -lt 845; $i++\\) { \"{0,4}: len={1}\" -f \\($i+1\\), $lines[$i].Length })",
       "PowerShell($f = \"c:\\\\Users\\\\naren\\\\OneDrive\\\\Desktop\\\\settlenewmedia\\\\consentbit-webapp-server\\\\src\\\\handlers\\\\cdn.js\"; $lines = Get-Content -LiteralPath $f; $loader = $lines[807]; $loader.Substring\\(0, 500\\))",
       "WebFetch(domain:developers.google.com)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(node --input-type=module -e \"import\\('./src/handlers/cdnNm.js'\\).then\\(\\(\\)=>console.log\\('cdnNm.js: imports + parses OK'\\)\\).catch\\(e=>{console.log\\('ERR',e.message\\);process.exit\\(1\\)}\\)\")",
+      "Bash(node __TRACKED_VAR__/fn.mjs __TRACKED_VAR__/minM_final.js __TRACKED_VAR__/fnM2.txt)",
+      "Bash(node __TRACKED_VAR__/fn.mjs __TRACKED_VAR__/minNM_final.js __TRACKED_VAR__/fnNM2.txt)"
     ]
   }
 }

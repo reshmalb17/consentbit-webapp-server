@@ -1,5 +1,11 @@
 // handlers/gtm.js
 //
+// NOT ROUTED. Kept for the dashboard-sync idea described below, which was built and
+// then set aside: the GTM template now only sets Consent Mode defaults and never
+// touches the site's region_mode, so nothing calls this. Wire it back up in
+// src/index.js (dispatch case + PUBLIC_PATHS + a rate limit) if that work resumes —
+// and read the SECURITY note first, because the caller is an anonymous browser.
+//
 // Region surface for the ConsentBit GTM template (Community Template Gallery).
 //
 // The template is sandboxed JavaScript running in the visitor's browser. It has no

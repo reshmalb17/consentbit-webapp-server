@@ -78,7 +78,6 @@ import { handleSyncEvent } from './handlers/syncEvent.js';
 import { handleBillingSummary, handleBillingPortal, handleBillingInvoices, handleBillingUsage } from './handlers/billing.js';
 import { handleCustomCookieRules } from './handlers/customCookieRules.js';
 import { handleScanPending } from './handlers/scanPending.js';
-import { handleGtmRegion } from './handlers/gtm.js';
 
 import { handleAuthDashboardInit } from './handlers/authDashboardInit.js';
 import { handleAuthLogin } from './handlers/authLogin.js';
@@ -177,11 +176,6 @@ const PUBLIC_PATHS = new Set([
   '/api/scan-site',
   '/api/scan-site-consented',
   '/api/scan-pending',
-  // GTM template region surface — called from the visitor's browser by the
-  // sandboxed template (sendPixel, a plain GET) and by the banner. Authorization
-  // is the Origin/Referer-vs-registered-domain check inside the handler, the same
-  // one the CDN applies before serving the script. See handlers/gtm.js.
-  '/api/gtm/region',
   '/api/v2/webflow-free-register',
   '/api/payment/subscription',
   '/api/webflow/billing',
@@ -392,10 +386,6 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleScanSiteConsented(request, env, ctx); break;
     case '/api/scan-pending':
       response = await handleScanPending(request, env); break;
-
-    // — GTM template: read the site's region setup, or set it from the tag
-    case '/api/gtm/region':
-      response = await handleGtmRegion(request, env); break;
 
     // — Auth
     case '/api/auth/login':
@@ -1172,17 +1162,6 @@ export default {
       const pvRl = checkRateLimit(`${ip}:pv`, 60);
       if (!pvRl.ok) {
         const r = withSecurityHeaders(rateLimitedResponse(pvRl));
-        return withPublicCors(r, request);
-      }
-    }
-
-    // The GTM beacon fires at most once per visitor per region change (the template
-    // dedupes in localStorage), so anything above a trickle is either a misconfigured
-    // container or someone probing the endpoint.
-    if (pathname === '/api/gtm/region') {
-      const gtmRl = checkRateLimit(`${ip}:gtm`, 20);
-      if (!gtmRl.ok) {
-        const r = withSecurityHeaders(rateLimitedResponse(gtmRl));
         return withPublicCors(r, request);
       }
     }
