@@ -310,8 +310,16 @@ export async function handleBannerCustomization(request, env) {
     // A null plan means resolution itself failed; don't demote a paying site on a
     // transient D1 error, leave the requested value alone.
     if (customization.hideBranding === 1 || customization.hideBranding === true) {
+      // Read the module constant *optionally*. The deployed bundle repeatedly hit
+      // "ReferenceError: REMOVE_BRANDING_PLANS is not defined" here — every save with
+      // the branding box ticked 500'd as SERVER_BUSY — even though the constant is
+      // plainly top-level in both the source and the generated bundle. `typeof` on an
+      // undeclared identifier is the one reference form that never throws, so this
+      // falls back to the same list instead of taking down the whole save.
+      const removeBrandingPlans =
+        typeof REMOVE_BRANDING_PLANS !== 'undefined' ? REMOVE_BRANDING_PLANS : ['growth'];
       const brandingPlanId = await resolveEffectivePlanId(db, env, siteId);
-      if (brandingPlanId !== null && !REMOVE_BRANDING_PLANS.includes(brandingPlanId)) {
+      if (brandingPlanId !== null && !removeBrandingPlans.includes(brandingPlanId)) {
         console.warn(
           `[BannerCustomization][POST] hideBranding not available on plan '${brandingPlanId}' for site ${siteId} — saving as 0`
         );

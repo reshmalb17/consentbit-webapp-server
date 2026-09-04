@@ -14,6 +14,7 @@ import { handleCookies } from './handlers/cookies.js';
 import { handleMarkVerified } from './handlers/markVerified.js';
 import { handleScanSite, handleScanSiteConsented } from './handlers/scanSite.js';
 import { handleBannerCustomization } from './handlers/bannerCustomization.js';
+import { handleBannerTemplates } from './handlers/bannerTemplates.js';
 import { handleScheduledScan } from './handlers/scheduledScan.js';
 import { handleConsentLogs } from './handlers/consentLogs.js';
 import { handleValidatePromo } from './handlers/validatePromo.js';
@@ -444,6 +445,10 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     // — Banner / scan
     case '/api/banner-customization':
       response = await handleBannerCustomization(request, env); break;
+    // Saved banner templates (colors + layout only). Authenticated + org-scoped, so
+    // deliberately NOT added to PUBLIC_PATHS — it keeps CSRF and body sanitization.
+    case '/api/banner-templates':
+      response = await handleBannerTemplates(request, env); break;
     case '/api/scheduled-scan':
       response = await handleScheduledScan(request, env); break;
     case '/api/scan-history':
