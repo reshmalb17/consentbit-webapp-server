@@ -80,7 +80,7 @@ export function getLoaderIabScript(customization, opts = {}, isGAC = false) {
  */
 // Local testing: relative so tcf.bundle.js / Tcfmanager.js resolve next to
 // index.html under Live Server. Production value: "https://api.consentbit.com/".
-const BASE_URL = "https://test-cmp.pages.dev/";
+const BASE_URL = "https://api.consentbit.com/";
 
 // Google Additional Consent (AC) toggle — baked from the isGAC build argument.
 const IS_GAC = ${isGoogleAC};
