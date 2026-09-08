@@ -1,9 +1,11 @@
-// handlers/cdnTest.js
+// handlers/cdnTest.js — TEST-ONLY copy of cdnM.js, served at /cdn-test/*.
 //
-// TEST-ONLY copy of cdnM.js, served at /cdn-test/*. Exists so banner behaviour —
-// especially per-jurisdiction paths — can be exercised without touching the live
-// CDN. Adds a geo override (?__country / ?__region / ?__eu) that cdnM.js must
-// never have. Re-copy from cdnM.js when the live runtime changes.
+// Differs from cdnM.js in exactly three ways. Strip all three when porting back:
+//   1. this header
+//   2. the export name (handleCDNScriptTest)
+//   3. the TEST-ONLY GEO OVERRIDE block
+// Everything else is fair game to copy to cdnM.js. Re-copy from cdnM.js when the
+// live runtime changes — it has drifted before.
 import { getBannerCustomization, getEffectivePlanForOrganization, getSubscriptionBySiteId, inferTierPlanIdFromStripePriceId } from '../services/db.js';
 import { authorizeRequestHost } from '../utils/domainValidate.js';
 import { trackCustomDomain } from '../services/domainResolver.js';
@@ -11,6 +13,7 @@ import { mergeTranslations } from '../data/defaultTranslations.js';
 import { SCRIPT_BLOCK_PROVIDERS } from '../data/scriptBlockProviders.js';
 import { getLoaderIabScript } from '../utils/IabCode.js';
 import { getWebflowSetupScript } from '../utils/webflowSetup.js';
+import { PT_BR_TRANSLATIONS, PT_BR_SECTION_LABELS } from '../data/ptBrTranslations.js';
 
 export async function handleCDNScriptTest(request, env, url) {
   try {
@@ -194,19 +197,9 @@ async function _handleCDNScript(request, env, url) {
 
   // ───────────────────────────────────────────────────────────────────────────
   // TEST-ONLY GEO OVERRIDE — this file only. Never port to cdnM.js.
-  //
-  // cf.country comes from the real request IP, so without this you can only ever
-  // exercise one jurisdiction's banner from one location. These params let the
-  // banner test page drive every law path from a single machine:
-  //
-  //   ?__country=BR                 → Brazil (LGPD path, today the GDPR banner)
-  //   ?__country=US&__region=UT     → Utah — reproduces the optOut mismatch
-  //   ?__country=US&__region=CA     → California / CCPA profile
-  //   ?__country=DE&__eu=1          → GDPR
-  //   ?__country=AU                 → Australia (today falls through to GDPR)
-  //
-  // Combine with a site whose region_mode is 'ccpa' and any non-US __country to
-  // reproduce the no-banner case (bannerEnabled=false).
+  //   ?__country=BR              → Brazil
+  //   ?__country=US&__region=UT  → Utah
+  //   ?__country=DE&__eu=1       → EU
   // ───────────────────────────────────────────────────────────────────────────
   const cf = request.cf || {};
   const _tp = url.searchParams;
@@ -309,7 +302,13 @@ async function _handleCDNScript(request, env, url) {
   function normalizeLangCode(raw) {
     if (!raw) return 'en';
     const s = String(raw).trim();
-    return LANG_NAME_TO_CODE[s] || (s.length <= 3 ? s.toLowerCase() : 'en');
+    if (LANG_NAME_TO_CODE[s]) return LANG_NAME_TO_CODE[s];
+    // Region-qualified tags ('pt-BR', 'en-AU'). The original expression was
+    // `s.length <= 3 ? s.toLowerCase() : 'en'`, which silently dropped every
+    // 5-character tag to English — pt-BR could never resolve.
+    const m = /^([A-Za-z]{2,3})[-_]([A-Za-z]{2})$/.exec(s);
+    if (m) return `${m[1].toLowerCase()}-${m[2].toUpperCase()}`;
+    return s.length <= 3 ? s.toLowerCase() : 'en';
   }
 
   const SECTION_LABELS = {
@@ -322,9 +321,12 @@ async function _handleCDNScript(request, env, url) {
     sv: { essential: 'Strikt Nödvändiga',        analytics: 'Analytik',    marketing: 'Marknadsföring', preferences: 'Inställningar'},
     nl: { essential: 'Strikt Noodzakelijk',      analytics: 'Analytics',   marketing: 'Marketing',      preferences: 'Voorkeuren'   },
     pl: { essential: 'Ściśle Niezbędne',         analytics: 'Analityczne', marketing: 'Marketingowe',   preferences: 'Preferencje'  },
+    'pt-BR': PT_BR_SECTION_LABELS,
   };
 
   let enTrans = {};
+  /** True when the Brazil language rule replaced the site's published text. */
+  let _brApplied = false;
   if (customization) {
     const rawPos = customization.position || 'bottom-left';
     const normPos = String(rawPos).trim().toLowerCase().replace(/_/g, '-');
@@ -369,7 +371,32 @@ async function _handleCDNScript(request, env, url) {
       enTrans = {};
       configTrans = {};
     }
-    const _langCode = enTrans.languageSelected || normalizeLangCode(customization.language);
+    // ─── LGPD language rule — TEST-ONLY, cdnTest.js ──────────────────────────
+    // A Brazilian visitor gets Brazilian Portuguese whatever the site published.
+    // LGPD art. 5, IX requires consent to be *informada*; CDC art. 31 requires
+    // consumer-facing information "em língua portuguesa". A banner the visitor
+    // cannot read does not produce valid consent, so the site's own language
+    // setting must not be able to override this.
+    //
+    // TRADE-OFF, deliberate and worth knowing: this replaces the customer's
+    // published wording with our generic pt-BR defaults for Brazilian visitors.
+    // The worker holds no per-site Portuguese text, so correct language and
+    // customer's own wording cannot both be served. Correct language wins,
+    // because the customer's wording in a language the reader does not speak
+    // fails the same art. 5, IX test.
+    //
+    // Sites already published in Portuguese keep their own text untouched.
+    if (country === 'BR') {
+      const _published = String(enTrans.languageSelected || '').toLowerCase();
+      if (_published !== 'pt-br' && _published !== 'pt') {
+        enTrans = { ...enTrans, ...PT_BR_TRANSLATIONS };
+        _brApplied = true;
+      }
+    }
+
+    const _langCode = _brApplied
+      ? 'pt-BR'
+      : (enTrans.languageSelected || normalizeLangCode(customization.language));
     const _labels = SECTION_LABELS[_langCode] || SECTION_LABELS['en'];
     enTrans.essential = _labels.essential;
     enTrans.strictlyNecessary = '';
@@ -897,7 +924,17 @@ async function _handleCDNScript(request, env, url) {
             customization.preferencePosition
           ),
           centerAnimationDirection: customization.centerAnimationDirection || 'fade',
-          language: normalizeLangCode(customization.language),
+          language: _brApplied ? 'pt-BR' : normalizeLangCode(customization.language),
+          // Effective published language, for consumers that have no TRANSLATIONS
+          // object to read it from — the IAB banner, which is served without
+          // translationsVar. translations.en carries the text in whichever language
+          // was published and languageSelected records which one, so it wins over
+          // the `language` column, which can be stale or unset. Same expression as
+          // _langCode above; kept as its own field so the GDPR/CCPA loader's
+          // existing `language` semantics are untouched.
+          resolvedLanguage: _brApplied
+            ? 'pt-BR'
+            : ((enTrans && enTrans.languageSelected) || normalizeLangCode(customization.language)),
           autoDetectLanguage: customization.autoDetectLanguage === 1,
           cookieExpirationDays:
             customization.cookieExpirationDays != null ? customization.cookieExpirationDays : 30,
