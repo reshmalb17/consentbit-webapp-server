@@ -1,6 +1,7 @@
 // src/index.js
 import { handleSites } from './handlers/sites.js';
 import { handleCDNScript } from './handlers/cdnM.js';
+import { handleCDNScriptTest } from './handlers/cdnTest.js';
 import { handleConsentV2Script } from './handlers/consentv2handler.js';
 import { handleEmbedFloatingLogo } from './handlers/embedFloatingLogo.js';
 import { handleConsent } from './handlers/consent.js';
@@ -1038,6 +1039,15 @@ export default {
     // ── Public embed asset (floating button logo) ─────────────────────────
     if (pathname === '/embed/floating-logo.svg' && request.method === 'GET') {
       return handleEmbedFloatingLogo(env);
+    }
+
+    // ── Banner test CDN — /cdn-test/<cdnScriptId>.js ───────────────────────
+    // Separate handler (handlers/cdnTest.js) so banner work, especially the
+    // per-jurisdiction paths, can be exercised without touching the live CDN
+    // below. Supports ?__country / ?__region / ?__eu to drive the geo gate from
+    // one machine. Checked BEFORE the live routes so it can never shadow them.
+    if (pathname.startsWith('/cdn-test/')) {
+      return handleCDNScriptTest(request, env, url);
     }
 
     // ── CDN scripts — no security middleware, served as-is ────────────────
