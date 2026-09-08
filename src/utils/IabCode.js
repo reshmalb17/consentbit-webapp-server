@@ -161,6 +161,8 @@ const STRINGS = {
     'banner.title': 'Your privacy matters to us',
     'banner.bodyHtml': 'With your permission, we and <a href="#" id="consentBitVendorsLink" class="consentBit-vendors-link" data-consentBit-tag="vendors-link" aria-label="View the list of third-party vendors and the purposes, special features and stacks they use"><span id="consentBitVendorCountText">third-party vendors</span></a> store and/or access information on your device (such as cookies and device identifiers) and process your personal data (including unique identifiers, IP address, browsing activity and approximate location) for the purposes below. Some processing relies on legitimate interest, which you can object to. Choices apply to this website only and can be updated any time via the cookie icon at the bottom-left.',
     'banner.purposesLineHtml': '<strong>Our partners collect your information for the following purposes:</strong> <span id="consentBitPurposesText" data-consentBit-tag="purposes-list"></span>.<br/> <strong>They also use the following special features:</strong> <span id="consentBitSpecialFeaturesText" data-consentBit-tag="special-features-list"></span>.',
+    'banner.vendorCount': '{count} third-party partners',
+    'banner.vendorCountGac': '{total} third-party partners ({iab} IAB + {google} Google)',
 
     'btn.customise': 'Customise',
     'btn.rejectAll': 'Reject All',
@@ -189,6 +191,8 @@ const STRINGS = {
     'vendor.hideDetails': 'Hide details ▴',
     'vendor.consentCount': 'Number of Vendors seeking consent: {count}',
     'vendor.countLineFull': 'Number of Vendors seeking consent: {consent} • Relying on legitimate interest: {li} • Total: {total}',
+    'vendor.featureCount': 'Number of Vendors using this feature: {count}',
+    'vendor.specialPurposeCount': 'Number of Vendors using this special purpose: {count}',
     'vendor.unknown': 'Unknown vendor',
     'vendor.idPrefix': 'ID:',
     'vendor.objectAria': 'Object to {name} processing on legitimate interest',
@@ -237,6 +241,8 @@ const STRINGS = {
     'common.purposeN': 'Purpose {id}',
 
     'atp.note': 'These Google-certified partners are not on the IAB vendor list. Choose whether they may use your data.',
+    'atp.tabIab': 'IAB Vendors ({count})',
+    'atp.tabGoogle': 'Google Partners ({count})',
 
     'cat.alwaysActive': 'Always Active',
     'cat.alwaysActiveAria': '{name} (Always Active)',
@@ -258,6 +264,8 @@ const STRINGS = {
     'banner.title': 'Ihre Privatsphäre ist uns wichtig',
     'banner.bodyHtml': 'Mit Ihrer Einwilligung speichern wir und <a href="#" id="consentBitVendorsLink" class="consentBit-vendors-link" data-consentBit-tag="vendors-link" aria-label="Liste der Drittanbieter sowie der von ihnen genutzten Zwecke, besonderen Merkmale und Stapel anzeigen"><span id="consentBitVendorCountText">Drittanbieter</span></a> Informationen auf Ihrem Gerät (etwa Cookies und Gerätekennungen) beziehungsweise greifen darauf zu und verarbeiten Ihre personenbezogenen Daten (einschließlich eindeutiger Kennungen, IP-Adresse, Surfverhalten und ungefährem Standort) für die unten genannten Zwecke. Ein Teil der Verarbeitung stützt sich auf berechtigtes Interesse, dem Sie widersprechen können. Ihre Auswahl gilt nur für diese Website und kann jederzeit über das Cookie-Symbol unten links geändert werden.',
     'banner.purposesLineHtml': '<strong>Unsere Partner erheben Ihre Informationen für die folgenden Zwecke:</strong> <span id="consentBitPurposesText" data-consentBit-tag="purposes-list"></span>.<br/> <strong>Sie nutzen außerdem die folgenden besonderen Merkmale:</strong> <span id="consentBitSpecialFeaturesText" data-consentBit-tag="special-features-list"></span>.',
+    'banner.vendorCount': '{count} Drittanbieter',
+    'banner.vendorCountGac': '{total} Drittanbieter ({iab} IAB + {google} Google)',
 
     'btn.customise': 'Anpassen',
     'btn.rejectAll': 'Alle ablehnen',
@@ -286,6 +294,8 @@ const STRINGS = {
     'vendor.hideDetails': 'Details ausblenden ▴',
     'vendor.consentCount': 'Anzahl der Anbieter, die eine Einwilligung einholen: {count}',
     'vendor.countLineFull': 'Anzahl der Anbieter, die eine Einwilligung einholen: {consent} • Auf berechtigtes Interesse gestützt: {li} • Gesamt: {total}',
+    'vendor.featureCount': 'Anzahl der Anbieter, die dieses Merkmal nutzen: {count}',
+    'vendor.specialPurposeCount': 'Anzahl der Anbieter, die diesen besonderen Zweck nutzen: {count}',
     'vendor.unknown': 'Unbekannter Anbieter',
     'vendor.idPrefix': 'ID:',
     'vendor.objectAria': 'Der Verarbeitung durch {name} auf Grundlage des berechtigten Interesses widersprechen',
@@ -334,6 +344,8 @@ const STRINGS = {
     'common.purposeN': 'Zweck {id}',
 
     'atp.note': 'Diese von Google zertifizierten Partner sind nicht in der IAB-Anbieterliste enthalten. Entscheiden Sie, ob sie Ihre Daten verwenden dürfen.',
+    'atp.tabIab': 'IAB-Anbieter ({count})',
+    'atp.tabGoogle': 'Google-Partner ({count})',
 
     'cat.alwaysActive': 'Immer aktiv',
     'cat.alwaysActiveAria': '{name} (immer aktiv)',
@@ -355,6 +367,8 @@ const STRINGS = {
     'banner.title': 'Uw privacy is belangrijk voor ons',
     'banner.bodyHtml': 'Met uw toestemming slaan wij en <a href="#" id="consentBitVendorsLink" class="consentBit-vendors-link" data-consentBit-tag="vendors-link" aria-label="Bekijk de lijst met externe leveranciers en de doeleinden, speciale functies en stapels die zij gebruiken"><span id="consentBitVendorCountText">externe leveranciers</span></a> informatie op uw apparaat op (zoals cookies en apparaat-identificatoren) of raadplegen wij deze, en verwerken wij uw persoonsgegevens (waaronder unieke identificatoren, IP-adres, surfgedrag en locatie bij benadering) voor de onderstaande doeleinden. Een deel van de verwerking berust op gerechtvaardigd belang, waartegen u bezwaar kunt maken. Uw keuzes gelden alleen voor deze website en kunnen op elk moment worden gewijzigd via het cookiepictogram linksonder.',
     'banner.purposesLineHtml': '<strong>Onze partners verzamelen uw gegevens voor de volgende doeleinden:</strong> <span id="consentBitPurposesText" data-consentBit-tag="purposes-list"></span>.<br/> <strong>Zij gebruiken ook de volgende speciale functies:</strong> <span id="consentBitSpecialFeaturesText" data-consentBit-tag="special-features-list"></span>.',
+    'banner.vendorCount': '{count} externe leveranciers',
+    'banner.vendorCountGac': '{total} externe leveranciers ({iab} IAB + {google} Google)',
 
     'btn.customise': 'Aanpassen',
     'btn.rejectAll': 'Alles weigeren',
@@ -383,6 +397,8 @@ const STRINGS = {
     'vendor.hideDetails': 'Details verbergen ▴',
     'vendor.consentCount': 'Aantal leveranciers dat toestemming vraagt: {count}',
     'vendor.countLineFull': 'Aantal leveranciers dat toestemming vraagt: {consent} • Berust op gerechtvaardigd belang: {li} • Totaal: {total}',
+    'vendor.featureCount': 'Aantal leveranciers dat deze functie gebruikt: {count}',
+    'vendor.specialPurposeCount': 'Aantal leveranciers dat dit speciale doel gebruikt: {count}',
     'vendor.unknown': 'Onbekende leverancier',
     'vendor.idPrefix': 'ID:',
     'vendor.objectAria': 'Bezwaar maken tegen verwerking door {name} op basis van gerechtvaardigd belang',
@@ -431,6 +447,8 @@ const STRINGS = {
     'common.purposeN': 'Doeleinde {id}',
 
     'atp.note': 'Deze door Google gecertificeerde partners staan niet op de IAB-leverancierslijst. Kies of zij uw gegevens mogen gebruiken.',
+    'atp.tabIab': 'IAB-leveranciers ({count})',
+    'atp.tabGoogle': 'Google-partners ({count})',
 
     'cat.alwaysActive': 'Altijd actief',
     'cat.alwaysActiveAria': '{name} (altijd actief)',
@@ -452,6 +470,8 @@ const STRINGS = {
     'banner.title': 'Votre vie privée nous tient à cœur',
     'banner.bodyHtml': 'Avec votre autorisation, nous et <a href="#" id="consentBitVendorsLink" class="consentBit-vendors-link" data-consentBit-tag="vendors-link" aria-label="Voir la liste des fournisseurs tiers ainsi que les finalités, fonctionnalités spéciales et piles qu’ils utilisent"><span id="consentBitVendorCountText">des fournisseurs tiers</span></a> stockons des informations sur votre appareil (telles que des cookies et des identifiants d’appareil) ou y accédons, et traitons vos données personnelles (y compris des identifiants uniques, l’adresse IP, l’activité de navigation et la localisation approximative) aux finalités indiquées ci-dessous. Certains traitements reposent sur l’intérêt légitime, auquel vous pouvez vous opposer. Vos choix s’appliquent uniquement à ce site web et peuvent être modifiés à tout moment via l’icône de cookie en bas à gauche.',
     'banner.purposesLineHtml': '<strong>Nos partenaires collectent vos informations aux finalités suivantes :</strong> <span id="consentBitPurposesText" data-consentBit-tag="purposes-list"></span>.<br/> <strong>Ils utilisent également les fonctionnalités spéciales suivantes :</strong> <span id="consentBitSpecialFeaturesText" data-consentBit-tag="special-features-list"></span>.',
+    'banner.vendorCount': '{count} fournisseurs tiers',
+    'banner.vendorCountGac': '{total} fournisseurs tiers ({iab} IAB + {google} Google)',
 
     'btn.customise': 'Personnaliser',
     'btn.rejectAll': 'Tout refuser',
@@ -480,6 +500,8 @@ const STRINGS = {
     'vendor.hideDetails': 'Masquer les détails ▴',
     'vendor.consentCount': 'Nombre de fournisseurs demandant un consentement : {count}',
     'vendor.countLineFull': 'Nombre de fournisseurs demandant un consentement : {consent} • Se fondant sur l’intérêt légitime : {li} • Total : {total}',
+    'vendor.featureCount': 'Nombre de fournisseurs utilisant cette fonctionnalité : {count}',
+    'vendor.specialPurposeCount': 'Nombre de fournisseurs utilisant cette finalité spéciale : {count}',
     'vendor.unknown': 'Fournisseur inconnu',
     'vendor.idPrefix': 'ID :',
     'vendor.objectAria': 'S’opposer au traitement par {name} fondé sur l’intérêt légitime',
@@ -528,6 +550,8 @@ const STRINGS = {
     'common.purposeN': 'Finalité {id}',
 
     'atp.note': 'Ces partenaires certifiés par Google ne figurent pas sur la liste des fournisseurs de l’IAB. Choisissez s’ils peuvent utiliser vos données.',
+    'atp.tabIab': 'Fournisseurs IAB ({count})',
+    'atp.tabGoogle': 'Partenaires Google ({count})',
 
     'cat.alwaysActive': 'Toujours actif',
     'cat.alwaysActiveAria': '{name} (toujours actif)',
@@ -549,6 +573,8 @@ const STRINGS = {
     'banner.title': 'La tua privacy è importante per noi',
     'banner.bodyHtml': 'Con il tuo consenso, noi e <a href="#" id="consentBitVendorsLink" class="consentBit-vendors-link" data-consentBit-tag="vendors-link" aria-label="Visualizza l’elenco dei fornitori terzi e le finalità, le funzionalità speciali e gli stack che utilizzano"><span id="consentBitVendorCountText">fornitori terzi</span></a> archiviamo informazioni sul tuo dispositivo (come cookie e identificatori del dispositivo) o vi accediamo, e trattiamo i tuoi dati personali (inclusi identificatori univoci, indirizzo IP, attività di navigazione e posizione approssimativa) per le finalità indicate di seguito. Alcuni trattamenti si basano sul legittimo interesse, al quale puoi opporti. Le tue scelte valgono solo per questo sito web e possono essere modificate in qualsiasi momento tramite l’icona dei cookie in basso a sinistra.',
     'banner.purposesLineHtml': '<strong>I nostri partner raccolgono le tue informazioni per le seguenti finalità:</strong> <span id="consentBitPurposesText" data-consentBit-tag="purposes-list"></span>.<br/> <strong>Utilizzano inoltre le seguenti funzionalità speciali:</strong> <span id="consentBitSpecialFeaturesText" data-consentBit-tag="special-features-list"></span>.',
+    'banner.vendorCount': '{count} fornitori terzi',
+    'banner.vendorCountGac': '{total} fornitori terzi ({iab} IAB + {google} Google)',
 
     'btn.customise': 'Personalizza',
     'btn.rejectAll': 'Rifiuta tutto',
@@ -577,6 +603,8 @@ const STRINGS = {
     'vendor.hideDetails': 'Nascondi dettagli ▴',
     'vendor.consentCount': 'Numero di fornitori che richiedono il consenso: {count}',
     'vendor.countLineFull': 'Numero di fornitori che richiedono il consenso: {consent} • Basati sul legittimo interesse: {li} • Totale: {total}',
+    'vendor.featureCount': 'Numero di fornitori che utilizzano questa funzionalità: {count}',
+    'vendor.specialPurposeCount': 'Numero di fornitori che utilizzano questa finalità speciale: {count}',
     'vendor.unknown': 'Fornitore sconosciuto',
     'vendor.idPrefix': 'ID:',
     'vendor.objectAria': 'Opporsi al trattamento da parte di {name} basato sul legittimo interesse',
@@ -625,6 +653,8 @@ const STRINGS = {
     'common.purposeN': 'Finalità {id}',
 
     'atp.note': 'Questi partner certificati da Google non sono presenti nell’elenco dei fornitori IAB. Scegli se possono utilizzare i tuoi dati.',
+    'atp.tabIab': 'Fornitori IAB ({count})',
+    'atp.tabGoogle': 'Partner Google ({count})',
 
     'cat.alwaysActive': 'Sempre attivo',
     'cat.alwaysActiveAria': '{name} (sempre attivo)',
@@ -646,6 +676,8 @@ const STRINGS = {
     'banner.title': 'Twoja prywatność jest dla nas ważna',
     'banner.bodyHtml': 'Za Twoją zgodą my oraz <a href="#" id="consentBitVendorsLink" class="consentBit-vendors-link" data-consentBit-tag="vendors-link" aria-label="Zobacz listę dostawców zewnętrznych oraz cele, funkcje specjalne i stosy, z których korzystają"><span id="consentBitVendorCountText">dostawcy zewnętrzni</span></a> przechowujemy informacje na Twoim urządzeniu (takie jak pliki cookie i identyfikatory urządzenia) lub uzyskujemy do nich dostęp oraz przetwarzamy Twoje dane osobowe (w tym unikalne identyfikatory, adres IP, aktywność przeglądania i przybliżoną lokalizację) w celach wskazanych poniżej. Część przetwarzania opiera się na prawnie uzasadnionym interesie, wobec którego możesz wnieść sprzeciw. Twoje wybory dotyczą wyłącznie tej witryny i można je zmienić w dowolnym momencie za pomocą ikony plików cookie w lewym dolnym rogu.',
     'banner.purposesLineHtml': '<strong>Nasi partnerzy zbierają Twoje informacje w następujących celach:</strong> <span id="consentBitPurposesText" data-consentBit-tag="purposes-list"></span>.<br/> <strong>Korzystają również z następujących funkcji specjalnych:</strong> <span id="consentBitSpecialFeaturesText" data-consentBit-tag="special-features-list"></span>.',
+    'banner.vendorCount': '{count} dostawców zewnętrznych',
+    'banner.vendorCountGac': '{total} dostawców zewnętrznych ({iab} IAB + {google} Google)',
 
     'btn.customise': 'Dostosuj',
     'btn.rejectAll': 'Odrzuć wszystko',
@@ -674,6 +706,8 @@ const STRINGS = {
     'vendor.hideDetails': 'Ukryj szczegóły ▴',
     'vendor.consentCount': 'Liczba dostawców proszących o zgodę: {count}',
     'vendor.countLineFull': 'Liczba dostawców proszących o zgodę: {consent} • Opierających się na prawnie uzasadnionym interesie: {li} • Łącznie: {total}',
+    'vendor.featureCount': 'Liczba dostawców korzystających z tej funkcji: {count}',
+    'vendor.specialPurposeCount': 'Liczba dostawców korzystających z tego celu specjalnego: {count}',
     'vendor.unknown': 'Nieznany dostawca',
     'vendor.idPrefix': 'ID:',
     'vendor.objectAria': 'Wnieś sprzeciw wobec przetwarzania przez {name} na podstawie prawnie uzasadnionego interesu',
@@ -722,6 +756,8 @@ const STRINGS = {
     'common.purposeN': 'Cel {id}',
 
     'atp.note': 'Ci partnerzy certyfikowani przez Google nie znajdują się na liście dostawców IAB. Zdecyduj, czy mogą korzystać z Twoich danych.',
+    'atp.tabIab': 'Dostawcy IAB ({count})',
+    'atp.tabGoogle': 'Partnerzy Google ({count})',
 
     'cat.alwaysActive': 'Zawsze aktywne',
     'cat.alwaysActiveAria': '{name} (zawsze aktywne)',
@@ -743,6 +779,8 @@ const STRINGS = {
     'banner.title': 'Tu privacidad nos importa',
     'banner.bodyHtml': 'Con tu permiso, nosotros y <a href="#" id="consentBitVendorsLink" class="consentBit-vendors-link" data-consentBit-tag="vendors-link" aria-label="Ver la lista de proveedores externos y las finalidades, funciones especiales y pilas que utilizan"><span id="consentBitVendorCountText">proveedores externos</span></a> almacenamos información en tu dispositivo (como cookies e identificadores de dispositivo) o accedemos a ella, y tratamos tus datos personales (incluidos identificadores únicos, dirección IP, actividad de navegación y ubicación aproximada) para las finalidades que se indican a continuación. Parte del tratamiento se basa en el interés legítimo, al que puedes oponerte. Tus elecciones se aplican únicamente a este sitio web y pueden modificarse en cualquier momento mediante el icono de cookies situado abajo a la izquierda.',
     'banner.purposesLineHtml': '<strong>Nuestros socios recopilan tu información para las siguientes finalidades:</strong> <span id="consentBitPurposesText" data-consentBit-tag="purposes-list"></span>.<br/> <strong>También utilizan las siguientes funciones especiales:</strong> <span id="consentBitSpecialFeaturesText" data-consentBit-tag="special-features-list"></span>.',
+    'banner.vendorCount': '{count} proveedores externos',
+    'banner.vendorCountGac': '{total} proveedores externos ({iab} IAB + {google} Google)',
 
     'btn.customise': 'Personalizar',
     'btn.rejectAll': 'Rechazar todo',
@@ -771,6 +809,8 @@ const STRINGS = {
     'vendor.hideDetails': 'Ocultar detalles ▴',
     'vendor.consentCount': 'Número de proveedores que solicitan consentimiento: {count}',
     'vendor.countLineFull': 'Número de proveedores que solicitan consentimiento: {consent} • Basados en el interés legítimo: {li} • Total: {total}',
+    'vendor.featureCount': 'Número de proveedores que utilizan esta función: {count}',
+    'vendor.specialPurposeCount': 'Número de proveedores que utilizan esta finalidad especial: {count}',
     'vendor.unknown': 'Proveedor desconocido',
     'vendor.idPrefix': 'ID:',
     'vendor.objectAria': 'Oponerse al tratamiento por parte de {name} basado en el interés legítimo',
@@ -819,6 +859,8 @@ const STRINGS = {
     'common.purposeN': 'Finalidad {id}',
 
     'atp.note': 'Estos socios certificados por Google no figuran en la lista de proveedores del IAB. Decide si pueden utilizar tus datos.',
+    'atp.tabIab': 'Proveedores del IAB ({count})',
+    'atp.tabGoogle': 'Socios de Google ({count})',
 
     'cat.alwaysActive': 'Siempre activas',
     'cat.alwaysActiveAria': '{name} (siempre activas)',
@@ -842,6 +884,8 @@ const STRINGS = {
     'banner.title': 'A sua privacidade é importante para nós',
     'banner.bodyHtml': 'Com a sua autorização, nós e <a href="#" id="consentBitVendorsLink" class="consentBit-vendors-link" data-consentBit-tag="vendors-link" aria-label="Ver a lista de fornecedores terceiros e as finalidades, funcionalidades especiais e pilhas que utilizam"><span id="consentBitVendorCountText">fornecedores terceiros</span></a> armazenamos informações no seu dispositivo (como cookies e identificadores de dispositivo) ou acedemos às mesmas, e tratamos os seus dados pessoais (incluindo identificadores únicos, endereço IP, atividade de navegação e localização aproximada) para as finalidades indicadas abaixo. Parte do tratamento baseia-se no interesse legítimo, ao qual pode opor-se. As suas escolhas aplicam-se apenas a este site e podem ser alteradas a qualquer momento através do ícone de cookies no canto inferior esquerdo.',
     'banner.purposesLineHtml': '<strong>Os nossos parceiros recolhem as suas informações para as seguintes finalidades:</strong> <span id="consentBitPurposesText" data-consentBit-tag="purposes-list"></span>.<br/> <strong>Utilizam também as seguintes funcionalidades especiais:</strong> <span id="consentBitSpecialFeaturesText" data-consentBit-tag="special-features-list"></span>.',
+    'banner.vendorCount': '{count} fornecedores terceiros',
+    'banner.vendorCountGac': '{total} fornecedores terceiros ({iab} IAB + {google} Google)',
 
     'btn.customise': 'Personalizar',
     'btn.rejectAll': 'Rejeitar tudo',
@@ -870,6 +914,8 @@ const STRINGS = {
     'vendor.hideDetails': 'Ocultar detalhes ▴',
     'vendor.consentCount': 'Número de fornecedores que solicitam consentimento: {count}',
     'vendor.countLineFull': 'Número de fornecedores que solicitam consentimento: {consent} • Baseados no interesse legítimo: {li} • Total: {total}',
+    'vendor.featureCount': 'Número de fornecedores que utilizam esta funcionalidade: {count}',
+    'vendor.specialPurposeCount': 'Número de fornecedores que utilizam esta finalidade especial: {count}',
     'vendor.unknown': 'Fornecedor desconhecido',
     'vendor.idPrefix': 'ID:',
     'vendor.objectAria': 'Opor-se ao tratamento por {name} baseado no interesse legítimo',
@@ -918,6 +964,8 @@ const STRINGS = {
     'common.purposeN': 'Finalidade {id}',
 
     'atp.note': 'Estes parceiros certificados pela Google não constam da lista de fornecedores do IAB. Decida se podem utilizar os seus dados.',
+    'atp.tabIab': 'Fornecedores IAB ({count})',
+    'atp.tabGoogle': 'Parceiros Google ({count})',
 
     'cat.alwaysActive': 'Sempre ativos',
     'cat.alwaysActiveAria': '{name} (sempre ativos)',
@@ -939,6 +987,8 @@ const STRINGS = {
     'banner.title': 'Din integritet är viktig för oss',
     'banner.bodyHtml': 'Med ditt samtycke lagrar vi och <a href="#" id="consentBitVendorsLink" class="consentBit-vendors-link" data-consentBit-tag="vendors-link" aria-label="Visa listan över tredjepartsleverantörer samt de ändamål, särskilda funktioner och staplar som de använder"><span id="consentBitVendorCountText">tredjepartsleverantörer</span></a> information på din enhet (såsom cookies och enhetsidentifierare) eller får åtkomst till den, och behandlar dina personuppgifter (inklusive unika identifierare, IP-adress, surfaktivitet och ungefärlig plats) för ändamålen nedan. En del av behandlingen grundar sig på berättigat intresse, som du kan invända mot. Dina val gäller endast denna webbplats och kan när som helst ändras via cookieikonen längst ned till vänster.',
     'banner.purposesLineHtml': '<strong>Våra partner samlar in dina uppgifter för följande ändamål:</strong> <span id="consentBitPurposesText" data-consentBit-tag="purposes-list"></span>.<br/> <strong>De använder även följande särskilda funktioner:</strong> <span id="consentBitSpecialFeaturesText" data-consentBit-tag="special-features-list"></span>.',
+    'banner.vendorCount': '{count} tredjepartsleverantörer',
+    'banner.vendorCountGac': '{total} tredjepartsleverantörer ({iab} IAB + {google} Google)',
 
     'btn.customise': 'Anpassa',
     'btn.rejectAll': 'Neka alla',
@@ -967,6 +1017,8 @@ const STRINGS = {
     'vendor.hideDetails': 'Dölj detaljer ▴',
     'vendor.consentCount': 'Antal leverantörer som begär samtycke: {count}',
     'vendor.countLineFull': 'Antal leverantörer som begär samtycke: {consent} • Grundar sig på berättigat intresse: {li} • Totalt: {total}',
+    'vendor.featureCount': 'Antal leverantörer som använder denna funktion: {count}',
+    'vendor.specialPurposeCount': 'Antal leverantörer som använder detta särskilda ändamål: {count}',
     'vendor.unknown': 'Okänd leverantör',
     'vendor.idPrefix': 'ID:',
     'vendor.objectAria': 'Invänd mot behandling av {name} som grundar sig på berättigat intresse',
@@ -1015,6 +1067,8 @@ const STRINGS = {
     'common.purposeN': 'Ändamål {id}',
 
     'atp.note': 'Dessa Google-certifierade partner finns inte med på IAB:s leverantörslista. Välj om de får använda dina uppgifter.',
+    'atp.tabIab': 'IAB-leverantörer ({count})',
+    'atp.tabGoogle': 'Google-partner ({count})',
 
     'cat.alwaysActive': 'Alltid aktiva',
     'cat.alwaysActiveAria': '{name} (alltid aktiva)',
@@ -2442,7 +2496,7 @@ function initPurposeAccordions() {
                                         \` : ''}
                                         \${item.hasConsent ? \`
                                             <div class="cb-consent-switch-wrapper">
-                                                <div class="cb-switch-label">Consent</div>
+                                                <div class="cb-switch-label">\${escapeHtml(t('label.consent'))}</div>
                                                 <div class="cb-switch-sm">
                                                     <input type="checkbox" id="cbIABPNFSection\${item.id}ToggleConsent" aria-label="Enable \${item.title} Consent" autocomplete="off">
                                                 </div>
@@ -3546,8 +3600,8 @@ function updateDynamicCounts() {
     if (countEl && vendorCount > 0) {
         const atpCount = (window.__cbIsGAC && Array.isArray(window.__cbAtpProviders)) ? window.__cbAtpProviders.length : 0;
         countEl.textContent = atpCount > 0
-            ? \`\${vendorCount + atpCount} third-party partners (\${vendorCount} IAB + \${atpCount} Google)\`
-            : \`\${vendorCount} third-party partner\${vendorCount === 1 ? '' : 's'}\`;
+            ? t('banner.vendorCountGac', { total: vendorCount + atpCount, iab: vendorCount, google: atpCount })
+            : t('banner.vendorCount', { count: vendorCount });
     }
 
     // 1st-layer purpose names (#7) — pull verbatim from GVL
@@ -3595,7 +3649,7 @@ function updateDynamicCounts() {
         const fVendors = typeof gvl.getVendorsWithFeature === 'function' ? gvl.getVendorsWithFeature(Number(fid)) : null;
         const count = fVendors ? Object.keys(fVendors).length : 0;
         document.querySelectorAll(\`#cbIABPNFSectionfeature\${fid}Body .cb-iab-vendors-count-wrapper\`).forEach((el) => {
-            el.textContent = \`Number of Vendors using this feature: \${count}\`;
+            el.textContent = t('vendor.featureCount', { count: count });
         });
     });
 
@@ -3604,7 +3658,7 @@ function updateDynamicCounts() {
         const spVendors = typeof gvl.getVendorsWithSpecialPurpose === 'function' ? gvl.getVendorsWithSpecialPurpose(Number(pid)) : null;
         const count = spVendors ? Object.keys(spVendors).length : 0;
         document.querySelectorAll(\`#cbIABPNFSectionspecialPurpose\${pid}Body .cb-iab-vendors-count-wrapper\`).forEach((el) => {
-            el.textContent = \`Number of Vendors using this special purpose: \${count}\`;
+            el.textContent = t('vendor.specialPurposeCount', { count: count });
         });
     });
 }
@@ -3683,7 +3737,7 @@ function rebuildPurposeAccordionsFromGvl() {
                     </div>
                 </div>\` : ''}
                 \${showConsent ? \`<div class="cb-consent-switch-wrapper">
-                    <div class="cb-switch-label">Consent</div>
+                    <div class="cb-switch-label">\${escapeHtml(t('label.consent'))}</div>
                     <div class="cb-switch-sm">
                         <input type="checkbox" id="cbIABPNFSection\${idAttr}ToggleConsent" aria-label="Enable \${name} consent" autocomplete="off">
                     </div>
@@ -3697,9 +3751,9 @@ function rebuildPurposeAccordionsFromGvl() {
         } else if (kind === 'special-feature') {
             countLine = t('vendor.consentCount', { count: consentCount });
         } else if (kind === 'specialPurpose') {
-            countLine = \`Number of Vendors using this special purpose: \${consentCount}\`;
+            countLine = t('vendor.specialPurposeCount', { count: consentCount });
         } else if (kind === 'feature') {
-            countLine = \`Number of Vendors using this feature: \${consentCount}\`;
+            countLine = t('vendor.featureCount', { count: consentCount });
         }
 
         return \`<div class="cb-child-accordion" id="cbIABPNFSection\${idAttr}">
@@ -3913,8 +3967,8 @@ function rebuildPurposeAccordionsFromGvl() {
       b.style.cssText = 'padding:6px 2px;border:none;background:none;color:' + textColor + ';cursor:pointer;font-size:13px;font-weight:400;text-decoration:none;text-underline-offset:4px';
       return b;
     }
-    var btnIab = makePill('cbSubTabIab', 'IAB Vendors (' + iabCount + ')');
-    var btnG = makePill('cbSubTabGoogle', 'Google Partners (' + gCount + ')');
+    var btnIab = makePill('cbSubTabIab', t('atp.tabIab', { count: iabCount }));
+    var btnG = makePill('cbSubTabGoogle', t('atp.tabGoogle', { count: gCount }));
 
     var nav = document.createElement('div');
     nav.id = 'cbVendorSubNav';
@@ -3968,7 +4022,7 @@ function rebuildPurposeAccordionsFromGvl() {
     list.appendChild(note);
 
     atpProviders.forEach(function (p) {
-      var displayName = p.name || ('Provider ' + p.id);
+      var displayName = p.name || t('vendor.unknown');
 
       // One card per provider — identical structure to the IAB vendor items.
       var item = document.createElement('div');
@@ -3986,7 +4040,9 @@ function rebuildPurposeAccordionsFromGvl() {
       name.textContent = displayName;
       var idd = document.createElement('div');
       idd.className = 'consentBit-vendor-id';
-      idd.textContent = 'AC ID: ' + p.id;
+      // "AC" names the Google Additional Consent namespace, so it stays verbatim;
+      // only the "ID:" label is translated.
+      idd.textContent = 'AC ' + t('vendor.idPrefix') + ' ' + p.id;
       info.appendChild(name);
       info.appendChild(idd);
 
@@ -3996,7 +4052,7 @@ function rebuildPurposeAccordionsFromGvl() {
       cw.className = 'consentBit-consent-switch-wrapper';
       var lbl = document.createElement('div');
       lbl.className = 'consentBit-switch-label';
-      lbl.textContent = 'Consent';
+      lbl.textContent = t('label.consent');
       var box = document.createElement('div');
       box.className = 'cb-switch-sm';
       var input = document.createElement('input');
@@ -4004,7 +4060,7 @@ function rebuildPurposeAccordionsFromGvl() {
       input.id = 'cbAtpProvider_' + p.id + 'ToggleConsent';
       input.setAttribute('autocomplete', 'off');
       input.setAttribute('data-atpid', String(p.id));
-      input.setAttribute('aria-label', 'Enable ' + displayName + ' consent');
+      input.setAttribute('aria-label', t('vendor.consentAria', { name: displayName }));
       box.appendChild(input);
       cw.appendChild(lbl);
       cw.appendChild(box);
@@ -4023,7 +4079,7 @@ function rebuildPurposeAccordionsFromGvl() {
         a.href = p.policyUrl;
         a.target = '_blank';
         a.rel = 'noopener noreferrer';
-        a.textContent = 'Privacy policy';
+        a.textContent = t('link.privacyPolicy');
         linkWrap.appendChild(a);
         item.appendChild(linkWrap);
       }
@@ -4088,6 +4144,48 @@ function rebuildPurposeAccordionsFromGvl() {
       }, 100);
     });
   }
+
+  // Re-render everything in this section that carries copy, for a runtime language
+  // switch. Exposed on window because refreshTranslatedUI() in Tcfmanager.js drives
+  // every language-dependent redraw and this IIFE's internals are otherwise private.
+  //
+  // Both builders latch: ensureVendorSubTabs() returns early once #cbAtpList exists
+  // and renderAtpSection() once its rendered flag is set, so neither picks up a new
+  // language on its own. The pills are relabelled in place; the list is rebuilt
+  // behind a cleared flag.
+  //
+  // Rebuilding destroys the checkboxes, so live toggle state is captured first and
+  // restored after. Reading it from the DOM rather than the stored AC string is
+  // deliberate: it keeps choices the visitor has made but not yet saved.
+  window.refreshAtpLanguage = function () {
+    var list = document.getElementById('cbAtpList');
+    if (!list || !atpProviders.length) return;
+
+    var vendorsList = document.getElementById('vendorsList');
+    var iabCount = (vendorsList && ((vendorsList.vendorsData && vendorsList.vendorsData.length) || vendorsList.children.length)) || 0;
+    var btnIab = document.getElementById('cbSubTabIab');
+    var btnG = document.getElementById('cbSubTabGoogle');
+    if (btnIab) btnIab.textContent = t('atp.tabIab', { count: iabCount });
+    if (btnG) btnG.textContent = t('atp.tabGoogle', { count: atpProviders.length });
+
+    var checked = {};
+    document.querySelectorAll('input[data-atpid]').forEach(function (cb) {
+      checked[cb.getAttribute('data-atpid')] = cb.checked;
+    });
+    var hadState = Object.keys(checked).length > 0;
+
+    list.innerHTML = '';
+    list.dataset.rendered = '';
+    renderAtpSection();
+
+    if (hadState) {
+      document.querySelectorAll('input[data-atpid]').forEach(function (cb) {
+        cb.checked = !!checked[cb.getAttribute('data-atpid')];
+      });
+    } else {
+      applyStoredAtp();
+    }
+  };
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);

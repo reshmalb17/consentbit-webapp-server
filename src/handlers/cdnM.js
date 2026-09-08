@@ -871,6 +871,15 @@ async function _handleCDNScript(request, env, url) {
           ),
           centerAnimationDirection: customization.centerAnimationDirection || 'fade',
           language: normalizeLangCode(customization.language),
+          // Effective published language, for consumers that have no TRANSLATIONS
+          // object to read it from — the IAB banner, which is served without
+          // translationsVar. translations.en carries the text in whichever language
+          // was published and languageSelected records which one, so it wins over
+          // the `language` column, which can be stale or unset. Same expression as
+          // _langCode above; kept as its own field so the GDPR/CCPA loader's
+          // existing `language` semantics are untouched.
+          resolvedLanguage:
+            (enTrans && enTrans.languageSelected) || normalizeLangCode(customization.language),
           autoDetectLanguage: customization.autoDetectLanguage === 1,
           cookieExpirationDays:
             customization.cookieExpirationDays != null ? customization.cookieExpirationDays : 30,

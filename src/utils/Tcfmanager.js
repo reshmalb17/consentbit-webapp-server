@@ -67,7 +67,11 @@ function detectLanguage() {
     return SUPPORTED_LANGUAGES.includes(nav) ? nav : 'en';
   }
 
-  return custom.language || 'en';
+  // resolvedLanguage first: it is derived from translations.en.languageSelected,
+  // which records the language the banner copy was actually published in. The
+  // `language` column is the older field and can be stale or unset, so it is only
+  // the fallback — matching how the GDPR/CCPA handlers resolve _langCode.
+  return custom.resolvedLanguage || custom.language || 'en';
 }
 
 class TCFManager {
@@ -279,6 +283,10 @@ class TCFManager {
     run('loadExistingPreferences');
     run('updateDynamicCounts');
     await run('loadVendors');
+    // Google Additional Consent sub-tab. Last, because it labels its "IAB Vendors"
+    // pill with a count it reads off the list loadVendors() has just rebuilt.
+    // No-op unless the AC layer is on — the banner only defines this when it is.
+    run('refreshAtpLanguage');
   }
 
   setupTCFApiStub() {
