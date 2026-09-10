@@ -37,6 +37,19 @@ export function getLoaderIabScript(customization, opts = {}, isGAC = false) {
     fontWeight: c.fontWeight || '400',
   });
   const alignmentJson = JSON.stringify(o.textAlign || c.textAlign || 'left');
+
+  // First-layer GVL text, prefetched server-side (see utils/gvlPrefetch.js) so the
+  // banner can paint the purpose names, special features and vendor count in the
+  // right language immediately instead of showing English placeholders until the
+  // GVL download finishes. Empty when the prefetch failed or the caller skipped
+  // it — the banner then behaves exactly as it did before.
+  const pre = o.gvlPrefetch || {};
+  const gvlPrefetchJson = JSON.stringify({
+    purposeNames: Array.isArray(pre.purposeNames) ? pre.purposeNames : [],
+    specialFeatureNames: Array.isArray(pre.specialFeatureNames) ? pre.specialFeatureNames : [],
+    vendorCount: Number(pre.vendorCount) > 0 ? Number(pre.vendorCount) : 0,
+    atpCount: Number(pre.atpCount) > 0 ? Number(pre.atpCount) : 0,
+  });
   const layoutJson = JSON.stringify({
     borderRadius: c.bannerBorderRadius || '0rem',
     buttonBorderRadius: c.buttonBorderRadius || '0.375rem',
@@ -80,7 +93,7 @@ export function getLoaderIabScript(customization, opts = {}, isGAC = false) {
  */
 // Local testing: relative so tcf.bundle.js / Tcfmanager.js resolve next to
 // index.html under Live Server. Production value: "https://api.consentbit.com/".
-const BASE_URL = "https://api.consentbit.com/";
+const BASE_URL = "https://test-cmp.pages.dev/";
 
 // Google Additional Consent (AC) toggle — baked from the isGAC build argument.
 const IS_GAC = ${isGoogleAC};
@@ -208,6 +221,7 @@ const STRINGS = {
     'section.features': 'Features',
     'section.specialFeatures': 'Special Features',
     'section.legitimateInterest': 'Legitimate Interest',
+    'label.illustrations': 'Illustrations',
 
     'vsec.purposesConsent': 'Purposes (consent required)',
     'vsec.purposesLegInt': 'Purposes (legitimate interest)',
@@ -311,6 +325,7 @@ const STRINGS = {
     'section.features': 'Merkmale',
     'section.specialFeatures': 'Besondere Merkmale',
     'section.legitimateInterest': 'Berechtigtes Interesse',
+    'label.illustrations': 'Beispiele',
 
     'vsec.purposesConsent': 'Zwecke (Einwilligung erforderlich)',
     'vsec.purposesLegInt': 'Zwecke (berechtigtes Interesse)',
@@ -414,6 +429,7 @@ const STRINGS = {
     'section.features': 'Functies',
     'section.specialFeatures': 'Speciale functies',
     'section.legitimateInterest': 'Gerechtvaardigd belang',
+    'label.illustrations': 'Voorbeelden',
 
     'vsec.purposesConsent': 'Doeleinden (toestemming vereist)',
     'vsec.purposesLegInt': 'Doeleinden (gerechtvaardigd belang)',
@@ -517,6 +533,7 @@ const STRINGS = {
     'section.features': 'Fonctionnalités',
     'section.specialFeatures': 'Fonctionnalités spéciales',
     'section.legitimateInterest': 'Intérêt légitime',
+    'label.illustrations': 'Illustrations',
 
     'vsec.purposesConsent': 'Finalités (consentement requis)',
     'vsec.purposesLegInt': 'Finalités (intérêt légitime)',
@@ -620,6 +637,7 @@ const STRINGS = {
     'section.features': 'Funzionalità',
     'section.specialFeatures': 'Funzionalità speciali',
     'section.legitimateInterest': 'Legittimo interesse',
+    'label.illustrations': 'Esempi',
 
     'vsec.purposesConsent': 'Finalità (consenso richiesto)',
     'vsec.purposesLegInt': 'Finalità (legittimo interesse)',
@@ -723,6 +741,7 @@ const STRINGS = {
     'section.features': 'Funkcje',
     'section.specialFeatures': 'Funkcje specjalne',
     'section.legitimateInterest': 'Prawnie uzasadniony interes',
+    'label.illustrations': 'Przykłady',
 
     'vsec.purposesConsent': 'Cele (wymagana zgoda)',
     'vsec.purposesLegInt': 'Cele (prawnie uzasadniony interes)',
@@ -826,6 +845,7 @@ const STRINGS = {
     'section.features': 'Funciones',
     'section.specialFeatures': 'Funciones especiales',
     'section.legitimateInterest': 'Interés legítimo',
+    'label.illustrations': 'Ejemplos',
 
     'vsec.purposesConsent': 'Finalidades (consentimiento requerido)',
     'vsec.purposesLegInt': 'Finalidades (interés legítimo)',
@@ -931,6 +951,7 @@ const STRINGS = {
     'section.features': 'Funcionalidades',
     'section.specialFeatures': 'Funcionalidades especiais',
     'section.legitimateInterest': 'Interesse legítimo',
+    'label.illustrations': 'Exemplos',
 
     'vsec.purposesConsent': 'Finalidades (consentimento necessário)',
     'vsec.purposesLegInt': 'Finalidades (interesse legítimo)',
@@ -1034,6 +1055,7 @@ const STRINGS = {
     'section.features': 'Funktioner',
     'section.specialFeatures': 'Särskilda funktioner',
     'section.legitimateInterest': 'Berättigat intresse',
+    'label.illustrations': 'Exempel',
 
     'vsec.purposesConsent': 'Ändamål (samtycke krävs)',
     'vsec.purposesLegInt': 'Ändamål (berättigat intresse)',
@@ -1086,10 +1108,44 @@ const STRINGS = {
   }
 };
 
-// Active banner language. Owned by TCFManager (config.language) so the GVL and
-// our own copy can never drift apart; falls back to English before it loads.
+// Banner language, resolved once and synchronously.
+//
+// __CONSENT_SITE__ is inlined by the CDN immediately above this script, so the
+// language is known before the first paint — no need to wait on TCFManager, which
+// only exists after two script fetches and a ~2 MB vendor-list download. Sourcing
+// it from there is what used to leave a non-English banner reading English for
+// about a second before it swapped.
+//
+// TCFManager reads this value back (see detectLanguage() in Tcfmanager.js), so the
+// GVL and our own copy still resolve from one source and cannot drift apart.
+const CB_LANG = (function resolveCbLang() {
+  try {
+    const custom = ((typeof window !== 'undefined' && window.__CONSENT_SITE__) || {}).customization || {};
+
+    // Manual override — set window.__cbIabLanguage before the banner script runs.
+    if (typeof window !== 'undefined' && window.__cbIabLanguage) return String(window.__cbIabLanguage);
+
+    // Auto-detect: follow the visitor's browser, English when we don't ship it.
+    if (custom.autoDetectLanguage === true) {
+      const nav = (navigator.language || navigator.userLanguage || 'en').split('-')[0].toLowerCase();
+      return STRINGS[nav] ? nav : 'en';
+    }
+
+    // resolvedLanguage is derived from translations.en.languageSelected, the field
+    // that records the language the copy was actually published in; the language
+    // column is the older fallback.
+    return custom.resolvedLanguage || custom.language || 'en';
+  } catch (e) {
+    return 'en';
+  }
+})();
+window.__cbLang = CB_LANG;
+
 function cbLang() {
-  const lang = window.tcfManager && window.tcfManager.config && window.tcfManager.config.language;
+  // TCFManager wins once it exists so setLanguage() keeps working at runtime; on
+  // first paint it is not loaded yet and CB_LANG already has the right answer.
+  const live = window.tcfManager && window.tcfManager.config && window.tcfManager.config.language;
+  const lang = live || CB_LANG;
   return (lang && STRINGS[lang]) ? lang : 'en';
 }
 
@@ -1121,6 +1177,56 @@ function t(key, vars) {
  */
 let __cbStringsApplied = false;
 
+// Spans inside the *Html strings whose text comes from the GVL at runtime, via
+// updateDynamicCounts(). The dictionary ships them empty because only the GVL
+// can supply their contents; the shipped English markup ships them populated.
+const CB_GVL_SPANS = [
+  'consentBitPurposesText',
+  'consentBitSpecialFeaturesText',
+  'consentBitVendorCountText',
+];
+
+// First-layer GVL text baked at script-build time. Same shape updateDynamicCounts()
+// derives from the live GVL, so what paints first and what replaces it agree.
+const CB_GVL_PREFETCH = ${gvlPrefetchJson};
+
+/**
+ * Fill the three GVL-backed spans from the server-baked values.
+ *
+ * Runs synchronously during initAll(), so the first frame already reads in the
+ * banner's language. updateDynamicCounts() still overwrites all three once the
+ * GVL has downloaded — by then it is writing the same text over itself, which is
+ * what makes the update invisible instead of a one-second flicker.
+ *
+ * Skips any value the prefetch could not supply, leaving the span for the live
+ * GVL to fill exactly as before.
+ */
+function applyPrefetchedGvlText() {
+  const pre = CB_GVL_PREFETCH;
+  if (!pre) return;
+
+  if (pre.purposeNames && pre.purposeNames.length) {
+    const el = document.getElementById('consentBitPurposesText');
+    if (el) el.textContent = pre.purposeNames.join(', ');
+  }
+
+  if (pre.specialFeatureNames && pre.specialFeatureNames.length) {
+    const el = document.getElementById('consentBitSpecialFeaturesText');
+    if (el) el.textContent = pre.specialFeatureNames.join(', ');
+  }
+
+  if (pre.vendorCount > 0) {
+    const el = document.getElementById('consentBitVendorCountText');
+    // Mirrors updateDynamicCounts() exactly, including the Google AC variant, so
+    // the string length does not change when the live counts arrive.
+    if (el) {
+      el.textContent = (IS_GAC && pre.atpCount > 0)
+        ? t('banner.vendorCountGac', { total: pre.vendorCount + pre.atpCount, iab: pre.vendorCount, google: pre.atpCount })
+        : t('banner.vendorCount', { count: pre.vendorCount });
+    }
+  }
+}
+
 function applyStaticStrings() {
   const cmpId = (window.tcfManager && window.tcfManager.config && window.tcfManager.config.cmpId) || '';
 
@@ -1150,7 +1256,25 @@ function applyStaticStrings() {
 
   document.querySelectorAll('[data-cb-i18n-html]').forEach(function (el) {
     const value = t(el.getAttribute('data-cb-i18n-html'), { cmpId: cmpId });
-    if (value) el.innerHTML = value;
+    if (!value) return;
+    // Carry the GVL-filled spans across the swap. The dictionary ships them
+    // empty — only updateDynamicCounts() can fill them, and that cannot run until
+    // the vendor list has downloaded. Replacing blindly would therefore blank the
+    // purpose and special-feature lists the shipped markup already carries,
+    // collapsing the banner's height until the GVL lands a second later and it
+    // snaps back. Keeping the old text holds the layout steady; the names are
+    // still English for that second, then updateDynamicCounts() overwrites them
+    // with the translated ones.
+    const carried = {};
+    CB_GVL_SPANS.forEach(function (id) {
+      const prev = el.querySelector('#' + id);
+      if (prev && prev.textContent.trim()) carried[id] = prev.textContent;
+    });
+    el.innerHTML = value;
+    Object.keys(carried).forEach(function (id) {
+      const next = el.querySelector('#' + id);
+      if (next && !next.textContent.trim()) next.textContent = carried[id];
+    });
   });
 
   document.querySelectorAll('[data-cb-i18n-aria]').forEach(function (el) {
@@ -1348,7 +1472,9 @@ function injectStyles() {
 .cb-accordion-chevron{width:20px;height:20px}
 .cb-child-accordion-chevron{width:16px;height:16px}
 .cb-chevron-right{width:0;height:0;border-top:4px solid transparent;border-bottom:4px solid transparent;border-left:6px solid #999;transition:transform .2s;display:inline-block}
-.cb-accordion.active .cb-chevron-right,.cb-child-accordion.active .cb-chevron-right{transform:rotate(90deg)}
+/* Each level keyed to its own chevron wrapper: a bare descendant selector also
+   matches the children nested inside an open parent, rotating all of them at once. */
+.cb-accordion.active .cb-accordion-chevron .cb-chevron-right,.cb-child-accordion.active .cb-child-accordion-chevron .cb-chevron-right{transform:rotate(90deg)}
 .cb-accordion-header-wrapper{flex:1}
 .cb-accordion-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:10px}
 .cb-accordion-btn,.cb-child-accordion-btn{background:none;border:none;font-size:14px;font-weight:600;color:\${s.headingColor};cursor:pointer;text-align:\${s.textAlign};padding:0}
@@ -2511,7 +2637,7 @@ function initPurposeAccordions() {
                                 <p class="cb-iab-ad-settings-details-des">\${item.description}</p>
                                 \${item.illustrations ? \`
                                     <div class="cb-iab-illustrations">
-                                        <p class="cb-iab-illustrations-title">Illustrations</p>
+                                        <p class="cb-iab-illustrations-title">\${escapeHtml(t('label.illustrations'))}</p>
                                         <ul class="cb-iab-illustrations-des">
                                             \${item.illustrations.map(ill => \`<li>\${ill}</li>\`).join('')}
                                         </ul>
@@ -3554,6 +3680,17 @@ function initGroupToggles() {
 async function initAll() {
     injectStyles();
     if (!ensureConsentUiShell()) return;
+    // Translate the shell before anything paints. CB_LANG is resolved synchronously
+    // from the inline site config, so this no longer has to wait for TCFManager —
+    // which is what used to show a non-English banner in English for ~1s. The
+    // cmpId slot in the storage disclosure stays blank until TCFManager loads and
+    // the poller below re-runs this, but that text lives inside the preference
+    // modal, which is hidden on load.
+    applyStaticStrings();
+    // Immediately after, still before anything paints: fills the purpose,
+    // special-feature and vendor-count spans, which applyStaticStrings() can only
+    // carry over in English.
+    applyPrefetchedGvlText();
     // Hide banner immediately if consent was already stored — avoids visible flash
     // while waiting for tcfManager to initialize (~100 ms poll in waitForTCFManager).
     try {
@@ -3769,7 +3906,7 @@ function rebuildPurposeAccordionsFromGvl() {
                     <p class="cb-iab-ad-settings-details-des">\${description}</p>
                     \${featureStdHtml}
                     \${illustrations.length ? \`<div class="cb-iab-illustrations">
-                        <p class="cb-iab-illustrations-title">Illustrations</p>
+                        <p class="cb-iab-illustrations-title">\${escapeHtml(t('label.illustrations'))}</p>
                         <ul class="cb-iab-illustrations-des">
                             \${illustrations.map((ill) => \`<li>\${escapeHtml(ill)}</li>\`).join('')}
                         </ul>
