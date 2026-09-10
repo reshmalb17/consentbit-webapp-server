@@ -58,6 +58,15 @@ function detectLanguage() {
     return String(window.__cbIabLanguage);
   }
 
+  // The banner resolves the language synchronously from the same inline config and
+  // publishes it here before injecting this script, so it can paint the correct
+  // language on first paint rather than waiting for us. Preferring it keeps the GVL
+  // and the banner's own copy resolving from one value; the chain below is the
+  // fallback for loading this file without the banner.
+  if (typeof window !== 'undefined' && window.__cbLang) {
+    return String(window.__cbLang);
+  }
+
   // Auto-detect: follow the visitor's browser, English when we don't ship
   // their language. Mirrors R() in the standard loader.
   if (custom.autoDetectLanguage === true) {

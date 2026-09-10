@@ -4,6 +4,7 @@ import { trackCustomDomain } from '../services/domainResolver.js';
 import { mergeTranslations } from '../data/defaultTranslations.js';
 import { SCRIPT_BLOCK_PROVIDERS } from '../data/scriptBlockProviders.js';
 import { getLoaderIabScript } from '../utils/IabCode.js';
+import { prefetchGvlBannerText } from '../utils/gvlPrefetch.js';
 import { getWebflowSetupScript } from '../utils/webflowSetup.js';
 
 export async function handleCDNScript(request, env, url) {
@@ -969,9 +970,25 @@ function remToPx(rem, baseFontSize = 16) {
 
 const banerBr=remToPx(parseFloat(customization?.bannerBorderRadius) || 12);
 const isGoogleAc = enTrans?.isGoogleAc === true || enTrans?.isGoogleAc === 1 || enTrans?.isGoogleAc === '1' || String(enTrans?.isGoogleAc || '').toLowerCase() === 'true';
+
+  // First-layer GVL text, fetched here so the banner paints it in the right
+  // language on the first frame instead of showing English until the GVL lands.
+  // Only for sites that actually serve the IAB banner — a GDPR/CCPA site must not
+  // pay for these subrequests. Best-effort: on failure this returns empty values
+  // and the banner fills the spans itself, exactly as before.
+  // With auto-detect on, the language is a client-side decision the server cannot
+  // see, so fall back to Accept-Language — in practice it agrees with
+  // navigator.language. A mismatch only costs the flicker we already had today;
+  // it can never render the wrong language for longer than the GVL takes to load.
+  const gvlBakeLang = siteConfigPayload?.customization?.autoDetectLanguage === true
+    ? (request.headers.get('Accept-Language') || '').split(',')[0].trim()
+    : (siteConfigPayload?.customization?.resolvedLanguage || 'en');
+  const gvlPrefetch = String(resolvedSite.banner_type || '').toLowerCase() === 'iab'
+    ? await prefetchGvlBannerText(gvlBakeLang, isGoogleAc)
+    : null;
 const loaderIab=`
 ${inlineConfig}
-${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom-left', bannerLayoutVisual: enTrans?.bannerLayoutVisual, textAlign: (typeof textAlign !== 'undefined' && (textAlign === 'center' || textAlign === 'right')) ? textAlign : 'left', bannerEntranceAnimation: siteConfigPayload?.customization?.bannerEntranceAnimation, hideBranding: siteConfigPayload?.customization?.hideBranding === true }, isGoogleAc)}
+${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom-left', bannerLayoutVisual: enTrans?.bannerLayoutVisual, textAlign: (typeof textAlign !== 'undefined' && (textAlign === 'center' || textAlign === 'right')) ? textAlign : 'left', bannerEntranceAnimation: siteConfigPayload?.customization?.bannerEntranceAnimation, hideBranding: siteConfigPayload?.customization?.hideBranding === true, gvlPrefetch }, isGoogleAc)}
 `
 
   const loaderCore = loader.replace(inlineConfig, '');
