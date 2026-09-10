@@ -519,6 +519,35 @@ async function _runEnsureSchema(db) {
     // Column already exists, ignore
   }
 
+  // Jurisdiction + proof columns. Purely additive; each guarded independently so
+  // one failure cannot abort the rest.
+  //
+  // `regulation` is deliberately left alone — dashboards, exports and the legacy
+  // path all read it, and it only ever holds 'gdpr' or 'ccpa'. `law` is the new,
+  // correct field: it names the actual statute (LGPD, PDPA_SG, VCDPA…), which is
+  // what a regulator enquiry asks for.
+  //
+  // `consent_language` matters because the served language is now decided per
+  // request rather than being a static site setting, so the row is the only place
+  // that fact survives. Under LGPD art. 8 §2 the burden of proving consent sits
+  // with the controller, and "informed" is unprovable without knowing which
+  // language the visitor actually read.
+  for (const [name, type] of [
+    ['law', 'TEXT'],
+    ['law_resolved', 'INTEGER DEFAULT 0'],
+    ['consent_language', 'TEXT'],
+    ['consent_model', 'TEXT'],
+    ['notice_version', 'TEXT'],
+    ['policy_version', 'TEXT'],
+    ['lang_wanted', 'TEXT'],
+  ]) {
+    try {
+      await db.prepare(`ALTER TABLE Consent ADD COLUMN ${name} ${type}`).run();
+    } catch (e) {
+      // Column already exists, ignore
+    }
+  }
+
   // PromoCode: for Pro Plan single (monthly/yearly) discounts
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS PromoCode (

@@ -196,6 +196,25 @@ async function _handleCDNScript(request, env, url) {
   // visitor as California).
   const regionCode = cf.regionCode || null;
 
+  // Countries whose law requires a consent banner, used only to stop the
+  // CCPA-only path suppressing it. Deliberately a plain Set and not the fuller
+  // law-profile registry: this is a targeted fix to live behaviour, and the
+  // smallest change that removes the exposure is the right one.
+  //
+  // EU/EEA is covered separately by `isEU`, which Cloudflare already gives us.
+  const BANNER_REQUIRED_COUNTRIES = new Set([
+    'GB', 'CH', 'NO', 'IS', 'LI',   // UK GDPR, Swiss FADP, EEA non-EU
+    'BR',                            // LGPD
+    'AU',                            // Privacy Act
+    'CA',                            // PIPEDA + Quebec Law 25
+    'SG',                            // PDPA
+    'TH',                            // PDPA
+    'ZA',                            // POPIA
+    'SA',                            // PDPL
+    'NZ',                            // Privacy Act 2020
+    'JP', 'KR', 'IN',                // APPI, PIPA, DPDPA
+  ]);
+
   const regionMode = resolvedSite.region_mode || 'gdpr';
   let effectiveBannerType = resolvedSite.banner_type || 'gdpr';
   let bannerEnabled = true;
@@ -214,11 +233,23 @@ async function _handleCDNScript(request, env, url) {
     } else if (regionMode === 'ccpa') {
       if (country === 'US') {
         effectiveBannerType = 'ccpa';
+      } else if (isEU || BANNER_REQUIRED_COUNTRIES.has(country)) {
+        // Previously every non-US visitor here got bannerEnabled=false — no
+        // banner, and therefore no consent captured at all, in the EU and in
+        // every country whose law requires one. Suppressing the banner is the
+        // worst available outcome: worse than the wrong language, worse than
+        // the wrong consent model, because there is no record to show anyone.
+        // Fall back to the opt-in banner, which is lawful in all of these.
+        effectiveBannerType = 'gdpr';
       } else {
         bannerEnabled = false;
       }
     } else if (effectiveBannerType === 'ccpa') {
-      if (country !== 'US') {
+      if (country === 'US') {
+        // unchanged
+      } else if (isEU || BANNER_REQUIRED_COUNTRIES.has(country)) {
+        effectiveBannerType = 'gdpr';   // same reasoning as above
+      } else {
         bannerEnabled = false;
       }
     }

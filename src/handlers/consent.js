@@ -73,6 +73,19 @@ export async function handleConsent(request, env, ctx) {
     expiresAt,
     consent: consentPayload = null,
     tcf = {},
+    // Jurisdiction + proof fields. Optional: cdnM.js does not send them yet, and
+    // cached older scripts never will, so every one defaults rather than failing.
+    // `regulation` above is untouched and still authoritative for existing readers.
+    law = null,
+    lawResolved = false,
+    consentLanguage = null,
+    consentModel = null,
+    noticeVersion = null,
+    policyVersion = null,
+    // The language the jurisdiction expects but which we have no string set for
+    // yet (th, ar, fr, en-AU). Null once the gap closes. Recording it makes the
+    // shortfall visible in the data rather than only in a document.
+    langWanted = null,
   } = body || {};
   const consentCategoriesJson = consentPayload != null ? JSON.stringify(consentPayload) : null;
 
@@ -245,7 +258,14 @@ export async function handleConsent(request, env, ctx) {
         tcf_publisher_restrictions,
         tcf_core_string,
         tcf_publisher_string,
-        domain
+        domain,
+        law,
+        law_resolved,
+        consent_language,
+        consent_model,
+        notice_version,
+        policy_version,
+        lang_wanted
       )
       VALUES (
         ?1, ?2, ?3, ?4, ?5,
@@ -254,7 +274,8 @@ export async function handleConsent(request, env, ctx) {
         ?17, ?18, ?19, ?20, ?21,
         ?22, ?23, ?24, ?25, ?26,
         ?27, ?28, ?29, ?30, ?31,
-        ?32, ?33, ?34, ?35, ?36
+        ?32, ?33, ?34, ?35, ?36,
+        ?37, ?38, ?39, ?40, ?41, ?42, ?43
       )
     `
     )
@@ -294,7 +315,14 @@ export async function handleConsent(request, env, ctx) {
       tcf_publisher_restr,
       tcf_core_string,
       tcf_publisher_string,
-      site.domain || null
+      site.domain || null,
+      law,
+      lawResolved ? 1 : 0,
+      consentLanguage,
+      consentModel,
+      noticeVersion,
+      policyVersion,
+      langWanted
     )
     .run();
 

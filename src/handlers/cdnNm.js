@@ -196,6 +196,14 @@ async function _handleCDNScript(request, env, url) {
   // visitor as California).
   const regionCode = cf.regionCode || null;
 
+  // Countries whose law requires a consent banner, used only to stop the
+  // CCPA-only path suppressing it. Mirrors cdnM.js — keep the two in step.
+  // EU/EEA is covered separately by `isEU`, which Cloudflare already gives us.
+  const BANNER_REQUIRED_COUNTRIES = new Set([
+    'GB', 'CH', 'NO', 'IS', 'LI',
+    'BR', 'AU', 'CA', 'SG', 'TH', 'ZA', 'SA', 'NZ', 'JP', 'KR', 'IN',
+  ]);
+
   const regionMode = resolvedSite.region_mode || 'gdpr';
   let effectiveBannerType = resolvedSite.banner_type || 'gdpr';
   let bannerEnabled = true;
@@ -214,11 +222,21 @@ async function _handleCDNScript(request, env, url) {
     } else if (regionMode === 'ccpa') {
       if (country === 'US') {
         effectiveBannerType = 'ccpa';
+      } else if (isEU || BANNER_REQUIRED_COUNTRIES.has(country)) {
+        // Previously every non-US visitor got bannerEnabled=false — no banner,
+        // no consent captured, in the EU and every country whose law requires
+        // one. Suppression is the worst outcome available: there is no record
+        // to show anyone. Fall back to the opt-in banner, lawful in all of them.
+        effectiveBannerType = 'gdpr';
       } else {
         bannerEnabled = false;
       }
     } else if (effectiveBannerType === 'ccpa') {
-      if (country !== 'US') {
+      if (country === 'US') {
+        // unchanged
+      } else if (isEU || BANNER_REQUIRED_COUNTRIES.has(country)) {
+        effectiveBannerType = 'gdpr';   // same reasoning as above
+      } else {
         bannerEnabled = false;
       }
     }
