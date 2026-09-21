@@ -343,7 +343,7 @@ async function processTransferRequest(request, env, ctx, owner, opts = {}) {
   // background and respond immediately.
   ctx.waitUntil(
     sendEmailViaBrevo(env, { to: owner.email, name: owner.name, subject, text, html })
-      .then(() => console.log('[TransferOwnership] ✅ authorization email sent to owner'))
+      .then(() => {})
       .catch((e) => console.error('[TransferOwnership] ❌ email send failed:', e?.message || e)),
   );
 

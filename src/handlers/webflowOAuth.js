@@ -210,18 +210,9 @@ export async function handleWebflowOAuthAuthorize(request, env) {
   const redirectUri = resolveRedirectUri(env, url);
   const scope = env.WEBFLOW_OAUTH_SCOPES || DEFAULT_SCOPES;
 
-  console.log(`${TAG} → /authorize`, {
-    clientIdSet: !!clientId,
-    redirectUri,
-    scope,
-    returnTo: returnTo || '(none)',
-    state: state.slice(0, 8) + '…',
-    format: url.searchParams.get('format') || 'redirect',
-  });
 
   // Persist state for CSRF validation in the callback (short-lived).
   await createWebflowOAuthState(db, { state, returnTo, ttlMinutes: 10 });
-  console.log(`${TAG} state stored in D1 (10 min ttl)`);
 
   const authUrl = new URL(AUTHORIZE_URL);
   authUrl.searchParams.set('response_type', 'code');
@@ -232,10 +223,8 @@ export async function handleWebflowOAuthAuthorize(request, env) {
 
   // Let the app fetch the URL (to open in a popup/new tab) instead of redirecting.
   if (url.searchParams.get('format') === 'json') {
-    console.log(`${TAG} returning authorize URL as JSON`);
     return Response.json({ success: true, url: authUrl.toString(), state });
   }
-  console.log(`${TAG} redirecting user to Webflow consent screen`);
   return redirect(authUrl.toString());
 }
 
@@ -280,10 +269,8 @@ export async function handleWebflowOAuthStatus(request, env, opts = {}) {
   // D1-first → KV-fallback → backfill into D1 (migrates live v1 users, no re-auth).
   const row = await resolveWebflowOAuthToken(db, env.WEBFLOW_AUTHENTICATION, siteId);
   if (!row?.accessToken) {
-    console.log(`${TAG} status: ${siteId} not authorized (no token in D1 or KV)`);
     return Response.json({ success: true, authorized: false, authorizeUrl });
   }
-  console.log(`${TAG} status: ${siteId} authorized via ${row.source}`);
 
   // Verify the token is still live (catches uninstalled/revoked tokens). Skip with
   // ?verify=false for a fast existence-only check.
@@ -364,7 +351,6 @@ export async function handleWebflowOAuthStatus(request, env, opts = {}) {
         } catch (_) { /* fall back to KV email below */ }
       }
     }
-    console.log(`${TAG} status: ${siteId} registered=${registered} plan=${plan ?? 'none'} version=${version ?? 'null'} bannerCreated=${bannerCreated}`);
   } catch (e) {
     console.warn(`${TAG} status: registration lookup failed (non-fatal)`, e?.message || e);
   }
@@ -390,7 +376,6 @@ export async function handleWebflowOAuthStatus(request, env, opts = {}) {
         const kvPlan = String(kvEntry.plan).trim().toLowerCase();
         if (['basic', 'essential', 'growth'].includes(kvPlan)) {
           plan = kvPlan;
-          console.log(`${TAG} status: ${siteId} plan from KV fallback=${kvPlan} (no paid plan in D1)`);
         }
       }
     }
@@ -422,7 +407,6 @@ export async function handleWebflowOAuthStatus(request, env, opts = {}) {
         }
       }
     }
-    console.log(`${TAG} status: ${siteId} freeUsed=${freeUsed}`);
   } catch (e) {
     console.warn(`${TAG} status: freeUsed check failed (non-fatal)`, e?.message || e);
   }
@@ -432,12 +416,10 @@ export async function handleWebflowOAuthStatus(request, env, opts = {}) {
   // over-counting the repeated status calls the app fires on window focus/visibility
   // (refreshAccount). Only for authorized+registered sites we can attribute to an account
   // (email); this endpoint is Webflow-only so no platform check is needed.
-  console.log(`[PostHog DEBUG] webflow_app_opened guard: siteId=${siteId} authenticated=${authenticated} registered=${registered} email=${email || 'NONE'}`);
   if (authenticated && registered && email) {
     try {
       const kv = env.WEBFLOW_AUTHENTICATION;
       const seen = kv ? await kv.get(`appopen:${siteId}`) : null;
-      console.log(`[PostHog DEBUG] webflow_app_opened dedup: appopen:${siteId} seen=${seen ? 'YES (skipping)' : 'no (will fire)'}`);
       if (!seen) {
         let wfUserId = null;
         try {
@@ -480,11 +462,6 @@ export async function handleWebflowOAuthCallback(request, env) {
   const state = url.searchParams.get('state');
   const providerError = url.searchParams.get('error');
 
-  console.log(`${TAG} ← /callback`, {
-    hasCode: !!code,
-    state: state ? state.slice(0, 8) + '…' : '(none)',
-    providerError: providerError || '(none)',
-  });
 
   const db = env.CONSENT_WEBAPP;
   if (!db) {
@@ -520,9 +497,7 @@ export async function handleWebflowOAuthCallback(request, env) {
       return Response.json({ success: false, error: 'Invalid or expired state' }, { status: 400 });
     }
     returnTo = stateRow.returnTo || '';
-    console.log(`${TAG} app-initiated install; state OK, returnTo=${returnTo || '(none)'}`);
   } else {
-    console.log(`${TAG} Webflow-initiated install (no state) — proceeding without CSRF check`);
   }
 
   const clientId = env.WEBFLOW_CLIENT_ID || env.webflow_TEST_CLIENT_ID;
@@ -545,10 +520,6 @@ export async function handleWebflowOAuthCallback(request, env) {
     grant_type: 'authorization_code',
   };
   if (state) tokenBody.redirect_uri = redirectUri;
-  console.log(`${TAG} exchanging code for token`, {
-    tokenUrl: TOKEN_URL,
-    redirectUri: state ? redirectUri : '(omitted — Webflow-initiated)',
-  });
   let tokenJson;
   try {
     const res = await fetch(TOKEN_URL, {
@@ -564,12 +535,6 @@ export async function handleWebflowOAuthCallback(request, env) {
       });
       return Response.json({ success: false, error: 'Token exchange failed' }, { status: 502 });
     }
-    console.log(`${TAG} token exchange OK`, {
-      httpStatus: res.status,
-      tokenType: tokenJson.token_type || 'bearer',
-      tokenLength: tokenJson.access_token.length, // never log the token itself
-      scope: tokenJson.scope || '(not returned)',
-    });
   } catch (e) {
     console.error(`${TAG} token exchange error`, e);
     return Response.json({ success: false, error: 'Token exchange error' }, { status: 502 });
@@ -587,8 +552,6 @@ export async function handleWebflowOAuthCallback(request, env) {
     if (sres.ok) {
       const sjson = await sres.json();
       sites = Array.isArray(sjson.sites) ? sjson.sites : [];
-      console.log(`${TAG} fetched ${sites.length} site(s)`,
-        sites.map((s) => ({ id: s.id, name: s.displayName, shortName: s.shortName })));
     } else {
       console.warn(`${TAG} sites fetch returned HTTP ${sres.status}`);
     }
@@ -601,10 +564,6 @@ export async function handleWebflowOAuthCallback(request, env) {
     });
     if (ures.ok) {
       authorizedBy = await ures.json();
-      console.log(`${TAG} authorized_by`, {
-        userId: authorizedBy?.user?.id || authorizedBy?.id || '(unknown)',
-        email: authorizedBy?.email || authorizedBy?.user?.email || '(n/a)',
-      });
     } else {
       console.warn(`${TAG} authorized_by fetch returned HTTP ${ures.status}`);
     }
@@ -614,7 +573,6 @@ export async function handleWebflowOAuthCallback(request, env) {
 
   // Persist token (one row per user) + per-site index in CONSENT_WEBAPP.
   const userKey = authorizedBy?.user?.id || authorizedBy?.id || sites[0]?.id || state;
-  console.log(`${TAG} persisting token to D1`, { userKey, siteCount: sites.length });
   try {
     await saveWebflowOAuthToken(db, {
       userKey,
@@ -657,7 +615,6 @@ export async function handleWebflowOAuthCallback(request, env) {
         }
       }),
     );
-    console.log(`${TAG} mirrored accessToken into WEBFLOW_AUTHENTICATION KV for ${sites.length} site(s)`);
   }
 
   // Where to send the user after install:
@@ -670,7 +627,6 @@ export async function handleWebflowOAuthCallback(request, env) {
     : '';
   const dest = returnTo || env.WEBFLOW_APP_REDIRECT || designerUrl;
 
-  console.log(`${TAG} ✓ done — authorized ${sites.length} site(s) for ${userKey}; redirecting to ${dest || '(none → JSON)'}`);
 
   // Track oauth_completed server-side, before returning to the app extension. The
   // authorized user's email is the distinct_id, so this merges into the same PostHog

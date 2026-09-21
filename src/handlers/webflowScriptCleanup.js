@@ -290,7 +290,6 @@ export async function handleWebflowScriptCleanupRemove(request, env) {
     }
 
     const removedIds = legacy.map((s) => s.id);
-    console.log(`${TAG} ✓ removed ${removedIds.length} legacy script(s) for ${siteId}`);
     return Response.json({
       success: true,
       removed: removedIds,

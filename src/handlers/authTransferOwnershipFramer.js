@@ -237,7 +237,7 @@ export async function handleFramerTransferOwnershipRequest(request, env, ctx) {
   // The link goes only to the current owner, so send in the background and respond now.
   ctx.waitUntil(
     sendEmailViaBrevo(env, { to: owner.email, name: owner.name, subject, text, html })
-      .then(() => console.log(`${TAG} ✅ authorization email sent to owner`))
+      .then(() => {})
       .catch((e) => console.error(`${TAG} ❌ email send failed:`, e?.message || e)),
   );
 

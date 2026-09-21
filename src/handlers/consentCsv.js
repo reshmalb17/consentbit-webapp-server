@@ -35,7 +35,6 @@ export async function handleConsentCsv(request, env) {
 
   const url = new URL(request.url);
   const siteId = url.searchParams.get('siteId');
-  console.log(`[PostHog DEBUG] consent-csv handler reached: siteId=${siteId}`);
   if (!siteId) return new Response('siteId required', { status: 400 });
 
   const year = url.searchParams.get('year');

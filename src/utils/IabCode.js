@@ -87,13 +87,98 @@ export function getLoaderIabScript(customization, opts = {}, isGAC = false) {
   );
 
   return `
+// The whole banner runs inside this closure so the page's own scripts cannot
+// replace our functions. Unwrapped, every top-level function landed on window,
+// and Splide 4.x (\`var n,t; t=function(){...}\`) overwrote our t() — the Vendors
+// tab then rendered Splide's constructor source instead of text. Anything that
+// must stay reachable from outside is exported explicitly at the bottom.
+;(function () {
+// Run once per page. Sites often end up with script.js twice (a manual head tag
+// plus the Webflow-registered injector that appends the same URL). injectHTML()
+// treats an existing shell as success, so a second copy re-ran initAll() and bound
+// a second document click listener — every accordion click toggled open and
+// straight back shut. The standard runtime has the same guard (__cbBannerInit).
+if (window.__cbIabBundleLoaded) return;
+window.__cbIabBundleLoaded = true;
+
+// Google Consent Mode default, sent synchronously before anything else runs.
+// Previously the only default came from Tcfmanager.js createDefaultTCModel(), which
+// loads after two sequential network fetches — by then the page's own Google tag had
+// already configured with no consent state and set _ga cookies. Google ignores a
+// default that arrives after the tag. This also covers Google tags the URL blocker
+// cannot recognise (first-party Google tag gateway, server-side GTM). Keys match the
+// four Tcfmanager.js mapPreferencesToGoogle() updates, so nothing is left stuck on
+// 'denied' after the visitor accepts.
+(function cbIabConsentModeBootstrap() {
+  try {
+    window.dataLayer = window.dataLayer || [];
+    if (typeof window.gtag !== 'function') {
+      window.gtag = function () { window.dataLayer.push(arguments); };
+    }
+    if (window.__cbConsentDefaultSet === true) return;
+    window.__cbConsentDefaultSet = true;
+    window.gtag('consent', 'default', {
+      ad_storage: 'denied',
+      analytics_storage: 'denied',
+      ad_user_data: 'denied',
+      ad_personalization: 'denied',
+      security_storage: 'granted',
+      wait_for_update: 500
+    });
+    window.gtag('set', 'ads_data_redaction', true);
+
+    // Returning visitor: replay their stored IAB decision straight away, using the
+    // same rule as mapPreferencesToGoogle() (category + purpose + Google vendor 755).
+    var stored = null;
+    try { stored = JSON.parse(localStorage.getItem('cookieConsentPrefs') || 'null'); } catch (e) {}
+    if (stored) {
+      var cats = stored.cookieCategories || {};
+      var purposes = stored.purposes || {};
+      var google = !!(stored.vendors && stored.vendors.__755 && stored.vendors.__755.consent === true);
+      var analyticsOn = !!(cats.analytics && cats.analytics.enabled === true);
+      var adsOn = !!(cats.advertisement && cats.advertisement.enabled === true);
+      var p1 = !!(purposes.purpose1 && purposes.purpose1.consent === true);
+      var p3 = !!(purposes.purpose3 && purposes.purpose3.consent === true);
+      var p4 = !!(purposes.purpose4 && purposes.purpose4.consent === true);
+      window.gtag('consent', 'update', {
+        analytics_storage: analyticsOn && p1 && google ? 'granted' : 'denied',
+        ad_storage: adsOn && p1 && google ? 'granted' : 'denied',
+        ad_user_data: adsOn && p3 && google ? 'granted' : 'denied',
+        ad_personalization: adsOn && p4 && google ? 'granted' : 'denied'
+      });
+    }
+  } catch (e) {}
+})();
+
+// Webflow's built-in Google Analytics (or any gtag snippet above our tag) queues
+// gtag('js') + gtag('config') BEFORE this script runs, so the default above landed
+// after config: Google processed config with no consent state and set _ga, _gcl_au
+// and fired Ads remarketing before any choice (measured on monitaur.ai, 2026-09-17).
+// While gtag.js has not processed the queue yet (push is still the native one), move
+// every queued consent command to the front. Separate from the bootstrap so it also
+// runs when the Webflow setup script sent the default first.
+(function cbHoistConsentCommands() {
+  try {
+    var queue = window.dataLayer;
+    if (!queue || queue.push !== Array.prototype.push) return;
+    var consentCommands = [], otherEntries = [];
+    for (var k = 0; k < queue.length; k++) {
+      var entry = queue[k];
+      (entry && entry[0] === 'consent' ? consentCommands : otherEntries).push(entry);
+    }
+    if (consentCommands.length && otherEntries.length && queue[0] !== consentCommands[0]) {
+      queue.length = 0;
+      Array.prototype.push.apply(queue, consentCommands.concat(otherEntries));
+    }
+  } catch (e) {}
+})();
 /**
  * Cookie Consent UI Integration
  * Works with TCFManager for proper consent handling
  */
 // Local testing: relative so tcf.bundle.js / Tcfmanager.js resolve next to
 // index.html under Live Server. Production value: "https://api.consentbit.com/".
-const BASE_URL = "https://test-cmp.pages.dev/";
+const BASE_URL = "https://api.consentbit.com/";
 
 // Google Additional Consent (AC) toggle — baked from the isGAC build argument.
 const IS_GAC = ${isGoogleAC};
@@ -1719,7 +1804,7 @@ function waitForTCF() {
 // Keep this in sync with the server-side list.
 window.SCRIPT_BLOCK_PROVIDERS = [
   // Google Analytics / Tag Manager
-  { pattern: 'google-analytics\\\\.com|googletagmanager\\\\.com/gtag/js|googletagmanager\\\\.com/gtm\\\\.js|region1\\\\.google-analytics\\\\.com', categories: ['analytics'] },
+  { pattern: 'google-analytics\\\\.com|googletagmanager\\\\.com/gtag/js|googletagmanager\\\\.com/gtm\\\\.js|region1\\\\.google-analytics\\\\.com|google_tags_first_party', categories: ['analytics'] },
   // Google Ads / Display
   { pattern: 'googleadservices\\\\.com|googlesyndication\\\\.com|pagead/|google\\\\.com/pagead/|doubleclick\\\\.net|googleads\\\\.g\\\\.doubleclick\\\\.net', categories: ['marketing'] },
   // Facebook / Meta
@@ -1778,6 +1863,10 @@ window.SCRIPT_BLOCK_PROVIDERS = [
   { pattern: 'calendly\\\\.com/assets|assets\\\\.calendly|typeform\\\\.com|tally\\\\.so', categories: ['preferences', 'marketing'] },
   // Google Maps JS API
   { pattern: 'maps\\\\.googleapis\\\\.com/maps/api/js', categories: ['preferences'] },
+  // reb2b / rb2b
+  { pattern: 'rb2b\\\\.com|reb2b\\\\.com|ddwl4m2hdecbv\\\\.cloudfront\\\\.net|b2bjsstore', categories: ['marketing'] },
+  // 6sense
+  { pattern: '6sc\\\\.co|6sense\\\\.com', categories: ['marketing'] },
 ];
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1794,8 +1883,29 @@ var __cbInternalCreate = false;
 var __cbCreateElementBackup = null;
 
 /**
+ * Google tag gateway (first-party mode) serves gtag.js from the site's OWN origin
+ * under a random path, e.g.
+ *   <script>(function(w,i,g){...})(window,['G-XXXX'],'google_tags_first_party');</script>
+ *   <script async src="/g0lnomhfn3m.../jvoxlyh4N..."></script>
+ * Nothing in that URL names Google — by design, so ad blockers miss it — which made
+ * the URL patterns let it straight through. The inline half is caught by the
+ * 'google_tags_first_party' pattern; the loader is recognised as the same-origin
+ * script placed directly after it. Still true after a release, because
+ * releaseBlockedScripts() inserts the replacement inline script in the same spot.
+ */
+function cbIsGoogleTagGatewayLoader(url, el) {
+  if (!url || typeof url !== 'string' || !el) return false;
+  try {
+    if (new URL(url, location.href).origin !== location.origin) return false;
+  } catch (e) { return false; }
+  var prev = el.previousElementSibling;
+  return !!(prev && prev.nodeName === 'SCRIPT' &&
+    String(prev.textContent || '').indexOf('google_tags_first_party') !== -1);
+}
+
+/**
  * Resolve consent categories for a script.
- * Priority: data-category attr → data-cookieyes attr → URL pattern matching.
+ * Priority: data-category attr → data-cookieyes attr → Google tag gateway → URL pattern matching.
  * Returns [] if the script is not managed (allow freely).
  */
 function resolveScriptCategories(url, el) {
@@ -1810,6 +1920,7 @@ function resolveScriptCategories(url, el) {
       if (m) return m[1].split(',').map(function(c) { return c.trim().toLowerCase(); });
     }
   }
+  if (cbIsGoogleTagGatewayLoader(url, el)) return ['analytics'];
   var providers = (window.siteConfig && window.siteConfig.scriptBlockProviders) || window.SCRIPT_BLOCK_PROVIDERS || [];
   var matchTarget = '';
   if (url && typeof url === 'string') matchTarget += url + ' ';
@@ -1866,19 +1977,19 @@ function isCategoryAllowed(category) {
     }
   } catch(e) {}
 
-  // 3. Fallback: scan localStorage for consentbit_* keys (cdn.js flat-categories format)
+  // 3. The same IAB record, read straight from localStorage. Tcfmanager.js loads
+  //    after two network fetches, so on every page load the head's scripts are
+  //    judged before it exists — this is what those early decisions now read.
+  //
+  //    It replaces a fallback that scanned consentbit_* keys, i.e. the STANDARD
+  //    banner's saved choice. A visitor who had accepted the standard banner before
+  //    a site switched to IAB kept loading trackers on every reload even after
+  //    rejecting in IAB (and while the IAB banner was still asking them). Consent
+  //    given to a different banner is not a TCF decision, so it no longer counts.
   if (!prefs) {
     try {
-      for (var lsi = 0; lsi < localStorage.length; lsi++) {
-        var lsKey = localStorage.key(lsi);
-        if (lsKey && lsKey.indexOf('consentbit_') === 0) {
-          var lsRaw = localStorage.getItem(lsKey);
-          if (lsRaw) {
-            var lsData = JSON.parse(lsRaw);
-            if (lsData && lsData.accepted) { prefs = lsData; break; }
-          }
-        }
-      }
+      var iabRaw = localStorage.getItem('cookieConsentPrefs');
+      if (iabRaw) prefs = JSON.parse(iabRaw);
     } catch(e) {}
   }
 
@@ -1905,6 +2016,64 @@ function isCategoryAllowed(category) {
   }
 
   return false;
+}
+
+/**
+ * Cookie cleanup. Blocking a script only stops future writes, so cookies a tracker set
+ * before the decision (or before this script ran - Webflow's built-in GA executes first
+ * on cached repeat views) must be removed. Names match the standard runtime's list.
+ * Only analytics + marketing: IAB's "preferences" has no cookieCategories key
+ * (Tcfmanager acceptAll stores none), so it reads as denied even after Accept.
+ */
+var CB_IAB_COOKIE_PATTERNS = {
+  analytics: ["_ga", "_ga_*", "_gid", "_gat", "_gat_*", "_gac_*", "_hjid", "_hjSessionUser_*", "_hjSession_*", "_hjAbsoluteSessionInProgress", "_clck", "_clsk"],
+  marketing: ["_fbp", "_fbc", "_gcl_au", "_gcl_ls", "_gcl_aw", "_ttp", "tt_webid_v2", "_pin_unauth", "_pinterest_ct_ua", "li_sugr", "bcookie", "bscookie", "lidc", "_uetsid", "_uetvid", "IDE", "test_cookie", "fr", "_reb2b*", "_gd_visitor", "_gd_session", "_gd_svisitor", "_an_uid"]
+};
+
+function cbIabDeleteCookie(name) {
+  var host = window.location.hostname;
+  var bareHost = host.indexOf("www.") === 0 ? host.slice(4) : host;
+  var domains = [null, host, "." + host, bareHost, "." + bareHost, "www." + bareHost, ".www." + bareHost];
+  var paths = ["/", window.location.pathname];
+  for (var d = 0; d < domains.length; d++) {
+    for (var p = 0; p < paths.length; p++) {
+      var value = name + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=" + paths[p];
+      if (domains[d]) value += "; domain=" + domains[d];
+      try { document.cookie = value; } catch (e) {}
+    }
+  }
+}
+
+function cbIabCookieNames(pattern) {
+  var star = pattern.indexOf("*");
+  var prefix = star >= 0 ? pattern.slice(0, star) : null;
+  var names = document.cookie.split(";").map(function (c) { return c.trim().split("=")[0]; });
+  return prefix
+    ? names.filter(function (n) { return n.indexOf(prefix) === 0; })
+    : (names.indexOf(pattern) >= 0 ? [pattern] : []);
+}
+
+function cbIabDeleteCookiesFor(deniedCategories) {
+  for (var i = 0; i < deniedCategories.length; i++) {
+    var patterns = CB_IAB_COOKIE_PATTERNS[deniedCategories[i]] || [];
+    for (var p = 0; p < patterns.length; p++) {
+      var names = cbIabCookieNames(patterns[p]);
+      for (var n = 0; n < names.length; n++) cbIabDeleteCookie(names[n]);
+    }
+  }
+  // Plus cookies the site owner declared in the dashboard.
+  var rules = ((window.__CONSENT_SITE__ || {}).customCookieRules) || [];
+  for (var r = 0; r < rules.length; r++) {
+    if (rules[r] && rules[r].name && deniedCategories.indexOf(rules[r].category) >= 0) cbIabDeleteCookie(rules[r].name);
+  }
+}
+
+/** Categories the visitor's CURRENT choice denies (no choice yet = denied, TCF is opt-in). */
+function cbIabDeniedCategories() {
+  var denied = [];
+  if (!isCategoryAllowed('analytics')) denied.push('analytics');
+  if (!isCategoryAllowed('marketing')) denied.push('marketing');
+  return denied;
 }
 
 /**
@@ -1972,6 +2141,18 @@ function shouldBlockScript(url, el) {
 function patchDynamicScriptElement(el) {
   if (!el || el.__cbPatched) return;
   el.__cbPatched = true;
+  // setAttribute('src', …) skips the property setter below. By the time the
+  // MutationObserver sees the inserted node the fetch has already started, and a
+  // script that has started loading cannot be stopped — so catch it here too.
+  var nativeSetAttribute = el.setAttribute;
+  el.setAttribute = function(name, value) {
+    if (String(name).toLowerCase() === 'src' && shouldBlockScript(String(value), el)) {
+      nativeSetAttribute.call(el, 'data-cb-blocked-src', value);
+      nativeSetAttribute.call(el, 'type', 'javascript/blocked');
+      return;
+    }
+    return nativeSetAttribute.call(el, name, value);
+  };
   var proto = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
   if (!proto) return;
   Object.defineProperty(el, 'src', {
@@ -3445,8 +3626,10 @@ function cbRecordIabConsent(status, categories) {
 async function rejectAll() {
   // console.log('[ConsentBit][RejectAll] 🚫 User rejected all — blocking all non-essential scripts');
   if (!window.tcfManager) { return; }
+  window.__cbIabDecided = true;
   await window.tcfManager.rejectAll();
   window.__cbConsentState = { allDenied: true };
+  try { cbIabDeleteCookiesFor(['analytics', 'marketing']); } catch (e) {}
   // console.log('[ConsentBit][RejectAll] __cbConsentState set:', window.__cbConsentState);
   cbRecordIabConsent('rejected', { essential: true, analytics: false, marketing: false, preferences: false });
   blockNonEssentialScripts();
@@ -3525,6 +3708,7 @@ async function savePreferences() {
     });
  
     // Save through TCF Manager
+    window.__cbIabDecided = true;
     await window.tcfManager.saveConsent(preferences);
 
     // Set in-memory state so isCategoryAllowed reads it immediately
@@ -3538,6 +3722,8 @@ async function savePreferences() {
     };
     // console.log('[ConsentBit][SavePrefs] 💾 Preferences saved — __cbConsentState:', JSON.stringify(window.__cbConsentState));
     // console.log('[ConsentBit][SavePrefs] cookieCategories:', JSON.stringify(preferences.cookieCategories));
+
+    try { cbIabDeleteCookiesFor(cbIabDeniedCategories()); } catch (e) {}
 
     cbRecordIabConsent('partial', {
       essential: true,
@@ -3556,6 +3742,7 @@ async function savePreferences() {
 async function acceptAll() {
   // console.log('[ConsentBit][AcceptAll] ✅ User accepted all — releasing all blocked scripts');
   if (!window.tcfManager) {  return; }
+  window.__cbIabDecided = true;
   await window.tcfManager.acceptAll();
   window.__cbConsentState = { allGranted: true };
   // console.log('[ConsentBit][AcceptAll] __cbConsentState set:', window.__cbConsentState);
@@ -4331,6 +4518,34 @@ function rebuildPurposeAccordionsFromGvl() {
   }
 })();
 
+// Tcfmanager.js refreshTranslatedUI() calls these through window[name] on a
+// language change, so they have to stay reachable from outside the closure.
+// (refreshAtpLanguage already assigns itself to window above.)
+window.applyStaticStrings = applyStaticStrings;
+window.rebuildPurposeAccordionsFromGvl = rebuildPurposeAccordionsFromGvl;
+window.initCookieAccordions = initCookieAccordions;
+window.initGroupToggles = initGroupToggles;
+window.loadExistingPreferences = loadExistingPreferences;
+window.updateDynamicCounts = updateDynamicCounts;
+window.loadVendors = loadVendors;
+
+// Returning or undecided visitor: clear cookies their current choice denies. Some
+// trackers write before this script can act (Webflow's built-in GA runs first on cached
+// repeat views). Consent Mode is denied by now, so Google tags will not rewrite them.
+try {
+  var cbBootDenied = cbIabDeniedCategories();
+  if (cbBootDenied.length) {
+    cbIabDeleteCookiesFor(cbBootDenied);
+    setTimeout(function () {
+      try {
+        if (window.__cbIabDecided) return;
+        var cbLaterDenied = cbIabDeniedCategories();
+        if (cbLaterDenied.length) cbIabDeleteCookiesFor(cbLaterDenied);
+      } catch (e) {}
+    }, 2500);
+  }
+} catch (e) {}
+
 // ✅ Handle both cases
 if (document.readyState === "loading") {
     // console.log('[ConsentBit] 🔄 DOM loading — waiting for DOMContentLoaded');
@@ -4339,5 +4554,6 @@ if (document.readyState === "loading") {
     // console.log('[ConsentBit] ⚡ DOM already loaded — running initAll immediately');
     initAll();
 }
+})();
 `;
 }

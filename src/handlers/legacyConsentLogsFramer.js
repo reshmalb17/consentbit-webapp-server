@@ -27,17 +27,8 @@ async function getFramerConsentRows(kv, platformSiteId) {
   const key = `consent:${platformSiteId}`;
   try {
     const raw = await kv.get(key);
-    console.log('[legacyConsentLogsFramer] KV lookup', { key, rawPresent: !!raw, rawLength: raw?.length || 0 });
-    if (!raw) {
-      // Diagnostic: list nearby keys so we can see what *is* stored
-      try {
-        const listed = await kv.list({ prefix: 'consent:', limit: 10 });
-        console.log('[legacyConsentLogsFramer] no value at exact key. Sample keys with prefix consent:', listed.keys.map((k) => k.name));
-      } catch (e) { /* ignore */ }
-      return [];
-    }
+    if (!raw) return [];
     const parsed = JSON.parse(raw);
-    console.log('[legacyConsentLogsFramer] parsed value', { isArray: Array.isArray(parsed), count: Array.isArray(parsed) ? parsed.length : 'not-array', sample: Array.isArray(parsed) ? parsed[0] : parsed });
     if (!Array.isArray(parsed)) return [];
     return parsed.map((entry) => ({
       ...entry,
@@ -94,7 +85,6 @@ export async function handleLegacyConsentLogsFramer(request, env) {
     );
   }
 
-  console.log('[legacyConsentLogsFramer] site row', { id: site.id, domain: site.domain, platformSiteId: site.platformSiteId ?? site.platformsiteid });
   const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
   if (!platformSiteId) {
     return Response.json({ success: false, error: 'Site is missing platformSiteId' }, { status: 400 });
@@ -111,7 +101,6 @@ export async function handleLegacyConsentLogsFramer(request, env) {
   const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
   let entries = await getFramerConsentRows(kv, platformSiteId);
-  console.log('[legacyConsentLogsFramer] entries fetched', { count: entries.length, filterYear: year, filterMonth: month });
 
   if (year && month) {
     const paddedMonth = month.padStart(2, '0');
@@ -128,7 +117,6 @@ export async function handleLegacyConsentLogsFramer(request, env) {
 
   const total = consents.length;
   const page = consents.slice(offset, offset + limit);
-  console.log('[legacyConsentLogsFramer] returning', { total, returned: page.length, limit, offset });
 
   return Response.json({
     success: true,

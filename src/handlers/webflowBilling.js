@@ -194,7 +194,6 @@ export async function handleWebflowBilling(request, env) {
           invoicePdf: inv.invoice_pdf || null,
         }));
 
-      console.log(`${TAG} invoices site=${site.id} kept=${invoices.length} ofTotal=${(data.data || []).length}`);
     } catch (e) {
       console.warn(`${TAG} invoice fetch failed`, e?.message);
     }
@@ -343,7 +342,6 @@ export async function handleWebflowCancelSubscription(request, env) {
       } catch (e) {
         console.warn(`${TAG} D1 reconcile failed (non-fatal)`, e?.message);
       }
-      console.log(`${TAG} already canceled on Stripe — reconciled DB to canceled`, stripeSubscriptionId);
       return Response.json({ success: true, alreadyCanceled: true, cancelAtPeriodEnd: true });
     }
     console.error(`${TAG} Stripe cancel error`, data.error?.message);

@@ -30,7 +30,6 @@ export async function handleAdminBackfillConsentR2(request, env) {
   const limit = Math.min(parseInt(body.limit || '200', 10), 1000);
   const offset = parseInt(body.offset || '0', 10);
 
-  console.log('[BackfillConsentR2] start —', { filterSiteId, limit, offset });
 
   // Fetch D1 Consent rows (with their site domain)
   const { results: rows } = filterSiteId
@@ -56,7 +55,6 @@ export async function handleAdminBackfillConsentR2(request, env) {
     .catch(() => ({ results: [] }));
 
   const records = rows || [];
-  console.log('[BackfillConsentR2] D1 rows fetched:', records.length);
 
   let written = 0;
   let skipped = 0;
@@ -123,7 +121,6 @@ export async function handleAdminBackfillConsentR2(request, env) {
   const hasMore = records.length === limit;
   const nextOffset = offset + records.length;
 
-  console.log('[BackfillConsentR2] done —', { written, skipped, errors, hasMore, nextOffset });
 
   return Response.json({
     success: true,

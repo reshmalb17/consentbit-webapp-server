@@ -101,7 +101,6 @@ export async function handleAuthVerifyCode(request, env, ctx) {
   const code = String(body?.code || '').trim();
   // Optional cookie-scan id handed off from the scanner landing page (sent in the body).
   const scanId = (body?.scanId || '').trim();
-  console.log('[AuthVerifyCode] purpose:', purpose, '| scanId received:', scanId || '(none)');
   if (!isValidEmail(email)) {
     return Response.json({ success: false, error: 'Valid email is required' }, { status: 400 });
   }

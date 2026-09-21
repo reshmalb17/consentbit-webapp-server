@@ -27,6 +27,7 @@ import {
   createSite,
   saveSubscription,
   getSiteTrialUsed,
+  isSiteTrialIneligible,
   markTrialUsed,
   generateUniqueLicenseKey,
   canonicalEmbedOrigin,
@@ -37,6 +38,9 @@ import {
   getSessionById,
   getUserById,
 } from '../services/db.js';
+import { periodStartOf, periodEndOf } from '../utils/stripePeriod.js';
+import { setCustomerDefaultCard } from '../services/stripeCardPin.js';
+import { flowLog } from '../utils/flowLog.js';
 import {
   isRestrictedCode,
   isCodeAllowedForEmail,
@@ -44,6 +48,7 @@ import {
 } from '../services/promoRestrictions.js';
 import { injectScriptIntoWebflowHead } from './webflowFreeRegister.js';
 import { sendPaidPlanEmail } from '../services/email.js';
+import { copyEmailToAdmins } from '../services/team.js';
 import { addCustomerToClickUp, wasClickUpTaskCreated, markClickUpTaskCreated } from '../services/clickup.js';
 
 const VALID_PLAN_IDS = ['basic', 'essential', 'growth'];
@@ -209,7 +214,6 @@ async function cancelOldStripeSubscription(secret, oldSubId, newSubId, db) {
     if (data?.error && data.error.code !== 'resource_missing') {
       console.warn('[CustomCheckout] upgrade: Stripe cancel of old sub failed', data.error?.message);
     } else {
-      console.log('[CustomCheckout] upgrade: cancelled old subscription', oldSubId);
     }
     // Keep the old plan's D1 row (marked cancelled) instead of DELETING it, so its billing
     // history stays tracked to the site — otherwise the pre-upgrade plan's invoices vanish
@@ -414,7 +418,6 @@ async function persistPaidStatusToKv(env, { platform, platformSiteId, site, user
       : newFields;
 
     await kv.put(platformSiteId, JSON.stringify(merged));
-    console.log('[CustomCheckout] paid-status KV updated', { platform: p || 'webflow', platformSiteId, plan: planId || null, mergedWithExisting: !!existing });
   } catch (e) {
     console.error('[CustomCheckout] persistPaidStatusToKv failed', e?.message);
   }
@@ -465,7 +468,6 @@ async function persistPaidStatusToKv(env, { platform, platformSiteId, site, user
 // }
 
 async function postCheckoutWebflowInject(env, { wfSiteId, site, request, user, billingEmail, planId }) {
-  console.log('[CustomCheckout] postCheckoutWebflowInject start', { wfSiteId, siteId: site?.id, cdnScriptId: site?.cdnScriptId });
   if (!wfSiteId || !env.WEBFLOW_AUTHENTICATION) {
     console.warn('[CustomCheckout] postCheckoutWebflowInject skipped: missing wfSiteId or WEBFLOW_AUTHENTICATION binding');
     return;
@@ -475,16 +477,13 @@ async function postCheckoutWebflowInject(env, { wfSiteId, site, request, user, b
     if (!kvRaw) { console.warn('[CustomCheckout] no KV entry for wfSiteId=%s — skipping script inject', wfSiteId); return; }
     const kvEntry = JSON.parse(kvRaw);
     const accessToken = kvEntry.accessToken;
-    console.log('[CustomCheckout] postCheckoutWebflowInject KV found', { accessToken: !!accessToken, existingWebappSiteId: kvEntry.webappSiteId });
     if (!accessToken) { console.warn('[CustomCheckout] no accessToken in KV for wfSiteId=%s', wfSiteId); return; }
 
     const embedOrigin = canonicalEmbedOrigin(request, env);
     const scriptUrl = buildEmbedScriptUrl(embedOrigin, site.cdnScriptId)
       || `${new URL(request.url).origin}/consentbit/${site.cdnScriptId}/script.js`;
-    console.log('[CustomCheckout] postCheckoutWebflowInject scriptUrl:', scriptUrl);
 
     const result = await injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, '[CustomCheckout]', kvEntry.webflowScriptId ?? null);
-    console.log('[CustomCheckout] postCheckoutWebflowInject injection result:', { success: result.success, webflowScriptId: result.webflowScriptId });
 
     // Update KV with webapp linkage flags
     const updatedKv = {
@@ -501,7 +500,6 @@ async function postCheckoutWebflowInject(env, { wfSiteId, site, request, user, b
       ...(planId ? { plan: planId } : {}),
     };
     await env.WEBFLOW_AUTHENTICATION.put(wfSiteId, JSON.stringify(updatedKv));
-    console.log('[CustomCheckout] postCheckoutWebflowInject KV updated with webappSiteId:', site.id);
 
     // Publish the Webflow site so the injected script goes live immediately
     if (result.success) {
@@ -529,7 +527,6 @@ async function postCheckoutWebflowInject(env, { wfSiteId, site, request, user, b
           const err = await publishRes.text();
           console.warn('[CustomCheckout] postCheckoutWebflowInject Webflow publish failed status=%s body=%s', publishRes.status, err);
         } else {
-          console.log('[CustomCheckout] postCheckoutWebflowInject Webflow site published wfSiteId=%s', wfSiteId);
         }
       } catch (publishErr) {
         console.warn('[CustomCheckout] postCheckoutWebflowInject Webflow publish error (non-fatal):', publishErr?.message);
@@ -549,7 +546,6 @@ export async function handleCustomCheckout(request, env, ctx) {
   const secret = trimEnv(env.STRIPE_SECRET_KEY);
   const db = env.CONSENT_WEBAPP;
 
-  console.log('[CustomCheckout] Stripe key mode:', secret ? (secret.startsWith('sk_live') ? 'LIVE' : 'TEST') : 'NOT SET');
 
   if (!secret) {
     console.error('[CustomCheckout] STRIPE_SECRET_KEY not set');
@@ -630,7 +626,6 @@ export async function handleCustomCheckout(request, env, ctx) {
 
         if (!isSameAccount) {
           // Different account — block completely, no upgrade allowed
-          console.log('[CustomCheckout] domain pre-check: active under different account', { domain: canonDomain, existingPlan: existingSub?.planId });
           return Response.json({
             success: false,
             code: 'DOMAIN_TAKEN',
@@ -641,7 +636,6 @@ export async function handleCustomCheckout(request, env, ctx) {
 
         // Same account — offer upgrade
         if (!confirmUpgrade) {
-          console.log('[CustomCheckout] domain pre-check: active under same account', { domain: canonDomain, existingPlan: existingSub?.planId, siteId: existingSite.id });
           return Response.json({
             success: false,
             code: 'DOMAIN_EXISTS',
@@ -654,7 +648,6 @@ export async function handleCustomCheckout(request, env, ctx) {
         // confirmUpgrade === true → remember the old subscription so we can cancel
         // it once the new (upgraded) subscription is live — avoids double-billing.
         oldStripeSubscriptionId = existingSub?.stripeSubscriptionId ?? existingSub?.stripesubscriptionid ?? null;
-        console.log('[CustomCheckout] upgrade confirmed — old sub to cancel:', oldStripeSubscriptionId);
       }
     }
   }
@@ -690,8 +683,8 @@ export async function handleCustomCheckout(request, env, ctx) {
         stripeCustomerId: sub.customer,
         stripePriceId: sub.items?.data?.[0]?.price?.id || priceId,
         subscriptionStatus: sub.status,
-        currentPeriodStart: toTimestamp(sub.current_period_start),
-        currentPeriodEnd: toTimestamp(sub.current_period_end),
+        currentPeriodStart: toTimestamp(periodStartOf(sub)),
+        currentPeriodEnd: toTimestamp(periodEndOf(sub)),
         amountCents: sub.items?.data?.[0]?.price?.unit_amount ?? null,
         billingEmail,
         wfSiteId,
@@ -716,8 +709,10 @@ export async function handleCustomCheckout(request, env, ctx) {
         } catch (e) { /* fall back to billingEmail || email */ }
       }
       const _invoiceData = await fetchStripeInvoice(secret, subscriptionId || sub?.id, interval);
-      console.log('[CustomCheckout] sending paid-plan email', { to: _emailTo, source: _emailSource, domain: rawDomain, planId, hasInvoice: !!_invoiceData });
       sendPaidPlanEmail(env, ctx, { to: _emailTo, name: '', domain: rawDomain, planName: planId, invoice: _invoiceData });
+      // Team Admins of this site get the billing notice too.
+      copyEmailToAdmins(db, ctx, { siteId: site?.id, organizationId: _orgId }, [_emailTo, email], (a) =>
+        sendPaidPlanEmail(env, ctx, { to: a.email, name: a.name || '', domain: rawDomain, planName: planId, invoice: _invoiceData }));
       capturePosthog(env, ctx, {
         event: 'subscription_activated',
         distinctId: user.email || email,
@@ -774,15 +769,39 @@ export async function handleCustomCheckout(request, env, ctx) {
     return Response.json({ success: false, error: e.message || 'Failed to set up payment method' }, { status: 400 });
   }
 
+  // Populate the customer's invoice default — findOrCreateStripeCustomer only attaches the
+  // card. It is what Stripe's billing portal shows and edits, and the baseline a future
+  // customer.updated re-pin needs. Best effort; does not touch the subscription pin.
+  await setCustomerDefaultCard(secret, customerId, paymentMethodId);
+
   const subParams = new URLSearchParams();
   subParams.set('customer', customerId);
   subParams.set('items[0][price]', priceId);
   subParams.set('items[0][quantity]', '1');
+  // The checkout pages confirm with confirmCardPayment(clientSecret) and no card argument, so
+  // the card must be on the subscription's payment intent. Note this pin can never be cleared
+  // afterwards — see services/stripeCardPin.js.
   subParams.set('default_payment_method', paymentMethodId);
   subParams.set('payment_behavior', 'default_incomplete');
+  // Must stay 'on_subscription': "Stripe updates subscription.default_payment_method when
+  // payment succeeds". Because the pin cannot be removed, this is what moves it onto a new
+  // card once that card successfully pays an invoice. 'off' would leave renewals charging the
+  // original card forever.
   subParams.set('payment_settings[save_default_payment_method]', 'on_subscription');
   subParams.set('expand[]', 'latest_invoice.payment_intent');
-  subParams.set('trial_period_days', '14');
+  // Previously granted unconditionally — every checkout through this path got a 14-day trial,
+  // including a returning customer renewing a cancelled/deleted subscription on the same
+  // domain. The Site row is not resolved yet at this point, so check by domain: a brand-new
+  // domain has no history and stays eligible; a returning one does not.
+  const trialIneligible = await isSiteTrialIneligible(db, { domain: rawDomain }, env).catch((e) => {
+    // Fail closed toward NO trial — an error here must not hand out free time.
+    console.warn('[CustomCheckout] trial eligibility check failed, withholding trial:', e?.message);
+    return true;
+  });
+  if (!trialIneligible) {
+    subParams.set('trial_period_days', '14');
+  }
+  flowLog(env, 'trial', trialIneligible ? 'withheld' : 'granted', { path: 'custom-checkout', domain: rawDomain, planId, interval });
   // Store context in metadata so the webhook or phase-2 call can reference it
   subParams.set('metadata[source]', 'custom_checkout');
   subParams.set('metadata[email]', email);
@@ -851,8 +870,8 @@ export async function handleCustomCheckout(request, env, ctx) {
         stripeCustomerId: customerId,
         stripePriceId: sub.items?.data?.[0]?.price?.id || priceId,
         subscriptionStatus: subStatus,
-        currentPeriodStart: toTimestamp(sub.current_period_start),
-        currentPeriodEnd: toTimestamp(sub.current_period_end),
+        currentPeriodStart: toTimestamp(periodStartOf(sub)),
+        currentPeriodEnd: toTimestamp(periodEndOf(sub)),
         amountCents: sub.items?.data?.[0]?.price?.unit_amount ?? null,
         billingEmail,
         wfSiteId,
@@ -877,8 +896,10 @@ export async function handleCustomCheckout(request, env, ctx) {
         } catch (e) { /* fall back to billingEmail || email */ }
       }
       const _invoiceData = await fetchStripeInvoice(secret, subscriptionId || sub?.id, interval);
-      console.log('[CustomCheckout] sending paid-plan email', { to: _emailTo, source: _emailSource, domain: rawDomain, planId, hasInvoice: !!_invoiceData });
       sendPaidPlanEmail(env, ctx, { to: _emailTo, name: '', domain: rawDomain, planName: planId, invoice: _invoiceData });
+      // Team Admins of this site get the billing notice too.
+      copyEmailToAdmins(db, ctx, { siteId: site?.id, organizationId: _orgId }, [_emailTo, email], (a) =>
+        sendPaidPlanEmail(env, ctx, { to: a.email, name: a.name || '', domain: rawDomain, planName: planId, invoice: _invoiceData }));
       capturePosthog(env, ctx, {
         event: 'subscription_activated',
         distinctId: user.email || email,
@@ -911,10 +932,23 @@ export async function handleCustomCheckout(request, env, ctx) {
     }
   }
 
-  // 3DS required — return clientSecret for frontend to confirm
+  // Payment needs the browser — return clientSecret for the frontend to confirm.
+  //
+  // `requires_confirmation` is the NORMAL state for an immediate charge here: with
+  // payment_behavior='default_incomplete' Stripe never confirms the PaymentIntent itself,
+  // and because default_payment_method is set the card is already attached, so the PI
+  // waits for confirmation. The checkout pages call confirmCardPayment(clientSecret) with
+  // no card argument (see the note above subParams), which confirms with that card.
+  //
+  // This case was missing because until 2026-09-17 every checkout on this path got a
+  // 14-day trial — `trialing`, nothing to pay — so the immediate-charge branch never ran.
+  // Withholding the trial from returning sites (isSiteTrialIneligible) made it run for
+  // the first time, and every returning customer then got a 400 "Unexpected subscription
+  // status: incomplete" and could not pay. Logged 2026-09-18.
   if (
     paymentIntent?.status === 'requires_action' ||
-    paymentIntent?.status === 'requires_payment_method'
+    paymentIntent?.status === 'requires_payment_method' ||
+    paymentIntent?.status === 'requires_confirmation'
   ) {
     return Response.json({
       success: true,
@@ -935,26 +969,13 @@ export async function handleCustomCheckout(request, env, ctx) {
  * advisory only — checkout re-checks against the account that actually pays.
  */
 async function resolveCallerEmail(request, env) {
-  // Debug: identity resolution is the usual failure point for restricted codes.
-  // Cookie NAMES only — never log the sid value.
   const cookie = request.headers.get('Cookie') || '';
-  const cookieNames = cookie ? cookie.split(';').map((c) => c.split('=')[0].trim()).filter(Boolean) : [];
   const m = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
-  console.log('[ValidateCoupon] identity debug', {
-    origin: request.headers.get('Origin') || null,
-    referer: request.headers.get('Referer') || null,
-    hasCookieHeader: cookie.length > 0,
-    cookieNames,
-    hasSid: !!m,
-    emailHint: (new URL(request.url).searchParams.get('email') || '') ? 'present' : 'absent',
-  });
   try {
     if (m && env.CONSENT_WEBAPP) {
       const session = await getSessionById(env.CONSENT_WEBAPP, m[1].trim());
-      console.log('[ValidateCoupon] session lookup', { sessionFound: !!session, userId: session ? (session.userId ?? session.user_id ?? null) : null });
       if (session) {
         const user = await getUserById(env.CONSENT_WEBAPP, session.userId ?? session.user_id);
-        console.log('[ValidateCoupon] user lookup', { userFound: !!user, email: user?.email ?? null });
         if (user?.email) return String(user.email).trim().toLowerCase();
       }
     }
@@ -972,14 +993,12 @@ async function resolveCallerEmail(request, env) {
 // frontend can show "Coupon X — −20%" and re-send the promotionCodeId on
 // checkout. Server-side re-validates the code before applying.
 export async function handleValidateCoupon(request, env) {
-  console.log('[ValidateCoupon] request received', { method: request.method, url: request.url });
 
   const secret = trimEnv(env.STRIPE_SECRET_KEY);
   if (!secret) {
     console.error('[ValidateCoupon] STRIPE_SECRET_KEY not set on worker — cannot validate');
     return Response.json({ valid: false, error: 'Stripe not configured' }, { status: 503 });
   }
-  console.log('[ValidateCoupon] stripe key present', { keyPrefix: secret.slice(0, 7) });
 
   const url = new URL(request.url);
   const code = (url.searchParams.get('code') || '').trim();
@@ -987,7 +1006,6 @@ export async function handleValidateCoupon(request, env) {
     console.warn('[ValidateCoupon] no code provided');
     return Response.json({ valid: false, error: 'code required' }, { status: 400 });
   }
-  console.log('[ValidateCoupon] looking up code', { code });
 
   let promo = null;
   try {
@@ -1003,7 +1021,6 @@ export async function handleValidateCoupon(request, env) {
       { headers: { Authorization: `Bearer ${secret}` } },
     );
     const data = await res.json();
-    console.log('[ValidateCoupon] stripe responded', { httpStatus: res.status, matches: data?.data?.length ?? 0 });
     if (data?.error) {
       console.warn('[ValidateCoupon] Stripe list error', data.error?.message);
       return Response.json({ valid: false, error: data.error.message || 'Coupon lookup failed' }, { status: 400 });
@@ -1015,7 +1032,6 @@ export async function handleValidateCoupon(request, env) {
   }
 
   if (!promo || !promo.active) {
-    console.log('[ValidateCoupon] no active promo found', { found: !!promo, active: promo?.active ?? false });
     return Response.json({ valid: false, error: 'Invalid or expired code' }, { status: 200 });
   }
 
@@ -1030,12 +1046,6 @@ export async function handleValidateCoupon(request, env) {
   }
 
   const c = promo.coupon || {};
-  console.log('[ValidateCoupon] valid promo', {
-    promotionCodeId: promo.id,
-    couponId: c.id || null,
-    percentOff: c.percent_off ?? null,
-    amountOff: c.amount_off ?? null,
-  });
   return Response.json({
     valid: true,
     promotionCodeId: promo.id,           // promo_xxx — send back on checkout

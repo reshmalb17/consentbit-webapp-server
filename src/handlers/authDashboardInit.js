@@ -11,6 +11,7 @@ import {
   buildEmbedScriptUrl,
   canonicalEmbedOrigin,
 } from '../services/db.js';
+import { listMemberSiteGrants, hasPendingInviteForEmail } from '../services/team.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -70,11 +71,24 @@ export async function handleAuthDashboardInit(request, env) {
   let orgs = orgsInitial;
   let organizationId = orgs?.[0]?.id ?? orgs?.[0]?.organizationId ?? null;
 
+  // Sites reached as a team member of someone else's account (services/team.js).
+  const teamGrants = await listMemberSiteGrants(db, user.id);
+
   if (!orgs || orgs.length === 0) {
-    const orgName = user.name ? `${user.name}'s Organization` : 'My Organization';
-    const org = await getOrCreateOrganizationForUser(db, { userId: user.id, organizationName: orgName });
-    orgs = [org];
-    organizationId = org?.id ?? null;
+    // Someone who only joined another account's team (or is about to accept an
+    // invite) should not be handed an empty organization of their own — they would
+    // show up as "Account Owner" of nothing. Onboarding still creates one if they
+    // add a site themselves.
+    const teamOnly = teamGrants.length > 0 || (await hasPendingInviteForEmail(db, user.email));
+    if (teamOnly) {
+      orgs = [];
+      organizationId = null;
+    } else {
+      const orgName = user.name ? `${user.name}'s Organization` : 'My Organization';
+      const org = await getOrCreateOrganizationForUser(db, { userId: user.id, organizationName: orgName });
+      orgs = [org];
+      organizationId = org?.id ?? null;
+    }
   }
 
   // Fetch sites for ALL orgs the user belongs to (guards against multi-org edge cases)
@@ -82,7 +96,12 @@ export async function handleAuthDashboardInit(request, env) {
   if (organizationId && !allOrgIds.includes(organizationId)) allOrgIds.unshift(organizationId);
 
   const embedOrigin = canonicalEmbedOrigin(request, env);
-  const [sitesNested, { planId: effectivePlanId }] = await Promise.all([
+  // `subscription` is destructured alongside planId because getEffectivePlanForOrganization
+  // falls back to ANY subscription for the org when none is active — so a lapsed org still
+  // reports planId 'basic' from its cancelled subscription. Without the status, the webapp's
+  // org-level fallback makes a dead account look paid and routes it into the in-place tier
+  // change, which cannot work against a terminal Stripe subscription.
+  const [sitesNested, { planId: effectivePlanId, subscription: effectivePlanSub }] = await Promise.all([
     Promise.all(allOrgIds.map(oid => listSites(db, { organizationId: oid }))),
     getEffectivePlanForOrganization(db, organizationId, env),
   ]);
@@ -94,6 +113,31 @@ export async function handleAuthDashboardInit(request, env) {
     seenIds.add(id);
     return true;
   });
+
+  // Owner access wins when a site is reachable both ways.
+  const teamRoleBySite = {};
+  for (const s of sites) teamRoleBySite[String(s.id)] = 'owner';
+  const memberSiteIds = [...new Set(teamGrants.map(g => String(g.siteId)))].filter(id => !seenIds.has(id));
+  if (memberSiteIds.length > 0) {
+    try {
+      const ph = memberSiteIds.map((_, i) => `?${i + 1}`).join(',');
+      const { results: memberSites } = await db
+        .prepare(`SELECT * FROM Site WHERE id IN (${ph}) ORDER BY createdAt DESC`)
+        .bind(...memberSiteIds)
+        .all();
+      for (const s of memberSites || []) {
+        if (!s?.id || seenIds.has(s.id)) continue;
+        seenIds.add(s.id);
+        sites.push(s);
+      }
+    } catch (e) {
+      console.warn('[DashboardInit] team site load failed:', e?.message);
+    }
+  }
+  for (const g of teamGrants) {
+    const id = String(g.siteId);
+    if (!teamRoleBySite[id]) teamRoleBySite[id] = g.role;
+  }
 
   // Batch-fetch all subscriptions in a single D1 query (eliminates N+1)
   const siteIds = (sites || []).map(s => s?.id ?? s?.siteId ?? s?.site_id).filter(Boolean);
@@ -177,6 +221,12 @@ export async function handleAuthDashboardInit(request, env) {
     // planId ('basic'/'essential'/'growth') takes precedence over planType ('tier'/'single') —
     // tier subscriptions store the tier name in planId, not planType.
     const sitePlanId = (sub?.planId ?? sub?.planid ?? sub?.planType ?? sub?.plantype ?? null)?.toLowerCase() ?? null;
+    // Subscription status per site. Added so the webapp can tell a LAPSED account
+    // (site exists, subscription terminal) apart from a FREE one — without it the
+    // upgrade page reads the stale planId, routes into the in-place tier change and
+    // fails against a cancelled Stripe subscription. Additive: planId is unchanged,
+    // so every existing consumer behaves exactly as before.
+    const siteSubStatus = (sub?.status ?? sub?.Status ?? null)?.toLowerCase() ?? null;
 
     const stats = cookieStatsMap[siteId] ?? {};
     const pageStats = pageStatsMap[siteId] ?? pageStatsMap[String(siteId)] ?? {};
@@ -186,6 +236,8 @@ export async function handleAuthDashboardInit(request, env) {
       licenseKey: sub?.licenseKey ?? sub?.licensekey ?? null,
       planId: sitePlanId,
       plan_id: sitePlanId,
+      subscriptionStatus: siteSubStatus,
+      subscription_status: siteSubStatus,
       subscriptionId: sub?.id ?? null,
       stripeSubscriptionId: sub?.stripeSubscriptionId ?? sub?.stripesubscriptionid ?? null,
       subscriptionCurrentPeriodEnd: sub?.currentPeriodEnd ?? sub?.currentperiodend ?? null,
@@ -194,12 +246,14 @@ export async function handleAuthDashboardInit(request, env) {
       cookieCount: stats.cookieCount ?? 0,
       cookieCategories: stats.cookieCategories ?? 0,
       pagesScanned: pageStats.pagesScanned ?? 0,
+      // 'owner' | 'admin' | 'member' — the dashboard hides billing/plan actions for members.
+      teamRole: teamRoleBySite[siteId] ?? 'owner',
     };
   });
 
   // Fetch subscriptions with a licenseKey but no site assigned yet (unactivated keys)
   let unassignedRows = [];
-  try {
+  if (allOrgIds.length > 0) try {
     const placeholders = allOrgIds.map((_, i) => `?${i + 1}`).join(',');
     const { results: unassignedSubs } = await db
       .prepare(
@@ -239,6 +293,16 @@ export async function handleAuthDashboardInit(request, env) {
     });
   } catch (_) { /* non-critical — table may not have these columns yet */ }
 
+  // One entry per account the user is a team member of (for the Team tab + labels).
+  const teamMemberships = [];
+  const seenTeamOrgs = new Set();
+  for (const g of teamGrants) {
+    const key = `${g.organizationId}:${g.role}`;
+    if (seenTeamOrgs.has(key)) continue;
+    seenTeamOrgs.add(key);
+    teamMemberships.push({ organizationId: g.organizationId, role: g.role });
+  }
+
   return Response.json({
     authenticated: true,
     success: true,
@@ -246,5 +310,8 @@ export async function handleAuthDashboardInit(request, env) {
     organizations: orgs,
     sites: [...sitesWithPlan, ...unassignedRows],
     effectivePlanId: effectivePlanId ?? null,
+    effectivePlanStatus:
+      (effectivePlanSub?.status ?? effectivePlanSub?.Status ?? null)?.toLowerCase() ?? null,
+    teamMemberships,
   }, { status: 200 });
 }

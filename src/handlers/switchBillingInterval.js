@@ -13,6 +13,9 @@ import {
   getOrganizationMember,
 } from '../services/db.js';
 import { syncSubscriptionUpdateToLegacy } from '../services/syncLegacy.js';
+import { isTerminalSubscriptionStatus, TERMINAL_SUBSCRIPTION_MESSAGE } from '../utils/subscriptionStatus.js';
+import { flowLog } from '../utils/flowLog.js';
+import { resolveBillingActor } from '../services/team.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -72,14 +75,23 @@ async function prepareSwitch(request, env) {
   if (!targetInterval) return { error: fail('targetInterval must be monthly or yearly', 400) };
 
   const member = await getOrganizationMember(db, userId, organizationId);
-  if (!member) return { error: fail('Not allowed for this organization', 403) };
+  // A team Admin may switch the interval of a site they were granted, and only that
+  // site (the org-wide fallback below is owner-only).
+  let isAdminActor = false;
+  if (!member) {
+    const actor = siteId ? await resolveBillingActor(db, userId, organizationId, siteId) : null;
+    if (!actor?.admin) return { error: fail('Not allowed for this organization', 403) };
+    isAdminActor = true;
+  }
 
   // Load the current subscription for THIS site. An org can hold several subscriptions
   // (one per paid site), so falling back to the org-wide lookup would pick the most
   // recently updated one — e.g. a Growth sub — and preview/switch the wrong plan. Prefer
   // the per-site subscription; only fall back to org when no siteId was supplied. Mirrors changeTier.js.
-  const sub = (siteId ? await getSubscriptionBySiteId(db, siteId) : null)
-    || await getSubscriptionByOrganization(db, organizationId);
+  const sub = isAdminActor
+    ? await getSubscriptionBySiteId(db, siteId)
+    : (siteId ? await getSubscriptionBySiteId(db, siteId) : null)
+      || await getSubscriptionByOrganization(db, organizationId);
   if (!sub) return { error: fail('No active subscription found', 404) };
 
   const stripeSubId = sub.stripeSubscriptionId ?? sub.stripesubscriptionid;
@@ -114,6 +126,14 @@ async function prepareSwitch(request, env) {
     return { error: fail(stripeSub.error.message || 'Failed to read subscription', 400) };
   }
 
+  // Guard: switching monthly/yearly on a terminal subscription cannot work — Stripe rejects
+  // any change to it. Return a clear 409 instead of Stripe's raw error.
+  if (isTerminalSubscriptionStatus(stripeSub.status)) {
+    console.warn('[SwitchInterval] blocked — subscription is terminal', { stripeSubId, status: stripeSub.status });
+    flowLog(env, 'guard', 'switch-interval-blocked', { stripeSubId, status: stripeSub.status });
+    return { error: fail(TERMINAL_SUBSCRIPTION_MESSAGE, 409) };
+  }
+
   const subItemId = stripeSub.items?.data?.[0]?.id;
   if (!subItemId) return { error: fail('Could not read subscription item ID', 500) };
 
@@ -135,7 +155,6 @@ async function prepareSwitch(request, env) {
 // POST /api/subscriptions/switch-interval/preview
 // Returns the prorated balance that would be charged now (or trial info) — does NOT change anything.
 export async function handleSwitchIntervalPreview(request, env) {
-  console.log('[SwitchInterval] POST /preview called');
   const prep = await prepareSwitch(request, env);
   if (prep.error) return prep.error;
   const { stripeSubId, subItemId, newPriceId, targetInterval, currentInterval, isTrialing, trialEndISO } = prep.ctx;
@@ -205,11 +224,10 @@ export async function handleSwitchIntervalPreview(request, env) {
 
 // POST /api/subscriptions/switch-interval — commit the switch.
 export async function handleSwitchBillingInterval(request, env) {
-  console.log('[SwitchInterval] POST /api/subscriptions/switch-interval called');
   const prep = await prepareSwitch(request, env);
   if (prep.error) return prep.error;
   const {
-    db, user, organizationId, targetInterval, currentInterval,
+    db, user, targetInterval,
     sub, stripeSubId, subItemId, newPriceId, isTrialing,
   } = prep.ctx;
 
@@ -280,7 +298,6 @@ export async function handleSwitchBillingInterval(request, env) {
     console.warn('[SwitchInterval] Legacy sync failed (non-critical):', syncErr?.message);
   }
 
-  console.log('[SwitchInterval] switched from', currentInterval, '→', targetInterval, 'for org:', organizationId);
   return Response.json({
     success: true,
     interval: targetInterval,

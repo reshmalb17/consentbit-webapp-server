@@ -180,7 +180,6 @@ export async function requireWebflowIdentity(request, env, opts = {}) {
     return { ok: false, status: 403, code: 'SITE_FORBIDDEN', error: 'Not authorized for this resource.' };
   }
 
-  console.log(`${TAG} ✓ authorized — webflowSite=${webflowSiteId} target=${target} user=${resolved.email || resolved.id || '?'}`);
   return {
     ok: true,
     identity: {

@@ -27,6 +27,7 @@ import {
 import { capturePostHogEvent as _phCapture, identifyPostHogPerson as _phIdentify, identifyPostHogSite as _phSite } from '../services/posthog.js';
 import { captureGa4Event as _ga4Capture } from '../services/ga4.js';
 import { sendWelcomeEmail, sendPaidPlanEmail, sendPaymentFailureEmail } from '../services/email.js';
+import { copyEmailToAdmins, grantAdminNewSite } from '../services/team.js';
 import {
   syncPurchaseToLegacy,
   syncSubscriptionUpdateToLegacy,
@@ -34,6 +35,11 @@ import {
 } from '../services/syncLegacy.js';
 import { addCustomerToClickUp, wasClickUpTaskCreated, markClickUpTaskCreated } from '../services/clickup.js';
 import { createAdminNotification } from '../services/adminNotifications.js';
+import { periodStartOf, periodEndOf } from '../utils/stripePeriod.js';
+import { voidOpenInvoicesForCancelledSubscription } from '../services/cancelledInvoiceVoid.js';
+import { syncCustomerDefaultFromSubscription } from '../services/stripeCardPin.js';
+import { followCustomerDefaultCard, repinAfterCardDetached } from '../services/cardPinFollow.js';
+import { flowLog } from '../utils/flowLog.js';
 import {
   classifyTransition,
   recordPlanTransition,
@@ -472,10 +478,6 @@ async function processRefund(env, db, ctx, { charge, refund, eventId, eventType 
     row, customerId, stripeSubscriptionId, organizationId, siteId, domain, platform, userEmail,
   } = ctxRef;
 
-  console.log('[StripeWebhook] refund —', eventType,
-    '| chargeId:', chargeId, '| refundId:', refundId,
-    '| refunded:', refundedAmount, 'of', chargeAmount,
-    '| full:', isFull, '| subId:', stripeSubscriptionId, '| site:', domain || siteId);
 
   // --- Cancel, on a full refund only -------------------------------------
   //
@@ -640,7 +642,6 @@ export async function handleStripeWebhook(request, env, ctx) {
   await ensureSchema(db);
   const eventId = event.id;
   const type = event.type;
-  console.log('[StripeWebhook] event received — type:', type, '| eventId:', eventId);
 
   try {
     // payment_intent.succeeded: bulk one-time payment — create license keys and add to queue (cron creates subscriptions, 4 at a time)
@@ -722,7 +723,26 @@ export async function handleStripeWebhook(request, env, ctx) {
       const session = event.data.object;
       const subId = session.subscription;
       const sessionMeta = session.metadata || {};
-      console.log('[WEBHOOK] checkout.session.completed — sessionId:', session.id, '| subId:', subId, '| sessionMeta:', JSON.stringify(sessionMeta));
+
+      // Hosted Checkout puts the collected card on the subscription, never on the customer, so
+      // the customer's invoice default stays empty. Copy the card across: it is what Stripe's
+      // billing portal shows and edits, and the baseline a future customer.updated re-pin needs.
+      // The subscription's own pin is left untouched — Stripe does not allow clearing it.
+      //
+      // Scheduled before the bulk and single-site branches split, so both are covered. Only
+      // once payment has gone through ('paid', or 'no_payment_required' for a trial with the
+      // card set up). Background, never throws. See services/stripeCardPin.js.
+      if (
+        subId &&
+        session.mode === 'subscription' &&
+        (session.payment_status === 'paid' || session.payment_status === 'no_payment_required') &&
+        env.STRIPE_SECRET_KEY
+      ) {
+        ctx.waitUntil(syncCustomerDefaultFromSubscription(env.STRIPE_SECRET_KEY, subId));
+        flowLog(env, 'checkout', 'customer-default-sync-scheduled', {
+          sessionId: session.id, stripeSubscriptionId: subId, paymentStatus: session.payment_status,
+        });
+      }
       let orgId = session.client_reference_id || sessionMeta.organizationId;
       let siteId = sessionMeta.siteId && String(sessionMeta.siteId).trim() ? String(sessionMeta.siteId).trim() : null;
       let platformSiteId = sessionMeta.platformId?.trim() || sessionMeta.wfSiteId?.trim() || null;
@@ -757,8 +777,11 @@ export async function handleStripeWebhook(request, env, ctx) {
           }
           if (subMeta.planType) planTypeMeta = subMeta.planType;
           if (subMeta.interval) interval = subMeta.interval;
-          if (subData.current_period_start) currentPeriodStart = toTimestamp(subData.current_period_start);
-          if (subData.current_period_end) currentPeriodEnd = toTimestamp(subData.current_period_end);
+          // This fetch sends no Stripe-Version header, so it uses the account default API
+          // version — already the newer shape, where the period lives on the items. Reading
+          // only subData.current_period_* here would leave new checkouts with no period end.
+          if (periodStartOf(subData)) currentPeriodStart = toTimestamp(periodStartOf(subData));
+          if (periodEndOf(subData)) currentPeriodEnd = toTimestamp(periodEndOf(subData));
           if (!orgId) orgId = subMeta.organizationId;
           if (!siteId && subMeta.siteId) siteId = String(subMeta.siteId).trim() || null;
           if (!siteNameMeta && subMeta.siteName) siteNameMeta = String(subMeta.siteName).trim() || null;
@@ -831,6 +854,11 @@ export async function handleStripeWebhook(request, env, ctx) {
               regionMode: 'gdpr',
             });
             siteId = createdSite.id;
+            // A team Admin bought this site for the owner's account — give them access to it.
+            const _teamAdminUserId = String(sessionMeta.teamAdminUserId || subMeta?.teamAdminUserId || '').trim();
+            if (_teamAdminUserId) {
+              await grantAdminNewSite(db, _teamAdminUserId, orgId, createdSite.id);
+            }
             // Step 5 — new unique JS snippet created via the checkout webhook path.
             if (createdSite._created) {
               try {
@@ -895,7 +923,6 @@ export async function handleStripeWebhook(request, env, ctx) {
         if (!resolvedPlanId && stripePriceFromSub) {
           resolvedPlanId = inferTierPlanIdFromStripePriceId(env, stripePriceFromSub);
         }
-        console.log('[WEBHOOK] resolved — orgId:', orgId, '| siteId:', siteId, '| platformSiteId:', platformSiteId, '| planId:', resolvedPlanId, '| status:', subscriptionStatus);
         await saveSubscription(db, {
           organizationId: orgId,
           siteId: siteId || null,
@@ -1046,18 +1073,16 @@ export async function handleStripeWebhook(request, env, ctx) {
         if (customerEmail) {
           // Resolve billing email: use user's billingEmail if set, else fall back to checkout email
           let emailTo = customerEmail;
-          let emailSource = 'customer-email';
           if (orgId) {
             try {
               const userForEmail = await db.prepare(
                 'SELECT u.billingEmail FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
               ).bind(orgId).first();
-              if (userForEmail?.billingEmail) { emailTo = userForEmail.billingEmail; emailSource = 'user.billingEmail'; }
+              if (userForEmail?.billingEmail) { emailTo = userForEmail.billingEmail; }
             } catch (e) {
               // billingEmail lookup failed, use customerEmail
             }
           }
-          console.log('[StripeWebhook] sending paid-plan email', { to: emailTo, source: emailSource, domain: siteDomainMeta, planName });
 
           // Fetch the latest invoice for this subscription to include in the email
           let invoiceData = null;
@@ -1115,6 +1140,16 @@ export async function handleStripeWebhook(request, env, ctx) {
             invoice:  invoiceData,
             variant:  emailVariant,
           });
+          // Team Admins of this site get the billing notice too.
+          copyEmailToAdmins(db, ctx, { siteId }, [emailTo], (a) =>
+            sendPaidPlanEmail(env, ctx, {
+              to:       a.email,
+              name:     a.name || '',
+              domain:   siteDomainMeta || '',
+              planName,
+              invoice:  invoiceData,
+              variant:  emailVariant,
+            }));
         }
 
         // Add customer to ClickUp list on new payment
@@ -1129,8 +1164,6 @@ export async function handleStripeWebhook(request, env, ctx) {
           // Those subscribers must NOT create a task; when/if the payment does succeed,
           // customer.subscription.updated (active/trialing) picks them up instead.
           if (!isPaidForClickUp({ rawSubStatus, paymentStatus: session.payment_status })) {
-            console.log('[ClickUp] skipped — payment not settled. subId:', subId,
-              '| subStatus:', rawSubStatus, '| payment_status:', session.payment_status);
             return;
           }
           if (subId && await wasClickUpTaskCreated(env, subId)) return;
@@ -1164,17 +1197,14 @@ export async function handleStripeWebhook(request, env, ctx) {
           ctx.waitUntil((async () => {
             try {
               let wfId = platformSiteId || null;
-              console.log('[WEBHOOK] KV stamp — starting. platformSiteId:', wfId, '| siteId:', siteId);
               if (!wfId && siteId) {
                 const siteRow = await db.prepare('SELECT platformSiteId FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
                 wfId = siteRow?.platformSiteId ?? null;
-                console.log('[WEBHOOK] KV stamp — platformSiteId from DB lookup:', wfId);
               }
               if (wfId) {
                 const raw = await env.WEBFLOW_AUTHENTICATION.get(wfId);
                 const existing = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : {};
                 await env.WEBFLOW_AUTHENTICATION.put(wfId, JSON.stringify({ ...existing, plan: resolvedPlanId }));
-                console.log('[WEBHOOK] KV stamp — success. wfId:', wfId, '| plan:', resolvedPlanId);
               } else {
                 console.warn('[WEBHOOK] KV stamp — skipped: no platformSiteId found for siteId:', siteId);
               }
@@ -1298,7 +1328,6 @@ export async function handleStripeWebhook(request, env, ctx) {
           // 'trialing' (their only reliable webhook); everything else is picked up by
           // customer.subscription.updated once it actually turns active.
           if (sub.status !== 'trialing' && sub.status !== 'active') {
-            console.log('[ClickUp] skipped — subscription.created status not paid:', sub.status, '| subId:', sub.id);
             return;
           }
           if (await wasClickUpTaskCreated(env, sub.id)) return;
@@ -1460,8 +1489,10 @@ export async function handleStripeWebhook(request, env, ctx) {
         planId: planIdFromMeta,
         interval: intervalFromSub,
         status,
-        currentPeriodStart: toTimestamp(sub.current_period_start),
-        currentPeriodEnd: toTimestamp(sub.current_period_end),
+        // Both locations — see utils/stripePeriod.js. A missing value here is written as null
+        // on every update and would make the banner gate block a paid-through cancellation.
+        currentPeriodStart: toTimestamp(periodStartOf(sub)),
+        currentPeriodEnd: toTimestamp(periodEndOf(sub)),
         cancelAtPeriodEnd: sub.cancel_at_period_end ? 1 : 0,
         canceledAt,
         licenseKey: existing?.licenseKey ?? existing?.licensekey ?? null,
@@ -1808,12 +1839,27 @@ export async function handleStripeWebhook(request, env, ctx) {
         );
       }
 
+      // Close the trapdoor: once Stripe has cancelled a subscription, its unpaid invoice must
+      // not stay payable. Otherwise a customer can pay it, see "Paid", and get nothing back —
+      // a cancelled subscription can never be revived. Off unless CANCEL_INVOICE_VOID_MODE is
+      // set ('dry-run' records what it would void, 'on' voids). Non-blocking and never throws;
+      // every outcome is written to PaymentEvent. See services/cancelledInvoiceVoid.js.
+      if (type === 'customer.subscription.deleted' && sub?.id) {
+        ctx.waitUntil(
+          voidOpenInvoicesForCancelledSubscription(env, db, {
+            stripeSubscriptionId: sub.id,
+            subscriptionId: existing?.id ?? null,
+            organizationId: orgIdFinal ?? null,
+            source: 'webhook',
+          }).catch((e) => console.warn('[StripeWebhook] invoice void on cancel failed:', e?.message))
+        );
+      }
+
       return Response.json({ received: true });
     }
 
     if (type === 'invoice.payment_failed') {
       const invoice = event.data.object;
-      console.log('[StripeWebhook] invoice.payment_failed — invoiceId:', invoice.id, '| subId:', invoice.subscription, '| attempt:', invoice.attempt_count, '| amountDue:', invoice.amount_due);
       const subId = invoice.subscription;
       const existing = subId ? await getSubscriptionByStripeId(db, subId) : null;
       await savePaymentEvent(db, {
@@ -1860,8 +1906,20 @@ export async function handleStripeWebhook(request, env, ctx) {
                 updatePaymentUrl: billingUrl,
                 reminderNumber,
               });
+              // Same claim covers the Admin copies, so Stripe redeliveries don't resend them.
+              copyEmailToAdmins(
+                db,
+                ctx,
+                { siteId: existing?.siteId ?? existing?.siteid, organizationId: orgId },
+                [userRow.email],
+                (a) => sendPaymentFailureEmail(env, ctx, {
+                  to: a.email,
+                  name: a.name || '',
+                  updatePaymentUrl: billingUrl,
+                  reminderNumber,
+                }),
+              );
             } else {
-              console.log('[StripeWebhook] dunning reminder', reminderNumber, 'already sent for invoice', invoice.id, '— skipping');
             }
           }
         } catch (e) {
@@ -1882,7 +1940,6 @@ export async function handleStripeWebhook(request, env, ctx) {
         `SELECT id FROM PaymentEvent WHERE stripeEventId = ?1 LIMIT 1`
       ).bind(eventId).first();
       if (alreadyLogged) {
-        console.log('[StripeWebhook] refund event already processed —', eventId);
         return Response.json({ received: true });
       }
 
@@ -1897,7 +1954,6 @@ export async function handleStripeWebhook(request, env, ctx) {
         // Only a settled refund moves money. A pending or failed one must not
         // cancel anything — the customer still has the service they paid for.
         if (refund?.status && refund.status !== 'succeeded') {
-          console.log('[StripeWebhook] refund ignored — status:', refund.status, '| refundId:', refund.id);
           return Response.json({ received: true });
         }
         const chargeId = stripeId(refund?.charge);
@@ -1925,6 +1981,20 @@ export async function handleStripeWebhook(request, env, ctx) {
       }
 
       await processRefund(env, db, ctx, { charge, refund, eventId, eventType: type });
+      return Response.json({ received: true });
+    }
+
+    // Card changed outside our app (Stripe billing portal / dashboard): keep subscription
+    // pins on the current card — a pin cannot be cleared, only moved. Our own default-card
+    // writes are recognised by a metadata marker and ignored. Off unless
+    // CARD_PIN_FOLLOW_MODE is set. Awaited so the 200 follows a recorded outcome; both
+    // functions never throw. See services/cardPinFollow.js.
+    if (type === 'customer.updated') {
+      await followCustomerDefaultCard(env, db, event);
+      return Response.json({ received: true });
+    }
+    if (type === 'payment_method.detached') {
+      await repinAfterCardDetached(env, db, event);
       return Response.json({ received: true });
     }
 

@@ -5,7 +5,9 @@
 // Checkout uses `customer_email` from the logged-in user; Stripe creates the Customer on completion.
 // Returns { success, sessionId, url }
 
-import { getSessionById, getUserById, getSiteTrialUsed } from '../services/db.js';
+import { getSessionById, getUserById, getSiteTrialUsed, isSiteTrialIneligible } from '../services/db.js';
+import { flowLog } from '../utils/flowLog.js';
+import { resolveBillingActor } from '../services/team.js';
 import {
   isCodeAllowedForEmail,
   isCouponIdAllowedForEmail,
@@ -69,7 +71,6 @@ async function validatePriceIsRecurring(secret, priceId, label) {
 }
 
 export async function handleCreateCheckoutSession(request, env) {
-  console.log('[CreateCheckout] POST /api/create-checkout-session called');
   if (request.method !== 'POST') {
     return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
   }
@@ -78,7 +79,6 @@ export async function handleCreateCheckoutSession(request, env) {
   const priceMonthly = env.STRIPE_PRICE_MONTHLY;
   const priceYearly = env.STRIPE_PRICE_YEARLY;
 
-  console.log('[CreateCheckout] Stripe key mode:', secret ? (secret.startsWith('sk_live') ? 'LIVE' : 'TEST') : 'NOT SET');
 
   if (!secret) {
     console.error('[CreateCheckout] STRIPE_SECRET_KEY not set');
@@ -140,7 +140,6 @@ export async function handleCreateCheckoutSession(request, env) {
 
   const organizationId = (body.organizationId || '').trim();
   const planId = (body.planId && ['basic', 'essential', 'growth'].includes(body.planId)) ? body.planId : null;
-  console.log('[CreateCheckout] body — orgId:', organizationId, '| planId:', planId, '| interval:', body.interval, '| siteId:', body.siteId);
   const rawPlanType = body.planType === 'quantity' ? 'quantity' : body.planType === 'bulk' ? 'bulk' : 'single';
   if (rawPlanType === 'bulk' || rawPlanType === 'quantity') {
     return Response.json(
@@ -259,11 +258,34 @@ export async function handleCreateCheckoutSession(request, env) {
     }
   }
 
+  // A team Admin checking out for the owner's account: bill the owner's Stripe
+  // customer (owner's billing email), and tag the session so the webhook gives the
+  // Admin access to a site this creates. Owners take the unchanged path below.
+  let customerEmail = email;
+  let teamAdminUserId = null;
+  if (db && organizationId) {
+    const actor = await resolveBillingActor(db, user.id, organizationId, siteId || null);
+    if (actor.admin) {
+      if (siteId && planId === 'basic') {
+        return Response.json({ success: false, error: "Only the account owner can move a site to Basic or Free. Team members lose access on those plans.", code: 'OWNER_ONLY' }, { status: 403 });
+      }
+      if (!actor.ownerEmail) {
+        return Response.json({ success: false, error: 'Could not find the account owner\'s billing email.' }, { status: 409 });
+      }
+      customerEmail = actor.ownerEmail;
+      teamAdminUserId = String(user.id);
+    }
+  }
+
   const params = new URLSearchParams();
   params.set('success_url', successUrl);
   params.set('cancel_url', cancelUrl);
   params.set('client_reference_id', organizationId);
-  params.set('customer_email', email);
+  params.set('customer_email', customerEmail);
+  if (teamAdminUserId) {
+    params.set('metadata[teamAdminUserId]', teamAdminUserId);
+    params.set('subscription_data[metadata][teamAdminUserId]', teamAdminUserId);
+  }
   params.set('billing_address_collection', 'auto');
 
   if (useTierPlan) {
@@ -281,7 +303,12 @@ export async function handleCreateCheckoutSession(request, env) {
       if (domainNorm) params.set('subscription_data[metadata][siteDomain]', domainNorm);
     }
     // Only grant trial if this site has never used one before
-    const trialAlreadyUsed = siteId ? await getSiteTrialUsed(db, siteId) : false;
+    // Any subscription history — not just the trialUsed flag — rules out a trial, so a
+    // returning customer renewing a cancelled/deleted subscription never gets a second one.
+    const trialAlreadyUsed = siteId ? await isSiteTrialIneligible(db, { siteId }, env) : false;
+    flowLog(env, 'trial', trialAlreadyUsed ? 'withheld' : 'granted', {
+      path: 'hosted-checkout', siteId, organizationId, planId, interval,
+    });
     if (!trialAlreadyUsed) {
       params.set('subscription_data[trial_period_days]', '14');
     }
@@ -313,7 +340,7 @@ export async function handleCreateCheckoutSession(request, env) {
 
   if (stripeCouponId) {
     // Raw coupon ids bypass promotion-code checks — verify the account is allowed first.
-    const rawOk = await isCouponIdAllowedForEmail(secret, stripeCouponId, email);
+    const rawOk = await isCouponIdAllowedForEmail(secret, stripeCouponId, customerEmail);
     if (!rawOk.allowed) {
       return Response.json({ success: false, error: rawOk.reason }, { status: 400 });
     }
@@ -333,7 +360,7 @@ export async function handleCreateCheckoutSession(request, env) {
         console.warn('[CreateCheckout] promotion code rejected', { id: promotionCodeId, err: verify.error?.message });
         return Response.json({ success: false, error: 'Promotion code is no longer valid' }, { status: 400 });
       }
-      if (!isCodeAllowedForEmail(verify.code, email)) {
+      if (!isCodeAllowedForEmail(verify.code, customerEmail)) {
         console.warn('[CreateCheckout] promo restricted to another account', { code: verify.code, email });
         return Response.json({ success: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 400 });
       }
@@ -346,12 +373,6 @@ export async function handleCreateCheckoutSession(request, env) {
   }
 
   // ── Apply customer-facing coupon code (optional) ─────────────────────────
-  console.log('[CreateCheckout] coupon inputs', {
-    couponCode,
-    promotionCodeId,
-    stripeCouponId,
-    bodyKeys: Object.keys(body || {}),
-  });
   if (couponCode && !promotionCodeId) {
     try {
       const listParams = new URLSearchParams({ code: couponCode, active: 'true', limit: '1' });
@@ -360,13 +381,6 @@ export async function handleCreateCheckoutSession(request, env) {
         { headers: { Authorization: `Bearer ${secret}` } },
       );
       const lookupData = await lookupRes.json();
-      console.log('[CreateCheckout] coupon code lookup result', {
-        httpStatus: lookupRes.status,
-        found: lookupData?.data?.length || 0,
-        firstId: lookupData?.data?.[0]?.id,
-        firstActive: lookupData?.data?.[0]?.active,
-        error: lookupData?.error?.message,
-      });
       if (lookupData?.error) {
         return Response.json({ success: false, error: lookupData.error.message || 'Coupon lookup failed' }, { status: 400 });
       }
@@ -374,13 +388,12 @@ export async function handleCreateCheckoutSession(request, env) {
       if (!promo || !promo.active) {
         return Response.json({ success: false, error: 'Invalid or expired coupon code' }, { status: 400 });
       }
-      if (!isCodeAllowedForEmail(promo.code || couponCode, email)) {
+      if (!isCodeAllowedForEmail(promo.code || couponCode, customerEmail)) {
         console.warn('[CreateCheckout] coupon restricted to another account', { code: promo.code || couponCode, email });
         return Response.json({ success: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 400 });
       }
       params.set('discounts[0][promotion_code]', promo.id);
       params.set('subscription_data[metadata][promotionCode]', promo.code || couponCode);
-      console.log('[CreateCheckout] coupon attached to session', { promoId: promo.id, code: promo.code });
     } catch (e) {
       console.error('[CreateCheckout] coupon code resolution failed', e?.message);
       return Response.json({ success: false, error: 'Coupon validation failed' }, { status: 400 });
@@ -402,17 +415,9 @@ export async function handleCreateCheckoutSession(request, env) {
 
   // Final visibility into what we're sending to Stripe
   if (params.has('discounts[0][promotion_code]') || params.has('discounts[0][coupon]')) {
-    console.log('[CreateCheckout] discount params being sent to Stripe', {
-      'discounts[0][promotion_code]': params.get('discounts[0][promotion_code]'),
-      'discounts[0][coupon]': params.get('discounts[0][coupon]'),
-      mode: params.get('mode'),
-      hasTrial: params.has('subscription_data[trial_period_days]'),
-    });
   } else {
-    console.log('[CreateCheckout] no discount being applied to Stripe session');
   }
 
-  console.log('[CreateCheckout] creating Stripe checkout session — plan:', planId || 'legacy', '| interval:', body.interval === 'yearly' ? 'yearly' : 'monthly');
   const res = await fetch('https://api.stripe.com/v1/checkout/sessions', {
     method: 'POST',
     headers: {
@@ -437,7 +442,6 @@ export async function handleCreateCheckoutSession(request, env) {
     return Response.json({ success: false, error: 'No session URL returned' }, { status: 502 });
   }
 
-  console.log('[CreateCheckout] session created:', data.id);
   return Response.json({
     success: true,
     sessionId: data.id,

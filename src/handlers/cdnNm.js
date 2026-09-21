@@ -837,8 +837,22 @@ async function _handleCDNScript(request, env, url) {
   // would break working banners. The two populations separate cleanly by length: every
   // shipped notice default is ~160 chars, every opt-out intro 481-595, with nothing in
   // between. Gate on the runtime's own 320 cap, above which a notice would be truncated
-  // anyway. Blanking lets the existing W("ccpaDescription") || W("description") chain
-  // fall through to the site's own banner message - what the dashboard already shows.
+  // anyway. Replace it with the CCPA notice default in the site's language - the same
+  // text the Designer App previews for the CCPA banner (bannerContent.js ccpaLocalization).
+  // Do NOT blank it: the runtime's W("ccpaDescription") || W("description") fallback
+  // then renders the GDPR message, whose defaults say 'By clicking "Accept All"' on a
+  // banner that has no Accept button (Monitaur, 2026-09-17).
+  const CCPA_NOTICE_DEFAULTS = {
+    en: 'We use cookies to provide you with the best possible experience. They also allow us to analyze user behavior in order to constantly improve the website for you.',
+    nl: 'We gebruiken cookies om u de best mogelijke ervaring te bieden. Ze stellen ons ook in staat om gebruikersgedrag te analyseren om de website voortdurend voor u te verbeteren.',
+    fr: "Nous utilisons des cookies pour vous offrir la meilleure expérience possible. Ils nous permettent également d'analyser le comportement des utilisateurs afin d'améliorer constamment le site web pour vous.",
+    de: 'Wir verwenden Cookies, um Ihnen das bestmögliche Erlebnis zu bieten. Sie ermöglichen es uns außerdem, das Nutzerverhalten zu analysieren, um die Website kontinuierlich für Sie zu verbessern.',
+    it: 'Utilizziamo i cookie per offrirti la migliore esperienza possibile. Ci permettono inoltre di analizzare il comportamento degli utenti per migliorare costantemente il sito web per te.',
+    pl: 'Używamy plików cookie, aby zapewnić Ci najlepsze możliwe doświadczenie. Pozwalają nam one również analizować zachowanie użytkowników, aby stale ulepszać stronę dla Ciebie.',
+    pt: 'Usamos cookies para lhe proporcionar a melhor experiência possível. Também nos permitem analisar o comportamento dos utilizadores para melhorar constantemente o site para si.',
+    es: 'Utilizamos cookies para brindarle la mejor experiencia posible. También nos permiten analizar el comportamiento de los usuarios para mejorar constantemente el sitio web para usted.',
+    sv: 'Vi använder cookies för att ge dig bästa möjliga upplevelse. De gör det också möjligt för oss att analysera användarbeteende för att ständigt förbättra webbplatsen för dig.',
+  };
   if (translationsForScript && translationsForScript.en) {
     const _ccpaT = translationsForScript.en;
     if (
@@ -846,7 +860,34 @@ async function _handleCDNScript(request, env, url) {
       _ccpaT.ccpaDescription === _ccpaT.ccpaOptOutPreferenceIntro &&
       String(_ccpaT.ccpaDescription).length > 320
     ) {
-      _ccpaT.ccpaDescription = '';
+      _ccpaT.ccpaDescription = CCPA_NOTICE_DEFAULTS[_ccpaT.languageSelected] || CCPA_NOTICE_DEFAULTS.en;
+    }
+  }
+
+  // The GDPR message defaults (webapp translations.ts `description`, Designer/Framer
+  // bannerContent.js `message`) say 'By clicking "Accept"' / '"Accept All"'. They reach
+  // the CCPA banner - which has no Accept button - two ways: saved verbatim into
+  // ccpaDescription (Webflow Designer saves), or ccpaDescription left blank so the
+  // runtime's W("ccpaDescription") || W("description") fallback renders it (Framer).
+  // Match on each language's opening clause, which both the "Accept" and "Accept All"
+  // variants share, so customer-written text is never touched. Prod on 2026-09-17:
+  // adhd-evidence.com, www.kesem.org, thesignalforgelabs.com, one framer.app site.
+  if (translationsForScript && translationsForScript.en) {
+    const _ccpaT = translationsForScript.en;
+    const GDPR_ACCEPT_DEFAULT_PREFIXES = [
+      'We use cookies to enhance your browsing experience, serve personalised ads or content',
+      'We gebruiken cookies om uw browse-ervaring te verbeteren',
+      'Nous utilisons des cookies pour améliorer votre expérience de navigation',
+      'Wir verwenden Cookies, um Ihr Surferlebnis zu verbessern',
+      'Utilizziamo i cookie per migliorare la tua esperienza di navigazione',
+      'Używamy plików cookie, aby ulepszyć Twoje doświadczenie przeglądania',
+      'Utilizamos cookies para melhorar a sua experiência de navegação',
+      'Usamos cookies para mejorar su experiencia de navegación',
+      'Vi använder cookies för att förbättra din surfupplevelse',
+    ];
+    const _shown = String((_ccpaT.ccpaDescription && String(_ccpaT.ccpaDescription).trim()) || _ccpaT.description || '').trim();
+    if (_shown && GDPR_ACCEPT_DEFAULT_PREFIXES.some((p) => _shown.indexOf(p) === 0)) {
+      _ccpaT.ccpaDescription = CCPA_NOTICE_DEFAULTS[_ccpaT.languageSelected] || CCPA_NOTICE_DEFAULTS.en;
     }
   }
 
@@ -2226,7 +2267,7 @@ ${inlineConfig}
   /** Cookies known to be dropped by the trackers in each category. */
   var COOKIE_PATTERNS_BY_CATEGORY = {
     analytics: ["_ga", "_ga_*", "_gid", "_gat", "_gat_*", "_gac_*", "_hjid", "_hjSessionUser_*", "_hjSession_*", "_hjAbsoluteSessionInProgress", "_clck", "_clsk"],
-    marketing: ["_fbp", "_fbc", "_gcl_au", "_gcl_ls", "_gcl_aw", "_ttp", "tt_webid_v2", "_pin_unauth", "_pinterest_ct_ua", "li_sugr", "bcookie", "bscookie", "lidc", "_uetsid", "_uetvid", "IDE", "test_cookie", "fr"],
+    marketing: ["_fbp", "_fbc", "_gcl_au", "_gcl_ls", "_gcl_aw", "_ttp", "tt_webid_v2", "_pin_unauth", "_pinterest_ct_ua", "li_sugr", "bcookie", "bscookie", "lidc", "_uetsid", "_uetvid", "IDE", "test_cookie", "fr", "_reb2b*", "_gd_visitor", "_gd_session", "_gd_svisitor", "_an_uid"],
     preferences: []
   };
 
@@ -2835,14 +2876,14 @@ ${inlineConfig}
           prefsBody.appendChild(prefsText);
 
           var optOutLabel = document.createElement("label");
-          optOutLabel.style.cssText = "display:flex;align-items:flex-start;gap:12px;margin-top:20px;cursor:pointer;";
+          optOutLabel.style.cssText = "display:flex !important;align-items:center !important;gap:10px !important;margin:20px 0 0 0 !important;padding:0 !important;cursor:pointer;font-size:13px !important;font-weight:500 !important;";
           var optOutText = document.createElement("span");
-          optOutText.style.cssText = "flex:1;line-height:1.45;";
+          optOutText.style.cssText = "flex:1;line-height:1.4 !important;";
           optOutText.textContent = translate("doNotSell");
           var optOutCheckbox = document.createElement("input");
           optOutCheckbox.type = "checkbox";
           optOutCheckbox.id = "cb-ccpa-optout";
-          optOutCheckbox.style.cssText = "flex-shrink:0;margin-top:2px;";
+          optOutCheckbox.style.cssText = "flex-shrink:0 !important;display:inline-block !important;position:static !important;float:none !important;margin:0 !important;padding:0 !important;width:16px !important;min-width:16px !important;height:16px !important;opacity:1 !important;visibility:visible !important;transform:none !important;clip:auto !important;pointer-events:auto !important;-webkit-appearance:auto !important;appearance:auto !important;";
           optOutCheckbox.checked = !!(consentState && consentState.accepted && consentState.ccpa && consentState.ccpa.doNotSell);
           optOutLabel.appendChild(optOutCheckbox);
           optOutLabel.appendChild(optOutText);
@@ -3535,6 +3576,9 @@ ${inlineConfig}
         postConsentToApi(ccpaState, {
           status: doNotSell ? "rejected" : "given"
         });
+        // Opting out must also clear what already ran before the choice (GDPR Reject does
+        // this too). Same scope as updateGoogleConsentModeCcpa: Utah keeps analytics.
+        if (doNotSell) deleteCookiesForCategories((usLaw && usLaw.optOut) || ["analytics", "marketing", "preferences"]);
         doNotSell || unblockAllowedScripts({
           analytics: true,
           marketing: true,
@@ -3660,6 +3704,39 @@ ${inlineConfig}
     // script there, which reacts to the consent broadcast instead.
     if (!window.__CB_WEBFLOW_MODE__) try {
       unblockAllowedScripts()
+    } catch (err) {
+    }
+
+    // Clear tracker cookies the stored choice denies. Some trackers write before this script
+    // can act: Webflow's built-in Google Analytics sits above our tag and, served from cache on
+    // repeat views, runs first, so _ga exists before any consent signal; trackers already running
+    // when the visitor opted out (6sense) rewrite their cookies after the Save-time sweep.
+    // Consent Mode is denied by now, so Google tags will not rewrite them; the delayed pass
+    // catches late async writes. Undecided CCPA visitors and legacy states without categories
+    // are left alone. The delayed pass re-reads the CURRENT choice: a visitor who accepts
+    // within those 2.5 s must not lose the cookies they just allowed.
+    try {
+      var deniedCategoriesNow = function () {
+        var allCategories = ["analytics", "marketing", "preferences"];
+        return !consentState || !consentState.accepted
+          ? ("gdpr" === ((window.__CONSENT_SITE__ || {}).bannerType || "gdpr") ? allCategories : [])
+          : consentState.ccpa
+            ? (consentState.ccpa.doNotSell ? ((usLaw && usLaw.optOut) || allCategories) : [])
+            : consentState.categories
+              ? allCategories.filter(function (category) { return !consentState.categories[category] })
+              : [];
+      };
+      var deniedAtBoot = deniedCategoriesNow();
+      if (deniedAtBoot.length) {
+        deleteCookiesForCategories(deniedAtBoot);
+        setTimeout(function () {
+          try {
+            var deniedLater = deniedCategoriesNow();
+            deniedLater.length && deleteCookiesForCategories(deniedLater)
+          } catch (err) {
+          }
+        }, 2500)
+      }
     } catch (err) {
     }
 
@@ -3884,7 +3961,12 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
     `window.clarity('consentv2',{source:${JSON.stringify(clarityCmpSource)},ad_Storage:cm,analytics_Storage:ca});` +
     `window.__cbClaritySignal=cm+'|'+ca;` +
     `}catch(_){}`;
-  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? 'true' : 'false'};var d=null,e=false,hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}${clarityBootstrap}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);window.gtag('set','developer_id.dN2Q3Yj',true);var g=window.__cbConsentDefaultSet===true;if(!c){if(!g){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});}if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else if(!g){window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}window.__cbConsentDefaultSet=true;}catch(_){}})();\n`;
+  // The hoist at the end moves every queued gtag('consent', ...) command to the front of
+  // dataLayer while gtag.js has not yet processed the queue (push is still Array.prototype.push).
+  // Webflow's built-in Google Analytics integration queues gtag('js') + gtag('config') ABOVE our
+  // tag, so without it config ran with no consent state: _ga, _gcl_au, Ads remarketing and Xandr
+  // fired before any choice (Monitaur, 2026-09-17, measured in a real browser).
+  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? 'true' : 'false'};var d=null,e=false,hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}${clarityBootstrap}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);window.gtag('set','developer_id.dN2Q3Yj',true);var g=window.__cbConsentDefaultSet===true;if(!c){if(!g){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});}if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else if(!g){window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}try{var L=window.dataLayer;if(L&&L.push===Array.prototype.push){var h=[],r=[];for(var k=0;k<L.length;k++){var it=L[k];(it&&it[0]==='consent'?h:r).push(it);}if(h.length&&r.length&&L[0]!==h[0]){L.length=0;Array.prototype.push.apply(L,h.concat(r));}}}catch(_){}window.__cbConsentDefaultSet=true;}catch(_){}})();\n`;
 
   const scriptToServe =
     (serveKind === 'iab' ? loaderIab : serveKind === 'iabwebflow' ? loaderIabWebflow : serveKind === 'webflow' ? loaderWebflow : (consentModeBootstrap + loader));

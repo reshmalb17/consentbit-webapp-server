@@ -7,7 +7,9 @@
 // Body: { siteId, organizationId, planId: 'basic'|'essential'|'growth', interval: 'monthly'|'yearly', successUrl?, cancelUrl? }
 // Returns: { success, url, sessionId }
 
-import { getSessionById, getUserById, getSubscriptionBySiteId, getSiteTrialUsed } from '../services/db.js';
+import { getSessionById, getUserById, getSubscriptionBySiteId, getSiteTrialUsed, isSiteTrialIneligible } from '../services/db.js';
+import { flowLog } from '../utils/flowLog.js';
+import { resolveBillingActor } from '../services/team.js';
 import {
   isCodeAllowedForEmail,
   isCouponIdAllowedForEmail,
@@ -45,7 +47,6 @@ async function validatePriceIsRecurring(secret, priceId) {
 }
 
 export async function handleUpgradeSubscription(request, env) {
-  console.log('[UPGRADE] POST /api/subscriptions/upgrade called');
   if (request.method !== 'POST') {
     return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
   }
@@ -85,7 +86,6 @@ export async function handleUpgradeSubscription(request, env) {
     : `${rawSuccessUrl}?session_id={CHECKOUT_SESSION_ID}`;
   const cancelUrl = body.cancelUrl || `${request.url.replace(/\/api\/.*$/, '')}/dashboard`;
 
-  console.log('[UPGRADE] body parsed — siteId:', siteId, '| orgId:', organizationId, '| planId:', planId, '| interval:', interval);
 
   if (!siteId) { console.error('[UPGRADE] Missing siteId'); return Response.json({ success: false, error: 'siteId required' }, { status: 400 }); }
   if (!organizationId) { console.error('[UPGRADE] Missing organizationId'); return Response.json({ success: false, error: 'organizationId required' }, { status: 400 }); }
@@ -98,7 +98,6 @@ export async function handleUpgradeSubscription(request, env) {
     growth:    { monthly: trimEnv(env.STRIPE_PRICE_GROWTH_MONTHLY),     yearly: trimEnv(env.STRIPE_PRICE_GROWTH_YEARLY) },
   };
   const newPriceId = tierPriceMap[planId][interval] || tierPriceMap[planId].monthly;
-  console.log('[UPGRADE] resolved priceId:', newPriceId, 'for plan:', planId, 'interval:', interval);
   if (!newPriceId) {
     console.error('[UPGRADE] Missing price env var for', planId, interval);
     return Response.json(
@@ -108,7 +107,6 @@ export async function handleUpgradeSubscription(request, env) {
   }
 
   const priceCheck = await validatePriceIsRecurring(secret, newPriceId);
-  console.log('[UPGRADE] priceCheck:', priceCheck);
   if (!priceCheck.ok) {
     console.error('[UPGRADE] price validation failed:', priceCheck.error);
     return Response.json({ success: false, error: priceCheck.error }, { status: 400 });
@@ -119,16 +117,30 @@ export async function handleUpgradeSubscription(request, env) {
   const oldStripeSubscriptionId = existingSub
     ? (existingSub.stripeSubscriptionId ?? existingSub.stripesubscriptionid ?? null)
     : null;
-  console.log('[UPGRADE] existingSub:', existingSub ? { planId: existingSub.planId, status: existingSub.status } : null, '| oldStripeSubId:', oldStripeSubscriptionId);
 
   // Look up platformSiteId so the webhook can update WEBFLOW_AUTHENTICATION KV
   let platformSiteId = null;
   try {
     const siteRow = await db.prepare('SELECT platformSiteId FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
     platformSiteId = siteRow?.platformSiteId ?? null;
-    console.log('[UPGRADE] platformSiteId from DB:', platformSiteId);
   } catch (e) {
     console.error('[UPGRADE] platformSiteId lookup failed:', e?.message);
+  }
+
+  // A team Admin upgrading for the owner bills the owner's Stripe customer (owner's
+  // billing email). Owners take the unchanged path.
+  let customerEmail = email;
+  if (organizationId) {
+    const actor = await resolveBillingActor(db, user.id, organizationId, siteId);
+    if (actor.admin) {
+      if (planId === 'basic') {
+        return Response.json({ success: false, error: "Only the account owner can move a site to Basic or Free. Team members lose access on those plans.", code: 'OWNER_ONLY' }, { status: 403 });
+      }
+      if (!actor.ownerEmail) {
+        return Response.json({ success: false, error: "Could not find the account owner's billing email." }, { status: 409 });
+      }
+      customerEmail = actor.ownerEmail;
+    }
   }
 
   // Build Stripe Checkout Session — subscription mode with new plan
@@ -136,7 +148,7 @@ export async function handleUpgradeSubscription(request, env) {
   params.set('success_url', successUrl);
   params.set('cancel_url', cancelUrl);
   params.set('client_reference_id', organizationId);
-  params.set('customer_email', email);
+  params.set('customer_email', customerEmail);
   params.set('billing_address_collection', 'auto');
   params.set('mode', 'subscription');
   params.set('line_items[0][price]', newPriceId);
@@ -148,7 +160,6 @@ export async function handleUpgradeSubscription(request, env) {
   params.set('subscription_data[metadata][siteId]', siteId);
   if (platformSiteId) {
     params.set('subscription_data[metadata][platformId]', platformSiteId);
-    console.log('[UPGRADE] stamping platformId in Stripe metadata:', platformSiteId);
   } else {
     console.warn('[UPGRADE] platformSiteId not found — KV plan stamp will fall back to DB lookup in webhook');
   }
@@ -157,23 +168,20 @@ export async function handleUpgradeSubscription(request, env) {
     params.set('subscription_data[metadata][oldStripeSubscriptionId]', oldStripeSubscriptionId);
   }
   // Only give free trial if: no existing paid subscription AND trial has never been used before
-  const trialAlreadyUsed = await getSiteTrialUsed(db, siteId);
-  console.log('[UPGRADE] trialAlreadyUsed:', trialAlreadyUsed, '| will offer trial:', !oldStripeSubscriptionId && !trialAlreadyUsed);
+  // Subscription history counts, not just the flag — no second trial for a returning site.
+  const trialAlreadyUsed = await isSiteTrialIneligible(db, { siteId }, env);
+  flowLog(env, 'trial', (!oldStripeSubscriptionId && !trialAlreadyUsed) ? 'granted' : 'withheld', {
+    path: 'upgrade', siteId, hasOldSubscription: !!oldStripeSubscriptionId, trialAlreadyUsed,
+  });
   if (!oldStripeSubscriptionId && !trialAlreadyUsed) {
     params.set('subscription_data[trial_period_days]', '14');
   }
 
   // ── Apply coupon / promotion code (optional) ─────────────────────────────
-  console.log('[UPGRADE] coupon inputs', {
-    couponCode,
-    promotionCodeId,
-    stripeCouponId,
-    bodyKeys: Object.keys(body || {}),
-  });
 
   // a) Raw coupon id (coup_xxx) — bypasses promotion-code checks, so gate it here.
   if (stripeCouponId) {
-    const rawOk = await isCouponIdAllowedForEmail(secret, stripeCouponId, email);
+    const rawOk = await isCouponIdAllowedForEmail(secret, stripeCouponId, customerEmail);
     if (!rawOk.allowed) {
       return Response.json({ success: false, error: rawOk.reason }, { status: 400 });
     }
@@ -192,7 +200,7 @@ export async function handleUpgradeSubscription(request, env) {
         console.warn('[UPGRADE] promotion code rejected', { id: promotionCodeId, err: verify.error?.message });
         return Response.json({ success: false, error: 'Promotion code is no longer valid' }, { status: 400 });
       }
-      if (!isCodeAllowedForEmail(verify.code, email)) {
+      if (!isCodeAllowedForEmail(verify.code, customerEmail)) {
         console.warn('[UPGRADE] promo restricted to another account', { code: verify.code, email });
         return Response.json({ success: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 400 });
       }
@@ -214,13 +222,6 @@ export async function handleUpgradeSubscription(request, env) {
         { headers: { Authorization: `Bearer ${secret}` } },
       );
       const lookupData = await lookupRes.json();
-      console.log('[UPGRADE] coupon code lookup result', {
-        httpStatus: lookupRes.status,
-        found: lookupData?.data?.length || 0,
-        firstId: lookupData?.data?.[0]?.id,
-        firstActive: lookupData?.data?.[0]?.active,
-        error: lookupData?.error?.message,
-      });
       if (lookupData?.error) {
         return Response.json({ success: false, error: lookupData.error.message || 'Coupon lookup failed' }, { status: 400 });
       }
@@ -228,13 +229,12 @@ export async function handleUpgradeSubscription(request, env) {
       if (!promo || !promo.active) {
         return Response.json({ success: false, error: 'Invalid or expired coupon code' }, { status: 400 });
       }
-      if (!isCodeAllowedForEmail(promo.code || couponCode, email)) {
+      if (!isCodeAllowedForEmail(promo.code || couponCode, customerEmail)) {
         console.warn('[UPGRADE] coupon restricted to another account', { code: promo.code || couponCode, email });
         return Response.json({ success: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 400 });
       }
       params.set('discounts[0][promotion_code]', promo.id);
       params.set('subscription_data[metadata][promotionCode]', promo.code || couponCode);
-      console.log('[UPGRADE] coupon attached to session', { promoId: promo.id, code: promo.code });
     } catch (e) {
       console.error('[UPGRADE] coupon code resolution failed', e?.message);
       return Response.json({ success: false, error: 'Coupon validation failed' }, { status: 400 });
@@ -242,16 +242,9 @@ export async function handleUpgradeSubscription(request, env) {
   }
 
   if (params.has('discounts[0][promotion_code]') || params.has('discounts[0][coupon]')) {
-    console.log('[UPGRADE] discount params being sent to Stripe', {
-      'discounts[0][promotion_code]': params.get('discounts[0][promotion_code]'),
-      'discounts[0][coupon]': params.get('discounts[0][coupon]'),
-      hasTrial: params.has('subscription_data[trial_period_days]'),
-    });
   } else {
-    console.log('[UPGRADE] no discount being applied to Stripe session');
   }
 
-  console.log('[UPGRADE] creating Stripe checkout session...');
   const res = await fetch('https://api.stripe.com/v1/checkout/sessions', {
     method: 'POST',
     headers: {
@@ -271,6 +264,5 @@ export async function handleUpgradeSubscription(request, env) {
     return Response.json({ success: false, error: 'No session URL returned from Stripe' }, { status: 502 });
   }
 
-  console.log('[UPGRADE] checkout session created:', data.id);
   return Response.json({ success: true, sessionId: data.id, url: data.url });
 }

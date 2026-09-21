@@ -88,7 +88,6 @@ export async function handleWebflowCheckoutToken(request, env) {
         payload.email = String(owner.email).trim().toLowerCase();
         // Billing defaults to the account email unless the owner set a distinct one.
         payload.billingEmail = String(owner.billingEmail || owner.email).trim().toLowerCase();
-        console.log('[webflow-checkout-token] resolved CURRENT owner email from D1 for', payload.platformId);
       }
     } catch (e) {
       console.warn('[webflow-checkout-token] owner email resolve failed (non-fatal)', e?.message || e);
@@ -104,7 +103,6 @@ export async function handleWebflowCheckoutToken(request, env) {
         const kvEntry = typeof kvRaw === 'string' ? JSON.parse(kvRaw) : kvRaw;
         if (kvEntry?.email) {
           payload.email = String(kvEntry.email).trim().toLowerCase();
-          console.log('[webflow-checkout-token] resolved email from KV for platformId', payload.platformId);
         }
       }
     } catch (e) {
@@ -121,7 +119,6 @@ export async function handleWebflowCheckoutToken(request, env) {
         const email = tokenRow?.authorizedBy?.email || tokenRow?.authorizedBy?.user?.email;
         if (email) {
           payload.email = String(email).trim().toLowerCase();
-          console.log('[webflow-checkout-token] resolved email from D1 for platformId', payload.platformId);
         }
       }
     } catch (e) {
@@ -134,7 +131,6 @@ export async function handleWebflowCheckoutToken(request, env) {
 
   const token = crypto.randomUUID();
   await kv.put(`checkout-token:${token}`, JSON.stringify(payload), { expirationTtl: TOKEN_TTL_SECONDS });
-  console.log('[webflow-checkout-token] stored token', token, 'keys:', Object.keys(payload));
 
   // plan_selected vs upgrade_initiated — both start checkout via this endpoint. If the
   // site already has an active PAID plan, this is an upgrade (funnel step 10); otherwise

@@ -118,7 +118,7 @@ export async function handleWebflowTrack(request, env, ctx, identity) {
     || (typeof body?.wfSiteId === 'string' ? body.wfSiteId : '');
 
   // Resolve the distinct_id — registered owner, else the pre-registration OAuth identity.
-  const { distinctId, source } = await resolveDistinctId(env, webflowSiteId);
+  const { distinctId } = await resolveDistinctId(env, webflowSiteId);
 
   // Forward only primitive props (never client-supplied objects / PII).
   const safeProps = {};
@@ -137,7 +137,6 @@ export async function handleWebflowTrack(request, env, ctx, identity) {
     // what hid the dropped skip events in the first place.
     console.warn(`[wf/track] no distinct_id for site ${webflowSiteId || '(none)'} — dropped ${event}`);
   }
-  console.log(`[wf/track] ${event} site=${webflowSiteId || '(none)'} identity=${source}`);
 
   // Always 200 so best-effort client telemetry never surfaces an error to the user.
   return Response.json({ success: true });

@@ -24,8 +24,6 @@ export function describeStored(stored) {
 
 export function pwDebug(event, data) {
   try {
-    console.log(`[PwAuth:DEBUG] ${event}`, JSON.stringify(data));
   } catch (e) {
-    console.log(`[PwAuth:DEBUG] ${event} <unserialisable>`);
   }
 }

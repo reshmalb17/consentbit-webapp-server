@@ -201,10 +201,6 @@ export async function handleSyncPlugin(request, env) {
   try {
     const existingSite = await getSiteByDomain(db, rawDomain);
     if (existingSite && existingSite.id) {
-      console.log('[SyncPlugin] domain already exists in DB — skipping create flow', {
-        webAppSiteId: existingSite.id,
-        domain: rawDomain,
-      });
 
       // Resolve owner userId from the site's organization
       const siteOrgId = existingSite.organizationId ?? existingSite.organizationid ?? null;
@@ -266,7 +262,6 @@ export async function handleSyncPlugin(request, env) {
           ? { ...existingKv, ...newFields }
           : newFields;
         await kv.put(platformSiteId, JSON.stringify(kvValue));
-        console.log('[SyncPlugin] KV mapping written for existing site', { platformSiteId, mergedWithExisting: !!existingKv });
       } catch (e) {
         console.error('[SyncPlugin] KV put failed for existing site', e);
         return Response.json({ success: false, error: 'Failed to persist platform mapping' }, { status: 500 });
@@ -609,7 +604,6 @@ export async function handleGetPluginPlan(request, env) {
     console.error('[GetPluginPlan] getSubscriptionBySiteId failed', e);
     return Response.json({ success: false, error: 'Failed to look up subscription' }, { status: 500 });
   }
-  console.log('[GetPluginPlan] lookup result', { subFound: !!sub });
 
   let planId = 'free';
   let status = 'inactive';

@@ -133,9 +133,6 @@ async function applyRegionMode(db, request, site, requestedMode) {
     return { applied: false, reason: 'WRITE_FAILED', regionMode: currentRegionMode };
   }
 
-  console.log(
-    `[GTM] region ${currentRegionMode} → ${requestedMode} for site ${site.id} from ${auth.host}`,
-  );
   return { applied: true, reason: 'APPLIED', regionMode: requestedMode };
 }
 

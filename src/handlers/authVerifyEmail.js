@@ -129,7 +129,6 @@ export async function handleAuthVerifyEmail(request, env, ctx) {
   await markUserEmailVerified(db, row.userId);
   await markEmailVerificationTokenUsed(db, row.id);
 
-  console.log('[VerifyEmail] verified', { userId: row.userId, email: row.email });
   return Response.json({ success: true, email: row.email });
 }
 

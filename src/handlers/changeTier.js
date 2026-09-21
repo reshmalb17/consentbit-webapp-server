@@ -19,6 +19,9 @@ import {
 } from '../services/db.js';
 import { syncSubscriptionUpdateToLegacy } from '../services/syncLegacy.js';
 import { isPromotionCodeAllowedForEmail } from '../services/promoRestrictions.js';
+import { isTerminalSubscriptionStatus, TERMINAL_SUBSCRIPTION_MESSAGE } from '../utils/subscriptionStatus.js';
+import { flowLog } from '../utils/flowLog.js';
+import { resolveBillingActor } from '../services/team.js';
 
 const PLAN_ORDER = { basic: 1, essential: 2, growth: 3 };
 
@@ -98,19 +101,32 @@ async function prepareChange(request, env) {
   if (!planId) return { error: fail('planId must be basic, essential, or growth', 400) };
 
   const member = await getOrganizationMember(db, userId, organizationId);
-  if (!member) return { error: fail('Not allowed for this organization', 403) };
+  // A team Admin may change the plan of a site they were granted (and only that site —
+  // no org-wide fallback). Everyone else who isn't the owner is refused as before.
+  let adminActor = null;
+  if (!member) {
+    const actor = siteId ? await resolveBillingActor(db, userId, organizationId, siteId) : null;
+    if (!actor?.admin) return { error: fail('Not allowed for this organization', 403) };
+    adminActor = actor;
+    // Basic has no team feature — moving there would suspend this Admin and the whole
+    // team, so it's the owner's call.
+    if (planId === 'basic') return { error: fail("Only the account owner can move a site to Basic or Free. Team members lose access on those plans.", 403) };
+  }
 
-  // Per-customer promo restrictions (see services/promoRestrictions.js).
+  // Per-customer promo restrictions (see services/promoRestrictions.js). An Admin's
+  // change is for the owner's account, so it's checked against the owner's email.
   if (promotionCodeId) {
     const promoOk = await isPromotionCodeAllowedForEmail(
-      env.STRIPE_SECRET_KEY, promotionCodeId, user.email,
+      env.STRIPE_SECRET_KEY, promotionCodeId, adminActor?.ownerEmail || user.email,
     );
     if (!promoOk.allowed) return { error: fail(promoOk.reason, 400) };
   }
 
   // Load current subscription — prefer the per-site license, fall back to org.
-  const sub = (siteId ? await getSubscriptionBySiteId(db, siteId) : null)
-    || await getSubscriptionByOrganization(db, organizationId);
+  const sub = adminActor
+    ? await getSubscriptionBySiteId(db, siteId)
+    : (siteId ? await getSubscriptionBySiteId(db, siteId) : null)
+      || await getSubscriptionByOrganization(db, organizationId);
   if (!sub) return { error: fail('No active subscription found', 404) };
 
   const stripeSubId = sub.stripeSubscriptionId ?? sub.stripesubscriptionid;
@@ -149,6 +165,16 @@ async function prepareChange(request, env) {
     return { error: fail(subRes.body.error.message || 'Failed to read subscription', 400) };
   }
   const stripeSub = subRes.body;
+
+  // Guard: a terminal subscription cannot be changed in place. Without this the handler
+  // carries on (a cancelled subscription still returns 200 with its items) and the
+  // customer gets Stripe's raw error. 409 tells the webapp to route to checkout instead.
+  if (isTerminalSubscriptionStatus(stripeSub.status)) {
+    console.warn('[ChangeTier] blocked — subscription is terminal', { stripeSubId, status: stripeSub.status });
+    flowLog(env, 'guard', 'change-tier-blocked', { stripeSubId, status: stripeSub.status, organizationId, siteId, targetPlan: planId });
+    return { error: fail(TERMINAL_SUBSCRIPTION_MESSAGE, 409) };
+  }
+
   const subItemId = stripeSub.items?.data?.[0]?.id;
   if (!subItemId) return { error: fail('Could not read subscription item ID', 500) };
 
@@ -240,7 +266,6 @@ async function previewImmediateAmount(env, ctx) {
 
 // POST /api/subscriptions/change-tier/preview
 export async function handleChangeTierPreview(request, env) {
-  console.log('[ChangeTier] POST /preview');
   const prep = await prepareChange(request, env);
   if (prep.error) return prep.error;
   const ctx = prep.ctx;
@@ -297,7 +322,6 @@ export async function handleChangeTierPreview(request, env) {
 
 // POST /api/subscriptions/change-tier — commit.
 export async function handleChangeTier(request, env) {
-  console.log('[ChangeTier] POST /api/subscriptions/change-tier');
   const prep = await prepareChange(request, env);
   if (prep.error) return prep.error;
   const {
@@ -469,7 +493,6 @@ export async function handleChangeTier(request, env) {
     console.warn('[ChangeTier] Legacy sync failed (non-critical):', syncErr?.message);
   }
 
-  console.log('[ChangeTier] upgraded to', planId, interval, 'for org:', organizationId);
   return Response.json({
     success: true,
     direction: 'upgrade',

@@ -7,6 +7,7 @@
 import { getSessionById, getUserById, getSubscriptionByStripeId, getSubscriptionById, saveSubscription, getSiteById, getSiteByDomain } from '../services/db.js';
 import { syncSubscriptionUpdateToLegacy } from '../services/syncLegacy.js';
 import { sendCancellationEmail } from '../services/email.js';
+import { copyEmailToAdmins, resolveBillingActor } from '../services/team.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -29,7 +30,6 @@ function getLicenseKeysFromRow(row) {
 }
 
 export async function handleCancelSubscription(request, env, ctx) {
-  console.log('[CancelSubscription] POST /api/subscriptions/cancel called');
   if (request.method !== 'POST') {
     return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
   }
@@ -63,7 +63,6 @@ export async function handleCancelSubscription(request, env, ctx) {
   const stripeSubscriptionId = (body.stripeSubscriptionId || body.stripe_subscription_id || '').trim() || null;
   const subscriptionId = (body.subscriptionId || body.subscription_id || '').trim() || null;
   const licenseKey = (body.licenseKey || '').trim() || null;
-  console.log('[CancelSubscription] stripeSubId:', stripeSubscriptionId, '| subscriptionId:', subscriptionId, '| licenseKey:', licenseKey);
 
   if (!env.STRIPE_SECRET_KEY) {
     console.error('[CancelSubscription] STRIPE_SECRET_KEY not set');
@@ -82,7 +81,21 @@ export async function handleCancelSubscription(request, env, ctx) {
     console.warn('[CancelSubscription] no subscription found for stripeSubId:', stripeSubscriptionId, '| subscriptionId:', subscriptionId);
     return Response.json({ success: false, error: 'No active subscription found for this account.' }, { status: 400 });
   }
-  console.log('[CancelSubscription] sub found — planType:', sub.planType ?? sub.plantype, '| status:', sub.status, '| stripeSubId:', sub.stripeSubscriptionId ?? sub.stripesubscriptionid);
+
+  // Cancelling ends the plan (→ Free), which suspends the site's team. A team Admin
+  // can't do that; it's the owner's call. Everyone else follows the existing path.
+  {
+    const orgIdForActor = sub.organizationId ?? sub.organizationid;
+    const actor = orgIdForActor
+      ? await resolveBillingActor(db, user.id, orgIdForActor, sub.siteId ?? sub.siteid ?? null)
+      : null;
+    if (actor?.admin) {
+      return Response.json(
+        { success: false, error: 'Only the account owner can cancel this subscription.', code: 'OWNER_ONLY' },
+        { status: 403 },
+      );
+    }
+  }
 
   const subStripeId = sub.stripeSubscriptionId ?? sub.stripesubscriptionid ?? null;
   if (!subStripeId) {
@@ -272,8 +285,9 @@ export async function handleCancelSubscription(request, env, ctx) {
     console.warn('[CancelSubscription] Legacy sync failed (non-critical):', syncErr?.message);
   }
 
-  console.log('[CancelSubscription] cancel_at_period_end set — stripeSubId:', subStripeId);
   sendCancellationEmail(env, ctx, { to: user.email, name: user.name || '' });
+  copyEmailToAdmins(db, ctx, { siteId: sub.siteId ?? sub.siteid, organizationId: sub.organizationId ?? sub.organizationid }, [user.email], (a) =>
+    sendCancellationEmail(env, ctx, { to: a.email, name: a.name || '' }));
   return Response.json({
     success: true,
     message: 'Subscription will be cancelled at the end of the current billing period. Your plan continues until then.',

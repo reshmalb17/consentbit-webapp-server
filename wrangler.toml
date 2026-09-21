@@ -65,6 +65,18 @@ binding = "CHECKOUT_TOKENS"
 id = "353f494f977440feb2120b3464aa917a"
 
 [vars]
+# Structured [CB-FLOW] logs for the subscription renewal / cancellation workflow
+# (src/utils/flowLog.js). TEST WORKER ONLY — deliberately NOT in [env.production.vars].
+# Watch with: npx wrangler tail --search "CB-FLOW"
+CB_FLOW_LOG = "1"
+# Workflow switches. Unset in production until verified on Test.
+#   CANCEL_INVOICE_VOID_MODE / CARD_PIN_FOLLOW_MODE: "off" | "dry-run" | "on"
+CANCEL_INVOICE_VOID_MODE = "dry-run"
+CARD_PIN_FOLLOW_MODE = "dry-run"
+# TRIAL_RESTRICT_RETURNING_SITES: "on" withholds the 14-day trial from a site that has any
+# earlier subscription (item A). Anything else = returning sites get the trial again.
+# Decided 2026-09-18: allow (services/db.js isSiteTrialIneligible).
+TRIAL_RESTRICT_RETURNING_SITES = "off"
 # ClickUp Integration — set real values as secrets:
 #   wrangler secret put CLICKUP_API_KEY
 #   wrangler secret put CLICKUP_LIST_WEBFLOW
@@ -159,6 +171,15 @@ crons = ["*/1 * * * *"]
 name = "consent-webapp-manager-production"
 
 [env.production.vars]
+# Renewal / cancellation workflow — explicitly OFF in production until verified on Test.
+# (Top-level [vars] are not inherited here; declaring them makes that intent visible.)
+CB_FLOW_LOG = "0"
+CANCEL_INVOICE_VOID_MODE = "off"
+CARD_PIN_FOLLOW_MODE = "off"
+# TRIAL_RESTRICT_RETURNING_SITES: "on" withholds the 14-day trial from a site that has any
+# earlier subscription (item A). Anything else = returning sites get the trial again.
+# Decided 2026-09-18: allow (services/db.js isSiteTrialIneligible).
+TRIAL_RESTRICT_RETURNING_SITES = "off"
 CLICKUP_LIST_WEBFLOW = "901607427707"
 CLICKUP_LIST_FRAMER = "901611572886"
 CLICKUP_LIST_WEBSITE = "901615238761"

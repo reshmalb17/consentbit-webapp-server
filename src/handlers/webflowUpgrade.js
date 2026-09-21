@@ -67,7 +67,7 @@ function newReqId() {
   try { return crypto.randomUUID().slice(0, 8); } catch { return String(Date.now()).slice(-8); }
 }
 
-const log  = (rid, ...a) => console.log(`${TAG}[${rid}]`, ...a);
+const log  = (rid, ...a) => {};
 const warn = (rid, ...a) => console.warn(`${TAG}[${rid}]`, ...a);
 
 const fail = (error, status, extra) =>
@@ -390,6 +390,8 @@ export async function handleWebflowChangeTierPreview(request, env, ctxArg, ident
     log(rid, `✓ preview (trialing) — charged at trial end: ${priceRes.body.unit_amount} ${priceRes.body.currency || 'usd'} (${Date.now() - t0}ms)`);
     return Response.json({
       success: true,
+      // Changing plan on a cancelled-but-running subscription also clears the cancellation.
+      resumesCancellation: !!prep.ctx.stripeSub?.cancel_at_period_end,
       direction: isDowngrade ? 'downgrade' : 'upgrade',
       currentPlanId, currentInterval, planId, interval,
       isTrialing: true,
@@ -406,6 +408,8 @@ export async function handleWebflowChangeTierPreview(request, env, ctxArg, ident
     log(rid, `✓ preview (downgrade) — no charge now, effective ${periodEndISO || '-'}, new plan ${newAmount} ${priceRes.body?.currency || 'usd'} (${Date.now() - t0}ms)`);
     return Response.json({
       success: true,
+      // Changing plan on a cancelled-but-running subscription also clears the cancellation.
+      resumesCancellation: !!prep.ctx.stripeSub?.cancel_at_period_end,
       direction: 'downgrade',
       currentPlanId, currentInterval, planId, interval,
       isTrialing: false,
@@ -422,6 +426,8 @@ export async function handleWebflowChangeTierPreview(request, env, ctxArg, ident
   log(rid, `✓ preview (upgrade) — due now: ${res.amountDueCents} ${res.currency}${res.couponPreviewSkipped ? ' [coupon skipped in preview]' : ''} (${Date.now() - t0}ms)`);
   return Response.json({
     success: true,
+      // Changing plan on a cancelled-but-running subscription also clears the cancellation.
+      resumesCancellation: !!prep.ctx.stripeSub?.cancel_at_period_end,
     direction: 'upgrade',
     currentPlanId, currentInterval, planId, interval,
     isTrialing: false,
@@ -443,9 +449,41 @@ export async function handleWebflowChangeTier(request, env, ctxArg, identity) {
     sub, stripeSubId, stripeSub, subItemId, newPriceId, isDowngrade, isTrialing, periodEndISO,
   } = prep.ctx;
 
+  // A cancelled plan that still has time left keeps running when the customer changes
+  // plan — choosing a plan means they want to continue. So the scheduled cancellation
+  // (cancel_at_period_end) is cleared as part of the change. Without this they'd pay for
+  // the upgrade and still lose the plan on the original end date. (Decided 2026-09-18.)
+  const wasScheduledToCancel = !!stripeSub.cancel_at_period_end;
+  // Separate guarded write (additive): D1 may hold 'canceled' for a subscription that was
+  // only scheduled to cancel, which would keep the site showing as cancelled.
+  const markResumedInD1 = async (liveStatus) => {
+    try {
+      await db
+        .prepare(
+          `UPDATE Subscription
+              SET cancelAtPeriodEnd = 0, canceledAt = NULL, status = COALESCE(?1, status), updatedAt = ?2
+            WHERE stripeSubscriptionId = ?3`,
+        )
+        .bind(liveStatus ? String(liveStatus).toLowerCase() : null, new Date().toISOString(), stripeSubId)
+        .run();
+    } catch (e) {
+      console.warn(`${TAG}[${rid}] D1 cancellation-clear failed (non-fatal; webhook re-syncs)`, e?.message);
+    }
+  };
+
   // ── Downgrade → schedule for period end (no charge now) ──────────────────
   if (isDowngrade && !isTrialing) {
     log(rid, 'commit: scheduling downgrade at period end');
+    // A subscription schedule can't be built on a subscription that is set to cancel,
+    // and the customer is choosing to continue — clear the cancellation first.
+    if (wasScheduledToCancel) {
+      const cleared = await stripePost(env, `/subscriptions/${stripeSubId}`, { cancel_at_period_end: 'false' });
+      if (cleared.body.error) {
+        return failLog(rid, cleared.body.error.message || 'Could not keep the subscription running', 400);
+      }
+      await markResumedInD1(cleared.body.status);
+      log(rid, 'scheduled cancellation cleared before downgrade');
+    }
     const currentPriceId = stripeSub.items?.data?.[0]?.price?.id;
     const startDate = stripeSub.current_period_start;
     const changeDate = stripeSub.current_period_end;
@@ -489,6 +527,7 @@ export async function handleWebflowChangeTier(request, env, ctxArg, identity) {
       scheduled: true,
       effectiveAt: periodEndISO,
       planId, interval,
+      resumedCancellation: wasScheduledToCancel,
     });
   }
 
@@ -519,6 +558,8 @@ export async function handleWebflowChangeTier(request, env, ctxArg, identity) {
   };
   if (paymentMethodId) updateForm['default_payment_method'] = paymentMethodId;
   if (promotionCodeId) updateForm['discounts[0][promotion_code]'] = promotionCodeId;
+  // Same call as the plan change, so the customer can't end up upgraded-but-still-ending.
+  if (wasScheduledToCancel) updateForm.cancel_at_period_end = 'false';
 
   const updateRes = await stripePost(env, `/subscriptions/${stripeSubId}`, updateForm);
   if (updateRes.body.error) {
@@ -527,6 +568,11 @@ export async function handleWebflowChangeTier(request, env, ctxArg, identity) {
     return failLog(rid, updateRes.body.error.message || 'Payment could not be completed', 400);
   }
   const updatedSub = updateRes.body;
+  // Before the 3DS early-return below, so D1 is right on every successful path.
+  if (wasScheduledToCancel) {
+    await markResumedInD1(updatedSub.status);
+    log(rid, 'scheduled cancellation cleared with the upgrade');
+  }
   log(rid, `stripe sub updated — status=${updatedSub.status} price=${updatedSub.items?.data?.[0]?.price?.id || '-'}`);
 
   const latestInv = (updatedSub.latest_invoice && typeof updatedSub.latest_invoice === 'object')
@@ -540,6 +586,7 @@ export async function handleWebflowChangeTier(request, env, ctxArg, identity) {
       return Response.json({
         success: true,
         direction: 'upgrade',
+        resumedCancellation: wasScheduledToCancel,
         scheduled: false,
         requiresAction: true,
         clientSecret: pi.client_secret,
@@ -604,7 +651,7 @@ export async function handleWebflowChangeTier(request, env, ctxArg, identity) {
       subscriptionId: stripeSubId,
       customerId: pick(sub, 'stripeCustomerId', 'stripecustomerid'),
       status: 'active',
-      cancelAtPeriodEnd: !!(pick(sub, 'cancelAtPeriodEnd', 'cancelatperiodend')),
+      cancelAtPeriodEnd: wasScheduledToCancel ? false : !!(pick(sub, 'cancelAtPeriodEnd', 'cancelatperiodend')),
       platform: siteRow?.legacySource || 'webflow',
       interval,
     });
@@ -617,6 +664,7 @@ export async function handleWebflowChangeTier(request, env, ctxArg, identity) {
   return Response.json({
     success: true,
     direction: 'upgrade',
+        resumedCancellation: wasScheduledToCancel,
     scheduled: false,
     planId,
     interval,

@@ -58,8 +58,7 @@ export async function capturePostHogEvent(env, distinctId, eventName, properties
   if (!apiKey) { console.warn(`[PostHog DEBUG] SKIP "${eventName}" — POSTHOG_API_KEY is NOT set on this env`); return; }
   if (!distinctId) { console.warn(`[PostHog DEBUG] SKIP "${eventName}" — no distinct_id (owner email did not resolve)`); return; }
   try {
-    console.log(`[PostHog DEBUG] → sending "${eventName}" distinct_id=${distinctId} props=${JSON.stringify(properties)}`);
-    const res = await fetch('https://us.i.posthog.com/capture/', {
+    await fetch('https://us.i.posthog.com/capture/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -70,8 +69,6 @@ export async function capturePostHogEvent(env, distinctId, eventName, properties
         timestamp: new Date().toISOString(),
       }),
     });
-    const bodyText = await res.text().catch(() => '');
-    console.log(`[PostHog DEBUG] ← "${eventName}" HTTP ${res.status} ${bodyText}`);
   } catch (e) {
     console.warn(`[PostHog DEBUG] capture FAILED for "${eventName}":`, e?.message);
   }

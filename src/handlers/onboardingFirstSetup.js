@@ -12,6 +12,7 @@ import {
 import { sendFreePlanEmail } from '../services/email.js';
 import { capturePostHogEvent } from '../services/posthog.js';
 import { captureGa4Event } from '../services/ga4.js';
+import { resolveBillingActor, grantAdminNewSite } from '../services/team.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -64,8 +65,21 @@ export async function handleOnboardingFirstSetup(request, env, ctx) {
   const domain = normalizeDomain(websiteUrl);
   const siteName = domain || websiteUrl.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
 
+  // A team Admin adding a site for the owner passes the owner's organizationId; the
+  // site then goes into that account and the Admin is given access to it. Without a
+  // valid Admin grant the id is ignored and the caller's own account is used, as before.
+  let org = null;
+  let addedByTeamAdmin = false;
+  const requestedOrgId = String(body.organizationId || '').trim();
+  if (requestedOrgId) {
+    const actor = await resolveBillingActor(db, user.id, requestedOrgId);
+    if (actor.admin) {
+      org = { id: requestedOrgId };
+      addedByTeamAdmin = true;
+    }
+  }
   const defaultOrgName = organizationName || (user?.name ? `${user.name}'s Organization` : 'My Organization');
-  const org = await getOrCreateOrganizationForUser(db, { userId: user.id, organizationName: defaultOrgName });
+  if (!org) org = await getOrCreateOrganizationForUser(db, { userId: user.id, organizationName: defaultOrgName });
   if (!org?.id) {
     return Response.json({ success: false, error: 'Failed to initialize organization' }, { status: 500 });
   }
@@ -82,6 +96,7 @@ export async function handleOnboardingFirstSetup(request, env, ctx) {
       // Default: GDPR only until user customizes
       regionMode: 'gdpr',
     });
+    if (addedByTeamAdmin && site?.id) await grantAdminNewSite(db, user.id, org.id, site.id);
   } catch (e) {
     if (e?.code === 'DOMAIN_EXISTS' || e?.status === 409) {
       // The domain is owned by a different org — check if this user is a member of that org.

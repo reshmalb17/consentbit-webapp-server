@@ -57,6 +57,7 @@ import {
   getOrCreateOrganizationForUser,
   isPasswordSet,
 } from '../services/db.js';
+import { listMemberSiteGrants, hasPendingInviteForEmail } from '../services/team.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -90,7 +91,11 @@ export async function handleAuthMe(request, env) {
 
   // 3. If user has no orgs yet, create one then refetch
   let orgs = orgsInitial;
-  if (!orgs || orgs.length === 0) {
+  // Team-only users (member of another account, or holding a pending invite) are not
+  // given an empty organization of their own — same rule as authDashboardInit.js.
+  const teamOnly = (!orgs || orgs.length === 0)
+    && ((await listMemberSiteGrants(db, user.id)).length > 0 || (await hasPendingInviteForEmail(db, user.email)));
+  if ((!orgs || orgs.length === 0) && !teamOnly) {
     const defaultOrgName = user.name ? `${user.name}'s Organization` : 'My Organization';
     await getOrCreateOrganizationForUser(db, { userId: user.id, organizationName: defaultOrgName });
     orgs = await getOrganizationsForUser(db, user.id);

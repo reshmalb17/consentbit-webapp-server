@@ -144,7 +144,6 @@ function bytesToBase64(bytes) {
  */
 export async function sendScanReportForId(env, { to, name, scanId, force = false }) {
   if (!scanId) return;
-  console.log('[ScanReport] start — scanId:', scanId, '| to:', to);
 
   const db = env.COOKIE_SCANNER_DB;
   if (!db) { console.warn('[ScanReport] COOKIE_SCANNER_DB not bound — skipping'); return; }
@@ -166,7 +165,6 @@ export async function sendScanReportForId(env, { to, name, scanId, force = false
   // Already emailed for this scan and no newer scan has reset the flag — don't resend.
   // `force` (admin test sends) bypasses this guard.
   if (row.emailed_at && !force) {
-    console.log('[ScanReport] already emailed at', row.emailed_at, '— skipping scanId', scanId);
     return;
   }
 
@@ -231,13 +229,12 @@ ConsentBit Team
   // Mark this scan as emailed so a repeat login/signup with the same scanId doesn't resend.
   // A fresh scan of the site resets emailed_at to NULL, so new reports still get emailed.
   // Skip for forced test sends so the real user still receives their report.
-  if (force) { console.log('[ScanReport] forced test send — not marking emailed for', scanId); return; }
+  if (force) {  return; }
   try {
     await db
       .prepare(`UPDATE scan_reports SET emailed_at = ?1 WHERE id = ?2`)
       .bind(new Date().toISOString(), scanId)
       .run();
-    console.log('[ScanReport] sent + marked emailed — scanId', scanId);
   } catch (e) {
     console.error('[ScanReport] failed to mark emailed:', e?.message);
   }

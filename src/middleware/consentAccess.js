@@ -19,6 +19,7 @@
 import { getSessionById } from '../services/db.js';
 import { verifyDownloadToken } from '../utils/signedToken.js';
 import { requireActiveSubscriptionForConsentReport } from '../services/subscriptionGate.js';
+import { userCanAccessSite } from '../services/team.js';
 
 function sidFromCookie(request) {
   const cookie = request.headers.get('Cookie') || request.headers.get('cookie') || '';
@@ -27,7 +28,8 @@ function sidFromCookie(request) {
 }
 
 // True when a valid web-app session's user belongs to the organization that owns
-// `siteId` (the internal Site.id these handlers key on).
+// `siteId` (the internal Site.id these handlers key on), or is an active team
+// member granted that site. Any lookup error reads as false (fails closed).
 async function sessionOwnsSite(request, env, siteId) {
   const db = env.CONSENT_WEBAPP;
   if (!db || !siteId) return false;
@@ -35,16 +37,7 @@ async function sessionOwnsSite(request, env, siteId) {
   if (!sid) return false;
   const session = await getSessionById(db, sid);
   if (!session?.userId) return false;
-  const owns = await db
-    .prepare(
-      `SELECT 1 FROM Site s
-       JOIN OrganizationMember om ON om.organizationId = s.organizationId
-       WHERE s.id = ?1 AND om.userId = ?2 LIMIT 1`,
-    )
-    .bind(siteId, session.userId)
-    .first()
-    .catch(() => null);
-  return !!owns;
+  return userCanAccessSite(db, session.userId, siteId);
 }
 
 // Gate for /api/consent-logs and /api/consent-csv — require a session that owns

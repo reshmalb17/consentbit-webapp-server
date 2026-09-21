@@ -233,7 +233,6 @@ async function scanWithBrowser(browserBinding, scanUrl, options = {}) {
     if (options.acceptConsent) {
       preJar = await readJar();
       consentClicked = await tryAcceptConsent(page, options.acceptSelectors || []);
-      console.log('[ScanSite] consent accept attempt:', consentClicked || 'no button found');
       if (consentClicked) {
         // Let the consent choice persist (cookie/localStorage), then RELOAD so the now-
         // unblocked tags initialise from the start of a fresh pageview and drop their
@@ -419,7 +418,6 @@ export async function handleScanSite(request, env, ctx, options = {}) {
 
     // cookie_scan_started — only for a user-initiated Webflow scan (skip background
     // cron scans and non-Webflow platforms).
-    console.log(`[PostHog DEBUG] cookie_scan_started guard: siteId=${siteId} userInitiated=${!!options.userInitiated} platform=${site.platform ?? site.PLATFORM ?? 'NONE'}`);
     if (options.userInitiated && String(site.platform ?? site.PLATFORM ?? '').toLowerCase() === 'webflow') {
       try {
         const ownerRow = await db.prepare(

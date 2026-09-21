@@ -138,7 +138,6 @@ export async function handleBannerCustomization(request, env) {
 
     try {
       const row = await getBannerCustomization(db, siteId);
-      console.log(`[banner-customization] GET siteId=${siteId} → row=${row ? 'found' : 'none'}${row ? ' bg=' + (row.backgroundColor ?? '?') : ''}`);
       let translations = null;
       if (row?.translations) {
         try {
@@ -496,7 +495,6 @@ export async function handleBannerCustomization(request, env) {
         // installs by manual copy-paste, so the app must not add the script.
         try {
           if (manualInstall) {
-            console.log('[BannerCustomization][POST] manualInstall=true — skipping head injection for webflowSiteId:', webflowSiteId);
           } else {
           const mainKvRaw = await env.WEBFLOW_AUTHENTICATION.get(webflowSiteId);
           if (mainKvRaw) {
@@ -540,7 +538,6 @@ export async function handleBannerCustomization(request, env) {
         ).bind(siteId).first();
         const userEmail = userRow?.email;
         const isWebflow = String(userRow?.platform || '').toLowerCase() === 'webflow';
-        console.log(`[PostHog DEBUG] banner_settings_updated guard: siteId=${siteId} email=${userEmail || 'NONE'} platform=${userRow?.platform || 'NONE'} isWebflow=${isWebflow}`);
         if (userEmail) {
           await capturePostHogEvent(env, userEmail, 'banner_customized', { platform: 'webflow', site_id: siteId, wf_site_id: wfSiteId || null });
           await capturePostHogEvent(env, userEmail, 'banner_published_staging', { platform: 'webflow', site_id: siteId, wf_site_id: wfSiteId || null });

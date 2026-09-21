@@ -329,7 +329,6 @@ export async function handleVerifyScript(request, env) {
              JOIN User u ON u.id = om.userId
             WHERE s.id = ?1 LIMIT 1`
         ).bind(siteId).first();
-        console.log(`[PostHog DEBUG] banner_verified guard: siteId=${siteId} email=${ownerRow?.email || 'NONE'} platform=${ownerRow?.platform || 'NONE'} found=${found}`);
         if (ownerRow?.email && String(ownerRow.platform || '').toLowerCase() === 'webflow') {
           await capturePostHogEvent(env, ownerRow.email, 'banner_verified', {
             status: found ? 'verified' : 'failed',

@@ -185,12 +185,11 @@ async function requireFramerAuth(request, env, site) {
 
   // Bind the token to the target site via either signal it carries.
   let bound = false;
-  let boundBy = 'none';
   if (site) {
     if (tokenSiteId && (tokenSiteId === String(site.id) || tokenSiteId === String(site.platformSiteId))) {
-      bound = true; boundBy = 'siteId';
+      bound = true;
     } else if (tokenEmail && await orgHasMemberEmail(env.CONSENT_WEBAPP, site.organizationId, tokenEmail)) {
-      bound = true; boundBy = 'email';
+      bound = true;
     }
   }
 
@@ -206,7 +205,6 @@ async function requireFramerAuth(request, env, site) {
     }
     // Advisory mode: valid signature is enough. Proceed.
   } else {
-    console.log(`${TAG} authorized via ${boundBy} — site.id=${site?.id} user=${tokenEmail || '-'}`);
   }
 
   return { ok: true, email: tokenEmail || null };
@@ -645,7 +643,6 @@ export async function handleFramerChangeTier(request, env) {
     console.warn(`${TAG} Legacy sync failed (non-critical):`, syncErr?.message);
   }
 
-  console.log(`${TAG} upgraded to`, planId, interval, 'for site:', siteId);
   return Response.json({
     success: true,
     direction: 'upgrade',
@@ -782,7 +779,7 @@ export async function handleFramerSwitchInterval(request, env) {
   const prep = await prepareSwitch(request, env);
   if (prep.error) return prep.error;
   const {
-    db, email, siteId, targetInterval, currentInterval,
+    db, email, siteId, targetInterval,
     sub, stripeSubId, subItemId, newPriceId, isTrialing,
   } = prep.ctx;
 
@@ -831,7 +828,6 @@ export async function handleFramerSwitchInterval(request, env) {
     console.warn(`${TAG} Legacy sync failed (non-critical):`, syncErr?.message);
   }
 
-  console.log(`${TAG} switched`, currentInterval, '→', targetInterval, 'for site:', siteId);
   return Response.json({
     success: true,
     interval: targetInterval,

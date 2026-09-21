@@ -57,7 +57,6 @@ async function _runEnsureSchema(db) {
   try {
     const stamped = await db.prepare('SELECT version FROM SchemaVersion WHERE id = 1').first();
     if (stamped && Number(stamped.version) === SCHEMA_VERSION) {
-      console.log(`[ensureSchema] ✅ schema v${SCHEMA_VERSION} current — skipped full migration (${Date.now() - _schemaT0}ms)`);
       return;
     }
   } catch (_) {
@@ -67,7 +66,6 @@ async function _runEnsureSchema(db) {
   // Diagnostic: this only ever logs on the FIRST request to a fresh isolate.
   // If you see COLD START but never the matching "completed" line, the migration
   // threw partway — that throw is what surfaces as a 500 to the caller.
-  console.log('[ensureSchema] ⏳ COLD START — running FULL schema migration');
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS Site (
       id TEXT PRIMARY KEY,
@@ -1096,7 +1094,6 @@ async function _runEnsureSchema(db) {
     .bind(SCHEMA_VERSION)
     .run();
 
-  console.log(`[ensureSchema] ✅ FULL migration completed in ${Date.now() - _schemaT0}ms — stamped v${SCHEMA_VERSION}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -2423,6 +2420,53 @@ export async function getSiteTrialUsed(db, siteId) {
   if (!siteId) return false;
   const row = await db.prepare('SELECT trialUsed FROM Site WHERE id = ?1').bind(siteId).first();
   return row ? Number(row.trialUsed ?? row.trialused ?? 0) === 1 : false;
+}
+
+/**
+ * True when a site is not eligible for a free trial.
+ *
+ * `getSiteTrialUsed` reads only the `Site.trialUsed` flag, which is set by `markTrialUsed`
+ * when a trial starts in the current system. It is unset on migrated and older sites, so a
+ * returning customer — including one whose subscription Stripe cancelled after failed
+ * payments — can be granted a second 14-day trial on renewal.
+ *
+ * This treats **any subscription history** for the site as having used the trial, in
+ * addition to the flag. A site that has ever had a subscription is a returning site.
+ *
+ * Accepts `siteId`, `domain`, or both. `domain` exists for the custom checkout, which grants
+ * the trial before the Site row is resolved and only knows the domain at that point.
+ * A brand-new domain has no Site row and no subscriptions, so it stays trial-eligible.
+ *
+ * Per site, not per customer: a customer adding a genuinely new site still gets a trial
+ * for it, matching how `trialUsed` has always been scoped.
+ */
+export async function isSiteTrialIneligible(db, { siteId = null, domain = null } = {}, env = null) {
+  // Decision 2026-09-18: returning sites (cancelled / deleted / any earlier subscription)
+  // GET the 14-day trial again. The restriction below (item A, shipped 2026-09-17) is kept
+  // but OFF unless TRIAL_RESTRICT_RETURNING_SITES = "on" in wrangler.toml [vars].
+  // Known trade-off, accepted: without it a customer can cancel and re-subscribe on the same
+  // domain to get a fresh trial each time. Callers that pass no env get the default (allow).
+  if (String(env?.TRIAL_RESTRICT_RETURNING_SITES || '').trim().toLowerCase() !== 'on') return false;
+
+  let resolvedSiteId = siteId || null;
+
+  if (!resolvedSiteId && domain) {
+    const canonical = normalizeDomain(domain);
+    if (canonical) {
+      const site = await db.prepare('SELECT id FROM Site WHERE domain = ?1').bind(canonical).first();
+      resolvedSiteId = site?.id ?? null;
+    }
+  }
+
+  if (!resolvedSiteId) return false; // unknown site → new → eligible
+
+  if (await getSiteTrialUsed(db, resolvedSiteId)) return true;
+
+  const prior = await db
+    .prepare('SELECT 1 FROM Subscription WHERE siteId = ?1 LIMIT 1')
+    .bind(resolvedSiteId)
+    .first();
+  return Boolean(prior);
 }
 
 /** Mark a site's free trial as used (called when first trialing subscription is created). */

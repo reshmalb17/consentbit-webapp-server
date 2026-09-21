@@ -10,6 +10,7 @@ import {
   updateSiteFromPatch,
   getOrganizationsForUser,
 } from '../services/db.js';
+import { userCanAdminSite } from '../services/team.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -228,7 +229,9 @@ export async function handleSites(request, env) {
       return Response.json({ success: false, error: 'Site not found' }, { status: 404 });
     }
     const orgIds = new Set(userOrgs.map(function(o) { return String(o.id); }));
-    if (!orgIds.has(String(existingSite.organizationId))) {
+    // Owner, or a team Admin of this site, may edit its name and URL (as in CookieYes);
+    // Members may not.
+    if (!orgIds.has(String(existingSite.organizationId)) && !(await userCanAdminSite(db, user.id, siteId))) {
       return Response.json({ success: false, error: 'Site not found' }, { status: 404 });
     }
 

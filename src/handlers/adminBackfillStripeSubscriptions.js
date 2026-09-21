@@ -9,6 +9,7 @@
 //   ?limit=100     — max subscriptions to process (default: all)
 
 import { checkAdminAuth } from '../utils/adminAuth.js';
+import { periodStartOf, periodEndOf } from '../utils/stripePeriod.js';
 import {
   ensureSchema,
   saveSubscription,
@@ -141,8 +142,8 @@ export async function handleAdminBackfillStripeSubscriptions(request, env) {
         planId: planId || null,
         interval,
         status,
-        currentPeriodStart: toTimestamp(sub.current_period_start),
-        currentPeriodEnd: toTimestamp(sub.current_period_end),
+        currentPeriodStart: toTimestamp(periodStartOf(sub)),
+        currentPeriodEnd: toTimestamp(periodEndOf(sub)),
         cancelAtPeriodEnd: sub.cancel_at_period_end ? 1 : 0,
         canceledAt,
         amountCents: sub.plan?.amount ?? null,

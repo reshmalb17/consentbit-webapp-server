@@ -25,7 +25,6 @@ export async function handleLegacyConsentLogs(request, env) {
   const limit  = Math.min(parseInt(url.searchParams.get('limit')  || '50', 10), 500);
   const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
-  console.log('[LegacyConsentLogs] request params —', { siteId, year, month, limit, offset });
 
   const sid = getSessionIdFromCookie(request);
   if (!sid) {
@@ -43,7 +42,6 @@ export async function handleLegacyConsentLogs(request, env) {
   }
 
   const userId = session.userId ?? session.user_id;
-  console.log('[LegacyConsentLogs] userId:', userId);
 
   if (!siteId) return Response.json({ success: false, error: 'siteId required' }, { status: 400 });
 
@@ -77,37 +75,25 @@ export async function handleLegacyConsentLogs(request, env) {
   }
 
   const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
-  console.log('[LegacyConsentLogs] site found —', {
-    id: site.id,
-    name: site.name,
-    domain: site.domain,
-    platformSiteId,
-    legacySource: site.legacySource,
-  });
 
   const kv = env.WEBFLOW_AUTHENTICATION;
   const r2 = env.R2;
 
-  console.log('[LegacyConsentLogs] bindings — kv:', !!kv, '| r2:', !!r2);
 
   // Resolve search keys from KV site details.
   const searchKeys = await buildSearchKeys(kv, platformSiteId, site.domain, site.name);
-  console.log('[LegacyConsentLogs] searchKeys:', searchKeys);
 
   // 1. Read R2 (Cookie-Preferences.json + consent-v2/ per-visitor keys)
   let entries = [];
   if (r2) {
     entries = await getConsentRowsFromR2(r2, searchKeys);
-    console.log('[LegacyConsentLogs] R2 entries:', entries.length);
   } else {
     console.warn('[LegacyConsentLogs] R2 binding missing — skipping R2 read');
   }
 
   // 2. Fallback to KV Cookie-Preferences scan if R2 returned nothing
   if (entries.length === 0 && platformSiteId && kv) {
-    console.log('[LegacyConsentLogs] R2 empty — falling back to KV, platformSiteId:', platformSiteId);
     entries = await getConsentRowsFromKV(kv, platformSiteId);
-    console.log('[LegacyConsentLogs] KV entries:', entries.length);
   } else if (entries.length === 0) {
     console.warn('[LegacyConsentLogs] both R2 and KV returned 0 entries — platformSiteId:', platformSiteId, '| kv:', !!kv);
   }
@@ -115,7 +101,6 @@ export async function handleLegacyConsentLogs(request, env) {
   // 3. D1 fallback — Webflow app sites (isLegacy=0, platformSiteId set) save consent to D1.
   //    If R2/KV returned nothing, read directly from the Consent table.
   if (entries.length === 0 && !site.isLegacy) {
-    console.log('[LegacyConsentLogs] non-legacy site with no R2/KV data — reading from D1, siteId:', site.id);
     try {
       const paddedMonth = month ? month.padStart(2, '0') : '';
       const hasDateFilter = year && month;
@@ -142,7 +127,6 @@ export async function handleLegacyConsentLogs(request, env) {
             .bind(site.id)
             .all();
 
-      console.log('[LegacyConsentLogs] D1 rows found:', (d1Rows || []).length);
 
       // Map D1 Consent rows directly to the ConsentLog shape (skip transformEntry)
       const d1Consents = (d1Rows || []).map(row => {
@@ -199,7 +183,6 @@ export async function handleLegacyConsentLogs(request, env) {
         customCookieRules2 = ccrRows2 || [];
       } catch { /* non-fatal */ }
 
-      console.log('[LegacyConsentLogs] D1 response — total:', d1Consents.length);
       return Response.json({
         success: true,
         consents: d1Consents.slice(offset, offset + limit),
@@ -225,12 +208,10 @@ export async function handleLegacyConsentLogs(request, env) {
       const d = new Date(ts);
       return String(d.getFullYear()) === String(year) && String(d.getMonth() + 1).padStart(2, '0') === paddedMonth;
     });
-    console.log('[LegacyConsentLogs] year/month filter', year, paddedMonth, '—', beforeFilter, '->', entries.length, 'entries');
     if (entries.length === 0 && beforeFilter > 0) {
       console.warn('[LegacyConsentLogs] year/month filter removed all entries — no data for', year, '/', paddedMonth);
     }
   } else {
-    console.log('[LegacyConsentLogs] no year/month filter applied');
   }
 
   const consents = entries.map(e => transformEntry(e, siteId));
@@ -239,7 +220,6 @@ export async function handleLegacyConsentLogs(request, env) {
   const total = consents.length;
   const page = consents.slice(offset, offset + limit);
 
-  console.log('[LegacyConsentLogs] result — total:', total, '| page size:', page.length, '| offset:', offset);
 
   // Fetch scanned cookie inventory from D1 for this site
   const resolvedSiteId = site.id;

@@ -14,6 +14,7 @@ import {
   getSubscriptionByOrganization,
   getOrganizationMember,
 } from '../services/db.js';
+import { cardDefaultMarkerParams } from '../services/stripeCardPin.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -41,7 +42,6 @@ async function requireOrgAccess(db, userId, organizationId) {
 }
 
 export async function handleCreateSetupIntent(request, env) {
-  console.log('[SetupIntent] POST /api/billing/setup-intent called');
   if (request.method !== 'POST') {
     return Response.json({ error: 'Method not allowed' }, { status: 405 });
   }
@@ -107,12 +107,10 @@ export async function handleCreateSetupIntent(request, env) {
     return Response.json({ error: intent.error?.message || 'Failed to create setup intent' }, { status: 500 });
   }
 
-  console.log('[SetupIntent] created for customer:', stripeCustomerId);
   return Response.json({ success: true, clientSecret: intent.client_secret });
 }
 
 export async function handleUpdatePaymentMethod(request, env) {
-  console.log('[UpdatePM] POST /api/billing/update-payment-method called');
   if (request.method !== 'POST') {
     return Response.json({ error: 'Method not allowed' }, { status: 405 });
   }
@@ -162,11 +160,16 @@ export async function handleUpdatePaymentMethod(request, env) {
     return Response.json({ error: attached.error.message || 'Failed to attach payment method' }, { status: 400 });
   }
 
-  // 2. Set as default on customer
+  // 2. Set as default on customer. The marker tells the customer.updated handler
+  // (services/cardPinFollow.js) that this change came from us — step 3 re-pins the right
+  // subscription itself, so the handler must not also move the customer's other sites.
   await fetch(`https://api.stripe.com/v1/customers/${stripeCustomerId}`, {
     method: 'POST',
     headers: stripeHeaders,
-    body: new URLSearchParams({ 'invoice_settings[default_payment_method]': paymentMethodId }).toString(),
+    body: new URLSearchParams({
+      'invoice_settings[default_payment_method]': paymentMethodId,
+      ...cardDefaultMarkerParams(),
+    }).toString(),
   });
 
   // 3. Set as default on subscription
@@ -179,7 +182,6 @@ export async function handleUpdatePaymentMethod(request, env) {
   }
 
   const card = attached.card || {};
-  console.log('[UpdatePM] payment method updated for customer:', stripeCustomerId, '| last4:', card.last4);
   return Response.json({
     success: true,
     paymentMethod: {

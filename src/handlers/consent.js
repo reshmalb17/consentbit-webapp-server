@@ -5,6 +5,35 @@
 import { ensureSchema, getSiteById } from '../services/db.js';
 import { requestDomainMatchesSite } from '../utils/domainValidate.js';
 
+// Set once per isolate when the DB turns out to lack the optional Consent columns,
+// so later saves skip the doomed first attempt instead of paying a round-trip each time.
+let _optionalConsentColumnsMissing = false;
+
+// Inserts a Consent row from [column, value] pairs. Tries base + optional columns;
+// if the DB has no such column, retries with the base columns only. Any other error
+// is rethrown unchanged.
+async function insertConsentRow(db, baseRow, optionalRow) {
+  const run = (row) =>
+    db
+      .prepare(
+        `INSERT INTO Consent (${row.map(([col]) => col).join(', ')})
+         VALUES (${row.map((_, i) => `?${i + 1}`).join(', ')})`,
+      )
+      .bind(...row.map(([, val]) => val))
+      .run();
+
+  if (!_optionalConsentColumnsMissing) {
+    try {
+      return await run([...baseRow, ...optionalRow]);
+    } catch (e) {
+      if (!/no column named|has no column/i.test(e?.message || '')) throw e;
+      _optionalConsentColumnsMissing = true;
+      console.warn('[Consent] optional jurisdiction columns not in DB — saving without them:', e?.message);
+    }
+  }
+  return run(baseRow);
+}
+
 export async function handleConsent(request, env, ctx) {
   const db = env.CONSENT_WEBAPP;
 
@@ -89,20 +118,6 @@ export async function handleConsent(request, env, ctx) {
   } = body || {};
   const consentCategoriesJson = consentPayload != null ? JSON.stringify(consentPayload) : null;
 
-  console.log('[Consent] incoming —', {
-    siteId,
-    regulation,
-    bannerType,
-    consentMethod,
-    status,
-    expiresAt: expiresAt || null,
-    hasConsent: consentPayload != null,
-    consentKeys: consentPayload ? Object.keys(consentPayload) : [],
-    country,
-    region,
-    isEU,
-    origin: request.headers.get('origin') || request.headers.get('referer') || '(none)',
-  });
 
   if (!siteId) {
     console.warn('[Consent] rejected — siteId missing');
@@ -127,15 +142,8 @@ export async function handleConsent(request, env, ctx) {
     );
   }
 
-  console.log('[Consent] site found —', { id: site.id, domain: site.domain, isLegacy: site.isLegacy });
 
   const domainOk = requestDomainMatchesSite(site, request);
-  console.log('[Consent] domain check —', {
-    siteDomain: site.domain,
-    requestOrigin: request.headers.get('origin') || '(none)',
-    requestReferer: request.headers.get('referer') || '(none)',
-    passed: domainOk,
-  });
   if (!domainOk) {
     console.warn('[Consent] domain mismatch — siteId:', siteId, '| site.domain:', site.domain);
     return new Response(
@@ -203,7 +211,6 @@ export async function handleConsent(request, env, ctx) {
         .first()
         .catch(() => null);
       if (existing?.id) {
-        console.log('[Consent] duplicate suppressed — existing id:', existing.id, '| siteId:', siteId, '| status:', status);
         return new Response(
           JSON.stringify({ success: true, id: existing.id, deduped: true }),
           { headers: { 'Content-Type': 'application/json' } },
@@ -216,117 +223,63 @@ export async function handleConsent(request, env, ctx) {
 
   const id = crypto.randomUUID();
 
-  console.log('[Consent] inserting row — id:', id, '| siteId:', siteId, '| status:', status, '| regulation:', regulation);
+
+  // Columns every environment already has.
+  const baseRow = [
+    ['id', id],
+    ['siteId', siteId],
+    ['deviceId', body.deviceId || null],
+    ['ipAddress', ipAddress],
+    ['userAgent', userAgent],
+    ['country', country],
+    ['region', region],
+    ['is_eu', isEU],
+    ['createdAt', now],
+    ['updatedAt', now],
+    ['regulation', regulation],
+    ['bannerType', bannerType],
+    ['consentMethod', consentMethod],
+    ['status', status],
+    ['expiresAt', expiresAt || null],
+    ['consent_categories', consentCategoriesJson],
+    ['tcf_version', tcf_version],
+    ['tcf_cmp_id', tcf_cmp_id],
+    ['tcf_cmp_version', tcf_cmp_version],
+    ['tcf_consent_screen', tcf_consent_screen],
+    ['tcf_consent_language', tcf_consent_language],
+    ['tcf_vendor_list_version', tcf_vendor_list_version],
+    ['tcf_use_non_standard_texts', tcf_use_non_standard_txt],
+    ['tcf_purpose_one_treatment', tcf_purpose_one_treatment],
+    ['tcf_publisher_cc', tcf_publisher_cc],
+    ['tcf_purposes_consent', tcf_purposes_consent],
+    ['tcf_purposes_li', tcf_purposes_li],
+    ['tcf_special_purposes', tcf_special_purposes],
+    ['tcf_features', tcf_features],
+    ['tcf_special_features', tcf_special_features],
+    ['tcf_vendors_consent', tcf_vendors_consent],
+    ['tcf_vendors_li', tcf_vendors_li],
+    ['tcf_publisher_restrictions', tcf_publisher_restr],
+    ['tcf_core_string', tcf_core_string],
+    ['tcf_publisher_string', tcf_publisher_string],
+    ['domain', site.domain || null],
+  ];
+
+  // Jurisdiction + proof columns. Still test-mode: their ALTERs live in ensureSchema,
+  // which is skipped on any DB already stamped at SCHEMA_VERSION, so a DB may not
+  // have them yet. insertConsentRow() drops them rather than failing the save.
+  const optionalRow = [
+    ['law', law],
+    ['law_resolved', lawResolved ? 1 : 0],
+    ['consent_language', consentLanguage],
+    ['consent_model', consentModel],
+    ['notice_version', noticeVersion],
+    ['policy_version', policyVersion],
+    ['lang_wanted', langWanted],
+  ];
 
   try {
-  await db
-    .prepare(
-      `
-      INSERT INTO Consent (
-        id,
-        siteId,
-        deviceId,
-        ipAddress,
-        userAgent,
-        country,
-        region,
-        is_eu,
-        createdAt,
-        updatedAt,
-        regulation,
-        bannerType,
-        consentMethod,
-        status,
-        expiresAt,
-        consent_categories,
-        tcf_version,
-        tcf_cmp_id,
-        tcf_cmp_version,
-        tcf_consent_screen,
-        tcf_consent_language,
-        tcf_vendor_list_version,
-        tcf_use_non_standard_texts,
-        tcf_purpose_one_treatment,
-        tcf_publisher_cc,
-        tcf_purposes_consent,
-        tcf_purposes_li,
-        tcf_special_purposes,
-        tcf_features,
-        tcf_special_features,
-        tcf_vendors_consent,
-        tcf_vendors_li,
-        tcf_publisher_restrictions,
-        tcf_core_string,
-        tcf_publisher_string,
-        domain,
-        law,
-        law_resolved,
-        consent_language,
-        consent_model,
-        notice_version,
-        policy_version,
-        lang_wanted
-      )
-      VALUES (
-        ?1, ?2, ?3, ?4, ?5,
-        ?6, ?7, ?8, ?9, ?10,
-        ?11, ?12, ?13, ?14, ?15, ?16,
-        ?17, ?18, ?19, ?20, ?21,
-        ?22, ?23, ?24, ?25, ?26,
-        ?27, ?28, ?29, ?30, ?31,
-        ?32, ?33, ?34, ?35, ?36,
-        ?37, ?38, ?39, ?40, ?41, ?42, ?43
-      )
-    `
-    )
-    .bind(
-      id,
-      siteId,
-      body.deviceId || null,
-      ipAddress,
-      userAgent,
-      country,
-      region,
-      isEU,
-      now,
-      now,
-      regulation,
-      bannerType,
-      consentMethod,
-      status,
-      expiresAt || null,
-      consentCategoriesJson,
-      tcf_version,
-      tcf_cmp_id,
-      tcf_cmp_version,
-      tcf_consent_screen,
-      tcf_consent_language,
-      tcf_vendor_list_version,
-      tcf_use_non_standard_txt,
-      tcf_purpose_one_treatment,
-      tcf_publisher_cc,
-      tcf_purposes_consent,
-      tcf_purposes_li,
-      tcf_special_purposes,
-      tcf_features,
-      tcf_special_features,
-      tcf_vendors_consent,
-      tcf_vendors_li,
-      tcf_publisher_restr,
-      tcf_core_string,
-      tcf_publisher_string,
-      site.domain || null,
-      law,
-      lawResolved ? 1 : 0,
-      consentLanguage,
-      consentModel,
-      noticeVersion,
-      policyVersion,
-      langWanted
-    )
-    .run();
+  await insertConsentRow(db, baseRow, optionalRow);
 
-  console.log('[Consent] ✅ saved — id:', id, '| siteId:', siteId);
 
   // ── Dual-write to R2 (consent-v2/) for consents received before June 2026 ──
   // This keeps legacy CSV/logs exports working while the transition to D1 completes.
@@ -364,7 +317,6 @@ export async function handleConsent(request, env, ctx) {
         await env.R2.put(r2Key, JSON.stringify(legacyRecord), {
           httpMetadata: { contentType: 'application/json' },
         });
-        console.log('[Consent] R2 dual-write ✅ —', r2Key);
       } catch (r2Err) {
         console.warn('[Consent] R2 dual-write failed (non-fatal):', r2Err?.message);
       }

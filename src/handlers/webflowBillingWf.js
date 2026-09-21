@@ -177,7 +177,6 @@ export async function handleWebflowBillings(request, env) {
           invoicePdf: inv.invoice_pdf || null,
         }));
 
-      console.log(`${TAG} invoices site=${site.id} kept=${invoices.length} ofTotal=${(data.data || []).length}`);
     } catch (e) {
       console.warn(`${TAG} invoice fetch failed`, e?.message);
     }
@@ -311,7 +310,6 @@ export async function handleWebflowCancelSubscriptions(request, env) {
       } catch (e) {
         console.warn(`${TAG} D1 reconcile failed (non-fatal)`, e?.message);
       }
-      console.log(`${TAG} already canceled on Stripe — reconciled DB to canceled`, stripeSubscriptionId);
       return Response.json({ success: true, alreadyCanceled: true, cancelAtPeriodEnd: true });
     }
     console.error(`${TAG} Stripe cancel error`, data.error?.message);
@@ -330,6 +328,107 @@ export async function handleWebflowCancelSubscriptions(request, env) {
   return Response.json({
     success: true,
     cancelAtPeriodEnd: true,
+    currentPeriodEnd: data.current_period_end ? new Date(data.current_period_end * 1000).toISOString() : null,
+  });
+}
+
+// POST /api/wf/resume-subscription  { siteId }
+//
+// Undo a scheduled cancellation: clear cancel_at_period_end so the SAME subscription
+// renews as normal. The customer keeps their plan, billing date and saved card — no new
+// checkout. Before this existed the only way back was "Subscribe now", which started a
+// SECOND subscription while the first was still paid up (the checkout's double-billing
+// guard only catches an active plan, not a cancelled one), charging twice for the overlap.
+//
+// Identity: behind the /api/wf/* gate (middleware/webflowIdentity.js), which authorizes
+// the body's siteId against the Webflow ID token — same protection as cancel.
+//
+// Stripe is the judge of whether it can still be resumed. A subscription whose period has
+// already ended is fully `canceled` in Stripe and cannot be updated; that comes back as
+// { ended: true } so the app can offer a fresh checkout instead.
+export async function handleWebflowResumeSubscription(request, env) {
+  if (request.method !== 'POST') {
+    return Response.json({ success: false, error: 'Method not allowed' }, { status: 405 });
+  }
+  const db = env.CONSENT_WEBAPP;
+  if (!db) return Response.json({ success: false, error: 'Database unavailable' }, { status: 503 });
+  if (!env.STRIPE_SECRET_KEY) return Response.json({ success: false, error: 'Stripe not configured' }, { status: 503 });
+
+  let body;
+  try { body = await request.json(); } catch { return Response.json({ success: false, error: 'Invalid JSON body' }, { status: 400 }); }
+  const siteId = (body.siteId || '').trim();
+  if (!siteId) return Response.json({ success: false, error: 'siteId required' }, { status: 400 });
+
+  const site = await resolveSite(db, siteId);
+  const sub = await resolveSubscription(db, site);
+  const stripeSubscriptionId = pick(sub, 'stripeSubscriptionId', 'stripesubscriptionid');
+  if (!stripeSubscriptionId) {
+    return Response.json({ success: false, error: 'No subscription found for this site.' }, { status: 400 });
+  }
+
+  const params = new URLSearchParams();
+  params.set('cancel_at_period_end', 'false');
+  const res = await fetch(`https://api.stripe.com/v1/subscriptions/${stripeSubscriptionId}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString(),
+  });
+  const data = await res.json();
+
+  if (data.error) {
+    const errMsg = String(data.error?.message || '');
+    // Not found for this Stripe key — NOT the same as ended. The D1 row points at a
+    // subscription this key can't see (e.g. created under a different key/mode). Telling
+    // the customer it "ended" would be wrong, and so would sending them to a new checkout
+    // while their plan may still be running — so this needs a human, not a button.
+    if (data.error?.code === 'resource_missing') {
+      console.warn(`${TAG} resume refused — subscription not found in Stripe`, { stripeSubscriptionId });
+      return Response.json(
+        { success: false, notFound: true, error: "We couldn't find this subscription in billing, so it can't be resumed here. Please contact support." },
+        { status: 404 },
+      );
+    }
+    // Fully ended in Stripe (period over) → can't be resumed; a new subscription via
+    // checkout is the only way back.
+    const ended =
+      /canceled subscription can only update/i.test(errMsg) ||
+      data.error?.code === 'subscription_already_canceled';
+    if (ended) {
+      console.warn(`${TAG} resume refused — subscription has ended`, { stripeSubscriptionId, code: data.error?.code });
+      return Response.json(
+        { success: false, ended: true, error: 'This subscription has already ended and can no longer be resumed. Choose a plan to start a new one.' },
+        { status: 409 },
+      );
+    }
+    console.error(`${TAG} Stripe resume error`, data.error?.message);
+    return Response.json({ success: false, error: data.error.message || 'Stripe error' }, { status: 502 });
+  }
+
+  // Stripe accepted: its status is the truth. D1 can still say 'canceled' for a
+  // subscription that is only scheduled to cancel, which would keep the site showing as
+  // cancelled — so write the live status back along with the cleared flag.
+  const liveStatus = String(data.status || '').toLowerCase() || null;
+  try {
+    await db
+      .prepare(
+        `UPDATE Subscription
+            SET cancelAtPeriodEnd = 0,
+                canceledAt = NULL,
+                status = COALESCE(?1, status),
+                updatedAt = ?2
+          WHERE stripeSubscriptionId = ?3`,
+      )
+      .bind(liveStatus, new Date().toISOString(), stripeSubscriptionId)
+      .run();
+  } catch (e) {
+    // Non-fatal: the customer.subscription.updated webhook re-syncs this row.
+    console.warn(`${TAG} D1 update after resume failed (non-fatal)`, e?.message);
+  }
+
+  return Response.json({
+    success: true,
+    cancelAtPeriodEnd: false,
+    status: liveStatus,
     currentPeriodEnd: data.current_period_end ? new Date(data.current_period_end * 1000).toISOString() : null,
   });
 }

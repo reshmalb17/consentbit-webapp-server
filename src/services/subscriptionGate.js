@@ -147,7 +147,6 @@ export async function getConsentReportEntitlement(env, siteId) {
 export async function requireActiveSubscriptionForConsentReport(env, siteId) {
   const result = await getConsentReportEntitlement(env, siteId);
   if (result.entitled) return { ok: true };
-  console.log(`${TAG} denied — siteId=${siteId} status=${result.status} reason=${result.reason}`);
   return {
     ok: false,
     status: 403,

@@ -57,7 +57,6 @@ export async function handleActivateLicenseWebflow(request, env) {
   const wfSiteIdFromBody = (body.wfSiteId || '').trim() || null;
   const emailFromBody = (body.email || '').trim().toLowerCase() || null;
 
-  console.log(`${TAG} request | licenseKey=${licenseKey} domain=${domain} email=${emailFromBody} wfSiteId=${wfSiteIdFromBody}`);
 
   if (!licenseKey || !domain) {
     console.warn(`${TAG} missing required fields`);
@@ -71,7 +70,6 @@ export async function handleActivateLicenseWebflow(request, env) {
 
   const sid = getSessionIdFromCookie(request);
   if (sid) {
-    console.log(`${TAG} auth via session cookie`);
     const session = await getSessionById(db, sid);
     if (!session) {
       console.warn(`${TAG} session not found`);
@@ -83,7 +81,6 @@ export async function handleActivateLicenseWebflow(request, env) {
       return Response.json({ success: false, error: 'Login required' }, { status: 401 });
     }
   } else if (emailFromBody) {
-    console.log(`${TAG} auth via email`);
     user = await db.prepare('SELECT * FROM User WHERE email = ?1').bind(emailFromBody).first();
     if (!user) {
       console.warn(`${TAG} no user found for email=${emailFromBody}`);
@@ -94,7 +91,6 @@ export async function handleActivateLicenseWebflow(request, env) {
     return Response.json({ success: false, error: 'Authentication required' }, { status: 401 });
   }
 
-  console.log(`${TAG} user resolved | userId=${user.id} email=${user.email}`);
 
   // ── Resolve org ───────────────────────────────────────────────────────────
   const org = await db.prepare(
@@ -109,7 +105,6 @@ export async function handleActivateLicenseWebflow(request, env) {
     return Response.json({ success: false, error: 'No organization found for this account' }, { status: 404 });
   }
 
-  console.log(`${TAG} org resolved | orgId=${org.id}`);
 
   // Optional: verify organizationId hint from dashboard path
   const orgIdHint = (body.organizationId || '').trim();
@@ -120,7 +115,6 @@ export async function handleActivateLicenseWebflow(request, env) {
 
   // ── Guard: license already activated ─────────────────────────────────────
   const existingActivation = await getLicenseActivation(db, licenseKey);
-  console.log(`${TAG} existingActivation=${!!existingActivation}`);
 
   // ── Find this license key in org's subscriptions ──────────────────────────
   const { results: orgSubs } = await db
@@ -128,7 +122,6 @@ export async function handleActivateLicenseWebflow(request, env) {
     .bind(org.id)
     .all();
 
-  console.log(`${TAG} org subscriptions found: ${orgSubs?.length ?? 0}`);
 
   let sub = (orgSubs || []).find((s) => {
     const key = s.licenseKey ?? s.licensekey;
@@ -138,16 +131,13 @@ export async function handleActivateLicenseWebflow(request, env) {
 
   // ── Fallback: search globally by license key ──────────────────────────────
   if (!sub) {
-    console.log(`${TAG} key not in user org — searching globally`);
     sub = await db
       .prepare('SELECT * FROM Subscription WHERE licenseKey = ?1 LIMIT 1')
       .bind(licenseKey)
       .first();
     if (sub) {
-      console.log(`${TAG} key found globally | subId=${sub.id} orgId=${sub.organizationId}`);
       const keyOrg = await db.prepare('SELECT * FROM Organization WHERE id = ?1').bind(sub.organizationId).first();
       if (keyOrg) {
-        console.log(`${TAG} switching to key org | orgId=${keyOrg.id}`);
         Object.assign(org, keyOrg);
       }
     }
@@ -158,7 +148,6 @@ export async function handleActivateLicenseWebflow(request, env) {
     return Response.json({ success: false, error: 'Invalid license key. Please check the key and try again.' }, { status: 404 });
   }
 
-  console.log(`${TAG} subscription matched | subId=${sub.id} siteId=${sub.siteId ?? 'null'}`);
 
   // Both checks together = truly activated. Either alone = partial state, allow retry.
   if (sub.siteId && existingActivation) {
@@ -172,7 +161,6 @@ export async function handleActivateLicenseWebflow(request, env) {
   }
 
   if (existingActivation && !sub.siteId) {
-    console.log(`${TAG} stale LicenseActivation — cleaning up`);
     await db.prepare('DELETE FROM LicenseActivation WHERE licenseKey = ?1').bind(licenseKey).run();
   }
 
@@ -188,16 +176,13 @@ export async function handleActivateLicenseWebflow(request, env) {
       bannerType: 'gdpr',
       regionMode: 'gdpr',
     });
-    console.log(`${TAG} site created | siteId=${site.id}`);
   } catch (e) {
     if (e?.code === 'DOMAIN_EXISTS' || e?.status === 409) {
-      console.log(`${TAG} domain exists — fetching existing site`);
       site = await db.prepare('SELECT * FROM Site WHERE domain = ?1').bind(normalizeDomain(domain)).first();
       if (!site || String(site.organizationId) !== String(org.id)) {
         console.warn(`${TAG} domain belongs to another org | domain=${domain}`);
         return Response.json({ success: false, error: 'Domain is already registered to another account' }, { status: 409 });
       }
-      console.log(`${TAG} existing site resolved | siteId=${site.id}`);
     } else {
       console.error(`${TAG} createSite error:`, e?.message || e);
       return Response.json({ success: false, error: 'Failed to create site' }, { status: 500 });
@@ -222,7 +207,6 @@ export async function handleActivateLicenseWebflow(request, env) {
     return Response.json({ success: false, error: 'Failed to activate license' }, { status: 500 });
   }
 
-  console.log(`${TAG} license activated | siteId=${site.id}`);
 
   // ── Resolve Webflow site ID ───────────────────────────────────────────────
   let resolvedWfSiteId = wfSiteIdFromBody;
@@ -237,12 +221,10 @@ export async function handleActivateLicenseWebflow(request, env) {
       if (res.ok) {
         const html = await res.text();
         const m = html.match(/data-wf-site="([^"]+)"/);
-        if (m) { resolvedWfSiteId = m[1]; console.log(`${TAG} wfSiteId detected from HTML: ${resolvedWfSiteId}`); }
-        else console.log(`${TAG} data-wf-site not found in HTML`);
+        if (m) resolvedWfSiteId = m[1];
       }
     } catch (_) {}
   } else {
-    console.log(`${TAG} wfSiteId from body: ${resolvedWfSiteId}`);
   }
 
   // ── Update Site with platform + platformSiteId ────────────────────────────
@@ -265,7 +247,6 @@ export async function handleActivateLicenseWebflow(request, env) {
     buildEmbedScriptUrl(embedOrigin || new URL(request.url).origin, site.cdnScriptId) ||
     `${new URL(request.url).origin}/consentbit/${site.cdnScriptId}/script.js`;
 
-  console.log(`${TAG} scriptUrl=${scriptUrl}`);
 
   // ── Write to WEBFLOW_AUTHENTICATION KV ───────────────────────────────────
   if (resolvedWfSiteId && env.WEBFLOW_AUTHENTICATION) {
@@ -285,7 +266,6 @@ export async function handleActivateLicenseWebflow(request, env) {
         isWebappMigrated: true,
         activatedAt: now,
       }));
-      console.log(`${TAG} KV written | wfSiteId=${resolvedWfSiteId}`);
     } catch (kvErr) {
       console.warn(`${TAG} KV write failed (non-critical):`, kvErr?.message);
     }
@@ -301,12 +281,10 @@ export async function handleActivateLicenseWebflow(request, env) {
       customerId: sub?.stripeCustomerId ?? sub?.stripecustomerid ?? null,
       platform: 'webflow',
     });
-    console.log(`${TAG} legacy sync done`);
   } catch (syncErr) {
     console.warn(`${TAG} legacy sync failed (non-critical):`, syncErr?.message);
   }
 
-  console.log(`${TAG} success | siteId=${site.id} domain=${normalizeDomain(domain)}`);
 
   return Response.json({
     success: true,

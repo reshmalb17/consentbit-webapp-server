@@ -747,3 +747,124 @@ export function sendVerifyEmailLink(env, ctx, { to, name, link, ttlHours = 24 })
   if (ctx?.waitUntil) ctx.waitUntil(send);
   return send;
 }
+
+// ---------------------------------------------------------------------------
+// Team invite — someone was invited to help manage sites on another account
+// ---------------------------------------------------------------------------
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/**
+ * @param {object} env
+ * @param {ExecutionContext|null} ctx
+ * @param {{ to: string, inviterName: string, inviterEmail: string, role: string,
+ *           siteLabels: string[], link: string, ttlDays: number }} opts
+ */
+export function sendTeamInviteEmail(env, ctx, { to, inviterName, inviterEmail, role, siteLabels = [], link, ttlDays = 7 }) {
+  const inviter = inviterName || inviterEmail || 'A ConsentBit user';
+  const roleLabel = role === 'admin' ? 'Admin' : 'Member';
+  const subject = `${inviter} invited you to ConsentBit`;
+  const siteList = siteLabels.length
+    ? siteLabels.map((s) => `<li style="margin:0 0 4px;">${escapeHtml(s)}</li>`).join('')
+    : '';
+
+  const html = layout(
+    `${escapeHtml(inviter)} invited you to manage cookie consent as ${roleLabel}.`,
+    `
+    <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi,</p>
+    <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
+      <strong style="color:#111827;">${escapeHtml(inviter)}</strong>${inviterEmail && inviterName ? ` (${escapeHtml(inviterEmail)})` : ''}
+      invited you to join their ConsentBit team as <strong style="color:#111827;">${roleLabel}</strong>.
+    </p>
+
+    ${siteList ? `
+    <div style="background:#f3f4f6;border:1px solid #e5e7eb;border-radius:10px;padding:14px 18px;margin:0 0 22px;">
+      <p style="margin:0 0 8px;color:#111827;font-size:14px;font-weight:600;">You'll have access to</p>
+      <ul style="margin:0;padding:0 0 0 18px;color:#374151;font-size:14px;line-height:1.5;">${siteList}</ul>
+    </div>` : ''}
+
+    <p style="margin:0 0 24px;">
+      <a href="${link}" style="${BTN}">Accept invitation</a>
+    </p>
+
+    <p style="margin:0 0 18px;color:#6b7280;font-size:14px;line-height:1.6;">
+      Sign in or create a free account with <strong style="color:#374151;">${escapeHtml(to)}</strong> to accept.
+      This link expires in ${ttlDays} days. If the button does not work, copy this into your browser:<br />
+      <span style="color:#374151;word-break:break-all;">${link}</span>
+    </p>
+
+    ${HR}
+
+    <p style="margin:0;color:#6b7280;font-size:14px;line-height:1.6;">
+      Not expecting this? You can ignore this email — nothing happens unless you accept.
+    </p>
+    `,
+  );
+
+  const text = `Hi,\n\n${inviter}${inviterEmail && inviterName ? ` (${inviterEmail})` : ''} invited you to join their ConsentBit team as ${roleLabel}.\n\n${siteLabels.length ? `You'll have access to:\n${siteLabels.map((s) => `- ${s}`).join('\n')}\n\n` : ''}Accept the invitation (sign in or create an account with ${to}):\n${link}\n\nThis link expires in ${ttlDays} days.\n\nNot expecting this? You can ignore this email.\n\nConsentBit Team\n`;
+
+  const send = sendBrevoEmail(env, { to, subject, html, text })
+    .catch(e => console.error('[Email] sendTeamInviteEmail failed:', e?.message));
+
+  if (ctx?.waitUntil) ctx.waitUntil(send);
+  return send;
+}
+
+/**
+ * Tells the account owner and the site's Admins that the team changed.
+ *   event: 'invited'  — actorName/actorEmail invited memberEmail
+ *          'accepted' — memberEmail accepted their invitation
+ * @param {object} env
+ * @param {ExecutionContext|null} ctx
+ * @param {{ to: string, name?: string, event: 'invited'|'accepted', memberEmail: string,
+ *           role: string, siteLabels: string[], actorName?: string, actorEmail?: string,
+ *           teamUrl: string }} opts
+ */
+export function sendTeamActivityEmail(env, ctx, { to, name, event, memberEmail, role, siteLabels = [], actorName, actorEmail, teamUrl }) {
+  const roleLabel = role === 'admin' ? 'Admin' : 'Member';
+  const actor = actorName || actorEmail || 'A team admin';
+  const accepted = event === 'accepted';
+  const subject = accepted
+    ? `${memberEmail} joined your ConsentBit team`
+    : `${memberEmail} was invited to your ConsentBit team`;
+  const headline = accepted
+    ? `<strong style="color:#111827;">${escapeHtml(memberEmail)}</strong> accepted the invitation and joined as <strong style="color:#111827;">${roleLabel}</strong>.`
+    : `<strong style="color:#111827;">${escapeHtml(actor)}</strong> invited <strong style="color:#111827;">${escapeHtml(memberEmail)}</strong> as <strong style="color:#111827;">${roleLabel}</strong>.`;
+  const siteList = siteLabels.map((s) => `<li style="margin:0 0 4px;">${escapeHtml(s)}</li>`).join('');
+
+  const html = layout(
+    accepted ? `${escapeHtml(memberEmail)} joined your team.` : `${escapeHtml(memberEmail)} was invited to your team.`,
+    `
+    <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi${name ? ` ${escapeHtml(name)}` : ''},</p>
+    <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">${headline}</p>
+
+    ${siteList ? `
+    <div style="background:#f3f4f6;border:1px solid #e5e7eb;border-radius:10px;padding:14px 18px;margin:0 0 22px;">
+      <p style="margin:0 0 8px;color:#111827;font-size:14px;font-weight:600;">Sites</p>
+      <ul style="margin:0;padding:0 0 0 18px;color:#374151;font-size:14px;line-height:1.5;">${siteList}</ul>
+    </div>` : ''}
+
+    <p style="margin:0 0 24px;">
+      <a href="${teamUrl}" style="${BTN}">View team</a>
+    </p>
+
+    ${HR}
+
+    <p style="margin:0;color:#6b7280;font-size:14px;line-height:1.6;">
+      You're receiving this because you're the account owner or an Admin of ${siteLabels.length === 1 ? 'this site' : 'these sites'}.
+    </p>
+    `,
+  );
+
+  const text = `Hi${name ? ` ${name}` : ''},\n\n${accepted
+    ? `${memberEmail} accepted the invitation and joined as ${roleLabel}.`
+    : `${actor} invited ${memberEmail} as ${roleLabel}.`}\n\n${siteLabels.length ? `Sites:\n${siteLabels.map((s) => `- ${s}`).join('\n')}\n\n` : ''}View team: ${teamUrl}\n\nConsentBit Team\n`;
+
+  const send = sendBrevoEmail(env, { to, subject, html, text })
+    .catch(e => console.error('[Email] sendTeamActivityEmail failed:', e?.message));
+
+  if (ctx?.waitUntil) ctx.waitUntil(send);
+  return send;
+}

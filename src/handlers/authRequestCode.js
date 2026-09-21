@@ -137,7 +137,6 @@ export async function handleAuthRequestCode(request, env, ctx) {
     const ttlMinutes = Number(env.OTP_TTL_MINUTES || 10) || 10;
     const fixedHash = await sha256Hex(`${purpose}|${email}|${testCode}|${salt}`);
     const fixedRow = await createEmailVerificationCode(db, { email, purpose, codeHash: fixedHash, name: null, ttlMinutes });
-    console.log('[AuthRequestCode] test-login: issued fixed code (email skipped) for', email, 'requestId', fixedRow.id);
     return Response.json(
       { success: true, requestId: fixedRow.id, expiresAt: fixedRow.expiresAt },
       { status: 200 },
@@ -145,18 +144,10 @@ export async function handleAuthRequestCode(request, env, ctx) {
   }
 
   // Run user lookup and hash computation in parallel — neither depends on the other
-  const lookupT0 = Date.now();
   const [existingUser, codeHash] = await Promise.all([
     getUserByEmail(db, email),
     sha256Hex(`${purpose}|${email}|${code}|${salt}`),
   ]);
-  console.log('[AuthRequestCode] user lookup', {
-    email,
-    purpose,
-    userFound: !!existingUser,
-    userId: existingUser?.id || null,
-    lookupMs: Date.now() - lookupT0,
-  });
 
   if (purpose === 'login' && !existingUser) {
     return Response.json({ success: false, error: 'No account found with this email. Please sign up first.' }, { status: 404 });
@@ -171,7 +162,6 @@ export async function handleAuthRequestCode(request, env, ctx) {
   const ttlMinutes = Number(env.OTP_TTL_MINUTES || 10) || 10;
   // A large insertMs here means this request paid for the cold-start schema
   // migration — cross-reference the [ensureSchema] COLD START line in the tail.
-  const insertT0 = Date.now();
   const signupPasswordHash = signupPassword ? await hashPassword(signupPassword) : null;
   const row = await createEmailVerificationCode(db, {
     email,
@@ -182,11 +172,6 @@ export async function handleAuthRequestCode(request, env, ctx) {
     passwordHash: signupPasswordHash,
   });
   pwDebug('request-code:parked', { requestId: row.id, purpose, parkedHash: !!signupPasswordHash, hashLen: signupPasswordHash ? signupPasswordHash.length : 0 });
-  console.log('[AuthRequestCode] code row written', {
-    requestId: row.id,
-    expiresAt: row.expiresAt,
-    insertMs: Date.now() - insertT0,
-  });
 
   const subject = `Your ConsentBit verification code`;
   const text = `Hello${displayName ? ` ${displayName}` : ''},\n\nYour verification code is: ${code}\n\nThis code will expire in ${ttlMinutes} minutes, so please use it as soon as possible.\n\nIf you did not request this verification code, you can safely ignore this email.\n\nBest regards,\nConsentBit Team\n`;
@@ -211,16 +196,6 @@ export async function handleAuthRequestCode(request, env, ctx) {
   const hasBrevoConfig = Boolean(env.BREVO_API_KEY && env.BREVO_FROM_EMAIL);
   const allowReturn = String(env.RETURN_OTP_IN_RESPONSE || '').toLowerCase() === 'true';
 
-  console.log('[AuthRequestCode] email config check —', {
-    hasBrevoApiKey: !!env.BREVO_API_KEY,
-    hasBrevoFromEmail: !!env.BREVO_FROM_EMAIL,
-    fromEmail: env.BREVO_FROM_EMAIL || '(not set)',
-    allowReturn,
-    hasBrevoConfig,
-    toEmail: email,
-    purpose,
-    requestId: row.id,
-  });
 
   // If Brevo is not configured, fall back to returning the code in the response (dev only)
   if (!hasBrevoConfig || allowReturn) {
@@ -232,7 +207,6 @@ export async function handleAuthRequestCode(request, env, ctx) {
   }
 
   // Brevo is configured — fire email in background and respond immediately
-  console.log('[AuthRequestCode] dispatching Brevo email to:', email);
   const brevoT0 = Date.now();
   ctx.waitUntil(
     sendEmailViaBrevo(env, { to: email, subject, text, html })
@@ -241,13 +215,6 @@ export async function handleAuthRequestCode(request, env, ctx) {
         // To confirm the mailbox actually got it, look this messageId up in
         // Brevo → Transactional → Logs and check for Blocked / Hard bounce /
         // Soft bounce / Spam / Deferred, and check the Blocklist for the address.
-        console.log('[AuthRequestCode] ✅ Brevo ACCEPTED for delivery (not proof of inbox delivery)', {
-          to: email,
-          emailDomain,
-          messageId,
-          requestId: row.id,
-          brevoMs: Date.now() - brevoT0,
-        });
       })
       .catch((e) => {
         console.error('[AuthRequestCode] ❌ Brevo send FAILED', {

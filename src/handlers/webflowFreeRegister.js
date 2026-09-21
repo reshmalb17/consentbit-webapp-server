@@ -33,7 +33,6 @@ async function resolveWebflowEmail(db, env, wfSiteId) {
   // 1. D1 (authoritative, survives KV eviction)
   try {
     const siteRow = await getWebflowOAuthTokenBySite(db, wfSiteId);
-    console.log(`${TAG} resolveWebflowEmail: D1 WebflowOAuthSite row ${siteRow ? `found (userKey=${siteRow.userKey || 'none'})` : 'MISSING'}`);
     if (siteRow?.userKey) {
       const tokenRow = await getWebflowOAuthTokenByUser(db, siteRow.userKey);
       // Webflow's /v2/token/authorized_by returns a FLAT object
@@ -41,10 +40,8 @@ async function resolveWebflowEmail(db, env, wfSiteId) {
       // nested { user: { email } }. Accept either shape.
       const email = tokenRow?.authorizedBy?.email || tokenRow?.authorizedBy?.user?.email;
       if (email) {
-        console.log(`${TAG} resolveWebflowEmail: source=D1 email=${email}`);
         return String(email).trim().toLowerCase();
       }
-      console.log(`${TAG} resolveWebflowEmail: D1 token row had no authorizedBy email`);
     }
   } catch (e) {
     console.warn(`${TAG} resolveWebflowEmail: D1 lookup failed (non-fatal):`, e?.message || e);
@@ -55,12 +52,9 @@ async function resolveWebflowEmail(db, env, wfSiteId) {
     if (kvRaw) {
       const kvEntry = typeof kvRaw === 'string' ? JSON.parse(kvRaw) : kvRaw;
       if (kvEntry?.email) {
-        console.log(`${TAG} resolveWebflowEmail: source=KV email=${kvEntry.email}`);
         return String(kvEntry.email).trim().toLowerCase();
       }
-      console.log(`${TAG} resolveWebflowEmail: KV entry present but no .email field`);
     } else {
-      console.log(`${TAG} resolveWebflowEmail: no KV entry for wfSiteId=${wfSiteId}`);
     }
   } catch (e) {
     console.warn(`${TAG} resolveWebflowEmail: KV lookup failed (non-fatal):`, e?.message || e);
@@ -110,7 +104,6 @@ export async function handleWebflowFreeRegister(request, env) {
   // resolve the workspace email server-side from the stored OAuth record.
   if (!email) {
     email = await resolveWebflowEmail(db, env, wfSiteId);
-    console.log(`${TAG} email resolved server-side: ${email ? 'FOUND' : 'NOT FOUND'} (wfSiteId=${wfSiteId || 'none'})`);
   }
 
   if (!email || !domain) {
@@ -244,7 +237,6 @@ export async function handleWebflowFreeRegister(request, env) {
   if (wfSiteId) {
     const platformMatch = siteList.find((s) => s.platformSiteId === wfSiteId);
     if (platformMatch) {
-      console.log(`${TAG} Step 3: platformSiteId match — already registered, returning idempotent success for site=${platformMatch.id}`);
       const embedOriginForMatch = canonicalEmbedOrigin(request, env);
       const scriptUrlMatch =
         platformMatch.embedScriptUrl ||
@@ -454,7 +446,6 @@ export async function handleWebflowFreeRegister(request, env) {
           if (manualInstall) {
             // Updated app: the user installs the banner by manual copy-paste, so
             // the app must NOT auto-inject the script into the head or auto-publish.
-            console.log(`${TAG} Step 7: manualInstall=true — skipping head injection + publish for wfSiteId=${wfSiteId}`);
           } else {
             // Read stored Webflow script ID from D1 so we reuse it instead of creating a new registered script
             let storedWebflowScriptId = null;
@@ -509,7 +500,6 @@ export async function handleWebflowFreeRegister(request, env) {
                   const err = await publishRes.text();
                   console.warn(`${TAG} Step 7: Webflow publish failed status=${publishRes.status} body=${err}`);
                 } else {
-                  console.log(`${TAG} Step 7: Webflow site published successfully wfSiteId=${wfSiteId}`);
                 }
               } catch (publishErr) {
                 console.warn(`${TAG} Step 7: Webflow publish error (non-fatal):`, publishErr?.message || publishErr);

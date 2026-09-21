@@ -14,8 +14,10 @@ import { handleScanHistory } from './handlers/scanHistory.js';
 import { handleCookies } from './handlers/cookies.js';
 import { handleMarkVerified } from './handlers/markVerified.js';
 import { handleScanSite, handleScanSiteConsented } from './handlers/scanSite.js';
-import { handleBannerCustomization } from './handlers/bannerCustomization.js';
+import { handleBannerCustomization, resolveEffectivePlanId } from './handlers/bannerCustomization.js';
 import { handleBannerTemplates } from './handlers/bannerTemplates.js';
+import { handleConsentRetentionSettings } from './handlers/consentRetentionSettings.js';
+import { runConsentRetentionSweep } from './services/consentRetention.js';
 import { handleScheduledScan } from './handlers/scheduledScan.js';
 import { handleConsentLogs } from './handlers/consentLogs.js';
 import { handleValidatePromo } from './handlers/validatePromo.js';
@@ -53,6 +55,7 @@ import { handleAdminInjectScript } from './handlers/adminInjectScript.js';
 import { handleAdminMigrateFromDashboard } from './handlers/adminMigrateFromDashboard.js';
 import { handleAdminBackfillConsentR2 } from './handlers/adminBackfillConsentR2.js';
 import { handleAdminBackfillStripeSubscriptions } from './handlers/adminBackfillStripeSubscriptions.js';
+import { handleAdminVoidCancelledInvoices } from './handlers/adminVoidCancelledInvoices.js';
 import { handleAdminBackfillPosthog } from './handlers/adminBackfillPosthog.js';
 import { handleAdminGa4Test } from './handlers/adminGa4Test.js';
 import { handleAdminBackfillClickup } from './handlers/adminBackfillClickup.js';
@@ -103,10 +106,13 @@ import { handleCustomCheckout, handleValidateCoupon } from './handlers/customeCh
 import { handleSyncPlugin, handleSyncPluginCustomization, handleGetPluginData, handleGetPluginPlan } from './handlers/SyncPlugin.js';
 import { handlePaymentSubscription } from './handlers/paymentSubscription.js';
 import { handleWebflowBilling, handleWebflowCancelSubscription, handleWebflowSwitchInterval } from './handlers/webflowBilling.js';
-import { handleWebflowBillings, handleWebflowCancelSubscriptions, handleWebflowSwitchIntervals } from './handlers/webflowBillingWf.js';
+import { handleWebflowBillings, handleWebflowCancelSubscriptions, handleWebflowSwitchIntervals, handleWebflowResumeSubscription } from './handlers/webflowBillingWf.js';
 import { createAdminNotification } from './services/adminNotifications.js';
 import { processSubscriptionEndSweep } from './services/subscriptionEndSweep.js';
 import { requireConsentSession, requireConsentPdfAccess } from './middleware/consentAccess.js';
+import { handleTeam } from './handlers/team.js';
+import { listSiteAdminRecipients, copyEmailToAdmins } from './services/team.js';
+import { TEAM_GATED_PATHS, requireTeamSiteAccess } from './middleware/teamSiteAccess.js';
 import { requireActiveSubscriptionForConsentReport } from './services/subscriptionGate.js';
 import { handleFramerBilling, handleFramerCancelSubscription, handleFramerSwitchInterval } from './handlers/framerBilling.js';
 import {
@@ -151,6 +157,7 @@ import {
   getScanUsageForSite,
   getEffectivePlanForOrganization,
   getOrgOwnerEmail,
+  getSubscriptionByStripeId,
   markScanLimitNotified,
   getPendingFinalPaymentReminders,
   claimPaymentFailureEmail,
@@ -257,6 +264,8 @@ const WEBFLOW_APP_ROUTES = {
   'domains':             (req, env)      => handleWebflowDomains(req, env),
   'billings':             (req, env)     => handleWebflowBillings(req, env),
   'cancel-subscriptions': (req, env)     => handleWebflowCancelSubscriptions(req, env),
+  // Undo a scheduled cancellation (cancel_at_period_end=false) — same subscription keeps renewing.
+  'resume-subscription':  (req, env)     => handleWebflowResumeSubscription(req, env),
   'switch-intervals':     (req, env)     => handleWebflowSwitchIntervals(req, env),
   // Designer-app UPGRADE surface (tier change + interval switch, each with a prorated
   // preview). Webflow twin of the Framer /api/framer/upgrade/* routes — same Stripe
@@ -350,6 +359,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/admin/migrate-from-dashboard',
   '/api/admin/backfill-consent-r2',
   '/api/admin/backfill-stripe-subscriptions',
+  '/api/admin/void-cancelled-invoices',
   '/api/admin/backfill-posthog',
   '/api/admin/ga4-test',
   '/api/admin/backfill-clickup',
@@ -364,6 +374,15 @@ const CSRF_EXEMPT_PATHS = new Set([
 // ---------------------------------------------------------------------------
 async function dispatchApiRoute(pathname, request, env, ctx) {
   const isPublic = PUBLIC_PATHS.has(pathname);
+
+  // Per-site team access: a signed-in team member only reaches the sites they were
+  // granted. Requests without a web-app session pass untouched (see the middleware).
+  if (TEAM_GATED_PATHS.has(pathname)) {
+    const g = await requireTeamSiteAccess(request, env);
+    if (!g.ok) {
+      return { response: Response.json({ success: false, error: g.error, code: g.code }, { status: g.status }), isPublic };
+    }
+  }
 
   let response;
   switch (pathname) {
@@ -432,6 +451,17 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     case '/api/auth/transfer-ownership/authorize':
       response = await handleTransferOwnershipAuthorize(request, env); break;
 
+    // — Team members (Profile → Team). Session-authenticated; not public, so POSTs
+    //   keep CSRF. invite-info needs no session (accept page before sign-in).
+    case '/api/team':
+    case '/api/team/invite':
+    case '/api/team/update':
+    case '/api/team/remove':
+    case '/api/team/resend':
+    case '/api/team/invite-info':
+    case '/api/team/accept':
+      response = await handleTeam(request, env, ctx); break;
+
     // — Onboarding
     case '/api/onboarding/first-setup':
       response = await handleOnboardingFirstSetup(request, env, ctx); break;
@@ -450,6 +480,10 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     // deliberately NOT added to PUBLIC_PATHS — it keeps CSRF and body sanitization.
     case '/api/banner-templates':
       response = await handleBannerTemplates(request, env); break;
+    // Consent-record retention period (plan range → customer pick). Session + site
+    // ownership checked in the handler; not in PUBLIC_PATHS, so POST keeps CSRF.
+    case '/api/consent-retention':
+      response = await handleConsentRetentionSettings(request, env); break;
     case '/api/scheduled-scan':
       response = await handleScheduledScan(request, env); break;
     case '/api/scan-history':
@@ -657,6 +691,9 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     case '/api/admin/backfill-stripe-subscriptions':
       response = await handleAdminBackfillStripeSubscriptions(request, env); break;
+    // Voids still-payable invoices on already-cancelled subscriptions. Dry run unless ?dryRun=false.
+    case '/api/admin/void-cancelled-invoices':
+      response = await handleAdminVoidCancelledInvoices(request, env); break;
 
     case '/api/admin/backfill-posthog':
       response = await handleAdminBackfillPosthog(request, env); break;
@@ -762,7 +799,6 @@ async function executeScheduledScans(env, ctx) {
       }
     }
     const scheduledScans = [...bySite.values()];
-    console.log('[Cron] executeScheduledScans —', { time: now, dueRaw: dueRaw.length, dueScans: scheduledScans.length });
     const executed = [];
     for (const scheduledScan of scheduledScans) {
       try {
@@ -787,6 +823,17 @@ async function executeScheduledScans(env, ctx) {
                   domain: site.domain,
                   scansLimit,
                 });
+                // Team Admins of this site get the same notice (Members don't).
+                const ownerEmail = String(owner.email).trim().toLowerCase();
+                for (const admin of await listSiteAdminRecipients(db, scheduledScan.siteId)) {
+                  if (admin.email === ownerEmail) continue;
+                  sendScanLimitEmail(env, ctx, {
+                    to: admin.email,
+                    name: admin.name,
+                    domain: site.domain,
+                    scansLimit,
+                  });
+                }
                 await markScanLimitNotified(db, scheduledScan.siteId, scanUsage.yearMonth);
               }
             }
@@ -867,7 +914,6 @@ async function executeScheduledScans(env, ctx) {
         executed.push({ id: scheduledScan.id, status: 'failed', error: err.message });
       }
     }
-    console.log('[Cron] executeScheduledScans done —', executed);
   } catch (err) {
     console.error('[Cron] Error executing scheduled scans:', err);
   }
@@ -966,7 +1012,6 @@ async function processFinalPaymentReminders(env, ctx) {
     return;
   }
   if (pending.length === 0) return;
-  console.log('[Cron] final dunning reminders due:', pending.length);
 
   for (const row of pending) {
     const invoiceId = getRow(row, 'invoiceId');
@@ -994,12 +1039,28 @@ async function processFinalPaymentReminders(env, ctx) {
       if (!claimed) continue;
 
       if (!stillOwing) {
-        console.log('[Cron] final reminder skipped — invoice', invoiceId, 'is', invoice.status);
         continue;
       }
       const billingUrl = (env.WEBAPP_PUBLIC_URL || 'https://accounts.consentbit.com').replace(/\/$/, '');
       sendPaymentFailureEmail(env, ctx, { to, name, updatePaymentUrl: billingUrl, reminderNumber: 3 });
-      console.log('[Cron] final dunning reminder sent for invoice', invoiceId);
+      // Team Admins of the site (or account) get the final notice too.
+      const stripeSubId =
+        typeof invoice.subscription === 'string'
+          ? invoice.subscription
+          : invoice.parent?.subscription_details?.subscription || null;
+      const subRow = stripeSubId ? await getSubscriptionByStripeId(db, stripeSubId).catch(() => null) : null;
+      if (subRow) {
+        copyEmailToAdmins(
+          db,
+          ctx,
+          {
+            siteId: subRow.siteId ?? subRow.siteid,
+            organizationId: subRow.organizationId ?? subRow.organizationid,
+          },
+          [to],
+          (a) => sendPaymentFailureEmail(env, ctx, { to: a.email, name: a.name || '', updatePaymentUrl: billingUrl, reminderNumber: 3 }),
+        );
+      }
     } catch (err) {
       console.error('[Cron] final reminder failed for invoice', invoiceId, err);
     }
@@ -1012,7 +1073,6 @@ async function processFinalPaymentReminders(env, ctx) {
 
 export default {
   async scheduled(event, env, ctx) {
-    console.log('[Worker] scheduled cron fired —', { cron: event?.cron, scheduledTime: event?.scheduledTime });
     ctx.waitUntil(
       Promise.all([
         executeScheduledScans(env, ctx),
@@ -1023,6 +1083,13 @@ export default {
         // whether those sites still carry the ConsentBit script. Self-limiting:
         // a few sites per tick, each looked at no more than daily.
         processSubscriptionEndSweep(env),
+        // Consent-record retention. No-op unless CONSENT_RETENTION_MODE is set
+        // ('dry-run' counts, 'on' deletes) — and test + production share one D1,
+        // so enabling it on either worker affects both. See services/consentRetention.js.
+        runConsentRetentionSweep(env, {
+          now: new Date(event?.scheduledTime || Date.now()),
+          resolvePlanId: resolveEffectivePlanId,
+        }).catch((err) => console.warn('[ConsentRetention] sweep failed:', err?.message)),
       ])
     );
   },
@@ -1092,14 +1159,12 @@ export default {
       // properties like `--var`, text containing `--`, etc.) and would corrupt the
       // saved banner. Identity is enforced by the Webflow ID token below instead.
       const req = request;
-      console.log(`[wf] → ${request.method} ${pathname} siteHdr=${request.headers.get('X-Webflow-Site-Id') || '-'} hasToken=${!!request.headers.get('Authorization')}`);
       const auth = await requireWebflowIdentity(req, env, {
         // oauth/status must still answer for a not-yet-authorized site (no token
         // stored) so the app can show the authorize screen. Such a site has no
         // stored data, so allowing the read leaks nothing.
         allowUnauthorizedSite: pathname === '/api/wf/oauth/status',
       });
-      console.log(`[wf] ${pathname} → ${auth.ok ? 'OK' : 'DENIED ' + auth.status + ' ' + auth.code}`);
       // NOTE: these routes mirror formerly-PUBLIC endpoints, so responses are NOT
       // run through wrapAndEncodeResponse. Some handlers (e.g. banner-customization
       // GET) already envelope-encode their own body; re-encoding here double-wraps

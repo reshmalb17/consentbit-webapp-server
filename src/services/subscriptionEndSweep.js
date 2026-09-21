@@ -95,7 +95,6 @@ export async function stampEndedSubscriptions(db) {
     }
   }
 
-  if (stamped) console.log(`[endSweep] ${stamped} subscription(s) reached period end`);
   return stamped;
 }
 
@@ -176,11 +175,6 @@ async function applyResult(db, site, result) {
     .bind(decision.status, nowIso, decision.failures, site.id)
     .run();
 
-  console.log(
-    `[endSweep] ${site.domain || site.id} → ${decision.status}` +
-      (decision.reason ? ` (${decision.reason})` : '') +
-      (result.how ? ` [${result.how}]` : '')
-  );
   return decision.status;
 }
 

@@ -43,7 +43,6 @@ export async function handleCustomCookieRules(request, env) {
   const url = new URL(request.url);
   const { method } = request;
 
-  console.log(`${TAG} ${method} ${url.pathname}${url.search} origin=${request.headers.get('origin') || '-'}`);
 
   try {
     await ensureTable(db);
@@ -75,7 +74,6 @@ export async function handleCustomCookieRules(request, env) {
       }
       const res = await db.prepare(`DELETE FROM CustomCookieRule WHERE id = ?1`).bind(id).run();
       const changes = res?.meta?.changes ?? 0;
-      console.log(`${TAG} DELETE id=${id} → rowsDeleted=${changes}`);
       if (changes === 0) console.warn(`${TAG} DELETE matched no row for id=${id} (already gone or wrong id)`);
       return Response.json({ success: true, deleted: changes });
     }
@@ -99,7 +97,6 @@ export async function handleCustomCookieRules(request, env) {
         }
         const res = await db.prepare(`DELETE FROM CustomCookieRule WHERE id = ?1`).bind(id).run();
         const changes = res?.meta?.changes ?? 0;
-        console.log(`${TAG} POST action=delete id=${id} → rowsDeleted=${changes}`);
         if (changes === 0) console.warn(`${TAG} POST delete matched no row for id=${id} (already gone or wrong id)`);
         return Response.json({ success: true, deleted: changes });
       }

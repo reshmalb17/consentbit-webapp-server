@@ -113,7 +113,6 @@ export async function addCustomerToClickUp(env, {
       console.error('[ClickUp] task creation failed — status:', res.status, '| error:', data?.err || JSON.stringify(data));
       return false;
     }
-    console.log('[ClickUp] task created — id:', data.id, '| list:', listId, '| platform:', platformLabel);
     return true;
   } catch (e) {
     console.error('[ClickUp] task creation exception:', e?.message);

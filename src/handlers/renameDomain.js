@@ -22,6 +22,7 @@ import {
   normalizeDomain,
   getSiteById,
 } from '../services/db.js';
+import { userCanAdminSite } from '../services/team.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -158,7 +159,8 @@ export async function handleRenameDomain(request, env) {
   const userOrgs = await getOrganizationsForUser(db, user.id);
   const allowedOrgIds = new Set(userOrgs.map((o) => String(o.id ?? o.ID ?? '')).filter(Boolean));
   const targetOrgId = String(targetSite.organizationId ?? targetSite.organizationid ?? targetSite.ORGANIZATIONID ?? '');
-  if (!targetOrgId || !allowedOrgIds.has(targetOrgId)) {
+  // Owner, or a team Admin of this site (as in CookieYes); Members may not.
+  if (!targetOrgId || (!allowedOrgIds.has(targetOrgId) && !(await userCanAdminSite(db, user.id, excludeSiteId)))) {
     console.warn('[RenameDomain] forbidden — ownership check failed', {
       excludeSiteId,
       userId: user.id,

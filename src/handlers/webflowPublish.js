@@ -115,7 +115,6 @@ export async function handleWebflowPublish(request, env) {
   // ── Resolve the stored OAuth token for this site ────────────────────────────
   const row = await resolveWebflowOAuthToken(db, env.WEBFLOW_AUTHENTICATION, siteId);
   if (!row?.accessToken) {
-    console.log(`${TAG} ${siteId} not authorized (no token in D1 or KV)`);
     return Response.json(
       { success: false, error: 'Site not authorized', code: 'NOT_AUTHORIZED' },
       { status: 401 }
@@ -126,11 +125,6 @@ export async function handleWebflowPublish(request, env) {
   const payload = { publishToWebflowSubdomain };
   if (customDomains.length) payload.customDomains = customDomains;
 
-  console.log(`${TAG} publishing ${siteId}`, {
-    publishToWebflowSubdomain,
-    customDomains: customDomains.length,
-    source: row.source,
-  });
 
   let res, data;
   try {
@@ -177,7 +171,6 @@ export async function handleWebflowPublish(request, env) {
     );
   }
 
-  console.log(`${TAG} ✓ publish accepted for ${siteId}`, { httpStatus: res.status });
 
   // banner_changes_published — publish succeeded on Webflow. Resolve the account owner
   // email (distinct_id) + domain from D1 by the Webflow site id. (This endpoint is

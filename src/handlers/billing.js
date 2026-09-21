@@ -1,6 +1,8 @@
 // Billing APIs: summary, portal, invoices, usage
 // All require auth and organizationId (user must belong to org).
 
+import { periodEndOf } from '../utils/stripePeriod.js';
+import { displayPaymentMethodId } from '../services/stripeCardPin.js';
 import {
   ensureSchema,
   getSessionById,
@@ -18,6 +20,7 @@ import {
   inferTierPlanIdFromStripePriceId,
   getOrganizationMember,
 } from '../services/db.js';
+import { listAdminSiteIds } from '../services/team.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -40,7 +43,21 @@ async function requireAuth(request, env) {
 async function requireOrgAccess(db, userId, organizationId) {
   if (!organizationId) return { allowed: false };
   const member = await getOrganizationMember(db, userId, organizationId);
-  return { allowed: !!member };
+  if (member) return { allowed: true, owner: true };
+  // A team Admin acts for the owner, but only on the sites they were granted in this
+  // account. Callers narrow to `adminSiteIds`; anything account-wide stays owner-only.
+  const adminSiteIds = await listAdminSiteIds(db, userId, organizationId);
+  if (adminSiteIds.length === 0) return { allowed: false };
+  return { allowed: true, owner: false, adminSiteIds: new Set(adminSiteIds) };
+}
+
+/** Admin access that must be pinned to one granted site (summary, usage). */
+function adminSiteDenied(access, siteId) {
+  if (access.owner) return null;
+  if (!siteId || !access.adminSiteIds.has(String(siteId))) {
+    return Response.json({ error: 'Not allowed for this site' }, { status: 403 });
+  }
+  return null;
 }
 
 function planDisplayName(planType, planId) {
@@ -53,7 +70,6 @@ function planDisplayName(planType, planId) {
 
 // GET /api/billing/summary?organizationId=xxx
 export async function handleBillingSummary(request, env) {
-  console.log('[Billing] GET /api/billing/summary called');
   if (request.method !== 'GET') {
     return Response.json({ error: 'Method not allowed' }, { status: 405 });
   }
@@ -70,11 +86,16 @@ export async function handleBillingSummary(request, env) {
   if (!access.allowed) {
     return Response.json({ error: 'Not allowed for this organization' }, { status: 403 });
   }
+  const denied = adminSiteDenied(access, siteId);
+  if (denied) return denied;
 
   await ensureSchema(db);
-  const sub = siteId
-    ? (await getSubscriptionBySiteId(db, siteId)) || (await getSubscriptionByOrganization(db, organizationId))
-    : await getSubscriptionByOrganization(db, organizationId);
+  // An Admin sees only their site's own subscription — never the account-wide fallback.
+  const sub = !access.owner
+    ? await getSubscriptionBySiteId(db, siteId)
+    : siteId
+      ? (await getSubscriptionBySiteId(db, siteId)) || (await getSubscriptionByOrganization(db, organizationId))
+      : await getSubscriptionByOrganization(db, organizationId);
   if (!sub) {
     const { plan } = await getEffectivePlanForOrganization(db, organizationId, env);
     return Response.json({
@@ -113,11 +134,20 @@ export async function handleBillingSummary(request, env) {
         headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
       });
       const subData = await subRes.json();
-      if (!subData.error && subData.current_period_end) {
-        nextBillingDate = new Date(subData.current_period_end * 1000).toISOString();
+      // Direct fetch, no Stripe-Version pin → account-default API shape, where the period
+      // lives on the items. Read both locations (utils/stripePeriod.js).
+      const periodEnd = !subData.error ? periodEndOf(subData) : null;
+      if (periodEnd) {
+        nextBillingDate = new Date(periodEnd * 1000).toISOString();
       }
-      if (subData.default_payment_method) {
-        const pmRes = await fetch(`https://api.stripe.com/v1/payment_methods/${subData.default_payment_method}`, {
+      // The subscription's own pinned card if it has one, otherwise the customer's default.
+      // A subscription created without a pin charges the customer default, so reading only
+      // subData.default_payment_method would show no card and no address for it.
+      const displayPmId = !subData.error
+        ? await displayPaymentMethodId(env.STRIPE_SECRET_KEY, subData)
+        : null;
+      if (displayPmId) {
+        const pmRes = await fetch(`https://api.stripe.com/v1/payment_methods/${displayPmId}`, {
           headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
         });
         const pm = await pmRes.json();
@@ -203,7 +233,6 @@ export async function handleBillingSummary(request, env) {
 
 // POST /api/billing/portal - body: { organizationId, returnUrl }
 export async function handleBillingPortal(request, env) {
-  console.log('[Billing] POST /api/billing/portal called');
   if (request.method !== 'POST') {
     return Response.json({ error: 'Method not allowed' }, { status: 405 });
   }
@@ -224,6 +253,14 @@ export async function handleBillingPortal(request, env) {
   const access = await requireOrgAccess(db, auth.user.id, organizationId);
   if (!access.allowed) {
     return Response.json({ error: 'Not allowed for this organization' }, { status: 403 });
+  }
+  // The Stripe portal shows every subscription and the card for the whole account,
+  // so it stays with the owner.
+  if (!access.owner) {
+    return Response.json(
+      { error: 'Only the account owner can open the billing portal.', code: 'OWNER_ONLY' },
+      { status: 403 },
+    );
   }
 
   const sub = await getSubscriptionByOrganization(db, organizationId);
@@ -252,13 +289,11 @@ export async function handleBillingPortal(request, env) {
     console.error('[Billing] portal — no URL returned from Stripe');
     return Response.json({ error: 'No portal URL returned' }, { status: 502 });
   }
-  console.log('[Billing] portal session created for customer:', stripeCustomerId);
   return Response.json({ url: data.url });
 }
 
 // GET /api/billing/invoices?organizationId=xxx&limit=20
 export async function handleBillingInvoices(request, env) {
-  console.log('[Billing] GET /api/billing/invoices called');
   if (request.method !== 'GET') {
     return Response.json({ error: 'Method not allowed' }, { status: 405 });
   }
@@ -289,7 +324,10 @@ export async function handleBillingInvoices(request, env) {
     .bind(organizationId)
     .all();
 
-  const allRows = subRows.results || [];
+  // An Admin sees invoices for their own sites' subscriptions only.
+  const allRows = (subRows.results || []).filter(
+    (r) => access.owner || access.adminSiteIds.has(String(r.siteId ?? r.siteid ?? '')),
+  );
   if (allRows.length === 0) {
     return Response.json({ invoices: [] });
   }
@@ -319,9 +357,21 @@ export async function handleBillingInvoices(request, env) {
   const allLists = await Promise.all(fetchPromises);
   // Merge, deduplicate by invoice id, sort by created desc, trim to limit
   const seen = new Set();
+  const invoiceSubId = (inv) =>
+    typeof inv.subscription === 'string'
+      ? inv.subscription
+      : inv.subscription && typeof inv.subscription === 'object'
+        ? inv.subscription.id
+        : inv.parent?.subscription_details?.subscription || null;
   const list = allLists.flat().filter((inv) => {
     if (seen.has(inv.id)) return false;
     seen.add(inv.id);
+    // The owner's Stripe customer also holds other sites' invoices; an Admin gets only
+    // invoices of the subscriptions kept above.
+    if (!access.owner) {
+      const subId = invoiceSubId(inv);
+      if (!subId || !(String(subId) in stripeSubToSite)) return false;
+    }
     return true;
   }).sort((a, b) => (b.created || 0) - (a.created || 0)).slice(0, limit);
 
@@ -366,6 +416,8 @@ export async function handleBillingUsage(request, env) {
   if (!access.allowed) {
     return Response.json({ error: 'Not allowed for this organization' }, { status: 403 });
   }
+  const denied = adminSiteDenied(access, siteId);
+  if (denied) return denied;
 
   await ensureSchema(db);
   let usage;

@@ -137,8 +137,6 @@ export async function handleFramerConsent(request, env, ctx) {
 
   const id = crypto.randomUUID();
 
-  console.log('[FramerConsent] inserting — id:', id, '| platformSiteId:', resolvedPlatformSiteId,
-    '| siteId:', internalSiteId, '| status:', status, '| regulation:', regulation);
 
   try {
     await db
@@ -191,7 +189,6 @@ export async function handleFramerConsent(request, env, ctx) {
       )
       .run();
 
-    console.log('[FramerConsent] ✅ saved — id:', id, '| siteId:', internalSiteId);
 
     // ── Dual-write to R2 (consent-v2/) for consents received before June 2026 ──
     // Keeps legacy CSV/logs exports working during the D1 transition (mirrors consent.js).
@@ -225,7 +222,6 @@ export async function handleFramerConsent(request, env, ctx) {
           await env.R2.put(r2Key, JSON.stringify(legacyRecord), {
             httpMetadata: { contentType: 'application/json' },
           });
-          console.log('[FramerConsent] R2 dual-write ✅ —', r2Key);
         } catch (r2Err) {
           console.warn('[FramerConsent] R2 dual-write failed (non-fatal):', r2Err?.message);
         }
