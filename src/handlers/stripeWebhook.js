@@ -1500,6 +1500,39 @@ export async function handleStripeWebhook(request, env, ctx) {
         quantity: existing?.quantity ?? null,
         amountCents: sub.plan?.amount ?? null,
       });
+
+      // --- Record what Stripe ACTUALLY said -------------------------------------
+      // `status` above is deliberately lossy: everything except canceled/unpaid is
+      // flattened to 'active'. That flattening is load-bearing — every access check
+      // in the codebase filters `status IN ('active','trialing')` (cdnM.js banner
+      // gate, webflowBilling, getSubscriptionsBySiteIds, the consent-report gate),
+      // so writing a real 'past_due' into `status` would instantly cut off a
+      // customer whose card is merely inside Stripe's retry window. Dunning exists
+      // precisely to keep them served while the retries run.
+      //
+      // So the raw status goes in its own column instead. Nothing reads it for
+      // access, which is the point: it restores the lost information without
+      // changing a single access decision. `past_due` / `incomplete` are visible
+      // for support and dunning; `status` keeps deciding entitlement exactly as
+      // before.
+      //
+      // A SEPARATE guarded statement, not a saveSubscription() field: that helper
+      // is shared by checkout, migration and cancellation paths, and any caller not
+      // passing the field would write NULL over it on every update — the same trap
+      // already documented above for currentPeriodEnd. Failure here must never
+      // fail the webhook, so it is swallowed.
+      // stripeStatusAt records WHEN Stripe last said it, so a stale `past_due` from
+      // months ago is not mistaken for the customer's state today.
+      if (existing?.id && sub.status) {
+        await db
+          .prepare(`UPDATE Subscription SET stripeStatus = ?1, stripeStatusAt = ?2 WHERE id = ?3`)
+          .bind(String(sub.status), new Date().toISOString(), existing.id)
+          .run()
+          .catch((err) => {
+            console.warn('[StripeWebhook] stripeStatus write failed (non-fatal):', err?.message || err);
+          });
+      }
+
       await savePaymentEvent(db, {
         eventType: type,
         stripeEventId: eventId,
