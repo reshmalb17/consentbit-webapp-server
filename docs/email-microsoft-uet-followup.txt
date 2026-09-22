@@ -1,0 +1,25 @@
+Reply on the existing thread (Eugene Nikitin is already on it)
+Subject: Re: Microsoft UET Consent Mode - CMP integration and listing (ConsentBit)
+
+--------------------------------------------------------------------------------
+
+Hello Eugene,
+
+Thank you for being added to this thread regarding Microsoft UET Consent Mode.
+
+We are following up on the questions we shared earlier about adding UET Consent Mode support to ConsentBit and being listed as a certified CMP for UET.
+
+Two points in particular would help us move forward:
+
+1. Is there a CMP ID or equivalent identifier we should request before we begin implementation, as there was for Clarity?
+
+2. ConsentBit is an IAB TCF registered CMP and already surfaces Microsoft (Vendor ID 1126) and Xandr (Vendor ID 32) through the Global Vendor List. Would our TCF support satisfy the requirement on its own for those customers, or would you still expect a separate Consent Mode implementation for our non-TCF banners?
+
+We are ready to begin implementation and can provide a test site and a documentation page, as we did for the Clarity integration.
+
+Please let us know how you would like us to proceed, and whether there is anyone else we should include.
+
+Thank you for your time and assistance.
+
+Thanks & Regards,
+Team ConsentBit

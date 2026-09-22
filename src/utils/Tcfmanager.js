@@ -98,7 +98,13 @@ class TCFManager {
 
     this.config = {
       cmpId: 502,
-      cmpVersion: 1,
+      // Version of THIS CMP's code, encoded into every TC string and stored
+      // server-side as tcf_cmp_version. Bumped 1 → 2 for the TCF v2.4 alignment
+      // (Special Feature 2 renamed; vendor LI bit no longer set from
+      // flexiblePurposes alone). Strings carrying 1 came from the pre-v2.4 build,
+      // so an auditor can tell the two apart without guessing from timestamps.
+      // Bump again on any release that changes what goes into the string.
+      cmpVersion: 2,
       consentScreen: 1,
       // Resolved per-site from window.__CONSENT_SITE__ — see detectLanguage().
       // To test a language: set window.__cbIabLanguage = 'de' before this script
@@ -861,17 +867,35 @@ class TCFManager {
     return this.hasItems(vendor.purposes) || this.hasItems(vendor.flexiblePurposes);
   }
 
+  /**
+   * legIntPurposes ONLY — flexiblePurposes is deliberately not consulted.
+   *
+   * A flexible purpose is one the vendor is willing to switch legal basis on, but
+   * its DEFAULT basis is whichever list it actually appears in: flexiblePurposes is
+   * a subset of purposes ∪ legIntPurposes (verified against GVL 177 — zero vendors
+   * violate it). So a vendor with flexible purposes but an empty legIntPurposes has
+   * declared every one of them under consent, and only a publisher restriction of
+   * type 2 (Require Legitimate Interest) could move them. This CMP publishes no
+   * publisher restrictions at all, so that switch never happens.
+   *
+   * ORing in flexiblePurposes therefore set the vendor LI bit for 137 live vendors
+   * that never declared a legitimate interest — the same defect TCF v2.4 removes for
+   * special-purpose-only vendors (policy 5.0.b, mandatory 23 Oct 2026). Returning
+   * visitors correct themselves: initialize() replays applyStoredConsent(), which
+   * re-runs applyVendors() through this gate and re-encodes the string.
+   */
   vendorSupportsLegitimateInterest(vendorId) {
     const vendor = this.getVendorDeclaration(vendorId);
     if (!vendor) return false;
-    return this.hasItems(vendor.legIntPurposes) || this.hasItems(vendor.flexiblePurposes);
+    return this.hasItems(vendor.legIntPurposes);
   }
 
+  /** Same rule at purpose level — see vendorSupportsLegitimateInterest(). */
   purposeSupportsLegitimateInterest(purposeId) {
     return this.getAllVendorIds().some((vendorId) => {
       const vendor = this.getVendorDeclaration(vendorId);
       if (!vendor) return false;
-      return this.hasId(vendor.legIntPurposes, purposeId) || this.hasId(vendor.flexiblePurposes, purposeId);
+      return this.hasId(vendor.legIntPurposes, purposeId);
     });
   }
 
