@@ -1640,7 +1640,7 @@ function injectHTML() {
       <div class="consentBit-notice-group">
         <div class="consentBit-notice-des" data-consentBit-tag="iab-description">
           <p data-cb-i18n-html="banner.bodyHtml">With your permission, we and <a href="#" id="consentBitVendorsLink" class="consentBit-vendors-link" data-consentBit-tag="vendors-link" aria-label="View the list of third-party vendors and the purposes, special features and stacks they use"><span id="consentBitVendorCountText">third-party vendors</span></a> store and/or access information on your device (such as cookies and device identifiers) and process your personal data (including unique identifiers, IP address, browsing activity and approximate location) for the purposes below. Some processing relies on legitimate interest, which you can object to. Choices apply to this website only and can be updated any time via the cookie icon at the bottom-left.</p>
-          <p class="consentBit-purposes-line" data-cb-i18n-html="banner.purposesLineHtml"><strong>Our partners collect your information for the following purposes:</strong> <span id="consentBitPurposesText" data-consentBit-tag="purposes-list">Store and/or access information on a device, Use limited data to select advertising, Create profiles for personalised advertising, Use profiles to select personalised advertising, Create profiles to personalise content, Use profiles to select personalised content, Measure advertising performance, Measure content performance, Understand audiences through statistics or combinations of data from different sources, Develop and improve services, Use limited data to select content</span>.<br/> <strong>They also use the following special features:</strong> <span id="consentBitSpecialFeaturesText" data-consentBit-tag="special-features-list">Use precise geolocation data, Actively scan device characteristics for identification</span>.</p>
+          <p class="consentBit-purposes-line" data-cb-i18n-html="banner.purposesLineHtml"><strong>Our partners collect your information for the following purposes:</strong> <span id="consentBitPurposesText" data-consentBit-tag="purposes-list">Store and/or access information on a device, Use limited data to select advertising, Create profiles for personalised advertising, Use profiles to select personalised advertising, Create profiles to personalise content, Use profiles to select personalised content, Measure advertising performance, Measure content performance, Understand audiences through statistics or combinations of data from different sources, Develop and improve services, Use limited data to select content</span>.<br/> <strong>They also use the following special features:</strong> <span id="consentBitSpecialFeaturesText" data-consentBit-tag="special-features-list">Use precise geolocation data, Identify devices based on information actively requested</span>.</p>
         </div>
         <div class="consentBit-notice-btn-wrapper" data-consentBit-tag="notice-buttons">
           <button class="consentBit-btn consentBit-btn-customize" id="consentBitCustomiseBtn" aria-label="Customise" data-cb-i18n="btn.customise" data-cb-i18n-aria="btn.customise" aria-haspopup="dialog" aria-controls="cbPreferenceModal" data-consentBit-tag="settings-button">Customise</button>
@@ -2667,7 +2667,7 @@ const purposesData = [
             },
             {
                 id: 'special-feature2',
-                title: 'Actively scan device characteristics for identification',
+                title: 'Identify devices based on information actively requested',
                 description: 'With your acceptance, certain characteristics specific to your device might be requested and used to distinguish it from other devices (such as the installed fonts or plugins, the resolution of your screen) in support of the purposes explained in this notice.',
                 vendorCount: 157,
                 hasConsent: true,
@@ -3175,7 +3175,12 @@ async function loadVendors() {
 
             const uniqueId = \`consentBitVendorSection_\${vendorId}\`;
             const supportsConsent = (vendor.purposes && vendor.purposes.length) || (vendor.flexiblePurposes && vendor.flexiblePurposes.length);
-            const supportsLI = (vendor.legIntPurposes && vendor.legIntPurposes.length) || (vendor.flexiblePurposes && vendor.flexiblePurposes.length);
+            // legIntPurposes ONLY. A flexible purpose defaults to the basis of the
+            // list it appears in, and with no publisher restrictions in play a vendor
+            // with no legIntPurposes has no legitimate interest to object to — so it
+            // must not get an LI toggle (which ships checked) or an LI bit. Mirrors
+            // vendorSupportsLegitimateInterest() in Tcfmanager.js; keep the two in sync.
+            const supportsLI = !!(vendor.legIntPurposes && vendor.legIntPurposes.length);
 
             const vendorItem = document.createElement('div');
             vendorItem.className = 'consentBit-vendor-item';
