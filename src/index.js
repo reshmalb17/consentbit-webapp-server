@@ -117,6 +117,7 @@ import { listSiteAdminRecipients, copyEmailToAdmins } from './services/team.js';
 import { TEAM_GATED_PATHS, requireTeamSiteAccess } from './middleware/teamSiteAccess.js';
 import { requireActiveSubscriptionForConsentReport } from './services/subscriptionGate.js';
 import { handleFramerBilling, handleFramerCancelSubscription, handleFramerSwitchInterval } from './handlers/framerBilling.js';
+import { handleFramerResumeSubscription } from './handlers/framerResumeSubscription.js';
 import {
   handleFramerChangeTier,
   handleFramerChangeTierPreview,
@@ -210,6 +211,11 @@ const PUBLIC_PATHS = new Set([
   '/api/framer/upgrade/change-tier/preview',
   '/api/framer/upgrade/switch-interval',
   '/api/framer/upgrade/switch-interval/preview',
+  // Framer RESUME subscription (undo a scheduled cancellation). "Public" for TRANSPORT ONLY,
+  // exactly like the four upgrade paths above — the handler itself requires the Framer
+  // plugin JWT (Authorization: Bearer <auth_token>), verified with env.FRAMER_JWT_SECRET.
+  // See handlers/framerResumeSubscription.js.
+  '/api/framer/resume-subscription',
   // Framer account ownership transfer (request step). Authless by design — the
   // authorization link is emailed only to the resolved owner, who must click it to
   // complete the transfer (see SECURITY note in authTransferOwnershipFramer.js).
@@ -541,6 +547,11 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleFramerUpgradeSwitchInterval(request, env); break;
     case '/api/framer/upgrade/switch-interval/preview':
       response = await handleFramerUpgradeSwitchIntervalPreview(request, env); break;
+
+    // — Framer RESUME subscription (JWT-authed, siteId-keyed): clears cancel_at_period_end
+    //   so the SAME subscription keeps renewing — no new checkout, no double charge.
+    case '/api/framer/resume-subscription':
+      response = await handleFramerResumeSubscription(request, env); break;
 
     // — Framer account ownership transfer (request step; authorize reuses /api/auth/*)
     case '/api/framer/transfer-ownership/request':

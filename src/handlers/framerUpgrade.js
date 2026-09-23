@@ -167,7 +167,9 @@ async function orgHasMemberEmail(db, organizationId, email) {
 // mismatch) once the platformSiteId + owner-email linkage is confirmed for your data.
 // Even advisory, this is strictly more secure than the sibling /api/framer/* routes,
 // which require no token at all.
-async function requireFramerAuth(request, env, site) {
+// Exported (2026-09-23) so handlers/framerResumeSubscription.js reuses this exact gate
+// instead of holding a second copy of the JWT verification.
+export async function requireFramerAuth(request, env, site) {
   const token = extractBearer(request);
   if (!token) return { ok: false, res: fail('Missing authorization token', 401) };
 
