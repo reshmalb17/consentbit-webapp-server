@@ -33,6 +33,7 @@ import {
   canonicalEmbedOrigin,
   buildEmbedScriptUrl,
   getSubscriptionByOrganization,
+  getSubscriptionBySiteId,
   normalizeDomain,
   normalizeSignupSource,
   getSessionById,
@@ -236,6 +237,9 @@ async function cancelOldStripeSubscription(secret, oldSubId, newSubId, db) {
  */
 async function provisionAccount(db, env, request, ctx, {
   email,
+  // True when this site already had a LIVE subscription being replaced — then its banner
+  // region is kept instead of being reset to the gdpr default (see createSite).
+  preserveBannerSettings = false,
   domain,
   siteName,
   planId,
@@ -279,6 +283,8 @@ async function provisionAccount(db, env, request, ctx, {
     origin: embedOrigin,
     bannerType: 'gdpr',
     regionMode: 'gdpr',
+    preserveBannerSettings,
+    planId,
   });
 
   // Step 5 — new unique JS snippet created on this direct paid-checkout path.
@@ -614,7 +620,14 @@ export async function handleCustomCheckout(request, env, ctx) {
       : null;
     if (existingSite) {
       let existingSub = null;
-      try { existingSub = await getSubscriptionByOrganization(db, existingSite.organizationId); } catch { /* ignore */ }
+      // PER SITE, not per account. This used to ask getSubscriptionByOrganization, which
+      // returns the ACCOUNT's newest active subscription — so buying a plan for site B found
+      // site A's plan, declared 'this domain already has a plan', and then cancelled site A's
+      // subscription as 'the old plan being replaced'. Verified in prod data 2026-09-18:
+      // a Basic checkout on stunning-b9dafa killed stellar-123's Essential trial one second
+      // later. getSubscriptionBySiteId returns only this site's active/trialing row, so a
+      // renewal/replacement can only ever target the subscription of the site being bought.
+      try { existingSub = await getSubscriptionBySiteId(db, existingSite.id); } catch { /* ignore */ }
       const existingStatus = String(existingSub?.status || '').toLowerCase();
       const isActive = existingStatus === 'active' || existingStatus === 'trialing';
       if (isActive) {
@@ -675,6 +688,7 @@ export async function handleCustomCheckout(request, env, ctx) {
     try {
       const { user, isNewUser, session, site, org } = await provisionAccount(db, env, request, ctx, {
         email,
+        preserveBannerSettings: !!oldStripeSubscriptionId,
         domain: rawDomain,
         siteName,
         planId,
@@ -862,6 +876,7 @@ export async function handleCustomCheckout(request, env, ctx) {
     try {
       const { user, isNewUser, session, site, org } = await provisionAccount(db, env, request, ctx, {
         email,
+        preserveBannerSettings: !!oldStripeSubscriptionId,
         domain: rawDomain,
         siteName,
         planId,

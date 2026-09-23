@@ -2881,7 +2881,7 @@ export function normalizeDomain(input) {
 // This ensures the installation script code remains stable for each site
 export async function createSite(
   db,
-  { organizationId, name, domain, origin, bannerType, regionMode },
+  { organizationId, name, domain, origin, bannerType, regionMode, preserveBannerSettings = false, planId = null },
 ) {
   await ensureSchema(db);
 
@@ -2968,6 +2968,27 @@ export async function createSite(
     const backfillEmbed =
       existing.embedScriptUrl ||
       buildEmbedScriptUrl(origin, existing.cdnScriptId);
+    // Banner settings on an EXISTING site.
+    //
+    // Callers pass a DEFAULT (gdpr) meant for new sites, and writing it over an existing
+    // row silently turned a CCPA / CCPA+GDPR customer into GDPR-only — US visitors then
+    // get no CCPA banner and nobody is told. Decided 2026-09-23: keep what the site has
+    // ONLY when it still has a live plan (re-checkout / upgrade). Someone who cancelled
+    // and is starting a NEW subscription gets the gdpr default, as before.
+    //
+    // Plan clamp: region_mode 'both' and banner_type 'iab' are Essential/Growth only
+    // (BOTH_REGIONS_PLANS in handlers/bannerCustomization.js). Preserving them onto a
+    // Free/Basic plan would hand over a paid feature, so they fall back to gdpr.
+    const PAID_REGION_PLANS = ['essential', 'growth'];
+    let nextBannerType = bannerType;
+    let nextRegionMode = regionMode;
+    if (preserveBannerSettings) {
+      nextBannerType = existing.banner_type ?? bannerType;
+      nextRegionMode = existing.region_mode ?? regionMode;
+      const paidOk = planId ? PAID_REGION_PLANS.includes(String(planId).toLowerCase()) : true;
+      if (!paidOk && String(nextRegionMode).toLowerCase() === 'both') nextRegionMode = 'gdpr';
+      if (!paidOk && String(nextBannerType).toLowerCase() === 'iab') nextBannerType = 'gdpr';
+    }
     // Update only banner settings - preserve permanent cdnScriptId and apiKey; freeze embed URL once set
     await db
       .prepare(
@@ -2979,15 +3000,15 @@ export async function createSite(
              embedScriptUrl = COALESCE(embedScriptUrl, ?5)
          WHERE id = ?6`,
       )
-      .bind(name, bannerType, regionMode, now, backfillEmbed, existing.id)
+      .bind(name, nextBannerType, nextRegionMode, now, backfillEmbed, existing.id)
       .run();
 
     return {
       ...existing,
       _created: false,
       name,
-      banner_type: bannerType,
-      region_mode: regionMode,
+      banner_type: nextBannerType,
+      region_mode: nextRegionMode,
       updatedAt: now,
       embedScriptUrl: existing.embedScriptUrl || backfillEmbed,
       // cdnScriptId and apiKey are preserved from existing record

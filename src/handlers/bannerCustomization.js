@@ -304,6 +304,41 @@ export async function handleBannerCustomization(request, env) {
       return Response.json({ success: false, error: 'customization is required' }, { status: 400 });
     }
 
+    // A site whose OWN paid subscription has ENDED is read-only (decided 2026-09-23).
+    // Free sites still save — free is a plan; "cancelled and expired" is not. Judged on
+    // this site's own subscription, never the account's: a sibling's live plan must not
+    // grant edit rights here, the same rule the banner gate and checkout now follow.
+    try {
+      const ownSub = await db
+        .prepare(
+          `SELECT status, currentPeriodEnd FROM Subscription WHERE siteId = ?1
+            ORDER BY CASE WHEN LOWER(status) IN ('active','trialing') THEN 0 ELSE 1 END,
+                     datetime(COALESCE(updatedAt, createdAt)) DESC
+            LIMIT 1`,
+        )
+        .bind(siteId)
+        .first();
+      if (ownSub) {
+        const TERMINAL = ['canceled', 'cancelled', 'deleted', 'unpaid', 'incomplete_expired'];
+        const isTerminal = TERMINAL.includes(String(ownSub.status || '').trim().toLowerCase());
+        const rawEnd = ownSub.currentPeriodEnd ?? ownSub.currentperiodend ?? null;
+        // Rows mix ISO strings and SQLite datetimes — normalise before parsing.
+        const endMs = rawEnd ? Date.parse(String(rawEnd).replace(' ', 'T')) : NaN;
+        const periodOver = Number.isFinite(endMs) && endMs <= Date.now();
+        if (isTerminal && periodOver) {
+          console.warn('[BannerCustomization][POST] blocked — subscription ended', { siteId, status: ownSub.status, periodEnd: rawEnd });
+          return Response.json({
+            success: false,
+            code: 'SUBSCRIPTION_ENDED',
+            error: 'Your plan has ended, so the banner can no longer be edited. Choose a plan to start again.',
+          }, { status: 402 });
+        }
+      }
+    } catch (endedErr) {
+      // Never block a legitimate save because this check itself failed.
+      console.warn('[BannerCustomization][POST] ended-plan check failed (non-fatal)', endedErr?.message);
+    }
+
     // Plan gate: hideBranding is Growth-only. Downgrade the flag rather than rejecting
     // the request — the rest of this save is legitimate and should still persist.
     // A null plan means resolution itself failed; don't demote a paying site on a

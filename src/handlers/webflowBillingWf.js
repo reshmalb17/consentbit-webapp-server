@@ -395,6 +395,36 @@ export async function handleWebflowResumeSubscription(request, env) {
       data.error?.code === 'subscription_already_canceled';
     if (ended) {
       console.warn(`${TAG} resume refused — subscription has ended`, { stripeSubscriptionId, code: data.error?.code });
+      // Reconcile D1 with what Stripe just told us. A subscription cancelled IMMEDIATELY
+      // (Stripe DELETE — e.g. checkout replacing an old plan) leaves D1 holding the old
+      // FUTURE currentPeriodEnd, which is indistinguishable from "cancelled, still running
+      // until <date>". That is why the app offered Resume on a plan that was already gone,
+      // and kept saying "will end on <date>" next to this error. Take the real end date
+      // from Stripe so every screen reads it as ended from now on.
+      try {
+        const subRes = await fetch(`https://api.stripe.com/v1/subscriptions/${stripeSubscriptionId}`, {
+          headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
+        });
+        const live = await subRes.json();
+        if (!live.error && String(live.status || '').toLowerCase() === 'canceled') {
+          const iso = (sec) => (sec ? new Date(sec * 1000).toISOString() : null);
+          const endedAtISO = iso(live.ended_at) || iso(live.canceled_at) || new Date().toISOString();
+          await db
+            .prepare(
+              `UPDATE Subscription
+                  SET status = 'canceled', cancelAtPeriodEnd = 0,
+                      canceledAt = COALESCE(?1, canceledAt), endedAt = COALESCE(?2, endedAt),
+                      currentPeriodEnd = ?2, updatedAt = ?3
+                WHERE stripeSubscriptionId = ?4`,
+            )
+            .bind(iso(live.canceled_at), endedAtISO, new Date().toISOString(), stripeSubscriptionId)
+            .run();
+          console.warn(`${TAG} D1 reconciled — subscription ended at ${endedAtISO}`, { stripeSubscriptionId });
+        }
+      } catch (e) {
+        // Non-fatal: the customer still gets the correct message below.
+        console.warn(`${TAG} D1 reconcile after ended-resume failed (non-fatal)`, e?.message);
+      }
       return Response.json(
         { success: false, ended: true, error: 'This subscription has already ended and can no longer be resumed. Choose a plan to start a new one.' },
         { status: 409 },

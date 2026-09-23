@@ -174,6 +174,37 @@ async function _handleCDNScript(request, env, url) {
       }
     }
 
+    // A site with ANY subscription of its own is judged on THAT subscription — never on
+    // a sibling's. Without this the org fallback below picks the account's newest
+    // active/trialing row, so a cancelled site whose paid period had ENDED kept serving
+    // its banner for as long as any other site in the same account still paid.
+    // Confirmed 2026-09-23: three ended sites in one account all returned a full script.
+    // The org fallback still runs for a site that has no subscription row at all, which
+    // is what it exists for (org / bulk-licensed sites).
+    if (!subscription) {
+      try {
+        const ownAny = await db
+          .prepare(
+            `SELECT * FROM Subscription WHERE siteId = ?1
+              ORDER BY CASE WHEN LOWER(status) IN ('active','trialing') THEN 0 ELSE 1 END,
+                       datetime(COALESCE(updatedAt, createdAt)) DESC
+              LIMIT 1`,
+          )
+          .bind(resolvedSite.id)
+          .first();
+        if (ownAny) {
+          subscription = ownAny;
+          flowLog(env, 'banner', 'own-subscription-used', {
+            siteId: resolvedSite.id, domain: resolvedSite.domain,
+            status: ownAny.status ?? null,
+          });
+        }
+      } catch (ownAnyErr) {
+        // Fall through to the org fallback, i.e. the previous behaviour.
+        console.warn('[CDN] own subscription lookup failed:', ownAnyErr?.message);
+      }
+    }
+
     let resolvedPlanId = subscription ? (subscription.planId ?? subscription.planid ?? null) : null;
     if (resolvedPlanId) resolvedPlanId = String(resolvedPlanId).toLowerCase();
     if ((!resolvedPlanId || !['basic', 'essential', 'growth'].includes(resolvedPlanId)) && env && subscription) {
@@ -294,11 +325,31 @@ async function _handleCDNScript(request, env, url) {
     'JP', 'KR', 'IN',                // APPI, PIPA, DPDPA
   ]);
 
-  const regionMode = resolvedSite.region_mode || 'gdpr';
-  let effectiveBannerType = resolvedSite.banner_type || 'gdpr';
+  // Plan entitlement, enforced at SERVE time (added 2026-09-23).
+  //
+  // region_mode 'both' (GDPR+CCPA geo-routing) and banner_type 'iab' (IAB/TCF) are
+  // Essential/Growth only. Until now nothing re-checked them when a plan CHANGED:
+  // handlers/bannerCustomization.js clamps 'both' only while SAVING banner settings, and
+  // no tier-change / scheduled-downgrade / cancellation path touches Site.region_mode.
+  // So a site downgraded to Basic or Free kept serving the paid behaviour indefinitely.
+  //
+  // Doing it here covers every route into a downgrade at once, including sites that are
+  // already wrong, with no data backfill. The stored value is left alone — this only
+  // decides what is SERVED, so restoring the plan restores the banner with no re-save.
+  const PAID_REGION_PLANS = ['essential', 'growth'];
+  const planAllowsPaidRegions = PAID_REGION_PLANS.includes(String(effectivePlanId || 'free').toLowerCase());
+  const storedRegionMode = resolvedSite.region_mode || 'gdpr';
+  const storedBannerType = resolvedSite.banner_type || 'gdpr';
+  const regionMode = (!planAllowsPaidRegions && storedRegionMode === 'both') ? 'gdpr' : storedRegionMode;
+  let effectiveBannerType = (!planAllowsPaidRegions && String(storedBannerType).toLowerCase() === 'iab') ? 'gdpr' : storedBannerType;
+  if (!planAllowsPaidRegions && (storedRegionMode === 'both' || String(storedBannerType).toLowerCase() === 'iab')) {
+    console.warn(`[CDN] plan '${effectivePlanId}' does not include both-regions/IAB — serving gdpr`, {
+      siteId: resolvedSite.id, storedRegionMode, storedBannerType,
+    });
+  }
   let bannerEnabled = true;
 
-  const siteWantsIab = String(resolvedSite.banner_type || '').toLowerCase() === 'iab';
+  const siteWantsIab = String(effectiveBannerType || '').toLowerCase() === 'iab';
 
   if (!siteWantsIab) {
     if (regionMode === 'both') {

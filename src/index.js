@@ -59,6 +59,7 @@ import { handleAdminVoidCancelledInvoices } from './handlers/adminVoidCancelledI
 import { handleAdminBackfillPosthog } from './handlers/adminBackfillPosthog.js';
 import { handleAdminGa4Test } from './handlers/adminGa4Test.js';
 import { handleAdminBackfillClickup } from './handlers/adminBackfillClickup.js';
+import { handleAdminReconcileStripe } from './handlers/adminReconcileStripe.js';
 import { handleAdminMicheleClickup } from './handlers/adminMicheleClickup.js';
 import { handleAdminTestScanReport } from './handlers/adminTestScanReport.js';
 // The Admin Dashboard API (/api/admin/dashboard/*) used to live here. It now has
@@ -363,6 +364,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/admin/backfill-posthog',
   '/api/admin/ga4-test',
   '/api/admin/backfill-clickup',
+  '/api/admin/reconcile-stripe',
   '/api/admin/michele-clickup',
   '/api/admin/test-scan-report',
   '/api/payment/subscription',
@@ -703,6 +705,9 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     case '/api/admin/backfill-clickup':
       response = await handleAdminBackfillClickup(request, env); break;
+
+    case '/api/admin/reconcile-stripe':
+      response = await handleAdminReconcileStripe(request, env); break;
 
     case '/api/admin/michele-clickup':
       response = await handleAdminMicheleClickup(request, env); break;
