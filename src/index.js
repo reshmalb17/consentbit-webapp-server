@@ -34,6 +34,7 @@ import { handleActivateLicense } from './handlers/activateLicense.js';
 import { handleActivateLicenseWebflow } from './handlers/activateLicenseWebflow.js';
 import { handleCheckDomainScript } from './handlers/checkDomainScript.js';
 import { handleCancelSubscription } from './handlers/cancelSubscription.js';
+import { handleResumeSubscription } from './handlers/resumeSubscription.js';
 import { handleUpgradeSubscription } from './handlers/updateSubscription.js';
 import { handleCreateSetupIntent, handleUpdatePaymentMethod } from './handlers/updatePaymentMethod.js';
 import { handleSwitchBillingInterval, handleSwitchIntervalPreview } from './handlers/switchBillingInterval.js';
@@ -610,6 +611,9 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleCheckDomainScript(request, env); break;
     case '/api/subscriptions/cancel':
       response = await handleCancelSubscription(request, env, ctx); break;
+    // Undo a scheduled cancellation on the SAME subscription (no new checkout).
+    case '/api/subscriptions/resume':
+      response = await handleResumeSubscription(request, env, ctx); break;
     case '/api/subscriptions/upgrade':
       response = await handleUpgradeSubscription(request, env); break;
     case '/api/subscriptions/switch-interval':
