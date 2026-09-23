@@ -41,6 +41,7 @@
 import { syncSubscriptionUpdateToLegacy } from '../services/syncLegacy.js';
 import { requireWebflowIdentity } from '../middleware/webflowIdentity.js';
 import { isPromotionCodeAllowedForEmail } from '../services/promoRestrictions.js';
+import { clampSiteToPlanEntitlements } from '../services/planEntitlementClamp.js';
 
 const TAG = '[webflow-upgrade]';
 const PLAN_ORDER = { basic: 1, essential: 2, growth: 3 };
@@ -636,26 +637,18 @@ export async function handleWebflowChangeTier(request, env, ctxArg, identity) {
     log(rid, `d1 updated — ${rows} row(s) → ${planId}/${interval} periodEnd=${newPeriodEndISO || '-'}`);
     if (rows === 0) warn(rid, `d1 matched NO row for stripeSubscriptionId=${stripeSubId} — the app will still show the old plan`);
     // Downgrading out of Essential/Growth drops the paid banner features with it:
-    // region_mode 'both' (GDPR+CCPA geo-routing) and banner_type 'iab'. Nothing else
-    // re-checked them on a plan change, so a downgraded site kept them until the customer
-    // happened to re-save their banner. Separate guarded statement — it never affects the
-    // plan write above, and cdnM.js also clamps at serve time as the real enforcement.
-    if (!['essential', 'growth'].includes(String(planId).toLowerCase())) {
-      try {
-        const clamp = await db.prepare(
-          `UPDATE Site
-              SET region_mode = CASE WHEN lower(region_mode) = 'both' THEN 'gdpr' ELSE region_mode END,
-                  banner_type = CASE WHEN lower(banner_type) = 'iab' THEN 'gdpr' ELSE banner_type END,
-                  updatedAt = ?1
-            WHERE (id = ?2 OR platformSiteId = ?2)
-              AND (lower(region_mode) = 'both' OR lower(banner_type) = 'iab')`,
-        ).bind(now, siteId).run();
-        const clamped = clamp?.meta?.changes ?? 0;
-        if (clamped) log(rid, `plan ${planId} excludes both-regions/IAB — site reset to gdpr`);
-      } catch (clampErr) {
-        console.warn(`${TAG}[${rid}] region clamp failed (non-fatal; cdnM clamps at serve time)`, clampErr?.message);
-      }
-    }
+    // region_mode 'both' (GDPR+CCPA geo-routing) and banner_type 'iab'. All THREE
+    // stores that hold the selection are reset together — Site flags, the saved
+    // customization the Designer app loads, and the KV Banner-Settings entry that
+    // the customization GET prefers over D1. Clamping only the Site row (the old
+    // behaviour) left the app showing CCPA+GDPR/IAB again on the next launch, and
+    // its next save wrote that straight back. Never throws; cdnM.js still clamps at
+    // serve time as the real enforcement.
+    await clampSiteToPlanEntitlements(env, db, {
+      siteId,
+      planId,
+      logger: (msg) => log(rid, msg),
+    });
   } catch (dbErr) {
     // Stripe already charged — never fail the response on the bookkeeping write.
     console.error(`${TAG}[${rid}] d1 update FAILED (Stripe change already applied):`, dbErr?.message || dbErr);

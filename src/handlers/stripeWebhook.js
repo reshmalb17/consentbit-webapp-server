@@ -40,6 +40,7 @@ import { voidOpenInvoicesForCancelledSubscription } from '../services/cancelledI
 import { syncCustomerDefaultFromSubscription } from '../services/stripeCardPin.js';
 import { followCustomerDefaultCard, repinAfterCardDetached } from '../services/cardPinFollow.js';
 import { flowLog } from '../utils/flowLog.js';
+import { clampSiteToPlanEntitlements, planAllowsPaidRegions } from '../services/planEntitlementClamp.js';
 import {
   classifyTransition,
   recordPlanTransition,
@@ -1540,6 +1541,27 @@ export async function handleStripeWebhook(request, env, ctx) {
         organizationId: orgIdFinal,
         rawPayload: { status: sub.status, cancel_at_period_end: sub.cancel_at_period_end },
       });
+
+      // --- Paid-only banner features follow the plan down ---------------------
+      // A downgrade booked through a subscription schedule only lands HERE, when
+      // Stripe applies it at the period end — the change-tier handler ran days
+      // earlier and saw no plan change yet. Without this, a site that dropped to
+      // Basic/Free kept CCPA+GDPR and the IAB banner in the Designer app until it
+      // was saved again. Separate guarded block: it can never affect the
+      // subscription write above, and cdnM.js still clamps at serve time.
+      try {
+        const prevPlanForClamp = existing?.planId ?? existing?.planid ?? null;
+        const siteIdForClamp = existing?.siteId ?? existing?.siteid ?? sub.metadata?.siteId ?? null;
+        if (siteIdForClamp && planAllowsPaidRegions(prevPlanForClamp) && !planAllowsPaidRegions(planIdFromMeta)) {
+          await clampSiteToPlanEntitlements(env, db, {
+            siteId: siteIdForClamp,
+            planId: planIdFromMeta,
+            logger: (msg) => console.log('[StripeWebhook]', msg),
+          });
+        }
+      } catch (clampErr) {
+        console.warn('[StripeWebhook] entitlement clamp failed (non-fatal):', clampErr?.message || clampErr);
+      }
 
       // --- Plan transition log ----------------------------------------------
       // This is the ONLY place both sides of a plan change are known: `existing`
