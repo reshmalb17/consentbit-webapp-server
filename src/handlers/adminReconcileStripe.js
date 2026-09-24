@@ -20,6 +20,10 @@
 //                          Safe: neither column takes part in any access decision.
 //     ?fixInterval=true  — additionally correct the `interval` column where it disagrees
 //                          with Stripe. Off by default; see the note on that write below.
+//     ?fixEnded=true     — correct `currentPeriodEnd` on rows Stripe has already ended but
+//                          which still hold a later date (the `endedDrift` category). This
+//                          one DOES change entitlement — it switches those banners off —
+//                          so it is off by default and never rides along with a reconcile.
 //     ?limit=50          — cap the reported rows per category (default 200, 0 = no cap).
 //
 // READ-ONLY unless ?apply=true. It never writes `status`: that column decides entitlement
@@ -158,7 +162,7 @@ async function fetchAllSubscriptions(stripeKey) {
  * The reconcile itself, callable without a Request so the daily sweep can reuse it.
  * Read-only unless `apply` is set; never writes `status` under any option.
  */
-export async function runStripeReconcile(env, { apply = false, fixInterval = false, fixPlan = false, limit = 200 } = {}) {
+export async function runStripeReconcile(env, { apply = false, fixInterval = false, fixPlan = false, fixEnded = false, limit = 200 } = {}) {
   const db = env.CONSENT_WEBAPP;
   const now = new Date().toISOString();
 
@@ -189,6 +193,7 @@ export async function runStripeReconcile(env, { apply = false, fixInterval = fal
     statusDrift: [],    // we say entitled, Stripe disagrees — the one that costs money
     intervalDrift: [],
     periodDrift: [],
+    endedDrift: [],     // Stripe ended it; we still hold a later date — keeps the banner on
     missingInStripe: [],
     missingInD1: [],
     unpaidInvoice: [],  // status looks fine but the latest invoice was never paid
@@ -243,6 +248,34 @@ export async function runStripeReconcile(env, { apply = false, fixInterval = fal
       });
     }
 
+    // ── Ended, but we still hold a later date ──────────────────────────────
+    // `periodDrift` above cannot catch this: it compares `periodEndOf(sub)`, and Stripe
+    // does NOT rewrite `current_period_end` on cancellation — a subscription cancelled
+    // mid-period keeps the period it died inside, so both sides read the same future date
+    // and agree. The real end is `ended_at` (or `canceled_at`), which nothing compared.
+    //
+    // While our `currentPeriodEnd` sits after that instant the site keeps its banner:
+    // cdnM.js serves a 'canceled' row until that date (BLOCKED_AFTER_PERIOD_STATUSES), and
+    // the dashboard tells the customer the plan "stays active until" it. That is free
+    // service and a false promise, both from one stale field.
+    //
+    // stripeWebhook.js writes the correct value as of 2026-09-25; this finds the rows
+    // cancelled before that.
+    const sEndedRaw = String(sub.status || '').toLowerCase() === 'canceled'
+      ? (sub.ended_at ?? sub.canceled_at ?? null)
+      : null;
+    const sEndedAt = sEndedRaw ? new Date(sEndedRaw * 1000).toISOString() : null;
+    const d1EndMs = row.currentPeriodEnd ? Date.parse(String(row.currentPeriodEnd).replace(' ', 'T')) : NaN;
+    const staleEnd = !!sEndedAt && Number.isFinite(d1EndMs) && d1EndMs > Date.parse(sEndedAt);
+    if (staleEnd) {
+      report.endedDrift.push({
+        ...base,
+        d1PeriodEnd: row.currentPeriodEnd,
+        stripeEndedAt: sEndedAt,
+        stillServing: d1EndMs > Date.now(),
+      });
+    }
+
     // ── Writes — only the columns that decide nothing ──────────────────────
     if (apply && sStatus && sStatus !== String(row.stripeStatus || '').toLowerCase()) {
       writes.push(
@@ -255,6 +288,25 @@ export async function runStripeReconcile(env, { apply = false, fixInterval = fal
     // never corrected by the normal write path (absent from saveSubscription()'s
     // DO UPDATE SET), so this is the only thing that can fix it. Kept behind its own flag
     // so a reconcile run cannot change billing-facing copy unless that was asked for.
+    // Unlike every other write in this handler, this one DOES change entitlement:
+    // `currentPeriodEnd` is what cdnM.js checks before serving a cancelled site's banner,
+    // so correcting it switches that banner off. That is the right outcome — Stripe ended
+    // the subscription — but it is a customer-visible change, so it needs to be asked for
+    // explicitly and never rides along with a routine reconcile. Hence its own flag,
+    // default off, and Stripe's own timestamp rather than a computed one.
+    if (apply && fixEnded && staleEnd) {
+      writes.push(
+        db.prepare(
+          `UPDATE Subscription
+              SET currentPeriodEnd = ?1,
+                  canceledAt = COALESCE(canceledAt, ?1),
+                  endedAt    = COALESCE(endedAt, ?1),
+                  updatedAt  = ?2
+            WHERE id = ?3`,
+        ).bind(sEndedAt, now, row.id),
+      );
+    }
+
     if (apply && fixInterval && sInterval && sInterval !== String(row.interval || '').toLowerCase()) {
       writes.push(
         db.prepare(`UPDATE Subscription SET interval = ?1, updatedAt = ?2 WHERE id = ?3`)
@@ -354,6 +406,7 @@ export async function handleAdminReconcileStripe(request, env) {
     apply: url.searchParams.get('apply') === 'true',
     fixInterval: url.searchParams.get('fixInterval') === 'true',
     fixPlan: url.searchParams.get('fixPlan') === 'true',
+    fixEnded: url.searchParams.get('fixEnded') === 'true',
     limit: limitRaw === '0' ? Infinity : Number(limitRaw || 200),
   });
 

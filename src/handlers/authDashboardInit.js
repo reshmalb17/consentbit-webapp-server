@@ -7,6 +7,7 @@ import {
   getOrCreateOrganizationForUser,
   listSites,
   getSubscriptionsBySiteIds,
+  getLatestSubscriptionsBySiteIds,
   getEffectivePlanForOrganization,
   buildEmbedScriptUrl,
   canonicalEmbedOrigin,
@@ -142,6 +143,11 @@ export async function handleAuthDashboardInit(request, env) {
   // Batch-fetch all subscriptions in a single D1 query (eliminates N+1)
   const siteIds = (sites || []).map(s => s?.id ?? s?.siteId ?? s?.site_id).filter(Boolean);
   const subscriptionMap = await getSubscriptionsBySiteIds(db, siteIds);
+  // Separate from the entitlement map above: the site's own latest subscription whatever
+  // its status, so an ENDED plan can be told apart from never having had one. Only the
+  // status/date/id fields below read from it — planId still comes from the entitlement
+  // map, so a dead subscription can never present as a live plan.
+  const latestSubMap = await getLatestSubscriptionsBySiteIds(db, siteIds);
 
   // Repair stale embed URLs (fire-and-forget — don't block the response)
   const staleRepairs = (sites || [])
@@ -226,7 +232,14 @@ export async function handleAuthDashboardInit(request, env) {
     // upgrade page reads the stale planId, routes into the in-place tier change and
     // fails against a cancelled Stripe subscription. Additive: planId is unchanged,
     // so every existing consumer behaves exactly as before.
-    const siteSubStatus = (sub?.status ?? sub?.Status ?? null)?.toLowerCase() ?? null;
+    // Read from the site's OWN latest row, not the entitlement map. `sub` is null once a
+    // cancelled plan's paid period passes (getSubscriptionsBySiteIds drops it by design),
+    // which reported the site as having no subscription at all — so the dashboard showed
+    // "Active"/"Free" and the billing card fell through to a sibling site's plan. `hist`
+    // keeps the ended subscription visible; `planId` above still comes from `sub`, so
+    // entitlement is unchanged.
+    const hist = siteId ? (latestSubMap[siteId] ?? null) : null;
+    const siteSubStatus = (hist?.status ?? hist?.Status ?? sub?.status ?? sub?.Status ?? null)?.toLowerCase() ?? null;
 
     const stats = cookieStatsMap[siteId] ?? {};
     const pageStats = pageStatsMap[siteId] ?? pageStatsMap[String(siteId)] ?? {};
@@ -238,10 +251,13 @@ export async function handleAuthDashboardInit(request, env) {
       plan_id: sitePlanId,
       subscriptionStatus: siteSubStatus,
       subscription_status: siteSubStatus,
-      subscriptionId: sub?.id ?? null,
-      stripeSubscriptionId: sub?.stripeSubscriptionId ?? sub?.stripesubscriptionid ?? null,
-      subscriptionCurrentPeriodEnd: sub?.currentPeriodEnd ?? sub?.currentperiodend ?? null,
-      subscriptionCancelAtPeriodEnd: Number(sub?.cancelAtPeriodEnd ?? sub?.cancelatperiodend ?? 0) === 1 ? 1 : 0,
+      // All four follow the status above and come from the site's own latest row, so an
+      // ended subscription still reports its id and dates. Without them the frontend
+      // cannot say WHEN a plan ended, and Resume/Cancel lose the subscription they act on.
+      subscriptionId: (hist ?? sub)?.id ?? null,
+      stripeSubscriptionId: (hist ?? sub)?.stripeSubscriptionId ?? (hist ?? sub)?.stripesubscriptionid ?? null,
+      subscriptionCurrentPeriodEnd: (hist ?? sub)?.currentPeriodEnd ?? (hist ?? sub)?.currentperiodend ?? null,
+      subscriptionCancelAtPeriodEnd: Number((hist ?? sub)?.cancelAtPeriodEnd ?? (hist ?? sub)?.cancelatperiodend ?? 0) === 1 ? 1 : 0,
       interval: sub?.interval ?? sub?.billing_interval ?? null,
       cookieCount: stats.cookieCount ?? 0,
       cookieCategories: stats.cookieCategories ?? 0,

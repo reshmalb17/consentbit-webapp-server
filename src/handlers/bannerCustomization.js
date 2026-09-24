@@ -324,8 +324,19 @@ export async function handleBannerCustomization(request, env) {
         const rawEnd = ownSub.currentPeriodEnd ?? ownSub.currentperiodend ?? null;
         // Rows mix ISO strings and SQLite datetimes — normalise before parsing.
         const endMs = rawEnd ? Date.parse(String(rawEnd).replace(' ', 'T')) : NaN;
-        const periodOver = Number.isFinite(endMs) && endMs <= Date.now();
-        if (isTerminal && periodOver) {
+        // The date is only consulted for a status that can legitimately still be running.
+        // None of the terminal ones can: a SCHEDULED cancellation keeps status 'active'
+        // with cancelAtPeriodEnd=1 (cancelSubscription.js), so 'canceled' here always
+        // means Stripe has already ended it — and an immediate cancellation keeps the
+        // period it died inside, leaving a FUTURE date that is stale rather than owed.
+        // Requiring `periodOver` let exactly those rows keep editing a banner their plan
+        // no longer covers. Same rule as IMMEDIATELY_DEAD_STATUSES in the webapp's
+        // lib/subscription-state.ts. (2026-09-25)
+        //
+        // Note this is stricter than cdnM.js, which still serves a 'canceled' banner until
+        // the stored date. Until those rows are reconciled a site can briefly have a live
+        // banner it cannot edit — read-only, never a loss of service.
+        if (isTerminal) {
           console.warn('[BannerCustomization][POST] blocked — subscription ended', { siteId, status: ownSub.status, periodEnd: rawEnd });
           return Response.json({
             success: false,

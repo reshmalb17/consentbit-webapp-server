@@ -2514,6 +2514,50 @@ export async function getSubscriptionsBySiteIds(db, siteIds) {
   return map;
 }
 
+/**
+ * The most recent subscription per site, WHATEVER its status.
+ *
+ * Companion to getSubscriptionsBySiteIds, which answers a different question: that one
+ * returns the subscription a site is currently ENTITLED to, so it deliberately drops a
+ * cancelled row once its paid period has passed. Correct for entitlement, wrong for
+ * display — a site whose plan ended becomes indistinguishable from one that never had a
+ * plan, and every screen then falls back to org-level data: the domains table reads
+ * "Active", the plan pill reads "Free", and the billing card shows a SIBLING site's
+ * subscription (with its Resume button) because billing.js falls through to
+ * getSubscriptionByOrganization.
+ *
+ * So entitlement and history are fetched separately. This is history: it never decides
+ * access, and callers must keep taking planId from the entitlement map, or a dead
+ * subscription would read as a live plan.
+ *
+ * Statuses are NOT filtered at all — 'deleted' and 'unpaid' matter here for the same
+ * reason 'canceled' does.
+ */
+export async function getLatestSubscriptionsBySiteIds(db, siteIds) {
+  if (!siteIds || siteIds.length === 0) return {};
+  const placeholders = siteIds.map((_, i) => `?${i + 1}`).join(', ');
+  // A live row ALWAYS outranks a dead one, however recently the dead one was touched.
+  // Ordering by updatedAt alone was wrong: a site that cancelled and then re-subscribed
+  // holds both rows, and any later write to the old cancelled row (a webhook replay, a
+  // reconcile, the endedAt backfill) would make the dashboard report a PAYING site as
+  // ended. Same ordering as the ended-plan guard in handlers/bannerCustomization.js.
+  const { results } = await db
+    .prepare(
+      `SELECT * FROM Subscription WHERE siteId IN (${placeholders})
+         ORDER BY CASE WHEN LOWER(status) IN ('active','trialing') THEN 0 ELSE 1 END,
+                  datetime(COALESCE(updatedAt, createdAt)) DESC`,
+    )
+    .bind(...siteIds)
+    .all();
+  const map = {};
+  for (const row of results || []) {
+    const sid = String(row.siteId ?? row.siteid ?? '');
+    if (!sid || map[sid]) continue; // ordered live-first, then newest → first seen wins
+    map[sid] = row;
+  }
+  return map;
+}
+
 // --- License key generation ---
 
 /** Temporary placeholder keys for bulk checkout (e.g. L1, L2, L3). Used in payment intent metadata until real keys are created on payment success. */

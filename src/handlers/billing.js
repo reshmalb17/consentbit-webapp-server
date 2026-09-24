@@ -9,6 +9,7 @@ import {
   getUserById,
   getSubscriptionByOrganization,
   getSubscriptionBySiteId,
+  getLatestSubscriptionsBySiteIds,
   getSubscriptionsByOrganization,
   getPageviewUsageForOrganization,
   getPageviewUsageForSite,
@@ -91,10 +92,18 @@ export async function handleBillingSummary(request, env) {
 
   await ensureSchema(db);
   // An Admin sees only their site's own subscription — never the account-wide fallback.
+  // `getSubscriptionBySiteId` only matches active/trialing, so a site whose own plan has
+  // ended returns null and the org fallback below hands back a DIFFERENT site's
+  // subscription — which is how a cancelled site's billing card came to show a sibling's
+  // plan, complete with a Resume button wired to the sibling's Stripe id. Ask for the
+  // site's own latest row first: if this site ever had a subscription, that subscription
+  // is the answer, whatever its status. The org fallback then means what it says — this
+  // site has never had one of its own.
+  const ownLatest = siteId ? (await getLatestSubscriptionsBySiteIds(db, [siteId]))[String(siteId)] ?? null : null;
   const sub = !access.owner
-    ? await getSubscriptionBySiteId(db, siteId)
+    ? (await getSubscriptionBySiteId(db, siteId)) || ownLatest
     : siteId
-      ? (await getSubscriptionBySiteId(db, siteId)) || (await getSubscriptionByOrganization(db, organizationId))
+      ? (await getSubscriptionBySiteId(db, siteId)) || ownLatest || (await getSubscriptionByOrganization(db, organizationId))
       : await getSubscriptionByOrganization(db, organizationId);
   if (!sub) {
     const { plan } = await getEffectivePlanForOrganization(db, organizationId, env);
