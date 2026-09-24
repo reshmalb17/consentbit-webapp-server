@@ -1452,6 +1452,24 @@ export async function handleStripeWebhook(request, env, ctx) {
       const status = sub.status === 'canceled' || sub.status === 'unpaid' ? sub.status : 'active';
       const canceledAt = sub.canceled_at ? toTimestamp(sub.canceled_at) : (status === 'canceled' ? new Date().toISOString() : null);
 
+      // When the plan actually STOPPED. Stripe does not rewrite `current_period_end` on
+      // cancellation — a subscription cancelled immediately keeps the period it died
+      // inside, so `periodEndOf(sub)` still reports a FUTURE date. Writing that as
+      // currentPeriodEnd makes an already-dead plan indistinguishable from a paid-through
+      // cancellation, and everything downstream reads the wrong one:
+      //   • the upgrade page tells the customer the plan "stays active until <date>"
+      //   • cdnM.js keeps serving the banner until that date — weeks of free service
+      //   • Resume is offered, then fails with 409 ended
+      // The real end is `ended_at` (falling back to `canceled_at`). Only consulted when
+      // the subscription has genuinely ended: a SCHEDULED cancellation arrives as
+      // customer.subscription.updated with status 'active', cancel_at_period_end=true and
+      // no ended_at, so it keeps its real period end and continues to serve. (2026-09-25)
+      const endedAt = sub.ended_at ? toTimestamp(sub.ended_at) : null;
+      const hasEnded = type === 'customer.subscription.deleted' || sub.status === 'canceled';
+      const effectivePeriodEnd = hasEnded
+        ? (endedAt ?? canceledAt ?? toTimestamp(periodEndOf(sub)))
+        : toTimestamp(periodEndOf(sub));
+
       if (!orgIdFinal && !existing) {
         console.warn('[StripeWebhook] subscription update/delete without organizationId', {
           stripeSubscriptionId: sub.id,
@@ -1493,7 +1511,7 @@ export async function handleStripeWebhook(request, env, ctx) {
         // Both locations — see utils/stripePeriod.js. A missing value here is written as null
         // on every update and would make the banner gate block a paid-through cancellation.
         currentPeriodStart: toTimestamp(periodStartOf(sub)),
-        currentPeriodEnd: toTimestamp(periodEndOf(sub)),
+        currentPeriodEnd: effectivePeriodEnd,
         cancelAtPeriodEnd: sub.cancel_at_period_end ? 1 : 0,
         canceledAt,
         licenseKey: existing?.licenseKey ?? existing?.licensekey ?? null,
@@ -1522,6 +1540,75 @@ export async function handleStripeWebhook(request, env, ctx) {
       // passing the field would write NULL over it on every update — the same trap
       // already documented above for currentPeriodEnd. Failure here must never
       // fail the webhook, so it is swallowed.
+
+      // --- Record when the plan actually ended ---------------------------------
+      // Same reasoning, same shape: `saveSubscription` has no canceledAt/endedAt column,
+      // so the `canceledAt` passed above is silently dropped — which is why cancelled
+      // rows carry NULL for both. They are written here instead, as their own guarded
+      // statement. COALESCE keeps the first answer: a later customer.subscription.updated
+      // on an already-dead row must not move the recorded end date.
+      //
+      // Support reads these to answer "when did this actually stop?" without a Stripe
+      // round-trip; `currentPeriodEnd` above now carries the same instant for entitlement.
+      if (hasEnded && (canceledAt || endedAt)) {
+        try {
+          await db
+            .prepare(
+              `UPDATE Subscription
+                  SET canceledAt = COALESCE(canceledAt, ?1),
+                      endedAt    = COALESCE(endedAt, ?2),
+                      updatedAt  = ?3
+                WHERE stripeSubscriptionId = ?4`,
+            )
+            .bind(canceledAt, endedAt ?? canceledAt, new Date().toISOString(), sub.id)
+            .run();
+        } catch (e) {
+          console.warn('[StripeWebhook] canceledAt/endedAt write failed (non-fatal)', e?.message);
+        }
+      }
+
+      // --- Supersede older subscriptions on the same site ----------------------
+      // A customer who cancels and buys again gets a NEW Stripe subscription id, so the
+      // lookup above misses and a SECOND row is created while the old one stays 'active'.
+      // Both then satisfy `status IN ('active','trialing')` and which one wins is decided
+      // by updatedAt ordering — i.e. by accident.
+      //
+      // `siteId` is our own id and is stamped into subscription metadata at checkout
+      // (createCheckoutSession.js), so it survives cancel → resubscribe where the Stripe
+      // customer id does not: checkout passes customer_email only, so Stripe mints a fresh
+      // Customer every time.
+      //
+      // 'inactive', never 'canceled': getSubscriptionsBySiteIds deliberately honours a
+      // canceled row while its currentPeriodEnd is in the future, so 'canceled' would let
+      // the superseded plan keep winning over the one just bought. 'inactive' is outside
+      // every lookup set. Same rule as the site-reassignment checklist.
+      //
+      // Only supersedes when THIS subscription is live — a past_due or canceled event must
+      // never retire a healthy sibling.
+      {
+        const siteIdForSupersede = existing?.siteId ?? existing?.siteid ?? sub.metadata?.siteId ?? null;
+        const thisIsLive = ['active', 'trialing'].includes(String(sub.status || '').toLowerCase());
+        if (siteIdForSupersede && thisIsLive && sub.id) {
+          await db
+            .prepare(
+              `UPDATE Subscription
+                  SET status = 'inactive', updatedAt = ?1
+                WHERE siteId = ?2
+                  AND stripeSubscriptionId IS NOT ?3
+                  AND LOWER(COALESCE(status,'')) IN ('active','trialing')`,
+            )
+            .bind(new Date().toISOString(), siteIdForSupersede, sub.id)
+            .run()
+            .then((r) => {
+              const n = Number(r?.meta?.changes) || 0;
+              if (n > 0) console.warn(`[StripeWebhook] superseded ${n} older subscription row(s) on site ${siteIdForSupersede}`);
+            })
+            .catch((err) => {
+              console.warn('[StripeWebhook] supersede failed (non-fatal):', err?.message || err);
+            });
+        }
+      }
+
       // stripeStatusAt records WHEN Stripe last said it, so a stale `past_due` from
       // months ago is not mistaken for the customer's state today.
       if (existing?.id && sub.status) {
@@ -1550,9 +1637,12 @@ export async function handleStripeWebhook(request, env, ctx) {
       // was saved again. Separate guarded block: it can never affect the
       // subscription write above, and cdnM.js still clamps at serve time.
       try {
-        const prevPlanForClamp = existing?.planId ?? existing?.planid ?? null;
         const siteIdForClamp = existing?.siteId ?? existing?.siteid ?? sub.metadata?.siteId ?? null;
-        if (siteIdForClamp && planAllowsPaidRegions(prevPlanForClamp) && !planAllowsPaidRegions(planIdFromMeta)) {
+        // Judged on the NEW plan alone, never on the previous one: an immediate change
+        // (a downgrade during a trial) writes planId to D1 before this webhook arrives,
+        // so `existing` would already read 'basic' and a from/to comparison would skip
+        // the very case it exists for. The clamp is a no-op when nothing needs resetting.
+        if (siteIdForClamp && !planAllowsPaidRegions(planIdFromMeta)) {
           await clampSiteToPlanEntitlements(env, db, {
             siteId: siteIdForClamp,
             planId: planIdFromMeta,
@@ -1926,8 +2016,25 @@ export async function handleStripeWebhook(request, env, ctx) {
         amountCents: invoice.amount_due,
         attemptCount: invoice.attempt_count,
         nextRetryAt: invoice.next_payment_attempt ? toTimestamp(invoice.next_payment_attempt) : null,
-        failureReason: invoice.last_finalization_error?.message || null,
-        rawPayload: { attempt_count: invoice.attempt_count },
+        // Why it failed, not just that it did. `last_finalization_error` only covers
+        // invoices that failed to finalise; a card that was declined or BLOCKED reports
+        // under last_payment_error, and a Radar block shows there as a blocked outcome
+        // with no bank decline code. The distinction matters to whoever reads this:
+        // a decline may clear on retry, whereas a block means the customer's bank told
+        // Stripe to stop trying and no retry will ever succeed — only a new card will.
+        failureReason:
+          invoice.last_payment_error?.message ||
+          invoice.last_finalization_error?.message ||
+          null,
+        rawPayload: {
+          attempt_count: invoice.attempt_count,
+          failureCode: invoice.last_payment_error?.code || null,
+          declineCode: invoice.last_payment_error?.decline_code || null,
+          // 'blocked' here = Stripe Radar refused it before the bank saw it.
+          outcomeType: invoice.last_payment_error?.payment_intent?.last_payment_error?.type
+            || invoice.last_payment_error?.type
+            || null,
+        },
       });
 
       // Send payment failure reminder email based on attempt count.
@@ -1943,9 +2050,30 @@ export async function handleStripeWebhook(request, env, ctx) {
         try {
           const attempt = invoice.attempt_count || 1;
           const reminderNumber = attempt >= 2 ? 2 : 1;
-          const userRow = await db.prepare(
+          // Who to tell. The OrganizationMember join alone silently found nobody for 49
+          // organizations — every legacy-migrated account, because that migration created
+          // User + Organization + Site + Subscription but never the member link. An inner
+          // join returning zero rows is not an exception, so this skipped the email with no
+          // error and no log: 171 invoice.payment_failed events produced 8 emails, and
+          // customers lost their banner without ever being told a card had failed.
+          //
+          // Organization.ownerUserId always identifies the account holder, so fall back to
+          // it. Member row first — on a team account that is the person who should hear.
+          let userRow = await db.prepare(
             'SELECT u.email, u.name FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
           ).bind(orgId).first();
+          if (!userRow?.email) {
+            userRow = await db.prepare(
+              'SELECT u.email, u.name FROM Organization o JOIN User u ON u.id = o.ownerUserId WHERE o.id = ?1 LIMIT 1'
+            ).bind(orgId).first();
+          }
+          // Never fail silently again: if neither resolves, that is a customer whose
+          // payment is failing and who cannot be contacted. Say so.
+          if (!userRow?.email) {
+            console.warn('[StripeWebhook] payment failed but NO recipient could be resolved', {
+              organizationId: orgId, invoiceId: invoice.id, stripeSubscriptionId: subId,
+            });
+          }
           if (userRow?.email) {
             const claimed = await claimPaymentFailureEmail(db, {
               invoiceId: invoice.id,

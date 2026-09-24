@@ -60,7 +60,7 @@ import { handleAdminVoidCancelledInvoices } from './handlers/adminVoidCancelledI
 import { handleAdminBackfillPosthog } from './handlers/adminBackfillPosthog.js';
 import { handleAdminGa4Test } from './handlers/adminGa4Test.js';
 import { handleAdminBackfillClickup } from './handlers/adminBackfillClickup.js';
-import { handleAdminReconcileStripe } from './handlers/adminReconcileStripe.js';
+import { handleAdminReconcileStripe, runDailyStripeReconcile } from './handlers/adminReconcileStripe.js';
 import { handleAdminMicheleClickup } from './handlers/adminMicheleClickup.js';
 import { handleAdminTestScanReport } from './handlers/adminTestScanReport.js';
 // The Admin Dashboard API (/api/admin/dashboard/*) used to live here. It now has
@@ -1103,6 +1103,11 @@ export default {
         // whether those sites still carry the ConsentBit script. Self-limiting:
         // a few sites per tick, each looked at no more than daily.
         processSubscriptionEndSweep(env),
+        // Ask Stripe what it actually thinks, once a day. Self-claiming on the UTC
+        // date, so the every-minute cron runs it exactly once. This is what stops a
+        // missed webhook becoming a permanent wrong status, as it did for 24
+        // customers before 2026-09-24.
+        runDailyStripeReconcile(env),
         // Consent-record retention. No-op unless CONSENT_RETENTION_MODE is set
         // ('dry-run' counts, 'on' deletes) — and test + production share one D1,
         // so enabling it on either worker affects both. See services/consentRetention.js.

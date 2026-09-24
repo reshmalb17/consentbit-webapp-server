@@ -35,6 +35,8 @@ export async function sendBrevoEmail(env, { to, name, subject, html, text, attac
 
   const payload = {
     sender:      { email: fromEmail, name: fromName },
+    // email.consentbit.com has no MX — route replies to the monitored support inbox.
+    replyTo:     { email: env.BREVO_REPLY_TO || 'web@consentbit.com', name: fromName },
     to:          [{ email: to, name: name || to }],
     subject,
     htmlContent: html,

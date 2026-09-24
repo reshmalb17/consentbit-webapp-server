@@ -8,11 +8,10 @@
 // (Framer) billing handlers.
 //
 //   GET  /api/wf/billings?siteId=<id>           → plan + status + real Stripe invoices + usage
-//                                                 (+ pendingPlanChange when a downgrade is booked)
 //   POST /api/wf/switch-intervals   body { siteId, targetInterval } → switch monthly/yearly
 //   POST /api/wf/cancel-subscriptions body { siteId } → cancel at period end
 
-import { getPageviewUsageForSite, getScanUsageForSite, getPlanById, inferTierPlanIdFromStripePriceId } from '../services/db.js';
+import { getPageviewUsageForSite, getScanUsageForSite, getPlanById } from '../services/db.js';
 
 const TAG = '[webflow-billing-wf]';
 
@@ -110,7 +109,6 @@ export async function handleWebflowBillings(request, env) {
   const planId = pick(sub, 'planId', 'planid');
   const cancelRaw = pick(sub, 'cancelAtPeriodEnd', 'cancelatperiodend');
 
-  let scheduleId = null;
   let cancelAtPeriodEnd = cancelRaw === 1 || cancelRaw === true || cancelRaw === '1'
     || String(pick(sub, 'status', 'status') || '').toLowerCase() === 'canceled';
   if (stripeSubscriptionId && env.STRIPE_SECRET_KEY) {
@@ -122,11 +120,6 @@ export async function handleWebflowBillings(request, env) {
       if (!sdata.error) {
         cancelAtPeriodEnd = !!sdata.cancel_at_period_end
           || String(sdata.status || '').toLowerCase() === 'canceled';
-        // A downgrade is not applied now — it is parked on a subscription schedule
-        // that Stripe runs at the period end. Remember the id so the pending change
-        // can be reported below; without it the app shows the CURRENT plan with no
-        // sign that a change is booked.
-        scheduleId = sdata.schedule || null;
       }
     } catch (e) {
       console.warn(`${TAG} subscription fetch failed`, e?.message);
@@ -189,39 +182,6 @@ export async function handleWebflowBillings(request, env) {
     }
   }
 
-  // ── Pending plan change (scheduled downgrade) ──────────────────────────────
-  // Read from Stripe, never from D1: D1 still holds the CURRENT plan until the
-  // webhook fires at the period end (that is the whole point of scheduling). The
-  // phase we want is the one that has not started yet. planId comes from the
-  // metadata we set when creating the schedule, with a price lookup as fallback
-  // for schedules made elsewhere. Guarded: a failure just omits the field.
-  let pendingPlanChange = null;
-  if (scheduleId && env.STRIPE_SECRET_KEY) {
-    try {
-      const res = await fetch(`https://api.stripe.com/v1/subscription_schedules/${scheduleId}`, {
-        headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
-      });
-      const sched = await res.json();
-      const nowSec = Math.floor(Date.now() / 1000);
-      const phases = Array.isArray(sched?.phases) ? sched.phases : [];
-      const upcoming = phases.find((ph) => Number(ph?.start_date) > nowSec);
-      if (upcoming) {
-        const priceId = upcoming.items?.[0]?.price || null;
-        const nextPlan = sched?.metadata?.planId || inferTierPlanIdFromStripePriceId(env, priceId) || null;
-        const nextInterval = sched?.metadata?.interval || null;
-        // Only report a real change: an identical plan is not worth a banner in the UI.
-        if (nextPlan && String(nextPlan).toLowerCase() !== String(planId || '').toLowerCase()) {
-          pendingPlanChange = {
-            planId: String(nextPlan).toLowerCase(),
-            interval: nextInterval,
-            effectiveAt: new Date(Number(upcoming.start_date) * 1000).toISOString(),
-          };
-        }
-      }
-    } catch (e) {
-      console.warn(`${TAG} schedule fetch failed`, e?.message);
-    }
-  }
   const limits = await resolveLimits(db, planId);
   return Response.json({
     success: true,
@@ -230,7 +190,6 @@ export async function handleWebflowBillings(request, env) {
     interval: pick(sub, 'interval', 'interval'),
     currentPeriodEnd: pick(sub, 'currentPeriodEnd', 'currentperiodend'),
     cancelAtPeriodEnd,
-    pendingPlanChange,
     stripeSubscriptionId,
     invoices,
     ...usage,

@@ -50,6 +50,48 @@ function intervalOf(sub) {
   return raw === 'year' ? 'yearly' : raw === 'month' ? 'monthly' : String(raw);
 }
 
+/**
+ * Which tier a Stripe price represents.
+ *
+ * The env price list (STRIPE_PRICE_BASIC_MONTHLY and friends) only covers prices the
+ * CURRENT checkout creates, so every legacy subscription misses it and `planId` stays
+ * null — 50 rows with no price id at all, and the dashboard showing "—" for all of them.
+ * wrangler.toml also defines several of those keys twice with different values, so which
+ * one wins depends on TOML ordering.
+ *
+ * So: try the configured ids first (exact and authoritative when they match), then fall
+ * back to the amount, which is stable across every price we have ever issued. Returns
+ * null rather than guessing — a null shows as "unknown" instead of mislabelling someone's
+ * plan, which is the mistake this whole audit came from.
+ */
+function planIdOf(env, sub) {
+  const price = sub?.items?.data?.[0]?.price ?? null;
+  const priceId = price?.id ?? null;
+
+  const configured = {
+    basic: [env.STRIPE_PRICE_BASIC_MONTHLY, env.STRIPE_PRICE_BASIC_YEARLY],
+    essential: [env.STRIPE_PRICE_ESSENTIAL_MONTHLY, env.STRIPE_PRICE_ESSENTIAL_YEARLY],
+    growth: [env.STRIPE_PRICE_GROWTH_MONTHLY, env.STRIPE_PRICE_GROWTH_YEARLY],
+  };
+  if (priceId) {
+    for (const [tier, ids] of Object.entries(configured)) {
+      if (ids.filter(Boolean).includes(priceId)) return tier;
+    }
+  }
+
+  // Amount in cents → tier. Monthly and yearly both listed; see project plan pricing
+  // (flat 20% annual: 86 / 192 / 538 USD).
+  const amount = price?.unit_amount ?? sub?.plan?.amount ?? null;
+  const byAmount = {
+    800: 'basic', 8600: 'basic',
+    1900: 'essential', 19200: 'essential',
+    5600: 'growth', 53800: 'growth',
+  };
+  if (amount != null && byAmount[amount]) return byAmount[amount];
+
+  return null;
+}
+
 /** Unix seconds → ISO, or null. */
 function iso(seconds) {
   return seconds ? new Date(seconds * 1000).toISOString() : null;
@@ -112,24 +154,11 @@ async function fetchAllSubscriptions(stripeKey) {
   return all;
 }
 
-export async function handleAdminReconcileStripe(request, env) {
-  if (request.method !== 'POST') {
-    return Response.json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
-  }
-
-  const authError = checkAdminAuth(request, env);
-  if (authError) return authError;
-
-  if (!env.STRIPE_SECRET_KEY) {
-    return Response.json({ success: false, error: 'STRIPE_SECRET_KEY not configured' }, { status: 503 });
-  }
-
-  const url = new URL(request.url);
-  const apply = url.searchParams.get('apply') === 'true';
-  const fixInterval = url.searchParams.get('fixInterval') === 'true';
-  const limitRaw = url.searchParams.get('limit');
-  const limit = limitRaw === '0' ? Infinity : Number(limitRaw || 200);
-
+/**
+ * The reconcile itself, callable without a Request so the daily sweep can reuse it.
+ * Read-only unless `apply` is set; never writes `status` under any option.
+ */
+export async function runStripeReconcile(env, { apply = false, fixInterval = false, fixPlan = false, limit = 200 } = {}) {
   const db = env.CONSENT_WEBAPP;
   const now = new Date().toISOString();
 
@@ -138,7 +167,7 @@ export async function handleAdminReconcileStripe(request, env) {
   try {
     stripeSubs = await fetchAllSubscriptions(env.STRIPE_SECRET_KEY);
   } catch (err) {
-    return Response.json({ success: false, error: `Stripe fetch failed: ${err.message}` }, { status: 502 });
+    return { success: false, error: `Stripe fetch failed: ${err.message}`, _status: 502 };
   }
   const byStripeId = new Map(stripeSubs.map((s) => [s.id, s]));
 
@@ -163,6 +192,7 @@ export async function handleAdminReconcileStripe(request, env) {
     missingInStripe: [],
     missingInD1: [],
     unpaidInvoice: [],  // status looks fine but the latest invoice was never paid
+    missingPlanId: [],  // no tier recorded — the dashboard shows "—" for these
   };
 
   const writes = [];
@@ -231,6 +261,32 @@ export async function handleAdminReconcileStripe(request, env) {
           .bind(sInterval, now, row.id),
       );
     }
+
+    // planId — only ever FILLS a blank, never overwrites. A row that already names a tier
+    // was set by checkout metadata or by hand, and both are better evidence than a price
+    // lookup. `planId` gates nothing, so this cannot affect access either way.
+    const sPlan = planIdOf(env, sub);
+    if (!row.planId) {
+      // amount + interval are reported so an unresolved price can be mapped from real
+      // figures rather than guessed. Guessing a tier would silently give someone the
+      // wrong plan, which is the class of mistake this whole handler exists to catch.
+      const priceObj = sub?.items?.data?.[0]?.price ?? null;
+      report.missingPlanId.push({
+        ...base,
+        resolved: sPlan,
+        priceId: priceObj?.id ?? null,
+        amount: priceObj?.unit_amount ?? sub?.plan?.amount ?? null,
+        currency: priceObj?.currency ?? null,
+        priceInterval: priceObj?.recurring?.interval ?? null,
+        stripeStatus: sStatus,
+      });
+      if (apply && fixPlan && sPlan) {
+        writes.push(
+          db.prepare(`UPDATE Subscription SET planId = ?1, updatedAt = ?2 WHERE id = ?3 AND planId IS NULL`)
+            .bind(sPlan, now, row.id),
+        );
+      }
+    }
   }
 
   // Subscriptions Stripe has that we have no row for at all.
@@ -265,14 +321,113 @@ export async function handleAdminReconcileStripe(request, env) {
     Object.entries(report).map(([k, v]) => [k, Number.isFinite(limit) ? v.slice(0, limit) : v]),
   );
 
-  return Response.json({
+  return {
     success: true,
-    mode: apply ? (fixInterval ? 'apply + fixInterval' : 'apply') : 'read-only',
+    mode: apply ? ['apply', fixInterval && 'fixInterval', fixPlan && 'fixPlan'].filter(Boolean).join(' + ') : 'read-only',
     checkedAt: now,
     stripeSubscriptions: stripeSubs.length,
     d1Subscriptions: (rows || []).length,
     counts,
     written,
     report: capped,
+  };
+}
+
+// ─── HTTP entry point ────────────────────────────────────────────────────────
+
+export async function handleAdminReconcileStripe(request, env) {
+  if (request.method !== 'POST') {
+    return Response.json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
+  }
+
+  const authError = checkAdminAuth(request, env);
+  if (authError) return authError;
+
+  if (!env.STRIPE_SECRET_KEY) {
+    return Response.json({ success: false, error: 'STRIPE_SECRET_KEY not configured' }, { status: 503 });
+  }
+
+  const url = new URL(request.url);
+  const limitRaw = url.searchParams.get('limit');
+
+  const result = await runStripeReconcile(env, {
+    apply: url.searchParams.get('apply') === 'true',
+    fixInterval: url.searchParams.get('fixInterval') === 'true',
+    fixPlan: url.searchParams.get('fixPlan') === 'true',
+    limit: limitRaw === '0' ? Infinity : Number(limitRaw || 200),
   });
+
+  const status = result._status || (result.success ? 200 : 500);
+  delete result._status;
+  return Response.json(result, { status });
+}
+
+// ─── Daily sweep ─────────────────────────────────────────────────────────────
+
+/**
+ * Run the reconcile once per UTC day from the every-minute cron.
+ *
+ * This is the part that matters. Everything else here is a tool someone has to remember
+ * to use; 24 customers drifted for months precisely because the only correction path was
+ * a human noticing. A missed Stripe webhook now costs at most a day of staleness instead
+ * of being permanent.
+ *
+ * `apply` is on, `fixInterval` is off: recording what Stripe says touches only
+ * stripeStatus/stripeStatusAt, which no access decision reads, whereas rewriting the
+ * interval label unprompted is a change someone should ask for.
+ *
+ * The date claim is the whole concurrency story — INSERT OR IGNORE on a PRIMARY KEY of
+ * the UTC date. Whichever minute-tick inserts the row first does the work; every other
+ * tick that day sees changes === 0 and returns. No lock, no cursor, no drift.
+ */
+export async function runDailyStripeReconcile(env) {
+  if (!env.STRIPE_SECRET_KEY || !env.CONSENT_WEBAPP) return;
+  const db = env.CONSENT_WEBAPP;
+  const today = new Date().toISOString().slice(0, 10);
+
+  try {
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS StripeReconcileRun (
+           day TEXT PRIMARY KEY,
+           startedAt DATETIME NOT NULL,
+           finishedAt DATETIME,
+           counts TEXT,
+           written INTEGER,
+           error TEXT
+         )`,
+      )
+      .run();
+
+    const claim = await db
+      .prepare(`INSERT OR IGNORE INTO StripeReconcileRun (day, startedAt) VALUES (?1, ?2)`)
+      .bind(today, new Date().toISOString())
+      .run();
+    if (!(Number(claim?.meta?.changes) > 0)) return; // already claimed today
+
+    const result = await runStripeReconcile(env, { apply: true, fixInterval: false, limit: 0 });
+
+    await db
+      .prepare(
+        `UPDATE StripeReconcileRun
+            SET finishedAt = ?1, counts = ?2, written = ?3, error = ?4
+          WHERE day = ?5`,
+      )
+      .bind(
+        new Date().toISOString(),
+        JSON.stringify(result.counts || {}),
+        Number(result.written || 0),
+        result.success ? null : String(result.error || 'unknown'),
+        today,
+      )
+      .run();
+
+    const drift = Number(result?.counts?.statusDrift || 0);
+    if (drift > 0) {
+      console.warn(`[StripeReconcile] ${drift} subscriptions we treat as entitled that Stripe disagrees with`);
+    }
+  } catch (err) {
+    // Never let this break the cron — the other sweeps in that tick still need to run.
+    console.error('[StripeReconcile] daily sweep failed:', err?.message || err);
+  }
 }

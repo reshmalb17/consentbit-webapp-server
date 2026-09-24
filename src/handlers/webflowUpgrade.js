@@ -41,7 +41,6 @@
 import { syncSubscriptionUpdateToLegacy } from '../services/syncLegacy.js';
 import { requireWebflowIdentity } from '../middleware/webflowIdentity.js';
 import { isPromotionCodeAllowedForEmail } from '../services/promoRestrictions.js';
-import { clampSiteToPlanEntitlements } from '../services/planEntitlementClamp.js';
 
 const TAG = '[webflow-upgrade]';
 const PLAN_ORDER = { basic: 1, essential: 2, growth: 3 };
@@ -636,19 +635,12 @@ export async function handleWebflowChangeTier(request, env, ctxArg, identity) {
     const rows = upd?.meta?.changes ?? upd?.meta?.rows_written ?? '?';
     log(rid, `d1 updated — ${rows} row(s) → ${planId}/${interval} periodEnd=${newPeriodEndISO || '-'}`);
     if (rows === 0) warn(rid, `d1 matched NO row for stripeSubscriptionId=${stripeSubId} — the app will still show the old plan`);
-    // Downgrading out of Essential/Growth drops the paid banner features with it:
-    // region_mode 'both' (GDPR+CCPA geo-routing) and banner_type 'iab'. All THREE
-    // stores that hold the selection are reset together — Site flags, the saved
-    // customization the Designer app loads, and the KV Banner-Settings entry that
-    // the customization GET prefers over D1. Clamping only the Site row (the old
-    // behaviour) left the app showing CCPA+GDPR/IAB again on the next launch, and
-    // its next save wrote that straight back. Never throws; cdnM.js still clamps at
-    // serve time as the real enforcement.
-    await clampSiteToPlanEntitlements(env, db, {
-      siteId,
-      planId,
-      logger: (msg) => log(rid, msg),
-    });
+    // NOTE: the paid-feature reset (CCPA+GDPR / IAB) is deliberately NOT done here.
+    // It belongs to Stripe's view of the plan, not ours: a downgrade chosen in the app
+    // is parked on a subscription schedule and does not take effect until the period
+    // end, and the customer keeps the features they have paid for until then. The
+    // reset runs in handlers/stripeWebhook.js on customer.subscription.updated — the
+    // one moment the plan has actually changed, whether that is now or weeks from now.
   } catch (dbErr) {
     // Stripe already charged — never fail the response on the bookkeeping write.
     console.error(`${TAG}[${rid}] d1 update FAILED (Stripe change already applied):`, dbErr?.message || dbErr);

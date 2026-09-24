@@ -94,8 +94,27 @@ export async function handleSyncEvent(request, env) {
 async function handlePurchase(db, env, payload) {
   const {
     email, domain, subscriptionId, customerId,
-    status = 'active', platform, licenseKey, interval = 'monthly', cancelAtPeriodEnd = false,
+    status, platform, licenseKey, interval, cancelAtPeriodEnd = false,
   } = payload;
+
+  // `status = 'active'` and `interval = 'monthly'` used to be default parameters here.
+  // A payload that simply OMITTED the field therefore arrived as a paying, monthly
+  // customer — and combined with `status || existing.status` in handleSubscriptionUpdate
+  // below, a legacy row could only ever move TOWARDS active, never away. The measured
+  // result: legacy subscriptions cancelled at ~5% against ~37% for everyone else. Those
+  // cancellations happened; the sync could not express them.
+  //
+  // Defaulting is kept — this is a purchase event, so 'active' is the right reading of a
+  // missing status — but it is now recorded so a sender that stopped sending the field
+  // shows up in the logs instead of silently minting active subscriptions.
+  if (!status || !interval) {
+    console.warn('[syncEvent] purchase payload missing field(s); defaulting', {
+      domain, subscriptionId,
+      missingStatus: !status, missingInterval: !interval,
+    });
+  }
+  const statusFinal = status || 'active';
+  const intervalFinal = interval || 'monthly';
 
   // Upsert into CONSENT_WEBAPP via the migration helper (handles user/org/site/sub)
   await upsertLegacyEntry(db, {
@@ -103,16 +122,16 @@ async function handlePurchase(db, env, payload) {
     domain: normalizeDomain(domain),
     subscriptionId,
     customerId,
-    status,
+    status: statusFinal,
     legacySource: platform || 'dashboard',
-    interval,
+    interval: intervalFinal,
     cancelAtPeriodEnd: cancelAtPeriodEnd ? 1 : 0,
     licenseKey: licenseKey || null,
     active: true,
   }, new Date().toISOString());
 
   // Push to LEGACY_DB + KV (idempotent — other systems get a consistent view)
-  await syncPurchaseToLegacy(env, { email, domain, subscriptionId, customerId, status, platform, licenseKey, interval, cancelAtPeriodEnd });
+  await syncPurchaseToLegacy(env, { email, domain, subscriptionId, customerId, status: statusFinal, platform, licenseKey, interval: intervalFinal, cancelAtPeriodEnd });
 }
 
 async function handleSubscriptionUpdate(db, env, payload) {
@@ -121,6 +140,17 @@ async function handleSubscriptionUpdate(db, env, payload) {
     status, cancelAtPeriodEnd, platform, interval,
     currentPeriodStart, currentPeriodEnd,
   } = payload;
+
+  // An absent status keeps whatever the row already had — which, because the row could
+  // only ever have been set TO 'active', meant a legacy subscription had no way to be
+  // demoted by this path at all. Kept (an update that omits the field should not invent a
+  // state) but recorded, so a sender that stopped including it is visible rather than
+  // silently freezing every legacy row as paying.
+  if (!status) {
+    console.warn('[syncEvent] subscription_update with no status — keeping existing', {
+      subscriptionId, domain,
+    });
+  }
 
   // Update CONSENT_WEBAPP Subscription row
   const existing = await getSubscriptionByStripeId(db, subscriptionId);
