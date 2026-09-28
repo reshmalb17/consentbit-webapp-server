@@ -8,6 +8,7 @@ import {
   getScanUsageForSite,
   getEffectivePlanForOrganization,
 } from '../services/db.js';
+import { getSiteSubscriptionEnded, subscriptionEndedResponse } from '../services/siteSubscriptionEnded.js';
 
 export async function handleScheduledScan(request, env) {
   const db = env.CONSENT_WEBAPP;
@@ -48,6 +49,16 @@ export async function handleScheduledScan(request, env) {
         { success: false, error: 'siteId and scheduledAt are required' },
         { status: 400 }
       );
+    }
+
+    // Same gate as /api/scan-site and /api/scan-pending. Scheduling is the one that would
+    // otherwise keep costing us indefinitely: the cron re-fires it forever, long after the
+    // plan ended. Checked before the scan-limit logic below, since "your plan has ended" is
+    // the more useful answer than a quota message.
+    const ended = await getSiteSubscriptionEnded(db, siteId);
+    if (ended.ended) {
+      console.warn('[ScheduledScan] blocked — subscription ended', { siteId, status: ended.status });
+      return subscriptionEndedResponse('scheduled');
     }
 
     // Check scan limit before allowing a new scheduled scan to be created

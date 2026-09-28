@@ -3,6 +3,7 @@
 // POST /api/scan-pending            → { siteId, action:'request'|'clear' }
 
 import { ensureSchema } from '../services/db.js';
+import { getSiteSubscriptionEnded, subscriptionEndedResponse } from '../services/siteSubscriptionEnded.js';
 
 export async function handleScanPending(request, env) {
   const db = env.CONSENT_WEBAPP;
@@ -33,6 +34,19 @@ export async function handleScanPending(request, env) {
     if (!siteId) return Response.json({ success: false, error: 'siteId required' }, { status: 400 });
 
     if (action === 'request') {
+      // Same gate as /api/scan-site. This queues a BROWSER scan — pendingScan=1 makes the
+      // next visit to the site run a full cookie+script report — so leaving it open meant
+      // an ended plan could still start scans by the other route, which is exactly what
+      // happened: /api/scan-site returned 402 while this one returned 200.
+      //
+      // Only 'request' is gated. 'clear' below must stay open so a site can always cancel
+      // a queued scan, and the GET is a read.
+      const ended = await getSiteSubscriptionEnded(db, siteId);
+      if (ended.ended) {
+        console.warn('[ScanPending] blocked — subscription ended', { siteId, status: ended.status });
+        return subscriptionEndedResponse('run');
+      }
+
       await db.prepare('UPDATE Site SET pendingScan = 1, updatedAt = ?1 WHERE id = ?2')
         .bind(new Date().toISOString(), siteId)
         .run();

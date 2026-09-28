@@ -191,6 +191,7 @@ export async function runStripeReconcile(env, { apply = false, fixInterval = fal
 
   const report = {
     statusDrift: [],    // we say entitled, Stripe disagrees — the one that costs money
+    deniedDrift: [],    // Stripe says entitled and we do not — a customer locked out
     intervalDrift: [],
     periodDrift: [],
     endedDrift: [],     // Stripe ended it; we still hold a later date — keeps the banner on
@@ -231,6 +232,27 @@ export async function runStripeReconcile(env, { apply = false, fixInterval = fal
       report.statusDrift.push({ ...base, d1Status: dStatus, stripeStatus: sStatus, ...inv });
     }
 
+    // ── The same drift the other way round ────────────────────────────────
+    // Stripe says this customer is entitled and we do not, so we are withholding a
+    // service someone is paying for. Every check in this handler was written looking for
+    // revenue leaking OUT, which left it structurally unable to see a customer wrongly
+    // locked out — found only because one of them asked why their account was blocked.
+    //
+    // Reported, never written. Everything else here corrects a column that decides
+    // nothing; this one would GRANT access, and a bug in the comparison would hand out
+    // free service silently. A human should look before that happens, so the sweep raises
+    // it and stops.
+    if (!ENTITLED.has(dStatus) && ENTITLED.has(sStatus)) {
+      report.deniedDrift.push({
+        ...base,
+        d1Status: dStatus,
+        stripeStatus: sStatus,
+        stripeStatusAt: row.stripeStatusAt ?? null,
+        periodEnd: sPeriodEnd,
+        ...inv,
+      });
+    }
+
     // Paid-up on paper, unpaid in fact.
     if (ENTITLED.has(sStatus) && inv.invoiceStatus && !['paid', 'void'].includes(inv.invoiceStatus)) {
       report.unpaidInvoice.push({ ...base, stripeStatus: sStatus, ...inv });
@@ -240,7 +262,13 @@ export async function runStripeReconcile(env, { apply = false, fixInterval = fal
       report.intervalDrift.push({ ...base, d1Interval: row.interval, stripeInterval: sInterval });
     }
 
-    if (sPeriodEnd && !sameDay(sPeriodEnd, row.currentPeriodEnd)) {
+    // Cancelled rows are excluded: Stripe never rewrites current_period_end on
+    // cancellation, so once endedDrift has corrected ours to the real ended_at the two
+    // sides legitimately disagreeForever. Comparing them anyway turned 25 findings into 54
+    // the moment that correction ran — all noise, on rows where the period means nothing.
+    // endedDrift is the check that matters for those.
+    const cancelledHere = !ENTITLED.has(sStatus) && String(sStatus) !== 'past_due';
+    if (!cancelledHere && sPeriodEnd && !sameDay(sPeriodEnd, row.currentPeriodEnd)) {
       report.periodDrift.push({
         ...base,
         d1PeriodEnd: row.currentPeriodEnd, stripePeriodEnd: sPeriodEnd,
@@ -458,7 +486,20 @@ export async function runDailyStripeReconcile(env) {
       .run();
     if (!(Number(claim?.meta?.changes) > 0)) return; // already claimed today
 
-    const result = await runStripeReconcile(env, { apply: true, fixInterval: false, limit: 0 });
+    // fixInterval and fixPlan are ON. Both are labels that gate nothing — no access check
+    // reads either — and both are otherwise unfixable by the normal write path: `interval`
+    // is absent from saveSubscription()'s DO UPDATE SET, and `planId` never resolves for a
+    // legacy price. Left off, they simply drift again: 40 intervals were corrected by hand
+    // on 2026-09-24 and 7 more had reappeared by the next morning.
+    //
+    // fixEnded stays OFF deliberately. Unlike these two it DOES change entitlement — it
+    // switches banners off — so it stays a deliberate, reviewed action.
+    const result = await runStripeReconcile(env, {
+      apply: true,
+      fixInterval: true,
+      fixPlan: true,
+      limit: 0,
+    });
 
     await db
       .prepare(
@@ -478,6 +519,13 @@ export async function runDailyStripeReconcile(env) {
     const drift = Number(result?.counts?.statusDrift || 0);
     if (drift > 0) {
       console.warn(`[StripeReconcile] ${drift} subscriptions we treat as entitled that Stripe disagrees with`);
+    }
+    // Louder, because this one has a customer on the other end of it wondering why their
+    // account is blocked. Nothing corrects it automatically, so if this is not read,
+    // nothing happens at all.
+    const denied = Number(result?.counts?.deniedDrift || 0);
+    if (denied > 0) {
+      console.error(`[StripeReconcile] ${denied} subscription(s) Stripe considers ENTITLED that we are blocking — customers locked out of a plan they are paying for`);
     }
   } catch (err) {
     // Never let this break the cron — the other sweeps in that tick still need to run.

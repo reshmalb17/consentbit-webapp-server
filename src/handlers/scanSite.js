@@ -23,6 +23,7 @@ import {
   hostHintsFromSiteDomain,
 } from '../utils/customCookieRules.js';
 import { SCRIPT_BLOCK_PROVIDERS } from '../data/scriptBlockProviders.js';
+import { getSiteSubscriptionEnded, subscriptionEndedResponse } from '../services/siteSubscriptionEnded.js';
 
 function categorizeScriptByProviders(url) {
   try {
@@ -414,6 +415,23 @@ export async function handleScanSite(request, env, ctx, options = {}) {
         { success: false, error: 'Site not found' },
         { status: 404 },
       );
+    }
+
+    // A site whose own paid subscription has ENDED cannot scan. Same rule the banner
+    // editor already applies (handlers/bannerCustomization.js) — scanning is the more
+    // expensive of the two, since every run costs outbound fetches and a headless pass,
+    // so leaving it open meant lapsed accounts kept consuming that indefinitely.
+    //
+    // Free sites are unaffected: free is a plan, "cancelled and expired" is not. The
+    // helper fails OPEN if it cannot read, so an outage never blocks a paying customer.
+    {
+      const ended = await getSiteSubscriptionEnded(db, siteId);
+      if (ended.ended) {
+        console.warn('[ScanSite] blocked — subscription ended', {
+          siteId, domain: site.domain, status: ended.status,
+        });
+        return subscriptionEndedResponse('run');
+      }
     }
 
     // cookie_scan_started — only for a user-initiated Webflow scan (skip background
