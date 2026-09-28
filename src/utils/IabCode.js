@@ -115,6 +115,12 @@ window.__cbIabBundleLoaded = true;
     if (typeof window.gtag !== 'function') {
       window.gtag = function () { window.dataLayer.push(arguments); };
     }
+    // ConsentBit's Google-issued CMP developer ID. Set before the default guard so it
+    // is still sent when the Webflow setup script already published the default.
+    window.gtag('set', 'developer_id.dN2Q3Yj', true);
+    // Carry gclid/dclid/wbraid across navigations in the URL, so conversions still
+    // attribute for visitors who declined cookies — same as the standard banner.
+    window.gtag('set', 'url_passthrough', true);
     if (window.__cbConsentDefaultSet === true) return;
     window.__cbConsentDefaultSet = true;
     window.gtag('consent', 'default', {
