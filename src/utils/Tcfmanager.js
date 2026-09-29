@@ -622,6 +622,9 @@ class TCFManager {
       cmpId: this.config.cmpId,
       cmpVersion: this.config.cmpVersion,
       gdprApplies: true,
+      // Google-defined TCData flag: lets Google tags infer ad_storage, ad_user_data
+      // and ad_personalization from the TC string. Not part of the TC string itself.
+      enableAdvertiserConsentMode: true,
       cmpStatus: this.isInitialized ? 'loaded' : 'loading',
       eventStatus,
       isServiceSpecific: true,

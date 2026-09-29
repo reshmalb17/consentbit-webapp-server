@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ConsentBit Debug Docs</title>
+<style>
+  :root {
+    --text: #1f2328; --muted: #59636e; --line: #d0d7de; --soft: #f6f8fa;
+    --link: #0969da; --pass: #1a7f37; --warn: #9a6700; --info: #818b98;
+    --note-bg: #fff8c5; --note-line: #d4a72c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #fff; color: var(--text);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  main { max-width: 820px; margin: 0 auto; padding: 40px 20px 80px; }
+  h1 { font-size: 32px; line-height: 1.25; margin: 0 0 8px; }
+  h2 { font-size: 23px; margin: 44px 0 12px; padding-top: 8px; border-top: 1px solid var(--line); }
+  h3 { font-size: 18px; margin: 28px 0 8px; }
+  p, li { color: var(--text); }
+  .lead { color: var(--muted); font-size: 18px; margin: 0 0 24px; }
+  a { color: var(--link); }
+  code { font: 0.88em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--soft); border: 1px solid #eaeef2; border-radius: 4px; padding: 1px 5px; overflow-wrap: anywhere; }
+  pre { background: var(--soft); border: 1px solid var(--line); border-radius: 6px;
+    padding: 14px 16px; overflow-x: auto; font: 13.5px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  pre code { background: none; border: 0; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0 20px; font-size: 15px; }
+  th, td { text-align: left; vertical-align: top; padding: 9px 12px; border: 1px solid var(--line); }
+  th { background: var(--soft); font-weight: 600; }
+  .label { font: 600 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .04em; }
+  .pass { color: var(--pass); } .warn { color: var(--warn); } .info { color: var(--info); }
+  .note { background: var(--note-bg); border: 1px solid var(--note-line); border-radius: 6px; padding: 12px 16px; margin: 16px 0; }
+  .handoff { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 18px 20px; margin-bottom: 36px; font-size: 15px; }
+  .handoff h2 { border: 0; margin: 0 0 8px; padding: 0; font-size: 18px; }
+  .page { border: 1px solid var(--line); border-radius: 10px; padding: 8px 28px 28px; margin: 32px 0; }
+  .url { display: inline-block; font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: #ddf4ff; color: #0550ae; border-radius: 999px; padding: 3px 10px; margin: 20px 0 4px; }
+  .step { font-weight: 600; }
+  @media (max-width: 600px) { .page { padding: 4px 16px 20px; } h1 { font-size: 26px; } }
+</style>
+</head>
+<body>
+<main>
+
+<div class="handoff">
+  <h2>For the developer adding these pages</h2>
+  <p>This file contains <strong>two documentation pages</strong>. Please publish each at the exact URL shown, because the ConsentBit debug panel already links to them:</p>
+  <ul>
+    <li><strong>Page 1: Debug mode</strong> → <code>https://www.consentbit.com/articles/debug-mode</code></li>
+    <li><strong>Page 2: Google tag gateway</strong> → <code>https://www.consentbit.com/articles/using-consentbit-with-google-tag-gateway</code></li>
+  </ul>
+  <p>Every "How to fix" link in the debug panel jumps to the heading <strong>"Fixing a Google tag that loads too early"</strong> on Page 1 (it finds the heading by its text). <strong>Keep that heading text exactly as written</strong>, and keep that section starting with Step 1, the Google tag gateway check, because Google requires that order. Optionally, also give the heading the id <code>late-tags</code>. Restyle freely to match the site.</p>
+  <p><strong>Fix on the live articles:</strong> the Step 1 link on Page 1 and the "Debug mode" link on Page 2 still point to the old <code>consentbit.com/docs/…</code> addresses. Change them to the two URLs above.</p>
+  <p>Everything below the dotted pages is the content. Remove this grey box when publishing.</p>
+</div>
+
+<!-- ===================================================================== -->
+<!-- PAGE 1 — https://www.consentbit.com/articles/debug-mode                       -->
+<!-- ===================================================================== -->
+<section class="page" id="page-debug-mode">
+<span class="url">consentbit.com/articles/debug-mode</span>
+
+<h1>Debug mode</h1>
+<p class="lead">Check that ConsentBit is set up correctly on your website: that Google's consent settings load before your Google tags, and that your tags respect your visitors' choices.</p>
+
+<p>Debug mode shows a small panel on your own screen with a list of checks. It is only visible to you, in the browser tab where you turn it on. Your visitors never see it.</p>
+
+<h2 id="turn-on">Turn debug mode on</h2>
+<p>Open any page of your website and add <code>?consentbit_debug=1</code> to the end of the address:</p>
+<pre><code>https://www.example.com/?consentbit_debug=1</code></pre>
+<p>If the address already contains a <code>?</code>, add it with <code>&amp;</code> instead:</p>
+<pre><code>https://www.example.com/pricing?ref=ads&amp;consentbit_debug=1</code></pre>
+<p>After a couple of seconds the <strong>ConsentBit debug</strong> panel appears in the top-right corner. Debug mode stays on while you browse other pages in the same tab.</p>
+
+<h3>Other ways to turn it on</h3>
+<p>If you can edit your site's code, you can instead add <code>data-debug="true"</code> to the ConsentBit script tag. Remember to remove it when you are done, because it turns debug mode on for everyone who opens the page.</p>
+<pre><code>&lt;script id="consentbit" data-debug="true" src="https://manager.consentbit.com/consentbit/YOUR-SCRIPT-ID/script.js"&gt;&lt;/script&gt;</code></pre>
+
+<h2 id="turn-off">Turn debug mode off</h2>
+<p>Add <code>?consentbit_debug=0</code> to the address, or close the browser tab. Clicking <strong>×</strong> on the panel hides it for the current page only.</p>
+
+<h2 id="reading-the-panel">Reading the panel</h2>
+<p>The top of the panel shows a summary: <strong>all checks passed</strong>, or the number of issues found. Each line below it has a label:</p>
+<table>
+  <tr><th>Label</th><th>Meaning</th></tr>
+  <tr><td><span class="label pass">PASS</span></td><td>This part of your setup is correct.</td></tr>
+  <tr><td><span class="label warn">WARN</span></td><td>Something needs your attention. Follow the <strong>How to fix</strong> link under the message.</td></tr>
+  <tr><td><span class="label info">INFO</span></td><td>Useful information. Nothing to fix.</td></tr>
+</table>
+
+<h2 id="checks">What each check means</h2>
+
+<h3 id="check-consent-default">Consent default</h3>
+<p>Google's tags need to know your visitors' consent status <em>before</em> they start. ConsentBit sends this starting status (the "consent default") as soon as it loads. By default, advertising and analytics are set to <code>denied</code> until the visitor makes a choice.</p>
+<table>
+  <tr><th>Message</th><th>What to do</th></tr>
+  <tr><td><span class="label pass">PASS</span> Set before any Google tag.</td><td>Nothing. The values shown (for example <code>ad_storage=denied</code>) are the starting status your Google tags received.</td></tr>
+  <tr><td><span class="label warn">WARN</span> A Google tag ran before ConsentBit loaded, so it started without consent settings.</td><td>Your Google tag is loading too early. See <a href="#late-tags">Fixing a Google tag that loads too early</a>.</td></tr>
+  <tr><td><span class="label warn">WARN</span> Google tag commands were queued above ConsentBit. The default was moved in front of them…</td><td>ConsentBit corrected the order for you on this visit, but your setup should not depend on that. See <a href="#late-tags">Fixing a Google tag that loads too early</a>.</td></tr>
+  <tr><td><span class="label warn">WARN</span> Google tag commands ran before the consent default.</td><td>See <a href="#late-tags">Fixing a Google tag that loads too early</a>.</td></tr>
+  <tr><td><span class="label warn">WARN</span> No consent default found on this page.</td><td>Check that the ConsentBit script is installed on this page, then see <a href="#late-tags">Fixing a Google tag that loads too early</a>.</td></tr>
+  <tr><td><span class="label info">INFO</span> Set by the ConsentBit GTM template on Consent Initialization.</td><td>Nothing. You installed ConsentBit through Google Tag Manager, which sets the starting status itself. You can see it in the <strong>Consent</strong> tab of GTM Preview mode.</td></tr>
+</table>
+
+<h3 id="check-script-order">Script order</h3>
+<p>The ConsentBit script must be placed <strong>above</strong> your Google tag in your page's <code>&lt;head&gt;</code>.</p>
+<table>
+  <tr><th>Message</th><th>What to do</th></tr>
+  <tr><td><span class="label pass">PASS</span> ConsentBit loads before your Google tags.</td><td>Nothing.</td></tr>
+  <tr><td><span class="label warn">WARN</span> A Google tag is placed above the ConsentBit script.</td><td>Move the ConsentBit script above it. See <a href="#late-tags">Fixing a Google tag that loads too early</a>.</td></tr>
+</table>
+<p>This check does not appear when ConsentBit is installed through Google Tag Manager, because the template controls the order for you.</p>
+
+<h3 id="check-google-requests">Google requests</h3>
+<p>This check looks at the data your Google tags actually sent from the page, and confirms each request carried the visitor's consent status.</p>
+<table>
+  <tr><th>Message</th><th>What to do</th></tr>
+  <tr><td><span class="label pass">PASS</span> 1 request sent with a consent state.</td><td>Nothing. The code shown, for example <code>gcs=G100</code>, is the consent status Google received. <code>G100</code> means advertising and analytics were denied; <code>G111</code> means both were granted.</td></tr>
+  <tr><td><span class="label warn">WARN</span> … sent before the consent default was set.</td><td>A Google tag sent data before ConsentBit loaded. See <a href="#late-tags">Fixing a Google tag that loads too early</a>.</td></tr>
+  <tr><td><span class="label warn">WARN</span> … sent without a consent state.</td><td>A Google tag sent data without any consent status. See <a href="#late-tags">Fixing a Google tag that loads too early</a>.</td></tr>
+  <tr><td><span class="label info">INFO</span> None sent yet.</td><td>Nothing. With the ConsentBit <strong>IAB TCF</strong> banner, Google tags wait until the visitor gives consent before they send anything ("basic mode"). Accept the banner and the check updates.</td></tr>
+</table>
+
+<h3 id="check-tcf">TCF API <span style="font-weight:400;color:var(--muted)">(IAB TCF banner only)</span></h3>
+<p>If you use the ConsentBit IAB TCF banner, Google's tags read your visitors' choices through the TCF API (<code>__tcfapi</code>). It must be available before Google tags start.</p>
+<table>
+  <tr><th>Message</th><th>What to do</th></tr>
+  <tr><td><span class="label pass">PASS</span> Ready. Google tags are waiting for consent.<br><span class="label pass">PASS</span> Ready before Google tags started.</td><td>Nothing. <code>cmpId=502</code> is ConsentBit's registered IAB CMP ID.</td></tr>
+  <tr><td><span class="label warn">WARN</span> A Google tag started before __tcfapi was available.</td><td>See <a href="#late-tags">Fixing a Google tag that loads too early</a>.</td></tr>
+  <tr><td><span class="label warn">WARN</span> __tcfapi was not found on this page.</td><td>Check that the IAB TCF banner is enabled for this site in your ConsentBit dashboard, and that the ConsentBit script is installed on this page.</td></tr>
+</table>
+
+<h3 id="check-consent-update">Consent update</h3>
+<p>Each time a visitor makes or changes a choice in the banner, ConsentBit sends Google the new status (a "consent update"). Make a choice in the banner and this line shows the latest values, for example <code>analytics_storage=granted</code>. Try <strong>Accept</strong> and <strong>Reject</strong> and watch it change.</p>
+
+<h3 id="check-google-tags">Google tags</h3>
+<p>Lists the Google tag IDs found on the page, for example <code>G-XXXXXXXXXX</code> (Google Analytics), <code>AW-…</code> (Google Ads) or <code>GTM-…</code> (Google Tag Manager). If a tag you expect is missing, it may not be installed on this page.</p>
+
+<!-- REQUIRED ANCHOR: the debug panel links here (#late-tags) -->
+<h2 id="late-tags">Fixing a Google tag that loads too early</h2>
+<p>When debug mode flags a Google tag as late, work through these steps <strong>in order</strong>.</p>
+
+<h3><span class="step">Step 1.</span> Check whether the tag uses Google tag gateway</h3>
+<p>Google tag gateway serves your Google tags from <strong>your own website's address</strong> instead of from Google's. It is usually switched on through Cloudflare, another CDN, or Google Cloud.</p>
+<p>Signs that your site uses it:</p>
+<ul>
+  <li>Your Google tag script loads from your own domain, for example <code>https://www.example.com/abcd/gtag/js?id=G-…</code>, instead of <code>https://www.googletagmanager.com/gtag/js?id=G-…</code>.</li>
+  <li>You or your developer turned on <strong>Google tag gateway</strong> in Cloudflare, your CDN, Google Tag Manager or Google Ads.</li>
+</ul>
+<p><strong>If your site uses Google tag gateway</strong>, follow the <a href="https://www.consentbit.com/articles/using-consentbit-with-google-tag-gateway">Google tag gateway guide</a> instead of the steps below. If it does not, continue with Step 2.</p>
+
+<h3><span class="step">Step 2.</span> Put ConsentBit first</h3>
+<p>The ConsentBit script must be the <strong>first script</strong> in your page's <code>&lt;head&gt;</code>, above every Google tag.</p>
+<pre><code>&lt;head&gt;
+  &lt;!-- 1. ConsentBit: first --&gt;
+  &lt;script id="consentbit" src="https://manager.consentbit.com/consentbit/YOUR-SCRIPT-ID/script.js"&gt;&lt;/script&gt;
+
+  &lt;!-- 2. Google tag: after ConsentBit --&gt;
+  &lt;script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"&gt;&lt;/script&gt;
+  &lt;script&gt;
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-XXXXXXXXXX');
+  &lt;/script&gt;
+&lt;/head&gt;</code></pre>
+<p>Where to change this, by platform:</p>
+<ul>
+  <li><strong>Webflow:</strong> Site settings → Custom code → Head code. Put the ConsentBit script at the very top. If you use Webflow's built-in Google Analytics integration (Site settings → Apps &amp; integrations), Webflow places that tag above your custom code. ConsentBit moves its consent default in front of it automatically, but debug mode will still show a warning. For a clean setup, turn off the built-in integration and add your Google tag in Head code, below the ConsentBit script.</li>
+  <li><strong>Framer:</strong> Site settings → Custom code → "Start of &lt;head&gt; tag". Make the ConsentBit snippet the first one, above the Google tag snippet.</li>
+  <li><strong>Hand-coded site:</strong> edit the <code>&lt;head&gt;</code> of your page template as shown above.</li>
+  <li><strong>Google Tag Manager:</strong> do not paste the ConsentBit script into the page. Add the <strong>ConsentBit CMP</strong> tag template in GTM with the <strong>Consent Initialization - All Pages</strong> trigger. It runs before every other tag in your container.</li>
+</ul>
+
+<h3><span class="step">Step 3.</span> Do not load ConsentBit with <code>async</code> or <code>defer</code></h3>
+<p>The ConsentBit script tag should <strong>not</strong> have <code>async</code> or <code>defer</code>. Those attributes let the page run your Google tag first. Your Google tag itself can keep <code>async</code>.</p>
+
+<h3><span class="step">Step 4.</span> Check for a second copy of your Google tag</h3>
+<p>Plugins, themes, website builders and old code snippets sometimes add their own copy of Google Analytics or Google Ads. Look for any other Google tag installation on the page and either remove it or make sure it also loads after ConsentBit.</p>
+
+<h3><span class="step">Step 5.</span> Check again</h3>
+<p>Publish your changes, then open the page with <code>?consentbit_debug=1</code> in a new tab. Every <span class="label pass">PASS</span> line should now appear. For a second opinion, you can also use <a href="https://tagassistant.google.com/">Google Tag Assistant</a>: the first consent event should show every consent type as <strong>denied</strong> until you accept the banner.</p>
+
+<p>Still seeing a warning? Contact ConsentBit support and include the page address and a screenshot of the debug panel.</p>
+</section>
+
+<!-- ===================================================================== -->
+<!-- PAGE 2 — https://www.consentbit.com/articles/using-consentbit-with-google-tag-gateway               -->
+<!-- ===================================================================== -->
+<section class="page" id="page-google-tag-gateway">
+<span class="url">consentbit.com/articles/using-consentbit-with-google-tag-gateway</span>
+
+<h1>Using ConsentBit with Google tag gateway</h1>
+<p class="lead">How to set up ConsentBit when your Google tags are served from your own domain through Google tag gateway.</p>
+
+<h2 id="what-is-gtg">What Google tag gateway is</h2>
+<p>Google tag gateway lets your Google tags (Google Analytics, Google Ads, Google Tag Manager) load from <strong>your own website's address</strong> instead of from <code>googletagmanager.com</code>. It is usually switched on through Cloudflare, another CDN, or Google Cloud.</p>
+<p>Google tag gateway changes <strong>where</strong> your Google tags load from. It does not change what your visitors have agreed to. Your Google tags must still receive the visitor's consent status before they start, exactly as without the gateway.</p>
+
+<h2 id="the-rule">The one rule</h2>
+<div class="note"><strong>ConsentBit must still load before the Google tag served through the gateway.</strong> Nothing else about your ConsentBit setup changes.</div>
+
+<h2 id="setup">Setup</h2>
+
+<h3>If your Google tag is in your page code</h3>
+<p>Keep the ConsentBit script first in <code>&lt;head&gt;</code>, then load your Google tag from the gateway path your provider gave you:</p>
+<pre><code>&lt;head&gt;
+  &lt;!-- 1. ConsentBit: first --&gt;
+  &lt;script id="consentbit" src="https://manager.consentbit.com/consentbit/YOUR-SCRIPT-ID/script.js"&gt;&lt;/script&gt;
+
+  &lt;!-- 2. Google tag through the gateway on your own domain: after ConsentBit --&gt;
+  &lt;script async src="https://www.example.com/YOUR-GATEWAY-PATH/gtag/js?id=G-XXXXXXXXXX"&gt;&lt;/script&gt;
+  &lt;script&gt;
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-XXXXXXXXXX');
+  &lt;/script&gt;
+&lt;/head&gt;</code></pre>
+
+<h3>If you turned on the gateway in Cloudflare or another CDN</h3>
+<p>The CDN serves your existing Google tag through your own domain, so you usually do not change any page code. Check only that the ConsentBit script is still the first script in your <code>&lt;head&gt;</code>, above your Google tag snippet.</p>
+
+<h3>If you use Google Tag Manager through the gateway</h3>
+<ul>
+  <li>Load your GTM container through the gateway, as your provider instructs.</li>
+  <li>Install ConsentBit with the <strong>ConsentBit CMP</strong> tag template, using the <strong>Consent Initialization - All Pages</strong> trigger.</li>
+  <li>Do not also paste the ConsentBit script into the page.</li>
+</ul>
+<p>The template sets the consent status before any other tag in the container runs, wherever the container is loaded from.</p>
+
+<h3>If you use the ConsentBit IAB TCF banner</h3>
+<p>Nothing extra is needed. The TCF banner holds back Google tags until the visitor gives consent, whether they are served through the gateway or not. Keep the ConsentBit script first in <code>&lt;head&gt;</code>.</p>
+
+<h2 id="verify">Check your setup</h2>
+<ol>
+  <li>Open your page with <code>?consentbit_debug=1</code> (see <a href="https://www.consentbit.com/articles/debug-mode">Debug mode</a>).</li>
+  <li><strong>Consent default</strong> and <strong>Google requests</strong> should both show <span class="label pass">PASS</span>. These checks work the same with or without the gateway.</li>
+  <li>Open the page in <a href="https://tagassistant.google.com/">Google Tag Assistant</a> and confirm the first consent event shows every consent type as <strong>denied</strong> until you accept the banner.</li>
+</ol>
+<div class="note"><strong>Note:</strong> the <strong>Script order</strong> check recognises Google tags by Google's own addresses. A tag served from your own domain through the gateway may not be listed there. If <strong>Consent default</strong> and <strong>Google requests</strong> show <span class="label pass">PASS</span>, your gateway setup is correct.</div>
+
+<p>Need help? Contact ConsentBit support with your page address and a screenshot of the debug panel.</p>
+</section>
+
+</main>
+</body>
+</html>
