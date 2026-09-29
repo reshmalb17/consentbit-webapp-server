@@ -6,6 +6,7 @@ import { SCRIPT_BLOCK_PROVIDERS } from '../data/scriptBlockProviders.js';
 import { getLoaderIabScript } from '../utils/IabCode.js';
 import { prefetchGvlBannerText } from '../utils/gvlPrefetch.js';
 import { getWebflowSetupScript } from '../utils/webflowSetup.js';
+import { getDebugModeScript } from '../utils/debugMode.js';
 
 export async function handleCDNScript(request, env, url) {
   try {
@@ -3969,6 +3970,7 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
   const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? 'true' : 'false'};var d=null,e=false,hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}${clarityBootstrap}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);window.gtag('set','developer_id.dN2Q3Yj',true);var g=window.__cbConsentDefaultSet===true;if(!c){if(!g){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});}if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else if(!g){window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}try{var L=window.dataLayer;if(L&&L.push===Array.prototype.push){var h=[],r=[];for(var k=0;k<L.length;k++){var it=L[k];(it&&it[0]==='consent'?h:r).push(it);}if(h.length&&r.length&&L[0]!==h[0]){L.length=0;Array.prototype.push.apply(L,h.concat(r));}}}catch(_){}window.__cbConsentDefaultSet=true;}catch(_){}})();\n`;
 
   const scriptToServe =
+    getDebugModeScript() +
     (serveKind === 'iab' ? loaderIab : serveKind === 'iabwebflow' ? loaderIabWebflow : serveKind === 'webflow' ? loaderWebflow : (consentModeBootstrap + loader));
 
 

@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Consent Mode Article</title>
+<style>
+  :root {
+    --text: #1f2328; --muted: #59636e; --line: #d0d7de; --soft: #f6f8fa;
+    --link: #0969da; --note-bg: #fff8c5; --note-line: #d4a72c;
+    --del-bg: #ffebe9; --del-line: #ff8182;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #fff; color: var(--text);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  main { max-width: 820px; margin: 0 auto; padding: 40px 20px 80px; }
+  h1 { font-size: 32px; line-height: 1.25; margin: 0 0 8px; }
+  h2 { font-size: 23px; margin: 44px 0 12px; padding-top: 8px; border-top: 1px solid var(--line); }
+  h3 { font-size: 18px; margin: 28px 0 8px; }
+  .lead { color: var(--muted); font-size: 18px; margin: 0 0 24px; }
+  a { color: var(--link); }
+  code { font: 0.88em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--soft);
+    border: 1px solid #eaeef2; border-radius: 4px; padding: 1px 5px; overflow-wrap: anywhere; }
+  pre { background: var(--soft); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px;
+    overflow-x: auto; font: 13.5px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  pre code { background: none; border: 0; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0 20px; font-size: 15px; }
+  th, td { text-align: left; vertical-align: top; padding: 9px 12px; border: 1px solid var(--line); }
+  th { background: var(--soft); font-weight: 600; }
+  td code { white-space: nowrap; }
+  .note { background: var(--note-bg); border: 1px solid var(--note-line); border-radius: 6px; padding: 12px 16px; margin: 16px 0; }
+  .handoff { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 18px 20px; margin-bottom: 36px; font-size: 15px; }
+  .handoff h2 { border: 0; margin: 0 0 8px; padding: 0; font-size: 18px; }
+  .handoff h3 { margin: 18px 0 6px; font-size: 16px; }
+  .del { background: var(--del-bg); border-left: 3px solid var(--del-line); padding: 2px 8px; display: block; margin: 4px 0; }
+  .page { border: 1px solid var(--line); border-radius: 10px; padding: 8px 28px 28px; margin: 32px 0; }
+  .url { display: inline-block; font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: #ddf4ff; color: #0550ae; border-radius: 999px; padding: 3px 10px; margin: 20px 0 4px; }
+  @media (max-width: 600px) { .page { padding: 4px 16px 20px; } h1 { font-size: 26px; } td code { white-space: normal; } }
+</style>
+</head>
+<body>
+<main>
+
+<div class="handoff">
+  <h2>For the developer updating the site</h2>
+  <p>Google's CMP partner review checks that our Consent Mode documentation <strong>uses Google's own explanations</strong>, <strong>does not suggest Consent Mode solves any legal requirement</strong>, and <strong>explains how to set up both basic and advanced mode</strong>. The current article fails all three.</p>
+
+  <h3>1. Replace the article</h3>
+  <p>Replace the whole body of <code>https://www.consentbit.com/articles/google-consent-mode-v2</code> with the content in the bordered box below. Keep the headings and code examples as written. Restyle freely. Remove this grey box when publishing.</p>
+
+  <h3>2. Remove these lines from other pages</h3>
+  <p><strong><code>/google-consent-mode-v2</code></strong> (landing page), the GDPR fines line:</p>
+  <span class="del">What are the fines? Up to €20 million or 4% of global annual revenue, whichever is higher…</span>
+  <p><strong><code>/glossary/what-is-consent-mode-v2</code></strong>:</p>
+  <span class="del">Mandatory for EEA, UK, and Swiss traffic since March 2024…</span>
+  <span class="del">Setting parameters to "granted" by default is a common compliance failure</span>
+  <p>Replace with neutral wording, for example: <em>"Consent Mode lets your website tell Google tags about your visitors' consent choices, so the tags can adjust how they behave."</em></p>
+  <p><strong><code>/blog/google-consent-mode-v2</code></strong>: check the answer under "Is Google Consent Mode v2 mandatory?". It should describe Google's product requirement, not a legal one.</p>
+</div>
+
+<!-- ===================================================================== -->
+<!-- REPLACEMENT — https://www.consentbit.com/articles/google-consent-mode-v2 -->
+<!-- ===================================================================== -->
+<section class="page">
+<span class="url">consentbit.com/articles/google-consent-mode-v2</span>
+
+<h1>Google Consent Mode v2</h1>
+<p class="lead">How ConsentBit passes your visitors' consent choices to Google tags, what each setting does, and how to set up basic or advanced consent mode.</p>
+
+<h2 id="what-it-is">What Consent Mode is</h2>
+<p>In Google's words, consent mode lets you communicate your users' cookie or app identifier consent status to Google. Tags adjust their behavior and respect users' choices.</p>
+<p>When a visitor makes a choice in the ConsentBit banner, ConsentBit sends that choice to your Google tags (Google Analytics 4, Google Ads, Floodlight and Google Tag Manager) through Consent Mode. You don't need to write any Consent Mode code yourself.</p>
+<p>For Google's full explanation, see <a href="https://support.google.com/google-ads/answer/10000067">About consent mode</a> and <a href="https://developers.google.com/tag-platform/security/concepts/consent-mode">Consent mode overview</a>.</p>
+<p>Consent Mode is a way to pass consent choices to Google tags. Deciding which consent your website needs to collect, and from whom, is up to you and your legal advisers.</p>
+
+<h2 id="consent-types">Consent types</h2>
+<p>Consent Mode uses the consent types below. The descriptions are Google's. The right-hand column shows which ConsentBit banner category controls each one.</p>
+<table>
+  <tr><th>Consent type</th><th>Description (Google)</th><th>Set by ConsentBit category</th></tr>
+  <tr><td><code>ad_storage</code></td><td>Enables storage, such as cookies (web) or device identifiers (apps), related to advertising.</td><td>Marketing</td></tr>
+  <tr><td><code>ad_user_data</code></td><td>Sets consent for sending user data to Google for online advertising purposes.</td><td>Marketing</td></tr>
+  <tr><td><code>ad_personalization</code></td><td>Sets consent for personalized advertising.</td><td>Marketing</td></tr>
+  <tr><td><code>analytics_storage</code></td><td>Enables storage, such as cookies (web) or device identifiers (apps), related to analytics, for example, visit duration.</td><td>Analytics</td></tr>
+  <tr><td><code>functionality_storage</code></td><td>Enables storage that supports the functionality of the website or app, for example, language settings.</td><td>Preferences</td></tr>
+  <tr><td><code>personalization_storage</code></td><td>Enables storage related to personalization, for example, video recommendations.</td><td>Preferences</td></tr>
+  <tr><td><code>security_storage</code></td><td>Enables storage related to security such as authentication functionality, fraud prevention, and other user protection.</td><td>Always granted (strictly necessary)</td></tr>
+</table>
+<p><strong>IAB TCF banner:</strong> if you use the ConsentBit IAB TCF banner, the advertising consent types are based on the visitor's TCF choices for Google (vendor 755) and the related TCF purposes. ConsentBit also sets Google's <code>enableAdvertiserConsentMode</code> flag, so Google tags can read <code>ad_storage</code>, <code>ad_user_data</code> and <code>ad_personalization</code> directly from the TC string. <code>analytics_storage</code> is sent through Consent Mode.</p>
+
+<h2 id="default-and-update">Default and update commands</h2>
+<p>ConsentBit sends two kinds of Consent Mode commands for you:</p>
+<ul>
+  <li><strong>Default</strong> (<code>gtag('consent', 'default', …)</code>): the consent status your Google tags use before the visitor has made a choice. ConsentBit sends it as soon as its script loads, before your Google tags run. By default, every consent type is <code>denied</code> except <code>security_storage</code>.</li>
+  <li><strong>Update</strong> (<code>gtag('consent', 'update', …)</code>): sent every time a visitor makes or changes a choice in the banner, and on later page views for visitors who already chose.</li>
+</ul>
+<p>Where you choose to show a US opt-out banner (CCPA mode), the default reflects that opt-out model: consent types start as <code>granted</code> unless the visitor opts out or their browser sends a Global Privacy Control signal. With the script install, in regions where you have chosen not to show a banner, ConsentBit grants consent. With Google Tag Manager, set the defaults for those regions in the ConsentBit CMP template's region table.</p>
+
+<h2 id="other-settings">Other settings ConsentBit applies</h2>
+<table>
+  <tr><th>Setting</th><th>What it does (Google)</th><th>ConsentBit value</th></tr>
+  <tr><td><code>wait_for_update</code></td><td>A millisecond value that controls how long to wait before data is sent, for when the consent status is updated after the page loads.</td><td><code>500</code></td></tr>
+  <tr><td><code>ads_data_redaction</code></td><td>When <code>ads_data_redaction</code> is true and <code>ad_storage</code> is denied, ad click identifiers sent in network requests by Google Ads and Floodlight tags will be redacted.</td><td><code>true</code></td></tr>
+  <tr><td><code>url_passthrough</code></td><td>To improve ad click measurement quality when <code>ad_storage</code> is denied, passes information about ad clicks through URL parameters across pages.</td><td><code>true</code></td></tr>
+</table>
+<p>See Google's guide: <a href="https://developers.google.com/tag-platform/security/guides/consent">Set up consent mode on websites</a>.</p>
+
+<h2 id="basic-vs-advanced">Basic and advanced consent mode</h2>
+<p>Google describes two ways to implement consent mode:</p>
+<ul>
+  <li><strong>Basic consent mode:</strong> "When you implement consent mode in its basic version, you prevent Google tags from loading until a user interacts with a consent banner."</li>
+  <li><strong>Advanced consent mode:</strong> "When you implement consent mode in its advanced version, Google tags load when a user opens the website or app."</li>
+</ul>
+<table>
+  <tr><th></th><th>Basic consent mode</th><th>Advanced consent mode</th></tr>
+  <tr><td><strong>Google tags before consent</strong></td><td>Blocked until the visitor interacts with the consent banner.</td><td>Load when the page opens, with the default consent status.</td></tr>
+  <tr><td><strong>Data sent before consent</strong></td><td>None.</td><td>While consent is denied, Google tags send cookieless pings instead of storing cookies.</td></tr>
+  <tr><td><strong>After the visitor chooses</strong></td><td>If the visitor consents, tags load and receive the consent status. If not, tags stay blocked and no data is sent.</td><td>Tags follow the visitor's choice right away.</td></tr>
+  <tr><td><strong>Modeling</strong></td><td>Google uses a general model.</td><td>Google can use cookieless pings for advertiser-specific modeling.</td></tr>
+</table>
+<p>For details, see Google's <a href="https://support.google.com/google-ads/answer/10000067">About consent mode</a>.</p>
+
+<h2 id="configure-advanced">Set up advanced consent mode</h2>
+<p><strong>Advanced consent mode is ConsentBit's default.</strong> You don't need to change any settings.</p>
+
+<h3>Script install (Webflow app, Framer, or any website)</h3>
+<p>Put the ConsentBit script <strong>first</strong> in your page's <code>&lt;head&gt;</code>, then your Google tag as normal:</p>
+<pre><code>&lt;head&gt;
+  &lt;!-- 1. ConsentBit: first --&gt;
+  &lt;script id="consentbit" src="https://manager.consentbit.com/consentbit/YOUR-SCRIPT-ID/script.js"&gt;&lt;/script&gt;
+
+  &lt;!-- 2. Google tag: after ConsentBit, unchanged --&gt;
+  &lt;script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"&gt;&lt;/script&gt;
+  &lt;script&gt;
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-XXXXXXXXXX');
+  &lt;/script&gt;
+&lt;/head&gt;</code></pre>
+<p>ConsentBit sends the default before the Google tag runs, and an update whenever the visitor chooses.</p>
+
+<h3>Google Tag Manager</h3>
+<ol>
+  <li>Add the <strong>ConsentBit CMP</strong> tag template to your container, with the <strong>Consent Initialization - All Pages</strong> trigger. Don't also paste the ConsentBit script into your page.</li>
+  <li>Optionally, set default consent states per region in the template's region table.</li>
+  <li>Leave your Google tags (Google Analytics, Google Ads, Floodlight) on their usual triggers. They have built-in consent checks and follow the consent status automatically.</li>
+</ol>
+
+<h2 id="configure-basic">Set up basic consent mode</h2>
+<p>In basic mode, ConsentBit keeps your Google tags blocked until the visitor consents. ConsentBit still sends the default and update commands.</p>
+
+<h3>Script install (Webflow app, Framer, or any website)</h3>
+<p>Mark <strong>both</strong> parts of your Google tag with <code>type="text/plain"</code> and a <code>data-consentbit-category</code> attribute. ConsentBit loads them only after the visitor consents to that category:</p>
+<pre><code>&lt;head&gt;
+  &lt;!-- 1. ConsentBit: first --&gt;
+  &lt;script id="consentbit" src="https://manager.consentbit.com/consentbit/YOUR-SCRIPT-ID/script.js"&gt;&lt;/script&gt;
+
+  &lt;!-- 2. Google tag: blocked until the visitor consents to Analytics --&gt;
+  &lt;script type="text/plain" data-consentbit-category="analytics" async
+          src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"&gt;&lt;/script&gt;
+  &lt;script type="text/plain" data-consentbit-category="analytics"&gt;
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-XXXXXXXXXX');
+  &lt;/script&gt;
+&lt;/head&gt;</code></pre>
+<p>Which category to use:</p>
+<table>
+  <tr><th>Your Google tag</th><th><code>data-consentbit-category</code></th></tr>
+  <tr><td>Google Analytics 4 only</td><td><code>analytics</code></td></tr>
+  <tr><td>Google Ads or Floodlight only</td><td><code>marketing</code></td></tr>
+  <tr><td>One tag for both Analytics and Ads</td><td><code>analytics,marketing</code> (loads only when the visitor consents to both)</td></tr>
+</table>
+<p>See also <a href="https://www.consentbit.com/articles/manual-script-tagging">Manual script tagging</a>.</p>
+
+<h3>Google Tag Manager</h3>
+<ol>
+  <li>Add the <strong>ConsentBit CMP</strong> tag template with the <strong>Consent Initialization - All Pages</strong> trigger, as for advanced mode.</li>
+  <li>Open each Google tag, then go to <strong>Advanced Settings → Consent Settings</strong>.</li>
+  <li>Choose <strong>Require additional consent for tag to fire</strong> and add the consent types the tag needs: <code>analytics_storage</code> for Google Analytics, <code>ad_storage</code> for Google Ads and Floodlight.</li>
+  <li>Save and publish the container. The tags now fire only after the visitor grants those consent types.</li>
+</ol>
+
+<h3>IAB TCF banner</h3>
+<p>The ConsentBit IAB TCF banner blocks Google tags until the visitor makes a choice, so it runs in basic mode by default. No extra setup is needed.</p>
+
+<h2 id="switch">Switching between basic and advanced</h2>
+<ul>
+  <li><strong>Advanced → basic:</strong> add <code>type="text/plain"</code> and <code>data-consentbit-category</code> to your Google tag (script install), or turn on <strong>Require additional consent for tag to fire</strong> (Google Tag Manager).</li>
+  <li><strong>Basic → advanced:</strong> remove those attributes, or those additional consent requirements.</li>
+</ul>
+<p>In both cases, keep the ConsentBit script (or the ConsentBit CMP template) in place. It sends the default and update commands in either mode.</p>
+
+<h2 id="check">Check your setup</h2>
+<ul>
+  <li><strong>ConsentBit debug mode:</strong> open your page with <code>?consentbit_debug=1</code>. See <a href="https://www.consentbit.com/articles/debug-mode">Debug mode</a>.</li>
+  <li><strong>Google Tag Assistant:</strong> open <a href="https://tagassistant.google.com/">tagassistant.google.com</a>, connect your site, and open the <strong>Consent</strong> tab. Before any choice, the default should show the consent types as <code>denied</code>. After a choice, you should see an update with the new values.</li>
+</ul>
+</section>
+
+</main>
+</body>
+</html>
