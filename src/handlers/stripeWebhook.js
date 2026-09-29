@@ -1320,6 +1320,102 @@ export async function handleStripeWebhook(request, env, ctx) {
         })());
       }
 
+      // --- Manual (Dashboard-created) subscription → Subscription row ----------
+      // Subscriptions created by hand in the Stripe Dashboard never pass through
+      // checkout.session.completed, and one that is paid on creation starts 'active',
+      // so no .updated follows — D1 never learns about it, and the first renewal's
+      // .updated then INSERTS a second, keyless row for the site (the lookup at the
+      // .updated handler only falls back to rows with NULL stripeSubscriptionId).
+      //
+      // Opt-in ONLY, via metadata manual=true. changeTier / webflowUpgrade /
+      // framerUpgrade also create subscriptions that are 'active' at creation and
+      // write their own rows; syncing every active .created here would race them.
+      // Requires metadata siteId + organizationId. (2026-09-28, unitygym.cl)
+      if ((sub.status === 'active' || sub.status === 'trialing')
+          && String(sub.metadata?.manual ?? '').toLowerCase() === 'true'
+          && sub.metadata?.siteId && sub.metadata?.organizationId) {
+        ctx.waitUntil((async () => {
+          try {
+            if (await getSubscriptionByStripeId(db, sub.id)) return; // already linked
+            const siteId = sub.metadata.siteId;
+            const orgId = sub.metadata.organizationId;
+            const priceId = sub.items?.data?.[0]?.price?.id ?? null;
+            let planId = String(sub.metadata?.planId ?? '').toLowerCase();
+            if (!['basic', 'essential', 'growth'].includes(planId)) {
+              planId = inferTierPlanIdFromStripePriceId(env, priceId) || null;
+            }
+            const interval = sub.items?.data?.[0]?.plan?.interval === 'year' ? 'yearly' : 'monthly';
+            const periodStart = toTimestamp(periodStartOf(sub));
+            const periodEnd = toTimestamp(periodEndOf(sub));
+            const nowIso = new Date().toISOString();
+
+            const prev = await db.prepare(
+              `SELECT * FROM Subscription WHERE siteId = ?1 AND organizationId = ?2 ORDER BY updatedAt DESC LIMIT 1`
+            ).bind(siteId, orgId).first().catch(() => null);
+
+            if (prev) {
+              // Re-point the site's existing row (keeps its license key) — but only if
+              // the subscription it holds has really ended. A site that still has a live
+              // subscription is left alone: two live subs on one site needs a human.
+              const prevStripe = String(prev.stripeStatus ?? '').toLowerCase();
+              const prevStatus = String(prev.status ?? '').toLowerCase();
+              const prevEnd = prev.currentPeriodEnd ? Date.parse(prev.currentPeriodEnd) : NaN;
+              const prevEnded = ['canceled', 'unpaid', 'incomplete_expired'].includes(prevStripe)
+                || ['canceled', 'unpaid', 'inactive'].includes(prevStatus)
+                || (Number.isFinite(prevEnd) && prevEnd < Date.now());
+              if (!prevEnded) {
+                console.warn('[StripeWebhook] manual subscription not linked — site still has a live subscription', {
+                  stripeSubscriptionId: sub.id, siteId, rowId: prev.id,
+                });
+                return;
+              }
+              const res = await db.prepare(
+                `UPDATE Subscription
+                    SET stripeSubscriptionId = ?1, stripeCustomerId = ?2, stripePriceId = ?3,
+                        planType = 'tier', planId = COALESCE(?4, planId), interval = ?5,
+                        status = 'active', stripeStatus = ?6, stripeStatusAt = ?7,
+                        currentPeriodStart = ?8, currentPeriodEnd = ?9,
+                        cancelAtPeriodEnd = 0, canceledAt = NULL, endedAt = NULL, updatedAt = ?7
+                  WHERE id = ?10 AND COALESCE(stripeSubscriptionId, '') = ?11`
+              ).bind(
+                sub.id, sub.customer, priceId, planId, interval, sub.status, nowIso,
+                periodStart, periodEnd, prev.id, prev.stripeSubscriptionId ?? '',
+              ).run();
+              console.log('[StripeWebhook] manual subscription linked to existing row', {
+                stripeSubscriptionId: sub.id, rowId: prev.id, changes: res?.meta?.changes ?? null,
+              });
+              return;
+            }
+
+            const licenseKey = await generateUniqueLicenseKey(db);
+            const rowId = await saveSubscription(db, {
+              organizationId: orgId,
+              siteId,
+              stripeSubscriptionId: sub.id,
+              stripeCustomerId: sub.customer,
+              stripePriceId: priceId,
+              planType: 'tier',
+              planId,
+              interval,
+              status: 'active',
+              currentPeriodStart: periodStart,
+              currentPeriodEnd: periodEnd,
+              cancelAtPeriodEnd: 0,
+              licenseKey,
+              amountCents: sub.items?.data?.[0]?.price?.unit_amount ?? null,
+            });
+            await db.prepare(
+              `UPDATE Subscription SET stripeStatus = ?1, stripeStatusAt = ?2 WHERE id = ?3`
+            ).bind(sub.status, nowIso, rowId).run().catch(() => {});
+            console.log('[StripeWebhook] manual subscription inserted as new row', {
+              stripeSubscriptionId: sub.id, rowId, siteId,
+            });
+          } catch (e) {
+            console.warn('[StripeWebhook] manual subscription sync failed:', e?.message);
+          }
+        })());
+      }
+
       ctx.waitUntil((async () => {
         try {
           // Only real purchases. The custom-checkout flow creates subscriptions with
