@@ -40,6 +40,34 @@ window.__CB_CLARITY_CMP_ID__ = 165;
     }
   } catch (e) {}
 
+  // Microsoft UET Consent Mode default - queued before bat.js can run, because UET
+  // assumes ad_storage GRANTED when it finds no default at all. Reads the same plain
+  // cb-consent-* cookies as the Clarity block above, so a returning visitor's stored
+  // choice applies from the first moment. This loader never serves the IAB banner, so
+  // there is no TCF conflict here (Microsoft forbids Consent Mode and TCF together).
+  try {
+    var uetCfg = window.__CONSENT_SITE__ || {};
+    if (uetCfg.uetConsentMode !== false) {
+      var uetCk = function (n) {
+        var m = document.cookie.match('(^|;)\\s*' + n + '\\s*=\\s*([^;]+)');
+        return m ? m[2] : null;
+      };
+      var uetDns = uetCk('cb-consent-donotshare');
+      var uetAd;
+      window.uetq = window.uetq || [];
+      if (uetDns !== null) {
+        // CCPA opt-out regime: granted unless the visitor opted out.
+        uetAd = uetDns === 'true' ? 'denied' : 'granted';
+        window.uetq.push('consent', 'default', { ad_storage: uetAd });
+      } else {
+        uetAd = (uetCk('cb-consent-marketing_storage') === 'true' || uetCk('_cb_cms_') === 'true') ? 'granted' : 'denied';
+        window.uetq.push('consent', 'default', { ad_storage: 'denied' });
+        if (uetAd === 'granted') window.uetq.push('consent', 'update', { ad_storage: 'granted' });
+      }
+      window.__cbUetSignal = uetAd;
+    }
+  } catch (e) {}
+
   // CRITICAL: Initialize dataLayer and gtag IMMEDIATELY (before any other code)
   window.dataLayer = window.dataLayer || [];
   if (typeof window.gtag === 'undefined') {
@@ -149,6 +177,23 @@ window.gtag('consent', 'default', {
      * runs cookieless on its own (no _clck / _clsk / MUID). Blocking it would leave it
      * with no signal at all, so it would apply its own regional default instead of ours.
      */
+    /**
+     * Microsoft UET tag (bat.bing.com). Governed by UET Consent Mode rather than by
+     * blocking - Microsoft's recommended Advanced Consent Mode: the tag loads with
+     * ad_storage denied and sets no MUID / _uetsid / _uetvid until consent. Safe only
+     * because the 'default' is queued at the very top of this file.
+     */
+    function isUetScript(script) {
+      if (!script) return false;
+      try {
+        var cfg = window.__CONSENT_SITE__ || {};
+        if (cfg.uetConsentMode === false) return false;
+      } catch (e) {}
+      var src = (script.src || '').toLowerCase();
+      if (src) return src.indexOf('bat.bing.com') !== -1;
+      return (script.innerHTML || '').toLowerCase().indexOf('bat.bing.com') !== -1;
+    }
+
     function isClarityScript(script) {
       if (!script) return false;
       try {
@@ -169,6 +214,7 @@ window.gtag('consent', 'default', {
       if (!script) return false;
 
       if (isClarityScript(script)) return true;
+      if (isUetScript(script)) return true;
 
       // Check external scripts by src
       if (script.src) {
@@ -626,10 +672,33 @@ window.gtag('consent', 'default', {
       } catch (e) {}
     }
 
+    /**
+     * Signal the visitor's decision to Microsoft UET Consent Mode. UET enforces one
+     * permission, ad_storage, mapped from the Marketing category; CCPA preferences
+     * (doNotShare / doNotSell) grant it until the visitor opts out. Only 'update' is sent
+     * here - the 'default' is queued at the top of this file. Deduped on __cbUetSignal.
+     */
+    function updateUetConsent(preferences) {
+      try {
+        var cfg = window.__CONSENT_SITE__ || {};
+        if (cfg.uetConsentMode === false) return;
+        var prefs = preferences || {};
+        var marketingOn = (prefs.hasOwnProperty('doNotShare') || prefs.hasOwnProperty('doNotSell'))
+          ? !(prefs.doNotShare || prefs.doNotSell)
+          : !!prefs.marketing;
+        var ad = marketingOn ? 'granted' : 'denied';
+        if (window.__cbUetSignal === ad) return;
+        window.__cbUetSignal = ad;
+        window.uetq = window.uetq || [];
+        window.uetq.push('consent', 'update', { ad_storage: ad });
+      } catch (e) {}
+    }
+
     function updateGtagConsent(preferences) {
       // Microsoft Clarity first, and outside the gtag guard below: Clarity must be told
       // the decision even on pages where no Google tag ever loads.
       updateClarityConsent(preferences);
+      updateUetConsent(preferences);
       // Use window.gtag to ensure we're calling the actual Google gtag function
       if (typeof window.gtag === "function") {
         // Handle CCPA preferences (doNotShare/doNotSell) vs GDPR preferences (analytics/marketing/personalization)
