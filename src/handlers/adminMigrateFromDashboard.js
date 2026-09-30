@@ -1,3 +1,4 @@
+import { secretMatches } from '../utils/adminAuth.js';
 // Migrates all data from consentbit-licenses (env.LEGACY_DB) → consent-webapp (env.CONSENT_WEBAPP)
 //
 // POST /api/admin/migrate-from-dashboard?offset=0&limit=50&dryRun=false
@@ -454,7 +455,7 @@ export async function handleAdminMigrateFromDashboard(request, env) {
   const adminSecret = env.ADMIN_SECRET;
   if (!adminSecret) return Response.json({ error: 'Admin secret not configured' }, { status: 500 });
   const provided = request.headers.get('X-Admin-Key');
-  if (!provided || provided !== adminSecret) {
+  if (!provided || !secretMatches(provided, adminSecret)) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 });
   }
 

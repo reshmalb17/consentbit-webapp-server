@@ -12,7 +12,7 @@
 
 import { getSessionById } from '../services/db.js';
 import { resolveEffectivePlanId } from './bannerCustomization.js';
-import { userCanAccessSite } from '../services/team.js';
+import { userCanAccessSite, userCanAdminSite } from '../services/team.js';
 import {
   getPlanRetentionLimits,
   resolveRetentionDays,
@@ -30,14 +30,17 @@ function sidFromCookie(request) {
 
 // Same check as middleware/consentAccess.js sessionOwnsSite: owner of the site's
 // org, or an active team member granted the site.
-async function sessionOwnsSite(db, request, siteId) {
+// `manage` = the caller may CHANGE the period (owner or team Admin). The period
+// decides when consent records are deleted, so a team Member can view it but not
+// change it.
+async function sessionOwnsSite(db, request, siteId, { manage = false } = {}) {
   if (!db || !siteId) return false;
   const sid = sidFromCookie(request);
   if (!sid) return false;
   const session = await getSessionById(db, sid);
   const userId = session?.userId ?? session?.user_id;
   if (!userId) return false;
-  return userCanAccessSite(db, userId, siteId);
+  return manage ? userCanAdminSite(db, userId, siteId) : userCanAccessSite(db, userId, siteId);
 }
 
 async function describe(db, env, siteId) {
@@ -86,6 +89,12 @@ export async function handleConsentRetentionSettings(request, env) {
     if (!siteId) return Response.json({ success: false, error: 'siteId is required' }, { status: 400 });
     if (!(await sessionOwnsSite(db, request, siteId))) {
       return Response.json({ success: false, error: 'Authentication required.' }, { status: 401 });
+    }
+    if (!(await sessionOwnsSite(db, request, siteId, { manage: true }))) {
+      return Response.json(
+        { success: false, error: 'Only the account owner or a team Admin can change how long consent records are kept.', code: 'OWNER_OR_ADMIN_ONLY' },
+        { status: 403 },
+      );
     }
 
     try {

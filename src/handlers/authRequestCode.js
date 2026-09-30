@@ -1,5 +1,6 @@
 import {
   createEmailVerificationCode,
+  countRecentEmailVerificationCodes,
   getUserByEmail,
   hashPassword,
   validatePasswordPolicy,
@@ -12,9 +13,19 @@ function isValidEmail(email) {
   return e.includes('@') && e.includes('.') && e.length <= 320;
 }
 
+// Cryptographic RNG (Math.random is predictable). Rejection sampling keeps the six
+// digits uniform: values ≥ the largest multiple of 900000 below 2^32 are redrawn.
 function generateCode() {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  const limit = Math.floor(0x100000000 / 900000) * 900000;
+  const buf = new Uint32Array(1);
+  do { crypto.getRandomValues(buf); } while (buf[0] >= limit);
+  return String(100000 + (buf[0] % 900000));
 }
+
+// Per-email cap on codes issued. Each new code carries its own 5 guesses, so without
+// this an attacker could keep requesting codes to keep guessing. Busiest real email
+// in the live table: 5 codes in an hour.
+const MAX_CODES_PER_EMAIL_PER_HOUR = 10;
 
 async function sha256Hex(s) {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
@@ -142,6 +153,19 @@ export async function handleAuthRequestCode(request, env, ctx) {
     return Response.json(
       { success: true, requestId: fixedRow.id, expiresAt: fixedRow.expiresAt },
       { status: 200 },
+    );
+  }
+
+  const recentCodes = await countRecentEmailVerificationCodes(db, {
+    email,
+    purpose,
+    sinceIso: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+  }).catch(() => 0);
+  if (recentCodes >= MAX_CODES_PER_EMAIL_PER_HOUR) {
+    console.warn('[AuthRequestCode] per-email code cap reached', { emailDomain, purpose });
+    return Response.json(
+      { success: false, error: 'Too many codes requested for this email. Please wait an hour and try again.' },
+      { status: 429 },
     );
   }
 

@@ -10,6 +10,7 @@
 import { getSessionById, getUserById, getSubscriptionBySiteId, getSiteTrialUsed, isSiteTrialIneligible } from '../services/db.js';
 import { flowLog } from '../utils/flowLog.js';
 import { resolveBillingActor } from '../services/team.js';
+import { safeReturnUrl } from '../utils/returnUrl.js';
 import {
   isCodeAllowedForEmail,
   isCouponIdAllowedForEmail,
@@ -80,16 +81,34 @@ export async function handleUpgradeSubscription(request, env) {
   const stripeCouponId = body.stripeCouponId && body.stripeCouponId.trim() ? body.stripeCouponId.trim() : null;
   const promotionCodeId = body.promotionCodeId && body.promotionCodeId.trim() ? body.promotionCodeId.trim() : null;
   const couponCode = body.couponCode && body.couponCode.trim() ? body.couponCode.trim() : null;
-  const rawSuccessUrl = body.successUrl || `${request.url.replace(/\/api\/.*$/, '')}/dashboard`;
+  const rawSuccessUrl = safeReturnUrl(body.successUrl, env, `${request.url.replace(/\/api\/.*$/, '')}/dashboard`, '[UPGRADE]');
   const successUrl = rawSuccessUrl.includes('?')
     ? `${rawSuccessUrl}&session_id={CHECKOUT_SESSION_ID}`
     : `${rawSuccessUrl}?session_id={CHECKOUT_SESSION_ID}`;
-  const cancelUrl = body.cancelUrl || `${request.url.replace(/\/api\/.*$/, '')}/dashboard`;
+  const cancelUrl = safeReturnUrl(body.cancelUrl, env, `${request.url.replace(/\/api\/.*$/, '')}/dashboard`, '[UPGRADE]');
 
 
   if (!siteId) { console.error('[UPGRADE] Missing siteId'); return Response.json({ success: false, error: 'siteId required' }, { status: 400 }); }
   if (!organizationId) { console.error('[UPGRADE] Missing organizationId'); return Response.json({ success: false, error: 'organizationId required' }, { status: 400 }); }
   if (!planId) { console.error('[UPGRADE] Invalid planId:', body.planId); return Response.json({ success: false, error: 'planId must be basic, essential, or growth' }, { status: 400 }); }
+
+  // The site must belong to the organization in the request, and the caller must be that
+  // account's owner or a team Admin of the site. Otherwise a caller could pair their own
+  // organizationId with someone else's (public) siteId and take over its billing.
+  {
+    const siteOrgRow = await db.prepare('SELECT organizationId FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
+    if (!siteOrgRow) return Response.json({ success: false, error: 'Site not found' }, { status: 404 });
+    const gate = String(siteOrgRow.organizationId ?? siteOrgRow.organizationid ?? '') === organizationId
+      ? await resolveBillingActor(db, user.id, organizationId, siteId)
+      : null;
+    if (!gate?.owner && !gate?.admin) {
+      console.warn('[UPGRADE] refused — site not in caller\'s account', { userId: user.id, organizationId, siteId });
+      return Response.json(
+        { success: false, error: 'This site belongs to another account. Only its owner or a team Admin can change its plan.', code: 'NOT_OWNER' },
+        { status: 403 },
+      );
+    }
+  }
 
   // Resolve the new Stripe price id
   const tierPriceMap = {

@@ -21,7 +21,7 @@ import { syncSubscriptionUpdateToLegacy } from '../services/syncLegacy.js';
 import { isPromotionCodeAllowedForEmail } from '../services/promoRestrictions.js';
 import { isTerminalSubscriptionStatus, TERMINAL_SUBSCRIPTION_MESSAGE } from '../utils/subscriptionStatus.js';
 import { flowLog } from '../utils/flowLog.js';
-import { resolveBillingActor } from '../services/team.js';
+import { resolveBillingActor, siteInCallersAccount } from '../services/team.js';
 
 const PLAN_ORDER = { basic: 1, essential: 2, growth: 3 };
 
@@ -111,6 +111,13 @@ async function prepareChange(request, env) {
     // Basic has no team feature — moving there would suspend this Admin and the whole
     // team, so it's the owner's call.
     if (planId === 'basic') return { error: fail("Only the account owner can move a site to Basic or Free. Team members lose access on those plans.", 403) };
+  }
+
+  // The org gate above doesn't cover siteId, which is public — the site must be in the
+  // caller's own account (see siteInCallersAccount).
+  if (!(await siteInCallersAccount(db, userId, organizationId, siteId))) {
+    console.warn('[ChangeTier] refused — site not in caller\'s account', { userId, organizationId, siteId });
+    return { error: fail('This site belongs to another account. Only its owner or a team Admin can change its plan.', 403) };
   }
 
   // Per-customer promo restrictions (see services/promoRestrictions.js). An Admin's

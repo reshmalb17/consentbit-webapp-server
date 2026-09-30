@@ -9,6 +9,8 @@
 // It intentionally drops the old KV-array storage (CONSENT_STORE_FRAMER +
 // generateExpectedCookies) — consent now lives only in D1.
 import { ensureSchema } from '../services/db.js';
+import { requestDomainMatchesSite } from '../utils/domainValidate.js';
+import { readConsentBody, invalidFramerConsentFields } from '../utils/consentLimits.js';
 
 export async function handleFramerConsent(request, env, ctx) {
   const db = env.CONSENT_WEBAPP;
@@ -44,16 +46,16 @@ export async function handleFramerConsent(request, env, ctx) {
   //   expirationDurationDays: 120,
   //   metadata: { userAgent, language, platform, timezone }
   // }
-  let body;
-  try {
-    body = await request.json();
-  } catch (parseErr) {
-    console.error('[FramerConsent] failed to parse request body:', parseErr?.message);
-    return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-      status: 400,
+  // Size-capped read (see utils/consentLimits.js).
+  const parsed = await readConsentBody(request);
+  if (!parsed.ok) {
+    console.warn('[FramerConsent] rejected body:', parsed.error);
+    return new Response(JSON.stringify({ error: parsed.error }), {
+      status: parsed.status,
       headers: { 'Content-Type': 'application/json' },
     });
   }
+  const body = parsed.body;
 
   const {
     clientId = null,
@@ -62,7 +64,6 @@ export async function handleFramerConsent(request, env, ctx) {
     visitorId,
     preferences,
     timestamp,
-    country: bodyCountry = null,
     expiresAtTimestamp,
     expirationDurationDays,
     metadata = {},
@@ -78,6 +79,17 @@ export async function handleFramerConsent(request, env, ctx) {
     return new Response(
       JSON.stringify({ error: 'platformSiteId (siteId), visitorId, and preferences are required' }),
       { status: 400, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  const badField = invalidFramerConsentFields({
+    bannerType, visitorId, clientId, platformSiteId: resolvedPlatformSiteId,
+  });
+  if (badField) {
+    console.warn('[FramerConsent] rejected — invalid field:', badField);
+    return new Response(
+      JSON.stringify({ error: `Invalid consent field: ${badField}`, code: 'INVALID_CONSENT' }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } },
     );
   }
 
@@ -101,6 +113,15 @@ export async function handleFramerConsent(request, env, ctx) {
 
   const internalSiteId = site.id;
 
+  // Domain check, LOG-ONLY for now. /api/consent enforces an exact match, but Framer
+  // sites are also served from *.framer.website / *.framer.app preview hosts and the
+  // incoming Origin was never stored, so enforcing blind could drop real consents.
+  // Watch these warnings, then enforce once the real hosts are known.
+  if (!requestDomainMatchesSite(site, request)) {
+    const origin = request.headers.get('origin') || request.headers.get('referer') || '-';
+    console.warn('[FramerConsent] domain mismatch (not enforced) — site.domain:', site.domain, '| origin:', origin);
+  }
+
   // ── Normalize Framer payload into the standard consent shape ──
   const regulation = bannerType === 'ccpa' ? 'ccpa' : 'gdpr';
 
@@ -123,7 +144,10 @@ export async function handleFramerConsent(request, env, ctx) {
     } catch { /* ignore */ }
   }
 
-  const country = bodyCountry || cfCountry || null;
+  // Cloudflare's country only — the body's `country` is client-controlled. The banner
+  // posts straight from the visitor's browser (1,333 distinct IPs across 1,521 Framer
+  // consents in Sept 2026), so cf.country is the visitor's real country.
+  const country = cfCountry || null;
 
   // Consent categories stored as-is (mirrors loader's consent payload).
   const consentPayload = {
@@ -230,7 +254,7 @@ export async function handleFramerConsent(request, env, ctx) {
   } catch (dbErr) {
     console.error('[FramerConsent] ❌ DB insert failed — siteId:', internalSiteId, '| error:', dbErr?.message, '| cause:', dbErr?.cause?.message);
     return new Response(
-      JSON.stringify({ error: 'Failed to save consent', details: dbErr?.message }),
+      JSON.stringify({ error: 'Failed to save consent' }),
       { status: 500, headers: { 'Content-Type': 'application/json' } }
     );
   }

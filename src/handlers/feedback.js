@@ -12,14 +12,25 @@ export async function handleFeedback(request, env) {
   await ensureSchema(db);
 
   if (request.method === 'GET') {
+    // Only the caller's own feedback. This used to return every user's feedback to
+    // anyone; nothing in the product reads it (the dashboard only POSTs, and the admin
+    // dashboard reads the Feedback table directly), so scoping it breaks nothing.
+    const sid = getSessionIdFromCookie(request);
+    const session = sid ? await getSessionById(db, sid).catch(() => null) : null;
+    const userId = session?.userId ?? session?.user_id ?? null;
+    if (!userId) {
+      return Response.json({ success: false, error: 'Login required' }, { status: 401 });
+    }
     try {
       const { results } = await db
         .prepare(
           `SELECT id, userId, message, createdAt
            FROM Feedback
+           WHERE userId = ?1
            ORDER BY createdAt DESC
            LIMIT 200`
         )
+        .bind(userId)
         .all();
 
       return Response.json({ success: true, feedbacks: results || [] });

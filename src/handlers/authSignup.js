@@ -83,7 +83,9 @@ export async function handleAuthSignup(request, env, ctx) {
     console.error('[AuthSignup] verification email failed', e?.message || String(e));
   }
 
-  const isProd = env.NODE_ENV === 'production';
+  // Secure unless explicitly in development — NODE_ENV is not set on the deployed worker,
+  // so the old `=== 'production'` test left Secure off everywhere.
+  const isProd = env.NODE_ENV !== 'development';
   const cookieFlags = isProd
     ? 'Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000'
     : 'Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000';

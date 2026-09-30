@@ -15,7 +15,7 @@ import {
 import { syncSubscriptionUpdateToLegacy } from '../services/syncLegacy.js';
 import { isTerminalSubscriptionStatus, TERMINAL_SUBSCRIPTION_MESSAGE } from '../utils/subscriptionStatus.js';
 import { flowLog } from '../utils/flowLog.js';
-import { resolveBillingActor } from '../services/team.js';
+import { resolveBillingActor, siteInCallersAccount } from '../services/team.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -82,6 +82,13 @@ async function prepareSwitch(request, env) {
     const actor = siteId ? await resolveBillingActor(db, userId, organizationId, siteId) : null;
     if (!actor?.admin) return { error: fail('Not allowed for this organization', 403) };
     isAdminActor = true;
+  }
+
+  // The org gate above doesn't cover siteId, which is public — the site must be in the
+  // caller's own account (see siteInCallersAccount).
+  if (!(await siteInCallersAccount(db, userId, organizationId, siteId))) {
+    console.warn('[SwitchInterval] refused — site not in caller\'s account', { userId, organizationId, siteId });
+    return { error: fail('This site belongs to another account. Only its owner or a team Admin can change its billing.', 403) };
   }
 
   // Load the current subscription for THIS site. An org can hold several subscriptions

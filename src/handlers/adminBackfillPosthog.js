@@ -3,6 +3,7 @@
 // POST /api/admin/backfill-posthog
 // Body: { adminKey, days: 30 }
 
+import { secretMatches } from '../utils/adminAuth.js';
 import { capturePostHogEvent, identifyPostHogPerson } from '../services/posthog.js';
 
 export async function handleAdminBackfillPosthog(request, env) {
@@ -11,7 +12,7 @@ export async function handleAdminBackfillPosthog(request, env) {
   }
 
   const adminKey = request.headers.get('X-Admin-Key');
-  if (!adminKey || adminKey !== (env.ADMIN_SECRET || env.ADMIN_KEY)) {
+  if (!adminKey || !secretMatches(adminKey, env.ADMIN_SECRET || env.ADMIN_KEY)) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 });
   }
 

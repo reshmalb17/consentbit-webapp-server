@@ -2,20 +2,24 @@
 //
 // Per-site gate for the web-app routes that key on a siteId but never checked who
 // is asking (scan, cookies, scheduled scan, custom cookie rules, verify/mark-verified,
-// banner customization). Needed now that a team member may see only some sites.
+// banner customization).
 //
-// SCOPE — deliberately narrow so nothing that works today changes:
-//   • Only requests that carry a VALID web-app session (sid cookie) are checked.
-//     No cookie → passes through exactly as before. That keeps the public callers
-//     working: CDN scripts on customer sites, the Framer plugin, and the legacy
-//     Webflow paths never send our sid cookie.
-//   • Only when a siteId is present (query, or JSON body on writes).
-//   • Unknown siteId → passes through, so the handler still returns its own 404.
-//   • Applied at the router, not in the handlers: the /api/wf/* copies reuse the
-//     same handlers with a Webflow ID token and must not see this check.
+// Who calls these routes, and how each is treated:
+//   • Web app — through its server proxy, always with our sid cookie. Checked: the
+//     session must be valid and the user must have a role on EVERY site the request
+//     names. An expired session or a failed lookup is refused (it used to pass).
+//   • Framer plugin — calls scan / cookies / scheduled-scan / custom-cookie-rules with
+//     no cookie and no token. So a request WITHOUT a cookie is allowed only when every
+//     site it names is a Framer site. Webflow and web-app sites need a login. (Framer
+//     sites stay reachable without one until the plugin sends its JWT here.)
+//   • Webflow Designer apps — use the /api/wf/* copies, which never reach this gate.
+//   • cb-server (legacy Webflow backend) — calls /api/banner-customization server-to-
+//     server with no auth, so that path keeps the old behaviour (LEGACY_OPEN_PATHS).
 //
-// This makes the dashboard enforce per-site access. It does not close the older
-// gap that these routes answer anyone who omits the cookie — that is unchanged.
+// Every siteId in the request is checked — query AND body, whatever the Content-Type
+// (the handlers parse JSON regardless of it) — and delete-by-id calls are resolved to
+// the site that owns the row, so neither can be used to slip past the check.
+// Unknown siteIds pass through so the handler still returns its own 404.
 
 import { getSessionById } from '../services/db.js';
 import { getSiteRole, sidFromCookie } from '../services/team.js';
@@ -33,51 +37,87 @@ export const TEAM_GATED_PATHS = new Set([
   '/api/verify-script',
 ]);
 
-async function readSiteId(request) {
+/** Still answer cookie-less callers for any site (cb-server). Signed-in users are checked. */
+const LEGACY_OPEN_PATHS = new Set(['/api/banner-customization']);
+
+/** Every siteId the request names (query + body), plus the site behind a delete-by-id. */
+async function readSiteIds(request, db) {
   const url = new URL(request.url);
-  const fromQuery = url.searchParams.get('siteId') || url.searchParams.get('site_id');
-  if (fromQuery) return String(fromQuery).trim();
-  if (['GET', 'HEAD'].includes(request.method)) return null;
-  const ct = request.headers.get('Content-Type') || '';
-  if (!ct.includes('application/json')) return null;
-  try {
-    const body = await request.clone().json();
-    const id = body?.siteId ?? body?.site_id;
-    return id ? String(id).trim() : null;
-  } catch (_) {
-    return null;
+  const ids = new Set();
+  const add = (v) => { const s = v == null ? '' : String(v).trim(); if (s) ids.add(s); };
+  add(url.searchParams.get('siteId'));
+  add(url.searchParams.get('site_id'));
+
+  let body = null;
+  if (!['GET', 'HEAD'].includes(request.method)) {
+    try { body = await request.clone().json(); } catch (_) { body = null; }
+    add(body?.siteId);
+    add(body?.site_id);
   }
+
+  // Deletes name a row, not a site: DELETE ?id= (custom-cookie-rules, scheduled-scan)
+  // and POST { action: 'delete', id } (custom-cookie-rules).
+  const rowId = url.searchParams.get('id') || (body?.action === 'delete' ? body?.id : null);
+  if (rowId && db) {
+    const table = url.pathname === '/api/custom-cookie-rules' ? 'CustomCookieRule'
+      : url.pathname === '/api/scheduled-scan' ? 'ScheduledScan' : null;
+    if (table) {
+      const row = await db.prepare(`SELECT siteId FROM ${table} WHERE id = ?1 LIMIT 1`).bind(String(rowId)).first();
+      add(row?.siteId);
+    }
+  }
+  return [...ids];
+}
+
+function deny(status, error, code) {
+  return { ok: false, status, error, code };
 }
 
 /** { ok: true } or { ok: false, status, error, code }. */
 export async function requireTeamSiteAccess(request, env) {
   const db = env.CONSENT_WEBAPP;
+  if (!db) return { ok: true };
+  const pathname = new URL(request.url).pathname;
   const sid = sidFromCookie(request);
-  if (!db || !sid) return { ok: true };
 
-  const siteId = await readSiteId(request);
-  if (!siteId) return { ok: true };
+  // Old behaviour for the legacy-open path when there's no cookie.
+  if (!sid && LEGACY_OPEN_PATHS.has(pathname)) return { ok: true };
 
   try {
-    const session = await getSessionById(db, sid);
-    const userId = session?.userId ?? session?.user_id;
-    if (!userId) return { ok: true }; // expired/stale cookie — behave as before
+    const siteIds = await readSiteIds(request, db);
+    if (siteIds.length === 0) return { ok: true };
 
-    if (await getSiteRole(db, userId, siteId)) return { ok: true };
+    if (sid) {
+      const session = await getSessionById(db, sid);
+      const userId = session?.userId ?? session?.user_id;
+      if (!userId) return deny(401, 'Your session has expired. Please log in again.', 'LOGIN_REQUIRED');
+      for (const siteId of siteIds) {
+        if (await getSiteRole(db, userId, siteId)) continue;
+        const exists = await db.prepare('SELECT 1 FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
+        if (exists) return deny(403, 'You do not have access to this site.', 'SITE_ACCESS_DENIED');
+      }
+      return { ok: true };
+    }
 
-    const exists = await db.prepare('SELECT 1 FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
-    if (!exists) return { ok: true };
-
-    return {
-      ok: false,
-      status: 403,
-      error: 'You do not have access to this site.',
-      code: 'SITE_ACCESS_DENIED',
-    };
-  } catch (err) {
-    // A failed lookup must not take the dashboard down; log and fall back to the
-    // pre-team behaviour for this request.
-    console.warn('[TeamSiteAccess] check failed, allowing:', err?.message);
+    // No cookie: only the Framer plugin calls these routes this way, and only for
+    // Framer sites. legacySource || platform — platform alone can be demoted.
+    for (const siteId of siteIds) {
+      const site = await db
+        .prepare('SELECT platform, legacySource FROM Site WHERE id = ?1 LIMIT 1')
+        .bind(siteId)
+        .first();
+      if (!site) continue;
+      const origin = String(site.legacySource || site.platform || '').toLowerCase();
+      const isFramer = origin === 'framer' || String(site.platform || '').toLowerCase() === 'framer';
+      if (!isFramer) {
+        console.warn('[TeamSiteAccess] refused cookie-less request for a non-Framer site', { pathname, siteId });
+        return deny(401, 'Please log in to manage this site.', 'LOGIN_REQUIRED');
+      }
+    }
     return { ok: true };
+  } catch (err) {
+    // Fail closed: allowing on error let any lookup failure bypass the check.
+    console.warn('[TeamSiteAccess] check failed, refusing:', err?.message);
+    return deny(503, 'Could not verify access to this site. Please try again.', 'ACCESS_CHECK_FAILED');
   }
 }

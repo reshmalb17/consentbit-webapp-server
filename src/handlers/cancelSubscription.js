@@ -82,8 +82,9 @@ export async function handleCancelSubscription(request, env, ctx) {
     return Response.json({ success: false, error: 'No active subscription found for this account.' }, { status: 400 });
   }
 
-  // Cancelling ends the plan (→ Free), which suspends the site's team. A team Admin
-  // can't do that; it's the owner's call. Everyone else follows the existing path.
+  // Cancelling ends the plan (→ Free), which suspends the site's team. Only the owner of
+  // the account the subscription belongs to may do it: a team Admin gets OWNER_ONLY, and
+  // anyone outside the account (the ID came from the request body) gets a plain 403.
   {
     const orgIdForActor = sub.organizationId ?? sub.organizationid;
     const actor = orgIdForActor
@@ -92,6 +93,13 @@ export async function handleCancelSubscription(request, env, ctx) {
     if (actor?.admin) {
       return Response.json(
         { success: false, error: 'Only the account owner can cancel this subscription.', code: 'OWNER_ONLY' },
+        { status: 403 },
+      );
+    }
+    if (!actor?.owner) {
+      console.warn('[CancelSubscription] refused — caller does not own this subscription', { userId: user.id, subId: sub.id });
+      return Response.json(
+        { success: false, error: 'This subscription belongs to another account. Only the account owner can cancel it.', code: 'NOT_OWNER' },
         { status: 403 },
       );
     }

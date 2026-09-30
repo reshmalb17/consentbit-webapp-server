@@ -102,15 +102,39 @@ function toTimestamp(ts) {
   return ts;
 }
 
+// Stripe's own default tolerance. Retries and dashboard "resend" are re-signed with a
+// fresh timestamp, so only a captured-and-replayed request falls outside it.
+const STRIPE_SIGNATURE_TOLERANCE_SECONDS = 300;
+
+function timingSafeEqualHex(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 async function verifyStripeSignature(payload, signature, secret) {
-  const parts = {};
+  // Header: t=<ts>,v1=<sig>[,v1=<sig>...]. Several v1 entries are sent while a
+  // webhook secret is being rolled, so every one must be tried — not just the last.
+  let timestamp = null;
+  const v1s = [];
   signature.split(',').forEach((p) => {
-    const [k, v] = p.split('=');
-    parts[k] = v;
+    const i = p.indexOf('=');
+    if (i < 0) return;
+    const k = p.slice(0, i).trim();
+    const v = p.slice(i + 1).trim();
+    if (k === 't') timestamp = v;
+    else if (k === 'v1' && v) v1s.push(v);
   });
-  const timestamp = parts.t;
-  const v1 = parts.v1;
-  if (!timestamp || !v1) return false;
+  if (!timestamp || v1s.length === 0) return false;
+
+  // Replay window: reject events signed too long ago (or implausibly far ahead).
+  const ts = Number(timestamp);
+  if (!Number.isFinite(ts) || Math.abs(Date.now() / 1000 - ts) > STRIPE_SIGNATURE_TOLERANCE_SECONDS) {
+    console.warn('[StripeWebhook] signature timestamp outside tolerance', { timestamp });
+    return false;
+  }
+
   const signedPayload = `${timestamp}.${payload}`;
   const key = await crypto.subtle.importKey(
     'raw',
@@ -123,7 +147,7 @@ async function verifyStripeSignature(payload, signature, secret) {
   const hex = Array.from(new Uint8Array(sig))
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
-  return hex === v1;
+  return v1s.some((v1) => timingSafeEqualHex(hex, v1));
 }
 
 async function injectWebflowScript(accessToken, wfSiteId, scriptSrc) {
@@ -1018,27 +1042,20 @@ export async function handleStripeWebhook(request, env, ctx) {
           ).bind(billingEmailMeta, new Date().toISOString(), orgId).run().catch(() => {});
         }
 
-        // Sync email: if checkout email differs from stored User email, update User + WEBFLOW_AUTHENTICATION KV
-        const checkoutEmail = checkoutEmailRaw;
-        if (checkoutEmail && orgId) {
+        // A payment must never change who can log in. This used to overwrite the owner's
+        // login email (User.email + WEBFLOW_AUTHENTICATION KV) with the checkout email — a
+        // takeover path when someone else paid, and wrong even for a team Admin's checkout
+        // (Stripe sees the owner's BILLING email). Billing email is stored above; the login
+        // email only changes through the account's own email/ownership-transfer flows.
+        if (checkoutEmailRaw && orgId) {
           try {
             const userRow = await db.prepare(
-              'SELECT u.id, u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
+              'SELECT u.email FROM User u JOIN OrganizationMember om ON om.userId = u.id WHERE om.organizationId = ?1 LIMIT 1'
             ).bind(orgId).first();
-            if (userRow && userRow.email !== checkoutEmail) {
-              await db.prepare('UPDATE User SET email = ?1, updatedAt = ?2 WHERE id = ?3').bind(checkoutEmail, new Date().toISOString(), userRow.id).run();
-              // Update WEBFLOW_AUTHENTICATION KV if wfSiteId known
-              if (platformSiteId && env.WEBFLOW_AUTHENTICATION) {
-                const kvRaw = await env.WEBFLOW_AUTHENTICATION.get(platformSiteId);
-                if (kvRaw) {
-                  const kvEntry = JSON.parse(kvRaw);
-                  await env.WEBFLOW_AUTHENTICATION.put(platformSiteId, JSON.stringify({ ...kvEntry, email: checkoutEmail }));
-                }
-              }
+            if (userRow && userRow.email !== checkoutEmailRaw) {
+              console.log('[StripeWebhook] checkout email differs from login email — login email left unchanged', { orgId });
             }
-          } catch (e) {
-            // email sync failed
-          }
+          } catch (_) {}
         }
 
         // Mark trial as used on the site so it can never be granted again

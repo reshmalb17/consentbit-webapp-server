@@ -1,3 +1,4 @@
+import { secretMatches } from '../utils/adminAuth.js';
 // handlers/adminBackfillConsentR2.js
 //
 // One-time admin endpoint: reads D1 Consent records and writes them to R2
@@ -14,7 +15,7 @@ export async function handleAdminBackfillConsentR2(request, env) {
   // Admin-only
   const auth = request.headers.get('Authorization') || '';
   const secret = env.ADMIN_SECRET || '';
-  if (!secret || auth !== `Bearer ${secret}`) {
+  if (!secret || !secretMatches(auth, `Bearer ${secret}`)) {
     return Response.json({ success: false, error: 'Unauthorized' }, { status: 401 });
   }
 

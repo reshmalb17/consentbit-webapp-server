@@ -53,6 +53,19 @@ function getAllowedOrigins(env) {
   return origins;
 }
 
+/**
+ * True only for origins that host OUR webapp pages (the targets of emailed token links:
+ * /transfer-ownership/authorize, /team/accept). Narrower than isOriginAllowed — the
+ * Framer/Webflow plugin hosts may call the API but must never be an email-link origin.
+ * Anything else a client sends as appOrigin is ignored, so a caller can't point a real
+ * ConsentBit email at their own site and collect the token.
+ */
+export function isOwnWebappOrigin(origin, env) {
+  if (!origin) return false;
+  if (getAllowedOrigins(env).includes(origin)) return true;
+  return /^https:\/\/[a-z0-9-]+\.consentbit-webapp-frontend-test\.pages\.dev$/i.test(origin);
+}
+
 /** True if the origin matches an exact allowlist entry or one of the dynamic patterns. */
 function isOriginAllowed(origin, env) {
   if (!origin) return false;

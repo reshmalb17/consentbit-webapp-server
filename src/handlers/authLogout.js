@@ -22,7 +22,9 @@ export async function handleAuthLogout(request, env) {
     await deleteSessionById(db, sid);
   }
 
-  const isProd = env.NODE_ENV === 'production';
+  // Secure unless explicitly in development — NODE_ENV is not set on the deployed worker,
+  // so the old `=== 'production'` test left Secure off everywhere.
+  const isProd = env.NODE_ENV !== 'development';
   const cookieFlags = isProd
     ? 'Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'
     : 'Path=/; HttpOnly; SameSite=Lax; Max-Age=0';

@@ -10,6 +10,7 @@
 //
 // Delete this handler and its route once GA4 tracking is confirmed.
 
+import { secretMatches } from '../utils/adminAuth.js';
 import { ga4IdentityForEmail } from '../services/ga4.js';
 
 export async function handleAdminGa4Test(request, env) {
@@ -18,7 +19,7 @@ export async function handleAdminGa4Test(request, env) {
   }
 
   const adminKey = request.headers.get('X-Admin-Key');
-  if (!adminKey || adminKey !== (env.ADMIN_SECRET || env.ADMIN_KEY)) {
+  if (!adminKey || !secretMatches(adminKey, env.ADMIN_SECRET || env.ADMIN_KEY)) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 });
   }
 

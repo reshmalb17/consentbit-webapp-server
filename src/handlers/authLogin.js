@@ -115,7 +115,9 @@ export async function handleAuthLogin(request, env) {
   const session = await createSession(db, { userId: user.id });
   pwDebug('login:success', { userId: user.id, email, sessionCreated: true });
 
-  const isProd = env.NODE_ENV === 'production';
+  // Secure unless explicitly in development — NODE_ENV is not set on the deployed worker,
+  // so the old `=== 'production'` test left Secure off everywhere.
+  const isProd = env.NODE_ENV !== 'development';
 
   // Use Secure only in production (HTTPS); drop it in dev so localhost can send the cookie
   const cookieFlags = isProd

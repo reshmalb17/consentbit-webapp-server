@@ -311,6 +311,8 @@ const LEGACY_WEBFLOW_AUTH_PATHS = new Set([
   '/api/webflow/domains',
   '/api/webflow/script-cleanup',
   '/api/v2/webflow-free-register',
+  // Same handler as the v2 path (see the router switch) — it must not skip the token check.
+  '/api/internal/webflow-free-register',
   '/api/v2/webflow-checkout-token',
 ]);
 
@@ -1154,6 +1156,17 @@ export default {
 
     // ── Only continue for /api/ routes (or known public aliases) ─────────
     if (!pathname.startsWith('/api/') && !PUBLIC_PATHS.has(pathname)) {
+      return Response.json({ success: false, error: 'Not Found' }, { status: 404 });
+    }
+
+    // ── Admin routes closed (security audit C5/C7, 2026-09-30) ────────────
+    // ADMIN_SECRET was committed to git, and seed-legacy-users never checked it,
+    // so every /api/admin/* route (plus the debug schema dump) answers 404 until
+    // the key is rotated. Nothing calls these any more — the dashboard moved to
+    // Admin-Dashboard-Server and the crons run in-process. To reopen for a one-off
+    // job, set ADMIN_ROUTES_ENABLED = "true" (after rotating ADMIN_SECRET).
+    if ((pathname.startsWith('/api/admin/') || pathname === '/api/debug/schema')
+        && String(env.ADMIN_ROUTES_ENABLED || '').toLowerCase() !== 'true') {
       return Response.json({ success: false, error: 'Not Found' }, { status: 404 });
     }
 

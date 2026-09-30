@@ -1768,7 +1768,9 @@ export async function getLatestValidEmailVerificationCode(db, { email, purpose }
        FROM EmailVerificationCode
        WHERE email = ?1 AND purpose = ?2
          AND consumedAt IS NULL
-         AND expiresAt > datetime('now')
+         -- julianday, not a text compare: expiresAt is ISO ('…T…Z') and datetime('now')
+         -- is 'YYYY-MM-DD HH:MM:SS', so 'T' > ' ' kept every code alive until UTC midnight.
+         AND julianday(expiresAt) > julianday('now')
        ORDER BY createdAt DESC
        LIMIT 1`,
     )
@@ -1783,6 +1785,36 @@ export async function incrementEmailVerificationAttempts(db, id) {
     .prepare(`UPDATE EmailVerificationCode SET attempts = COALESCE(attempts, 0) + 1 WHERE id = ?1`)
     .bind(id)
     .run();
+}
+
+/**
+ * Atomically use up one guess on a code: increments `attempts` only while it is below
+ * `maxAttempts`, and reports whether this guess was allowed. Checking and incrementing
+ * in one statement means parallel guesses can't all read "0 attempts" and slip past
+ * the limit (the old read-then-increment could be raced).
+ */
+export async function claimEmailVerificationAttempt(db, id, maxAttempts) {
+  const row = await db
+    .prepare(
+      `UPDATE EmailVerificationCode SET attempts = COALESCE(attempts, 0) + 1
+       WHERE id = ?1 AND COALESCE(attempts, 0) < ?2
+       RETURNING attempts`,
+    )
+    .bind(id, maxAttempts)
+    .first();
+  return !!row;
+}
+
+/** Codes issued to this email+purpose since `sinceIso` (per-email request cap). */
+export async function countRecentEmailVerificationCodes(db, { email, purpose, sinceIso }) {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM EmailVerificationCode
+       WHERE email = ?1 AND purpose = ?2 AND julianday(createdAt) > julianday(?3)`,
+    )
+    .bind((email || '').trim().toLowerCase(), purpose, sinceIso)
+    .first();
+  return Number(row?.n ?? 0);
 }
 
 export async function consumeEmailVerificationCode(db, id) {
@@ -3704,7 +3736,9 @@ export async function createSession(db, { userId }) {
 export async function getSessionById(db, id) {
   if (!id) return null;
   const session = await db
-    .prepare('SELECT * FROM Session WHERE id = ?1 AND expiresAt > datetime(\'now\')')
+    // julianday: expiresAt is ISO, so a text compare against datetime('now') let a
+    // session outlive its expiry until the end of that UTC day.
+    .prepare('SELECT * FROM Session WHERE id = ?1 AND julianday(expiresAt) > julianday(\'now\')')
     .bind(id)
     .first();
   return session || null;

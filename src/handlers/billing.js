@@ -21,7 +21,8 @@ import {
   inferTierPlanIdFromStripePriceId,
   getOrganizationMember,
 } from '../services/db.js';
-import { listAdminSiteIds } from '../services/team.js';
+import { listAdminSiteIds, siteInCallersAccount } from '../services/team.js';
+import { safeReturnUrl } from '../utils/returnUrl.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -50,6 +51,13 @@ async function requireOrgAccess(db, userId, organizationId) {
   const adminSiteIds = await listAdminSiteIds(db, userId, organizationId);
   if (adminSiteIds.length === 0) return { allowed: false };
   return { allowed: true, owner: false, adminSiteIds: new Set(adminSiteIds) };
+}
+
+/** siteId is public: an owner-path request must name a site in the caller's own account. */
+async function foreignSiteDenied(db, userId, organizationId, siteId) {
+  if (await siteInCallersAccount(db, userId, organizationId, siteId || null)) return null;
+  console.warn('[Billing] refused — site not in caller\'s account', { userId, organizationId, siteId });
+  return Response.json({ error: 'This site belongs to another account.' }, { status: 403 });
 }
 
 /** Admin access that must be pinned to one granted site (summary, usage). */
@@ -89,6 +97,8 @@ export async function handleBillingSummary(request, env) {
   }
   const denied = adminSiteDenied(access, siteId);
   if (denied) return denied;
+  const foreign = await foreignSiteDenied(db, auth.user.id, organizationId, siteId);
+  if (foreign) return foreign;
 
   await ensureSchema(db);
   // An Admin sees only their site's own subscription — never the account-wide fallback.
@@ -255,7 +265,7 @@ export async function handleBillingPortal(request, env) {
     return Response.json({ error: 'Invalid JSON' }, { status: 400 });
   }
   const organizationId = (body.organizationId || '').trim();
-  const returnUrl = (body.returnUrl || body.return_url || '').trim() || request.url.replace(/\/api\/.*$/, '/');
+  const returnUrl = safeReturnUrl(body.returnUrl || body.return_url, env, request.url.replace(/\/api\/.*$/, '/'), '[BillingPortal]');
   if (!organizationId) {
     return Response.json({ error: 'organizationId required' }, { status: 400 });
   }
@@ -427,6 +437,8 @@ export async function handleBillingUsage(request, env) {
   }
   const denied = adminSiteDenied(access, siteId);
   if (denied) return denied;
+  const foreign = await foreignSiteDenied(db, auth.user.id, organizationId, siteId);
+  if (foreign) return foreign;
 
   await ensureSchema(db);
   let usage;

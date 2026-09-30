@@ -24,6 +24,7 @@ import {
   inferTierPlanIdFromStripePriceId,
 } from '../services/db.js';
 import { sendTeamInviteEmail, sendTeamActivityEmail } from '../services/email.js';
+import { isOwnWebappOrigin } from '../utils/cors.js';
 import {
   TEAM_ROLES,
   INVITE_TTL_DAYS,
@@ -59,12 +60,15 @@ async function requireUser(db, request) {
   return getUserById(db, userId);
 }
 
+// A client-supplied origin is honoured only if it is one of our own webapp origins —
+// invite emails carry a live accept token, so it must never land on someone else's site.
 function resolveAppOrigin(request, env, suppliedOrigin) {
   const candidate = String(suppliedOrigin || '').trim();
   if (candidate) {
     try {
       const u = new URL(candidate);
-      if (u.protocol === 'http:' || u.protocol === 'https:') return u.origin;
+      if (isOwnWebappOrigin(u.origin, env)) return u.origin;
+      console.warn('[Team] ignored appOrigin not on the webapp allowlist', { appOrigin: u.origin });
     } catch (_) { /* fall through */ }
   }
   const configured = String(env.WEBAPP_PUBLIC_URL || '').trim().replace(/\/+$/, '');

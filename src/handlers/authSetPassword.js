@@ -136,6 +136,16 @@ export async function handleAuthSetPassword(request, env) {
   await updateUserPasswordHash(db, user.id, await hashPassword(newPassword));
   pwDebug('set-password:updated', { userId: user.id, email: user.email, storedFormatNow: 'pbkdf2-salt:hash' });
 
+  // A password change is how a user locks out someone who got in, so sign out every
+  // OTHER web-app session. This one stays so the user isn't logged out mid-change.
+  // (Only web-app browser sessions live in Session — the Webflow and Framer apps use
+  // their own tokens and are unaffected.) Best-effort: the change itself has succeeded.
+  try {
+    await db.prepare('DELETE FROM Session WHERE userId = ?1 AND id != ?2').bind(user.id, sid).run();
+  } catch (e) {
+    console.warn('[SetPassword] could not revoke other sessions:', e?.message);
+  }
+
   return Response.json(
     { success: true, hasPassword: true, message: 'Password updated.' },
     { status: 200 },

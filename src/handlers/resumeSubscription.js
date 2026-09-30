@@ -81,7 +81,7 @@ export async function handleResumeSubscription(request, env, ctx) {
   }
 
   // Same gate as cancel: a team Admin can't decide the account keeps paying, that's the
-  // owner's call.
+  // owner's call — and anyone outside the account can't touch it at all.
   {
     const orgIdForActor = sub.organizationId ?? sub.organizationid;
     const actor = orgIdForActor
@@ -90,6 +90,13 @@ export async function handleResumeSubscription(request, env, ctx) {
     if (actor?.admin) {
       return Response.json(
         { success: false, error: 'Only the account owner can resume this subscription.', code: 'OWNER_ONLY' },
+        { status: 403 },
+      );
+    }
+    if (!actor?.owner) {
+      console.warn(`${TAG} refused — caller does not own this subscription`, { userId: user.id, subId: sub.id });
+      return Response.json(
+        { success: false, error: 'This subscription belongs to another account. Only the account owner can resume it.', code: 'NOT_OWNER' },
         { status: 403 },
       );
     }

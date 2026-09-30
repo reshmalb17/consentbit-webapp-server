@@ -9,7 +9,8 @@
 // passes its own app origin (accounts/dashboard.consentbit.com). Extra hosts can
 // be added via the REDIRECT_ALLOWED_HOSTS env var (comma-separated) for
 // staging/preview domains without a code change.
-function isAllowedRedirect(url, env) {
+// Exported for utils/returnUrl.js (checkout success/cancel + portal return URLs).
+export function isAllowedRedirect(url, env) {
   // Block non-web schemes (javascript:, data:, etc.). Allow http only for local dev.
   const host = url.hostname.toLowerCase();
   const isLocal = host === 'localhost' || host === '127.0.0.1';

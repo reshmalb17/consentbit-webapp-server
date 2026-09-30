@@ -48,7 +48,9 @@ function validatePasswordPolicy(password) {
 
 function sessionCookie(env, sessionId) {
   // Secure only in production. Dropped in dev so localhost, on plain HTTP, keeps the cookie.
-  const isProd = env.NODE_ENV === 'production';
+  // Secure unless explicitly in development — NODE_ENV is not set on the deployed worker,
+  // so the old `=== 'production'` test left Secure off everywhere.
+  const isProd = env.NODE_ENV !== 'development';
   const flags = isProd
     ? 'Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000'
     : 'Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000';

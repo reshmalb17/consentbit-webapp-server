@@ -1,6 +1,7 @@
 import {
   getLatestValidEmailVerificationCode,
   incrementEmailVerificationAttempts,
+  claimEmailVerificationAttempt,
   consumeEmailVerificationCode,
   getUserByEmail,
   createUser,
@@ -124,13 +125,14 @@ export async function handleAuthVerifyCode(request, env, ctx) {
 
     if (!row?.id) return Response.json({ success: false, error: 'Code expired or not found' }, { status: 400 });
 
-    const attempts = Number(row.attempts ?? row.Attempts ?? 0);
+    // Use up one guess atomically BEFORE comparing (see claimEmailVerificationAttempt).
     const maxAttempts = Number(env.OTP_MAX_ATTEMPTS || 5) || 5;
-    if (attempts >= maxAttempts) return Response.json({ success: false, error: 'Too many attempts. Request a new code.' }, { status: 429 });
+    if (!(await claimEmailVerificationAttempt(db, row.id, maxAttempts))) {
+      return Response.json({ success: false, error: 'Too many attempts. Request a new code.' }, { status: 429 });
+    }
 
     const expected = row.codeHash ?? row.codehash;
     if (!expected || computed !== expected) {
-      await incrementEmailVerificationAttempts(db, row.id);
       return Response.json({ success: false, error: 'Invalid code' }, { status: 400 });
     }
 
@@ -183,13 +185,14 @@ export async function handleAuthVerifyCode(request, env, ctx) {
 
   if (!row?.id) return Response.json({ success: false, error: 'Code expired or not found' }, { status: 400 });
 
-  const attempts = Number(row.attempts ?? row.Attempts ?? 0);
+  // Use up one guess atomically BEFORE comparing (see claimEmailVerificationAttempt).
   const maxAttempts = Number(env.OTP_MAX_ATTEMPTS || 5) || 5;
-  if (attempts >= maxAttempts) return Response.json({ success: false, error: 'Too many attempts. Request a new code.' }, { status: 429 });
+  if (!(await claimEmailVerificationAttempt(db, row.id, maxAttempts))) {
+    return Response.json({ success: false, error: 'Too many attempts. Request a new code.' }, { status: 429 });
+  }
 
   const expected = row.codeHash ?? row.codehash;
   if (!expected || computed !== expected) {
-    await incrementEmailVerificationAttempts(db, row.id);
     return Response.json({ success: false, error: 'Invalid code' }, { status: 400 });
   }
 

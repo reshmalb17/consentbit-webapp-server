@@ -4,6 +4,7 @@
 // own CDN scripts — the dashboard reads R2 for those before June 2026, D1 after.
 import { ensureSchema, getSiteById } from '../services/db.js';
 import { requestDomainMatchesSite } from '../utils/domainValidate.js';
+import { readConsentBody, invalidConsentFields } from '../utils/consentLimits.js';
 
 // Set once per isolate when the DB turns out to lack the optional Consent columns,
 // so later saves skip the doomed first attempt instead of paying a round-trip each time.
@@ -85,13 +86,13 @@ export async function handleConsent(request, env, ctx) {
   //     ]
   //   }
   // }
-  let body;
-  try {
-    body = await request.json();
-  } catch (parseErr) {
-    console.error('[Consent] failed to parse request body:', parseErr?.message);
-    return new Response(JSON.stringify({ error: 'Invalid JSON body' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+  // Size-capped read (see utils/consentLimits.js).
+  const parsed = await readConsentBody(request);
+  if (!parsed.ok) {
+    console.warn('[Consent] rejected body:', parsed.error);
+    return new Response(JSON.stringify({ error: parsed.error }), { status: parsed.status, headers: { 'Content-Type': 'application/json' } });
   }
+  const body = parsed.body;
 
   const {
     siteId,
@@ -117,6 +118,19 @@ export async function handleConsent(request, env, ctx) {
     langWanted = null,
   } = body || {};
   const consentCategoriesJson = consentPayload != null ? JSON.stringify(consentPayload) : null;
+
+  // Only values a real banner sends (limits derived from the live Consent table).
+  const badField = invalidConsentFields({
+    status, regulation, bannerType, consentMethod, deviceId: body?.deviceId, expiresAt,
+    consentCategoriesJson, law, consentLanguage, consentModel, noticeVersion, policyVersion, langWanted,
+  });
+  if (badField) {
+    console.warn('[Consent] rejected — invalid field:', badField, '| siteId:', body?.siteId);
+    return new Response(
+      JSON.stringify({ error: `Invalid consent field: ${badField}`, code: 'INVALID_CONSENT' }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } },
+    );
+  }
 
 
   if (!siteId) {
@@ -326,7 +340,7 @@ export async function handleConsent(request, env, ctx) {
   } catch (dbErr) {
     console.error('[Consent] ❌ DB insert failed — siteId:', siteId, '| error:', dbErr?.message, '| cause:', dbErr?.cause?.message);
     return new Response(
-      JSON.stringify({ error: 'Failed to save consent', details: dbErr?.message }),
+      JSON.stringify({ error: 'Failed to save consent' }),
       { status: 500, headers: { 'Content-Type': 'application/json' } }
     );
   }

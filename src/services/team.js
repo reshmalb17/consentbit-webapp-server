@@ -279,6 +279,43 @@ export async function resolveBillingActor(db, userId, organizationId, siteId = n
 }
 
 /**
+ * Billing routes take { organizationId, siteId } from the body and gate on the org, then
+ * load the subscription by siteId alone — so without this, a caller could pair their own
+ * org with someone else's (public) siteId. Returns true when the site is in
+ * `organizationId`, or when the caller owns the site's real account (the webapp sends a
+ * multi-org owner's first org for every site, so a strict equality would lock them out).
+ * No siteId → true (org-level request; the org gate already applies). A siteId that is
+ * not a Site (the dashboard's `unassigned_<subId>` rows, or a deleted site) is judged by
+ * any Subscription still pointing at it; with none, the handler's lookup finds nothing
+ * by siteId and falls back to the caller's own org, so it passes. Errors → false.
+ */
+export async function siteInCallersAccount(db, userId, organizationId, siteId) {
+  if (!siteId) return true;
+  if (!db || !userId) return false;
+  try {
+    const site = await db.prepare('SELECT organizationId FROM Site WHERE id = ?1 LIMIT 1').bind(String(siteId)).first();
+    let siteOrgId = site ? String(site.organizationId ?? site.organizationid ?? '') : '';
+    if (!site) {
+      const orphan = await db
+        .prepare('SELECT organizationId FROM Subscription WHERE siteId = ?1 LIMIT 1')
+        .bind(String(siteId))
+        .first();
+      if (!orphan) return true;
+      siteOrgId = String(orphan.organizationId ?? orphan.organizationid ?? '');
+    }
+    if (!siteOrgId) return false;
+    if (siteOrgId === String(organizationId)) return true;
+    const own = await db
+      .prepare('SELECT 1 FROM OrganizationMember WHERE organizationId = ?1 AND userId = ?2 LIMIT 1')
+      .bind(siteOrgId, userId)
+      .first();
+    return !!own;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
  * Give an Admin access to a site they just added to the owner's account, so it shows
  * up for them straight away. No-op unless they're an active Admin in that org.
  */

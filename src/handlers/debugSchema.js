@@ -2,6 +2,7 @@
 // Returns list of DB tables and a sample of PageviewUsage so you can verify schema and pageviews.
 // Set DEBUG_SCHEMA_KEY in wrangler (e.g. vars or secret) and call with ?key= that value.
 
+import { secretMatches } from '../utils/adminAuth.js';
 import { ensureSchema } from '../services/db.js';
 
 export async function handleDebugSchema(request, env) {
@@ -15,7 +16,7 @@ export async function handleDebugSchema(request, env) {
   const url = new URL(request.url);
   const key = url.searchParams.get('key') || '';
   const expected = env.DEBUG_SCHEMA_KEY;
-  if (!expected || key !== expected) {
+  if (!expected || !secretMatches(key, expected)) {
     return Response.json({ error: 'Not found' }, { status: 404 });
   }
 

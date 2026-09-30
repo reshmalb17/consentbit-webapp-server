@@ -14,6 +14,7 @@ import {
   getSubscriptionsByOrganization,
 } from '../services/db.js';
 import { capturePostHogEvent } from '../services/posthog.js';
+import { isOwnWebappOrigin } from '../utils/cors.js';
 
 /**
  * Move billing identity to the new owner: the stored billing email and, on every Stripe
@@ -154,21 +155,23 @@ async function sendEmailViaBrevo(env, { to, name, subject, text, html }) {
 
 /**
  * Build the base origin of the app the authorization link should point at.
- * Prefer an explicit origin supplied by the browser (its own location.origin,
- * validated to look like an http(s) URL), then WEBAPP_PUBLIC_URL, then the
- * request origin as a last resort.
+ * A browser-supplied origin is used only if it is one of our own webapp origins
+ * (isOwnWebappOrigin) — otherwise a caller could point a genuine ConsentBit email, token
+ * and all, at their own site. Then WEBAPP_PUBLIC_URL, then the accounts app. (Not the
+ * request origin: that is this Worker, and prod's WEBAPP_PUBLIC_URL is empty.)
  */
 function resolveAppOrigin(request, env, suppliedOrigin) {
   const candidate = (suppliedOrigin || '').trim();
   if (candidate) {
     try {
       const u = new URL(candidate);
-      if (u.protocol === 'http:' || u.protocol === 'https:') return u.origin;
+      if (isOwnWebappOrigin(u.origin, env)) return u.origin;
+      console.warn('[TransferOwnership] ignored appOrigin not on the webapp allowlist', { appOrigin: u.origin });
     } catch (_) { /* fall through */ }
   }
   const configured = (env.WEBAPP_PUBLIC_URL || '').trim().replace(/\/+$/, '');
   if (configured) return configured;
-  try { return new URL(request.url).origin; } catch (_) { return ''; }
+  return 'https://accounts.consentbit.com';
 }
 
 function authEmailHtml({ ownerName, newEmail, newName, link, ttlMinutes }) {
