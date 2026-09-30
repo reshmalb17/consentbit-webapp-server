@@ -915,6 +915,13 @@ async function _handleCDNScript(request, env, url) {
     return 'center';
   }
 
+  // Mirrors serveKind's IAB decision further down (wantsIab && iabAllowed). When the IAB
+  // bundle is served, Microsoft UET reads consent from the TCF string instead, and
+  // Microsoft forbids sending UET Consent Mode and TCF together — so UET Consent Mode is
+  // switched off in the payload for those sites. Keep in step with serveKind.
+  const iabBundleServed = String(resolvedSite.banner_type || '').toLowerCase() === 'iab' &&
+    (effectivePlanId === 'growth' || effectivePlanId === 'essential');
+
   const siteConfigPayload = {
     id: resolvedSite.id,
     bannerType: effectiveBannerType,
@@ -934,6 +941,8 @@ async function _handleCDNScript(request, env, url) {
     //     column is required for that default to hold.
     clarityCmpId: resolvedSite.clarityCmpId || 165,
     clarityConsentMode: resolvedSite.clarityConsentMode !== 0 && resolvedSite.clarityConsentMode !== false,
+    // Microsoft UET Consent Mode (ad_storage). Off when the IAB bundle is served — see iabBundleServed.
+    uetConsentMode: !iabBundleServed,
     // Google Consent Mode v2.
     //   gtmConsentMode — the same arrangement as clarityConsentMode, for the two Google
     //     loaders (gtm.js / gtag/js). On means they are governed by the consent SIGNAL
@@ -1078,6 +1087,7 @@ ${inlineConfig}
     var gaMeasurementId = SITE.gaId || null;
     var clarityConsentEnabled = false !== SITE.clarityConsentMode;
     var clarityCmpId = SITE.clarityCmpId || 165;
+    var uetConsentEnabled = false !== SITE.uetConsentMode;
     var customization = SITE.customization || null;
     // Growth-plan entitlement, already re-checked against the live plan by the worker.
     var hideBrandingEnabled = !(!customization || !customization.hideBranding);
@@ -1773,7 +1783,8 @@ ${inlineConfig}
   /** True when a consent signal — not the script blocker — governs this script. */
   function isConsentSignalGoverned(category, src) {
     if ("analytics" === category && isGoogleAnalyticsUrl(src)) return true;
-    return clarityConsentEnabled && isClarityTagUrl(src)
+    if (clarityConsentEnabled && isClarityTagUrl(src)) return true;
+    return uetConsentEnabled && isUetTagUrl(src)
   }
 
   /**
@@ -1816,6 +1827,39 @@ ${inlineConfig}
         ad_Storage: adStorage,
         analytics_Storage: analyticsStorage
       })
+    } catch (err) {}
+  }
+
+  /**
+   * Microsoft UET (Microsoft Advertising) tag host. Like Clarity, UET is governed by a
+   * consent signal rather than by blocking — Microsoft's recommended "Advanced Consent
+   * Mode": the tag loads straight away with ad_storage denied and sets no MUID /
+   * _uetsid / _uetvid cookies until consent is granted. Only the tag host is exempt, not
+   * the rest of bing.com. This is safe only because the 'default' is queued before bat.js
+   * can run — by the server-baked bootstrap (standard path) or webflowSetup.js (Webflow
+   * path). UET assumes GRANTED when it sees no default at all, the opposite of Clarity.
+   */
+  function isUetTagUrl(src) {
+    if (!src || "string" != typeof src) return false;
+    return -1 !== src.toLowerCase().indexOf("bat.bing.com")
+  }
+
+  /**
+   * Signal the visitor's decision to Microsoft UET Consent Mode. UET enforces a single
+   * permission, ad_storage, mapped from the Marketing category (CCPA: granted until the
+   * visitor opts out). Only 'update' is sent from here; the 'default' comes from the
+   * bootstrap, which also sets the __cbUetSignal fingerprint this dedupes against.
+   * Switched off (via uetConsentMode) whenever the IAB bundle is served: UET reads the
+   * TCF string there, and Microsoft forbids sending Consent Mode and TCF together.
+   */
+  function updateUetConsent(categories) {
+    if (!uetConsentEnabled) return;
+    try {
+      var adStorage = (categories || {}).marketing ? "granted" : "denied";
+      if (window.__cbUetSignal === adStorage) return;
+      window.__cbUetSignal = adStorage;
+      window.uetq = window.uetq || [];
+      window.uetq.push("consent", "update", { ad_storage: adStorage })
     } catch (err) {}
   }
 
@@ -1984,7 +2028,8 @@ ${inlineConfig}
     if (content.indexOf("pintrk(") >= 0 || content.indexOf("pintrk (") >= 0 || content.indexOf("ct.pinterest.com") >= 0) return "marketing";
     if (content.indexOf("twq(") >= 0 || content.indexOf("twq (") >= 0 || content.indexOf("ads-twitter.com") >= 0) return "marketing";
     if (content.indexOf("_linkedin_partner_id") >= 0 || content.indexOf("lintrk(") >= 0 || content.indexOf("lintrk (") >= 0) return "marketing";
-    if (content.indexOf("bat.bing.com") >= 0) return "marketing";
+    // The inline UET snippet is left to run: ad_storage is governed by UET Consent Mode.
+    if (content.indexOf("bat.bing.com") >= 0) return uetConsentEnabled ? null : "marketing";
     if (content.indexOf("hotjar.com") >= 0) return "analytics";
     // Clarity's own bootstrap snippet (and any window.clarity API call) is left to run:
     // its storage is governed by the Consent API v2 signal. See isClarityTagUrl().
@@ -2438,6 +2483,8 @@ ${inlineConfig}
               // load even with consent denied so it can run cookieless. This sweep
               // duplicates shouldBlockScript()'s logic rather than calling it, so the
               // exemption has to be repeated here — see isConsentSignalGoverned().
+            } else if (uetConsentEnabled && isUetTagUrl(src)) {
+              // Microsoft UET: same reasoning, governed by UET Consent Mode (ad_storage).
             } else if (isCategoryAllowed(category)) {
               // Consent already granted for this category.
             } else try {
@@ -2551,6 +2598,7 @@ ${inlineConfig}
     // queued dataLayer commands, so an early push is correct and a skipped push is not.
     ensureGtag()("consent", "update", consentUpdate);
     updateClarityConsent(categories);
+    updateUetConsent(categories);
     pushConsentDataLayerEvent(categories, source)
   }
 
@@ -2589,6 +2637,7 @@ ${inlineConfig}
       preferences: !outPreferences
     };
     updateClarityConsent(ccpaCats);
+    updateUetConsent(ccpaCats);
     // Source stays the literal "ccpa" — it is the value customers' existing GTM
     // triggers match on. The statute goes out as a separate additive key below.
     pushConsentDataLayerEvent(ccpaCats, "ccpa");
@@ -3665,6 +3714,7 @@ ${inlineConfig}
         // Undecided: Clarity still needs an explicit denied signal, otherwise it applies
         // its own regional default rather than ours. Deduped against the bootstrap.
         updateClarityConsent({});
+        updateUetConsent({});
         gaMeasurementId && bootstrapGoogleAnalytics()
       }
     } else if ("ccpa" === bannerType) {
@@ -3962,12 +4012,27 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
     `window.clarity('consentv2',{source:${JSON.stringify(clarityCmpSource)},ad_Storage:cm,analytics_Storage:ca});` +
     `window.__cbClaritySignal=cm+'|'+ca;` +
     `}catch(_){}`;
+  // Microsoft UET Consent Mode default, emitted alongside the Clarity signal and before
+  // the gtag work for the same reasons. This one is load-bearing for a different reason
+  // too: UET assumes ad_storage GRANTED when it finds no default at all, so the default
+  // has to be queued before bat.js can run — which is what makes it safe for the loader
+  // to stop blocking the UET tag. GDPR: default denied, then the stored decision as an
+  // update. CCPA (opt-out): default granted unless the visitor opted out. Sets the same
+  // __cbUetSignal fingerprint updateUetConsent() dedupes against.
+  const uetBootstrap = siteConfigPayload.uetConsentMode === false ? '' :
+    `try{` +
+    `window.uetq=window.uetq||[];` +
+    `var ua=c?(e?'denied':'granted'):(d&&d.marketing?'granted':'denied');` +
+    `window.uetq.push('consent','default',{ad_storage:c?ua:'denied'});` +
+    `if(!c&&ua==='granted')window.uetq.push('consent','update',{ad_storage:'granted'});` +
+    `window.__cbUetSignal=ua;` +
+    `}catch(_){}`;
   // The hoist at the end moves every queued gtag('consent', ...) command to the front of
   // dataLayer while gtag.js has not yet processed the queue (push is still Array.prototype.push).
   // Webflow's built-in Google Analytics integration queues gtag('js') + gtag('config') ABOVE our
   // tag, so without it config ran with no consent state: _ga, _gcl_au, Ads remarketing and Xandr
   // fired before any choice (Monitaur, 2026-09-17, measured in a real browser).
-  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? 'true' : 'false'};var d=null,e=false,hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}${clarityBootstrap}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);window.gtag('set','developer_id.dN2Q3Yj',true);var g=window.__cbConsentDefaultSet===true;if(!c){if(!g){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});}if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else if(!g){window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}try{var L=window.dataLayer;if(L&&L.push===Array.prototype.push){var h=[],r=[];for(var k=0;k<L.length;k++){var it=L[k];(it&&it[0]==='consent'?h:r).push(it);}if(h.length&&r.length&&L[0]!==h[0]){L.length=0;Array.prototype.push.apply(L,h.concat(r));}}}catch(_){}window.__cbConsentDefaultSet=true;}catch(_){}})();\n`;
+  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? 'true' : 'false'};var d=null,e=false,hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}${clarityBootstrap}${uetBootstrap}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);window.gtag('set','developer_id.dN2Q3Yj',true);var g=window.__cbConsentDefaultSet===true;if(!c){if(!g){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});}if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else if(!g){window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}try{var L=window.dataLayer;if(L&&L.push===Array.prototype.push){var h=[],r=[];for(var k=0;k<L.length;k++){var it=L[k];(it&&it[0]==='consent'?h:r).push(it);}if(h.length&&r.length&&L[0]!==h[0]){L.length=0;Array.prototype.push.apply(L,h.concat(r));}}}catch(_){}window.__cbConsentDefaultSet=true;}catch(_){}})();\n`;
 
   const scriptToServe =
     getDebugModeScript() +

@@ -101,6 +101,19 @@ export function getLoaderIabScript(customization, opts = {}, isGAC = false) {
 if (window.__cbIabBundleLoaded) return;
 window.__cbIabBundleLoaded = true;
 
+// Microsoft UET: read consent from the IAB TCF string. Microsoft asked us to enable
+// this explicitly rather than rely on UET detecting __tcfapi on its own. It must run
+// before any UET tag fires, hence the top of the bundle. TCF ONLY on this banner:
+// Microsoft says Consent Mode and TCF must never be used together, so the
+// UET Consent Mode (uetq "consent" commands) belongs on the GDPR/CCPA banners only.
+// Verify in the console: window.uetq.uetConfig.tcf.enabled === true
+// Ref: https://learn.microsoft.com/en-us/advertising/msa-help/hlp_ba_conc_uet_consentfaq
+try {
+  window.uetq = window.uetq || [];
+  window.uetq.push('config', 'tcf', { 'enabled': true });
+} catch (e) {}
+
+
 // Google Consent Mode default, sent synchronously before anything else runs.
 // Previously the only default came from Tcfmanager.js createDefaultTCModel(), which
 // loads after two sequential network fetches — by then the page's own Google tag had

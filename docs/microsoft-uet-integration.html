@@ -1,0 +1,549 @@
+<title>Microsoft UET Integration</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --paper:      #fbfbfc;
+    --surface:    #ffffff;
+    --surface-2:  #f4f5f7;
+    --ink:        #12181d;
+    --ink-2:      #414c56;
+    --ink-3:      #6c7883;
+    --rule:       #e2e5ea;
+    --rule-2:     #cdd3da;
+    --accent:     #0f5c43;
+    --accent-ink: #0b4633;
+    --accent-bg:  #e8f2ee;
+    --warn:       #8a5a0b;
+    --warn-bg:    #fbf3e2;
+    --code-bg:    #f4f5f7;
+
+    --measure: 68ch;
+    --step--1: 0.836rem;
+    --step-0:  1rem;
+    --step-1:  1.18rem;
+    --step-3:  1.85rem;
+    --step-4:  2.45rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --paper:      #0e1317;
+      --surface:    #151b21;
+      --surface-2:  #1b232a;
+      --ink:        #e6eaee;
+      --ink-2:      #b0bac4;
+      --ink-3:      #7d8892;
+      --rule:       #262f38;
+      --rule-2:     #38434e;
+      --accent:     #5cbfa0;
+      --accent-ink: #8fd8c0;
+      --accent-bg:  #12251f;
+      --warn:       #d9a441;
+      --warn-bg:    #241d10;
+      --code-bg:    #11171c;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --paper:      #0e1317;
+    --surface:    #151b21;
+    --surface-2:  #1b232a;
+    --ink:        #e6eaee;
+    --ink-2:      #b0bac4;
+    --ink-3:      #7d8892;
+    --rule:       #262f38;
+    --rule-2:     #38434e;
+    --accent:     #5cbfa0;
+    --accent-ink: #8fd8c0;
+    --accent-bg:  #12251f;
+    --warn:       #d9a441;
+    --warn-bg:    #241d10;
+    --code-bg:    #11171c;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: var(--step-0);
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .shell {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding-inline: 1.25rem;
+    padding-block: 4rem 6rem;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 3rem;
+  }
+
+  @media (min-width: 980px) {
+    .shell {
+      grid-template-columns: 15rem minmax(0, 1fr);
+      align-items: start;
+      padding-block-start: 5rem;
+    }
+    .rail { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 3rem); }
+  }
+  @media (max-width: 979px) { .rail { display: none; } }
+
+  /* ---------- masthead ---------- */
+
+  header.masthead { grid-column: 1 / -1; border-bottom: 1px solid var(--rule); padding-bottom: 2.25rem; }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: var(--step--1);
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 0.85rem;
+  }
+
+  h1 {
+    font-family: Newsreader, Georgia, "Times New Roman", serif;
+    font-weight: 500;
+    font-size: clamp(1.9rem, 5vw, var(--step-4));
+    line-height: 1.12;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+    margin: 0 0 0.9rem;
+  }
+
+  .standfirst { font-size: var(--step-1); color: var(--ink-2); max-width: var(--measure); margin: 0; }
+
+  .badges { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.5rem; }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.8rem;
+    border: 1px solid var(--rule-2);
+    border-radius: 2rem;
+    background: var(--surface);
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: var(--step--1);
+    color: var(--ink-2);
+  }
+  .dot { width: 0.45rem; height: 0.45rem; border-radius: 50%; background: var(--accent); }
+
+  /* ---------- section rail ---------- */
+
+  .rail nav { border-left: 2px solid var(--rule); }
+  .rail a {
+    display: block;
+    padding: 0.4rem 0 0.4rem 1rem;
+    margin-left: -2px;
+    border-left: 2px solid transparent;
+    color: var(--ink-3);
+    text-decoration: none;
+    font-size: var(--step--1);
+    line-height: 1.4;
+  }
+  .rail a:hover { color: var(--accent); border-left-color: var(--accent); }
+  .rail a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---------- prose ---------- */
+
+  main { max-width: var(--measure); min-width: 0; }
+  main > section + section { margin-top: 3.25rem; }
+
+  h2 {
+    font-family: Newsreader, Georgia, serif;
+    font-weight: 500;
+    font-size: var(--step-3);
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    margin: 0 0 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  h3 {
+    font-weight: 600;
+    font-size: var(--step-1);
+    letter-spacing: -0.005em;
+    text-wrap: balance;
+    margin: 2rem 0 0.6rem;
+  }
+
+  p { margin: 0 0 1rem; }
+  p:last-child { margin-bottom: 0; }
+
+  a { color: var(--accent); text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+  ul, ol { margin: 0 0 1rem; padding-left: 1.35rem; }
+  li { margin-bottom: 0.5rem; }
+  li::marker { color: var(--ink-3); }
+  strong { font-weight: 600; }
+
+  code {
+    font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 0.1em 0.36em;
+    overflow-wrap: anywhere;
+  }
+
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 1rem 1.1rem;
+    overflow-x: auto;
+    margin: 0 0 1rem;
+  }
+  pre code { background: none; border: 0; padding: 0; font-size: var(--step--1); line-height: 1.6; overflow-wrap: normal; }
+
+  /* ---------- tables ---------- */
+
+  .table-wrap { overflow-x: auto; margin: 0 0 1rem; border: 1px solid var(--rule); border-radius: 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: var(--step--1); }
+  th, td { text-align: left; padding: 0.7rem 0.9rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  thead th {
+    background: var(--surface-2);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--ink-2);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td code { white-space: nowrap; overflow-wrap: normal; }
+
+  .method {
+    display: inline-block;
+    padding: 0.12rem 0.5rem;
+    border-radius: 4px;
+    border: 1px solid var(--rule-2);
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.78rem;
+    white-space: nowrap;
+    color: var(--ink-2);
+    background: var(--surface);
+  }
+  .method.tcf { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-bg); }
+
+  .state { font-family: "IBM Plex Mono", monospace; white-space: nowrap; }
+  .granted { color: var(--accent); font-weight: 500; }
+  .denied  { color: var(--ink-3); }
+
+  /* ---------- callouts ---------- */
+
+  .callout {
+    border: 1px solid var(--rule-2);
+    border-left: 3px solid var(--accent);
+    background: var(--accent-bg);
+    border-radius: 6px;
+    padding: 1rem 1.15rem;
+    margin: 0 0 1.5rem;
+  }
+  .callout .label {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: var(--step--1);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent-ink);
+    margin: 0 0 0.45rem;
+  }
+  .callout.internal { border-left-color: var(--warn); background: var(--warn-bg); }
+  .callout.internal .label { color: var(--warn); }
+
+  /* ---------- numbered setup steps ---------- */
+
+  .steps { list-style: none; padding: 0; margin: 0; counter-reset: step; }
+  .steps > li { counter-increment: step; position: relative; padding-left: 2.9rem; margin-bottom: 1.9rem; }
+  .steps > li::before {
+    content: counter(step);
+    position: absolute;
+    left: 0; top: 0.05rem;
+    width: 1.85rem; height: 1.85rem;
+    display: grid; place-items: center;
+    border: 1px solid var(--accent);
+    border-radius: 50%;
+    background: var(--surface);
+    color: var(--accent);
+    font-family: "IBM Plex Mono", monospace;
+    font-size: var(--step--1);
+  }
+  .steps h3 { margin-top: 0; }
+
+  /* ---------- troubleshooting ---------- */
+
+  .faq { display: grid; gap: 1.25rem; }
+  .faq > div { border-top: 1px solid var(--rule); padding-top: 1rem; }
+  .faq > div:first-child { border-top: 0; padding-top: 0; }
+  .faq p.q { font-weight: 600; margin-bottom: 0.35rem; }
+
+  footer {
+    grid-column: 1 / -1;
+    border-top: 1px solid var(--rule);
+    padding-top: 1.5rem;
+    color: var(--ink-3);
+    font-size: var(--step--1);
+  }
+  footer ul { padding-left: 1.2rem; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  }
+</style>
+
+<div class="shell">
+
+  <header class="masthead">
+    <p class="eyebrow">Integration guide</p>
+    <h1>Microsoft UET Consent Mode with ConsentBit</h1>
+    <p class="standfirst">
+      ConsentBit passes each visitor's consent decision to Microsoft Advertising's Universal Event
+      Tracking (UET) tag automatically, so UET only stores cookies when your visitor has allowed it.
+    </p>
+    <div class="badges">
+      <span class="badge"><span class="dot"></span> UET Consent Mode</span>
+      <span class="badge"><span class="dot"></span> IAB TCF v2.2</span>
+    </div>
+  </header>
+
+  <aside class="rail">
+    <nav aria-label="On this page">
+      <a href="#how">How it works</a>
+      <a href="#states">With and without consent</a>
+      <a href="#before">Before you begin</a>
+      <a href="#setup">Setting up</a>
+      <a href="#verify">Verifying</a>
+      <a href="#trouble">Troubleshooting</a>
+    </nav>
+  </aside>
+
+  <main>
+
+    <div class="callout internal">
+      <p class="label">Internal: remove before publishing</p>
+      <ul>
+        <li>Publish at a permanent URL next to the Clarity article. Microsoft will link to it from their
+          help center. Suggested path:
+          <code>consentbit.com/articles/consentbit-supports-microsoft-uet-consent-mode</code></li>
+        <li>The copy says ConsentBit <em>supports</em> UET Consent Mode. Once Microsoft adds ConsentBit to
+          their list of supported CMPs, this can be updated.</li>
+      </ul>
+    </div>
+
+    <section id="intro">
+      <p>
+        Microsoft Advertising requires a consent signal for UET traffic from the European Economic Area,
+        the United Kingdom and Switzerland. Without one, Microsoft stops tracking UET conversions and stops
+        building remarketing lists for those visitors.
+      </p>
+      <p>
+        Microsoft accepts two kinds of consent signal: <strong>UET Consent Mode</strong> and the
+        <strong>IAB Transparency and Consent Framework (TCF)</strong>. It asks that a site never use both at
+        the same time. ConsentBit picks the right one for your banner type automatically.
+      </p>
+      <p><strong>No configuration is required in ConsentBit.</strong> Add your UET tag to your site and ConsentBit handles the rest.</p>
+    </section>
+
+    <section id="how">
+      <h2>How it works</h2>
+      <p>The consent method depends on which ConsentBit banner your site uses:</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Banner</th><th>Method</th><th>What ConsentBit sends</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>GDPR</td>
+              <td><span class="method">Consent Mode</span></td>
+              <td><code>ad_storage</code> is denied by default and granted when the visitor allows the Marketing category.</td>
+            </tr>
+            <tr>
+              <td>CCPA and US state laws</td>
+              <td><span class="method">Consent Mode</span></td>
+              <td><code>ad_storage</code> is granted by default and denied when the visitor selects
+                <strong>Do Not Sell or Share My Personal Information</strong>.</td>
+            </tr>
+            <tr>
+              <td>IAB TCF</td>
+              <td><span class="method tcf">TCF</span></td>
+              <td>ConsentBit enables TCF reading for UET. UET takes consent from the TC string, including
+                Microsoft (vendor 1126) and Xandr (vendor 32).</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>
+        UET only enforces one permission, <code>ad_storage</code>, which controls whether UET can store
+        cookies. ConsentBit maps it from your <strong>Marketing</strong> category. A visitor who allows
+        Analytics but not Marketing keeps <code>ad_storage</code> denied.
+      </p>
+      <p>
+        On the IAB TCF banner, ConsentBit asks visitors for consent to Microsoft and Xandr for the purposes
+        Microsoft requires: 1, 2, 3, 4, 7, 9 and 10. It does not send UET Consent Mode commands on that
+        banner, as Microsoft requires.
+      </p>
+    </section>
+
+    <section id="states">
+      <h2>What happens with and without consent</h2>
+
+      <h3>GDPR and CCPA banners</h3>
+      <p>
+        ConsentBit uses Microsoft's recommended Advanced Consent Mode. The UET tag loads straight away,
+        and ConsentBit sets the consent default before UET runs.
+      </p>
+      <ul>
+        <li><strong>Consent denied:</strong> UET does not write the <code>MUID</code>, <code>_uetsid</code>,
+          <code>_uetvid</code>, <code>_uetsid_exp</code>, <code>_uetvid_exp</code> or <code>MSPTC</code>
+          cookies. Microsoft only collects anonymous data, which it uses for conversion modelling.</li>
+        <li><strong>Consent granted:</strong> UET sets its cookies and tracks conversions and remarketing normally.</li>
+        <li><strong>Consent withdrawn:</strong> ConsentBit sends the updated decision straight away.</li>
+      </ul>
+
+      <h3>IAB TCF banner</h3>
+      <p>
+        The UET tag is held until the visitor makes a choice. When it loads, it reads the visitor's
+        consent for Microsoft from the TC string. If the visitor rejects, the UET tag does not load and no
+        Microsoft cookies are set.
+      </p>
+    </section>
+
+    <section id="before">
+      <h2>Before you begin</h2>
+      <p>You need a Microsoft Advertising account with a UET tag. You can find your tag in Microsoft Advertising under <strong>Tools → UET tag</strong>.</p>
+
+      <div class="callout">
+        <p class="label">Don't add your own consent code</p>
+        <p>
+          Remove any <code>uetq.push('consent', …)</code> or <code>uetq.push('config', 'tcf', …)</code> code
+          you added yourself. ConsentBit already sends the right signal for your banner, and extra code can
+          send UET Consent Mode and TCF at the same time, which Microsoft does not allow.
+        </p>
+      </div>
+    </section>
+
+    <section id="setup">
+      <h2>Setting up the integration</h2>
+
+      <ol class="steps">
+        <li>
+          <h3>Install ConsentBit</h3>
+          <p>Install the ConsentBit script in the <code>&lt;head&gt;</code> of your site and publish your cookie banner.</p>
+        </li>
+        <li>
+          <h3>Add your UET tag after the ConsentBit script</h3>
+          <p>Add the UET tag exactly as Microsoft Advertising provides it, <strong>below</strong> the ConsentBit script:</p>
+<pre><code>&lt;script&gt;
+(function(w,d,t,r,u){var f,n,i;w[u]=w[u]||[],f=function(){var o={ti:"YOUR_TAG_ID", enableAutoSpaTracking: true};o.q=w[u],w[u]=new UET(o),w[u].push("pageLoad")},n=d.createElement(t),n.src=r,n.async=1,n.onload=n.onreadystatechange=function(){var s=this.readyState;s&amp;&amp;s!=="loaded"&amp;&amp;s!=="complete"||(f(),n.onload=n.onreadystatechange=null)},i=d.getElementsByTagName(t)[0],i.parentNode.insertBefore(n,i)})(window,document,"script","//bat.bing.com/bat.js","uetq");
+&lt;/script&gt;</code></pre>
+          <p>Replace <code>YOUR_TAG_ID</code> with your UET tag ID.</p>
+          <p>
+            The order matters. UET treats consent as granted if it sees no consent default, so ConsentBit
+            has to run first. Do not add a blocking attribute such as <code>data-category</code> to the UET tag.
+          </p>
+        </li>
+        <li>
+          <h3>Publish your site</h3>
+          <p>ConsentBit detects UET and sends the consent signal on every page: on first visit, when a returning visitor's stored choice is applied, and whenever the visitor changes their preferences.</p>
+        </li>
+      </ol>
+    </section>
+
+    <section id="verify">
+      <h2>Verifying the integration</h2>
+      <p>
+        Open your site in a private window and press <strong>F12</strong> to open the browser console.
+        The checks below use the <code>uetConfig</code> object, which is only available after the UET tag has loaded.
+      </p>
+
+      <h3>GDPR and CCPA banners</h3>
+<pre><code>window.uetq.uetConfig.consent.enabled           // true
+window.uetq.uetConfig.consent.adStorageAllowed  // see table</code></pre>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Visitor action</th><th>GDPR banner</th><th>CCPA banner</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Banner shown, no choice made</td><td class="state"><span class="denied">false</span></td><td class="state"><span class="granted">true</span></td></tr>
+            <tr><td>Accept All</td><td class="state"><span class="granted">true</span></td><td class="state"><span class="granted">true</span></td></tr>
+            <tr><td>Reject All / Do Not Sell</td><td class="state"><span class="denied">false</span></td><td class="state"><span class="denied">false</span></td></tr>
+            <tr><td>Analytics only (GDPR)</td><td class="state"><span class="denied">false</span></td><td class="state">n/a</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>IAB TCF banner</h3>
+      <p>Accept the banner first, since the UET tag loads after consent on this banner. Then run:</p>
+<pre><code>window.uetq.uetConfig.tcf.enabled       // true
+window.uetq.uetConfig.consent.enabled   // false: Consent Mode is not used with TCF</code></pre>
+      <p>To check the consent Microsoft receives in the TC string:</p>
+<pre><code>__tcfapi('getTCData', 2, d =&gt; console.log(
+  'Microsoft (1126):', d.vendor.consents[1126],
+  'Xandr (32):', d.vendor.consents[32]));</code></pre>
+      <p>Both values are <code>true</code> after Accept All and <code>false</code> after Reject All.</p>
+
+      <h3>Check the cookies</h3>
+      <p>
+        Open <strong>Application → Cookies</strong> in your browser's developer tools. Before the visitor
+        consents, and after they reject, <code>MUID</code>, <code>_uetsid</code> and <code>_uetvid</code>
+        must not be present. Microsoft checks for exactly this.
+      </p>
+      <p>
+        You can also use Microsoft's <strong>UET Tag Helper</strong> browser extension. With Consent Mode,
+        the <code>asc</code> parameter on the page load event shows <code>G</code> when consent is granted
+        and <code>D</code> when it is denied. With TCF, a granted page load includes <code>&amp;ms=G</code>.
+      </p>
+    </section>
+
+    <section id="trouble">
+      <h2>Troubleshooting</h2>
+      <div class="faq">
+        <div>
+          <p class="q"><code>window.uetq.uetConfig</code> is undefined.</p>
+          <p>The UET tag has not loaded. Check that the tag is on the page. On the IAB TCF banner this is expected until the visitor accepts.</p>
+        </div>
+        <div>
+          <p class="q">Microsoft cookies appear before the visitor consents.</p>
+          <p>The UET tag is probably placed above the ConsentBit script, so UET ran before the consent default was set. Move the UET tag below the ConsentBit script.</p>
+        </div>
+        <div>
+          <p class="q">Both <code>tcf.enabled</code> and <code>consent.enabled</code> are true.</p>
+          <p>Your site has its own UET consent code alongside ConsentBit. Remove it, so only one consent method is used.</p>
+        </div>
+        <div>
+          <p class="q"><code>adStorageAllowed</code> stays false after the visitor saves preferences.</p>
+          <p>That is expected when the Marketing category is off. UET's <code>ad_storage</code> permission follows the Marketing category.</p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    <p><strong>Related links</strong></p>
+    <ul>
+      <li><a href="https://learn.microsoft.com/en-us/advertising/msa-help/hlp_ba_conc_uet_consentfaq">FAQ: UET and user consent</a></li>
+      <li><a href="https://help.ads.microsoft.com/#apex/ads/en/60119/1">Setting up UET for Consent Mode</a></li>
+      <li><a href="https://help.ads.microsoft.com/apex/index/3/en/60186">Transparency and Consent Framework (TCF) for UET</a></li>
+      <li><a href="https://www.consentbit.com/articles/consentbit-supports-microsoft-clarity-consent-mode">ConsentBit and Microsoft Clarity Consent Mode</a></li>
+    </ul>
+  </footer>
+
+</div>
