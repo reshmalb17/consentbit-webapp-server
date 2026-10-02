@@ -49,6 +49,24 @@ export function capsForPlan(planId) {
 }
 
 /**
+ * Accounts whose BASIC sites get team members anyway, with Essential's seats.
+ * Per-customer exception, keyed by organization id.
+ * Platan Hotels (2026-10-03): 15 Basic sites; billing contact needs team access.
+ */
+export const TEAM_ON_BASIC_ORG_IDS = [
+  '8653118a-ff20-4270-8172-3a71655b7398', // Platan Hotels — rodrigo.rejman@platanhotels.pl
+];
+
+/** Seat caps for one site: its plan, plus the Basic exception above. */
+export function capsForSite(planId, organizationId) {
+  const plan = String(planId || '').toLowerCase();
+  if (plan === 'basic' && TEAM_ON_BASIC_ORG_IDS.includes(String(organizationId || ''))) {
+    return TEAM_SEAT_CAPS.essential;
+  }
+  return capsForPlan(plan);
+}
+
+/**
  * SQL condition: the site (column `siteCol`) is on a plan that includes team members
  * — its own Essential/Growth subscription, active/trialing, or cancelled but still
  * inside the paid period (same rule as the Team tab's seat check).
@@ -63,12 +81,18 @@ export function siteHasTeamPlanSql(siteCol) {
   // getSubscriptionsBySiteIds (dashboard + Team tab): newest active/trialing, else a
   // cancelled one still inside its paid period. Checking "any Essential/Growth row"
   // let an old cancelled Essential keep the team in after a switch to Basic.
+  // Accounts in TEAM_ON_BASIC_ORG_IDS also count 'basic' as a team plan.
+  const basicOrgs = TEAM_ON_BASIC_ORG_IDS.map((id) => `'${String(id).replace(/'/g, "''")}'`).join(', ');
+  const plans = basicOrgs
+    ? `CASE WHEN (SELECT tbo.organizationId FROM Site tbo WHERE tbo.id = ${siteCol}) IN (${basicOrgs})
+            THEN 'basic' ELSE 'essential' END, 'essential', 'growth'`
+    : `'essential', 'growth'`;
   return `(SELECT lower(tp.planId) FROM Subscription tp
     WHERE tp.siteId = ${siteCol}
       AND (tp.status IN ('active', 'trialing')
            OR (tp.status = 'canceled' AND tp.currentPeriodEnd > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))
     ORDER BY CASE WHEN tp.status IN ('active', 'trialing') THEN 0 ELSE 1 END, tp.updatedAt DESC
-    LIMIT 1) IN ('essential', 'growth')`;
+    LIMIT 1) IN (${plans})`;
 }
 
 /** 'editor' was the old name for 'member'. Anything unrecognised → null. */

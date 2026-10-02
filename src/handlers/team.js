@@ -29,6 +29,7 @@ import {
   TEAM_ROLES,
   INVITE_TTL_DAYS,
   capsForPlan,
+  capsForSite,
   normalizeRole,
   ensureTeamTables,
   normalizeEmail,
@@ -261,7 +262,7 @@ async function describeSites(db, env, sites, excludeMemberId = null) {
   const out = [];
   for (const s of sites) {
     const planId = plans ? plans[String(s.id)] ?? 'free' : null;
-    const caps = capsForPlan(planId ?? 'free');
+    const caps = capsForSite(planId ?? 'free', s.organizationId ?? s.organizationid);
     out.push({
       id: String(s.id),
       name: s.name || null,

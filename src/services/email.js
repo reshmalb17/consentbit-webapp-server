@@ -67,6 +67,31 @@ export async function sendBrevoEmail(env, { to, name, subject, html, text, attac
 }
 
 // ---------------------------------------------------------------------------
+// Temporary per-customer mute (billing / plan / scan-limit emails only)
+// ---------------------------------------------------------------------------
+
+// Recipients that must not get billing, plan or scan-limit emails. Entries are
+// full addresses or "@domain" for a whole company. Login codes, verify links and
+// team emails are NOT muted — those don't check this list.
+// Platan Hotels (2026-10-03): 15 sites moved to manual Stripe subscriptions —
+// remove the entry when they want emails again.
+const MUTED_EMAIL_RECIPIENTS = [
+  '@platanhotels.pl',
+];
+
+function isEmailMuted(to) {
+  const addr = String(to || '').trim().toLowerCase();
+  if (!addr) return false;
+  return MUTED_EMAIL_RECIPIENTS.some(m => (m.startsWith('@') ? addr.endsWith(m) : addr === m));
+}
+
+function skipMuted(kind, to) {
+  if (!isEmailMuted(to)) return false;
+  console.log(`[Email] ${kind} skipped — recipient is muted`, { to });
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Shared layout wrapper
 // ---------------------------------------------------------------------------
 
@@ -206,6 +231,7 @@ ConsentBit Team
  * @param {{ to: string, name: string, domain: string, scriptUrl: string }} opts
  */
 export function sendFreePlanEmail(env, ctx, { to, name, domain, scriptUrl }) {
+  if (skipMuted('sendFreePlanEmail', to)) return;
   const displayName  = name || 'there';
   const displayDomain = domain || 'your website';
   const dashboardUrl  = (env.WEBAPP_PUBLIC_URL || 'https://accounts.consentbit.com').replace(/\/$/, '') + '/dashboard';
@@ -315,6 +341,7 @@ ConsentBit Team
  * }} opts
  */
 export function sendPaidPlanEmail(env, ctx, { to, name, domain, planName, invoice = null, variant = 'default' }) {
+  if (skipMuted('sendPaidPlanEmail', to)) return;
   const displayName   = name || 'there';
   const displayDomain = domain || 'your website';
   const displayPlan   = planName || 'Basic';
@@ -490,6 +517,7 @@ ConsentBit Team
  * @param {{ to: string, name: string }} opts
  */
 export function sendCancellationEmail(env, ctx, { to, name }) {
+  if (skipMuted('sendCancellationEmail', to)) return;
   const displayName = name || 'there';
 
   const subject = `Your ConsentBit Subscription Has Been Cancelled`;
@@ -547,6 +575,7 @@ Team ConsentBit
  * @param {{ to: string, name: string, updatePaymentUrl?: string, reminderNumber: 1|2|3 }} opts
  */
 export function sendPaymentFailureEmail(env, ctx, { to, name, updatePaymentUrl, reminderNumber = 1 }) {
+  if (skipMuted('sendPaymentFailureEmail', to)) return;
   const displayName   = name || 'there';
   const billingUrl    = updatePaymentUrl || ((env.WEBAPP_PUBLIC_URL || 'https://accounts.consentbit.com').replace(/\/$/, ''));
 
@@ -632,6 +661,7 @@ Support Team
  * @param {{ to: string, name: string, domain: string, scansLimit: number, upgradeUrl?: string }} opts
  */
 export function sendScanLimitEmail(env, ctx, { to, name, domain, scansLimit, upgradeUrl }) {
+  if (skipMuted('sendScanLimitEmail', to)) return;
   const displayName   = name || 'there';
   const displayDomain = domain || 'your website';
   const billingUrl    = upgradeUrl || ((env.WEBAPP_PUBLIC_URL || 'https://accounts.consentbit.com').replace(/\/$/, ''));
