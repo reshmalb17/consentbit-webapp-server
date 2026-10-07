@@ -3639,6 +3639,27 @@ function cbRecordIabConsent(status, categories) {
       tcf: tcf
     };
 
+    // Consent ID: one random ID per visitor per site, created on their first choice and
+    // reused afterwards, so all of a visitor's records can be found and deleted together.
+    // Same localStorage key as the standard banner (cdnM.js). Never blocks the POST.
+    try {
+      body.deviceId = (function () {
+        var k = 'cb_consent_id_' + siteId, v = null, w = window.crypto;
+        try { v = localStorage.getItem(k); } catch (x) {}
+        if (v && v.length === 36 && /^[0-9a-f-]+$/i.test(v)) return v;
+        if (w && w.randomUUID) {
+          v = w.randomUUID();
+        } else {
+          v = '10000000-1000-4000-8000-100000000000'.replace(/[018]/g, function (n) {
+            var b = w && w.getRandomValues ? w.getRandomValues(new Uint8Array(1))[0] : Math.floor(256 * Math.random());
+            return (+n ^ b & 15 >> +n / 4).toString(16);
+          });
+        }
+        try { localStorage.setItem(k, v); } catch (x) {}
+        return v;
+      })();
+    } catch (x) {}
+
     fetch(apiBase + '/api/consent', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

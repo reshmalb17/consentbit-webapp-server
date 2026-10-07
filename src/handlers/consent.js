@@ -212,6 +212,11 @@ export async function handleConsent(request, env, ctx) {
   // If an identical consent (same site + device + regulation + status) was recorded in the
   // last 10s, return that row instead of inserting a duplicate. Only dedups when a deviceId
   // is present, so two distinct anonymous visitors are never collapsed.
+  // The choices themselves must match too: a visitor who saves preferences twice within 10s
+  // with different categories (both status 'partial') made two real choices, and dropping
+  // the second would leave the record showing the wrong one. The payload's own timestamp
+  // differs between the two fires of a double-click, so compare only categories + ccpa.
+  // Needs idx_consent_site_created ON Consent (siteId, createdAt), or this scans the table.
   if (body.deviceId) {
     try {
       const dupSince = new Date(Date.now() - 10000).toISOString();
@@ -219,9 +224,11 @@ export async function handleConsent(request, env, ctx) {
         .prepare(
           `SELECT id FROM Consent
            WHERE siteId = ?1 AND deviceId = ?2 AND status = ?3 AND regulation IS ?4 AND createdAt >= ?5
+             AND json_extract(consent_categories, '$.categories') IS json_extract(?6, '$.categories')
+             AND json_extract(consent_categories, '$.ccpa') IS json_extract(?6, '$.ccpa')
            ORDER BY createdAt DESC LIMIT 1`,
         )
-        .bind(siteId, body.deviceId, status, regulation ?? null, dupSince)
+        .bind(siteId, body.deviceId, status, regulation ?? null, dupSince, consentCategoriesJson)
         .first()
         .catch(() => null);
       if (existing?.id) {

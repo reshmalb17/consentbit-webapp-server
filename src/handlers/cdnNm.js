@@ -1594,6 +1594,26 @@ ${inlineConfig}
         expiresAt: expiresAt,
         consent: state
       };
+      // Consent ID: one random ID per visitor per site, created on their first choice and
+      // reused afterwards, so all of a visitor's records can be found and deleted together.
+      // Same localStorage key as the IAB banner (IabCode.js). Never blocks the POST.
+      try {
+        payload.deviceId = function () {
+          var key = "cb_consent_id_" + siteId, id = null, cr = window.crypto;
+          try { id = localStorage.getItem(key) } catch (x) {}
+          if (id && id.length === 36 && /^[0-9a-f-]+$/i.test(id)) return id;
+          if (cr && cr.randomUUID) {
+            id = cr.randomUUID()
+          } else {
+            id = "10000000-1000-4000-8000-100000000000".replace(/[018]/g, function (n) {
+              var b = cr && cr.getRandomValues ? cr.getRandomValues(new Uint8Array(1))[0] : Math.floor(256 * Math.random());
+              return (+n ^ b & 15 >> +n / 4).toString(16)
+            })
+          }
+          try { localStorage.setItem(key, id) } catch (x) {}
+          return id
+        }()
+      } catch (x) {}
       try {
         fetch(apiBase + "/api/consent", {
           method: "POST",
@@ -3907,7 +3927,7 @@ ${inlineConfig}
 }();
 `;
 
-  const SCRIPT_VERSION = '2026-08-22-script-recreation-fixes';
+  const SCRIPT_VERSION = '2026-10-07-consent-id';
   const customizationUpdatedAt = customization?.updatedAt || customization?.updated_at || '';
   const translationsSig = await (async () => {
     try {
