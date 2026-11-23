@@ -10,7 +10,7 @@ import {
   updateSiteFromPatch,
   getOrganizationsForUser,
 } from '../services/db.js';
-import { userCanAdminSite } from '../services/team.js';
+import { userCanAdminSite, listMemberSiteGrants } from '../services/team.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -111,54 +111,89 @@ export async function handleSites(request, env) {
     return Response.json({ success: true, site });
   }
 
-  if (request.method === 'GET') {
-    const organizationId = url.searchParams.get('organizationId') || null;
+  if (request.method === 'GET') {
+    // Security audit C3 (2026-10-16): this used to return EVERY customer's sites to any
+    // `sid` cookie (even a made-up one), and any org's sites for ?organizationId= with no
+    // auth. Now a valid session is required and only the caller's sites come back: sites
+    // of orgs they belong to, plus sites granted to them as a team member. No session =
+    // the same empty answer as before. No live caller (Webflow app, Framer plugin,
+    // cb-server, webapps) uses this GET — checked 2026-10-16.
+    const organizationId = url.searchParams.get('organizationId') || null;
+    const sid = getSessionIdFromCookie(request);
+    const session = sid ? await getSessionById(db, sid) : null;
+    const userId = session ? (session.userId ?? session.user_id) : null;
 
-    let sites, effectivePlanId;
-    if (organizationId) {
-      // Explicit org ID - parallel sites + plan
-      const [siteResults, planResults] = await Promise.all([
-        listSites(db, { organizationId }),
-        getEffectivePlanForOrganization(db, organizationId),
-      ]);
-      sites = siteResults;
-      effectivePlanId = planResults.planId;
-    } else {
-      // Authenticated user - parallel session + user + org + sites + plan
-      const sid = getSessionIdFromCookie(request);
-      if (sid) {
-        const [session, user, siteResults, planResults] = await Promise.all([
-          getSessionById(db, sid),
-          sid ? getUserById(db, session?.userId ?? session?.user_id) : Promise.resolve(null),
-          listSites(db, { organizationId: null }), // Will get user's orgs
-          getEffectivePlanForOrganization(db, null), // Will get user's effective plan
-        ]);
-        sites = siteResults;
-        effectivePlanId = planResults.planId;
-      } else {
-        // No auth - just empty sites
-        sites = [];
-        effectivePlanId = 'free';
-      }
-    }
+    let sites, effectivePlanId;
+    if (!userId) {
+      sites = [];
+      effectivePlanId = 'free';
+    } else {
+      const [orgs, grants] = await Promise.all([
+        getOrganizationsForUser(db, userId),
+        listMemberSiteGrants(db, userId),
+      ]);
+      const ownOrgIds = orgs.map((o) => String(o.id));
 
-    // Enrich sites with stagingDomain from KV where platformSiteId is set
-    const kv = env.WEBFLOW_AUTHENTICATION;
-    if (kv && sites && sites.length > 0) {
-      await Promise.all(sites.map(async (s) => {
-        const platformSiteId = s.platformSiteId ?? s.platformsiteid ?? null;
-        if (!platformSiteId) return;
-        try {
-          const raw = await kv.get(platformSiteId);
-          if (raw) {
-            const data = JSON.parse(raw);
-            if (data.stagingUrl) {
-              s.stagingDomain = data.stagingUrl.replace(/^https?:\/\//, '').split('/')[0];
-            }
+      if (organizationId) {
+        if (ownOrgIds.includes(organizationId)) {
+          const [siteResults, planResults] = await Promise.all([
+            listSites(db, { organizationId }),
+            getEffectivePlanForOrganization(db, organizationId),
+          ]);
+          sites = siteResults;
+          effectivePlanId = planResults.planId;
+        } else {
+          // Team member: only the sites granted to them in that org.
+          const grantedIds = grants
+            .filter((g) => String(g.organizationId) === organizationId)
+            .map((g) => String(g.siteId));
+          if (grantedIds.length === 0) {
+            return Response.json({ success: false, error: 'Forbidden' }, { status: 403 });
           }
-        } catch { /* ignore */ }
-      }));
+          const [siteResults, planResults] = await Promise.all([
+            Promise.all(grantedIds.map((id) => getSiteById(db, id))),
+            getEffectivePlanForOrganization(db, organizationId),
+          ]);
+          sites = siteResults.filter(Boolean);
+          effectivePlanId = planResults.planId;
+        }
+      } else {
+        const ownSites = (await Promise.all(
+          ownOrgIds.map((id) => listSites(db, { organizationId: id })),
+        )).flat();
+        const seen = new Set(ownSites.map((s) => String(s.id)));
+        const grantedIds = [...new Set(grants.map((g) => String(g.siteId)))].filter((id) => !seen.has(id));
+        const grantedSites = (await Promise.all(grantedIds.map((id) => getSiteById(db, id)))).filter(Boolean);
+        sites = [...ownSites, ...grantedSites];
+        effectivePlanId = ownOrgIds[0]
+          ? (await getEffectivePlanForOrganization(db, ownOrgIds[0])).planId
+          : 'free';
+      }
     }
+
+    // stagingDomain from D1 Site.stagingUrl. The KV read (1 per site per list) was
+    // DISABLED 2026-10-16. Framer unchanged: it never had a KV entry here, so no label.
+    for (const s of sites || []) {
+      if (String(s.platform ?? '').toLowerCase() === 'framer') continue;
+      const stagingUrl = s.stagingUrl ?? s.stagingurl ?? null;
+      if (stagingUrl) s.stagingDomain = String(stagingUrl).replace(/^https?:\/\//, '').split('/')[0];
+    }
+    // const kv = env.WEBFLOW_AUTHENTICATION;
+    // if (kv && sites && sites.length > 0) {
+    //   await Promise.all(sites.map(async (s) => {
+    //     const platformSiteId = s.platformSiteId ?? s.platformsiteid ?? null;
+    //     if (!platformSiteId) return;
+    //     try {
+    //       const raw = await kv.get(platformSiteId);
+    //       if (raw) {
+    //         const data = JSON.parse(raw);
+    //         if (data.stagingUrl) {
+    //           s.stagingDomain = data.stagingUrl.replace(/^https?:\/\//, '').split('/')[0];
+    //         }
+    //       }
+    //     } catch { /* ignore */ }
+    //   }));
+    // }
 
     return Response.json({ success: true, sites, effectivePlanId });
   }

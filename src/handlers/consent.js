@@ -5,6 +5,8 @@
 import { ensureSchema, getSiteById } from '../services/db.js';
 import { requestDomainMatchesSite } from '../utils/domainValidate.js';
 import { readConsentBody, invalidConsentFields } from '../utils/consentLimits.js';
+import { truncateIp } from '../utils/ipTruncate.js';
+import { lawName } from '../utils/lawNames.js';
 
 // Set once per isolate when the DB turns out to lack the optional Consent columns,
 // so later saves skip the doomed first attempt instead of paying a round-trip each time.
@@ -48,11 +50,12 @@ export async function handleConsent(request, env, ctx) {
   const region  = cf.regionCode || null;       // "CA", "NY", etc.
   const isEU    = cf.isEUCountry === '1' ? 1 : 0;
 
-  // Network info
-  const ipAddress =
+  // Network info — IP is shortened (/24, /48) before it is stored anywhere.
+  const ipAddress = truncateIp(
     request.headers.get('cf-connecting-ip') ||
     request.headers.get('x-forwarded-for') ||
-    null;
+    null
+  );
   const userAgent = request.headers.get('user-agent') || null;
 
   // Body from CDN script
@@ -289,7 +292,7 @@ export async function handleConsent(request, env, ctx) {
   // which is skipped on any DB already stamped at SCHEMA_VERSION, so a DB may not
   // have them yet. insertConsentRow() drops them rather than failing the save.
   const optionalRow = [
-    ['law', law],
+    ['law', lawName(law)],   // official statute name, not the internal code (utils/lawNames.js)
     ['law_resolved', lawResolved ? 1 : 0],
     ['consent_language', consentLanguage],
     ['consent_model', consentModel],

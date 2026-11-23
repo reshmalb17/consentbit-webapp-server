@@ -1,0 +1,198 @@
+// src/handlers/consentVisitor.js
+//
+// One visitor's consent records, for the site owner to answer that visitor's access or
+// deletion request (gap F, docs/minimum-legal-requirements.md; GDPR Art. 28(3)(e) — we
+// are the processor and must help the customer answer data-subject requests).
+//
+//   GET  /api/consent-visitor?siteId=…&deviceId=…           → every record, as JSON (access)
+//   POST /api/consent-visitor { siteId, deviceId }           → delete every record (erasure)
+//
+// `deviceId` matches the visitor consent ID OR a single record ID, exactly like the
+// dashboard's "Find" (consentLogs.js), so what is deleted is what the customer was shown.
+//
+// TEST-ONLY: 404 unless LAW_FIXES="1". Not in PUBLIC_PATHS, so POST keeps the CSRF check.
+// Export needs access to the site; delete needs the account owner or a team Admin (same
+// rule as changing the retention period). Export is not plan-gated; delete is Growth-only
+// (DELETE_PLANS, below).
+//
+// Every deletion leaves a row in ConsentErasureLog (who, when, how many) holding only a
+// SHA-256 of the ID — enough to show later that a request was carried out, without
+// keeping the identifier that was erased.
+
+import { getSessionById } from '../services/db.js';
+import { userCanAccessSite, userCanAdminSite } from '../services/team.js';
+import { truncateIp } from '../utils/ipTruncate.js';
+import { resolveEffectivePlanId } from './bannerCustomization.js';
+
+// Deleting a visitor's records is a Growth entitlement (export stays open to every plan).
+const DELETE_PLANS = ['growth'];
+
+function sidFromCookie(request) {
+  const cookie = request.headers.get('Cookie') || request.headers.get('cookie') || '';
+  const m = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
+  return m ? m[1].trim() : null;
+}
+
+async function sessionUserId(db, request) {
+  const sid = sidFromCookie(request);
+  if (!sid) return null;
+  const session = await getSessionById(db, sid);
+  return session?.userId ?? session?.user_id ?? null;
+}
+
+const cleanId = (v) => String(v || '').trim().slice(0, 128);
+
+async function sha256Hex(text) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+export async function handleConsentVisitor(request, env) {
+  if (env.LAW_FIXES !== '1') {
+    return Response.json({ success: false, error: 'Not Found' }, { status: 404 });
+  }
+  const db = env.CONSENT_WEBAPP;
+
+  if (request.method === 'GET') {
+    const url = new URL(request.url);
+    const siteId = cleanId(url.searchParams.get('siteId'));
+    const visitorId = cleanId(url.searchParams.get('deviceId'));
+    if (!siteId || !visitorId) {
+      return Response.json({ success: false, error: 'siteId and deviceId are required' }, { status: 400 });
+    }
+    const userId = await sessionUserId(db, request);
+    if (!userId || !(await userCanAccessSite(db, userId, siteId))) {
+      return Response.json({ success: false, error: 'Authentication required.' }, { status: 401 });
+    }
+
+    try {
+      const { results } = await db
+        .prepare(`SELECT * FROM Consent WHERE siteId = ?1 AND (deviceId = ?2 OR id = ?2) ORDER BY createdAt DESC`)
+        .bind(siteId, visitorId)
+        .all();
+      // Records the retention sweep moved to consentbit-retention-data (RETENTION_DB) still
+      // belong to the visitor, so the export includes them.
+      let retained = [];
+      if (env.RETENTION_DB) {
+        try {
+          const r = await env.RETENTION_DB
+            .prepare(`SELECT consentRow FROM RetainedConsent WHERE siteId = ?1 AND (deviceId = ?2 OR id = ?2)`)
+            .bind(siteId, visitorId)
+            .all();
+          retained = (r.results || [])
+            .map((x) => { try { return JSON.parse(x.consentRow); } catch (_) { return null; } })
+            .filter(Boolean);
+        } catch (_) { /* retention schema not created yet */ }
+      }
+      const records = [...(results || []), ...retained].map((row) => {
+        let consent = row.consent_categories;
+        try { if (typeof consent === 'string') consent = JSON.parse(consent); } catch (_) { /* keep raw */ }
+        return { ...row, ipAddress: truncateIp(row.ipAddress), consent_categories: consent };
+      });
+      return Response.json({
+        success: true,
+        siteId,
+        consentId: visitorId,
+        exportedAt: new Date().toISOString(),
+        count: records.length,
+        records,
+      });
+    } catch (err) {
+      console.error('[ConsentVisitor][GET] failed:', err?.message);
+      return Response.json({ success: false, error: 'Could not load this visitor\'s records.' }, { status: 500 });
+    }
+  }
+
+  if (request.method === 'POST') {
+    const body = await request.json().catch(() => null);
+    const siteId = cleanId(body?.siteId);
+    const visitorId = cleanId(body?.deviceId);
+    if (!siteId || !visitorId) {
+      return Response.json({ success: false, error: 'siteId and deviceId are required' }, { status: 400 });
+    }
+    const userId = await sessionUserId(db, request);
+    if (!userId || !(await userCanAccessSite(db, userId, siteId))) {
+      return Response.json({ success: false, error: 'Authentication required.' }, { status: 401 });
+    }
+    if (!(await userCanAdminSite(db, userId, siteId))) {
+      return Response.json(
+        { success: false, error: 'Only the account owner or a team Admin can delete consent records.', code: 'OWNER_OR_ADMIN_ONLY' },
+        { status: 403 },
+      );
+    }
+    // Growth-only. The webapp hides the button below Growth, but this endpoint is callable
+    // directly. null = plan resolution failed; let it through rather than block on a D1 blip.
+    const planId = await resolveEffectivePlanId(db, env, siteId);
+    if (planId !== null && !DELETE_PLANS.includes(planId)) {
+      return Response.json(
+        { success: false, error: 'Deleting consent records is available on the Growth plan.', code: 'DELETE_PLAN_REQUIRED' },
+        { status: 403 },
+      );
+    }
+
+    try {
+      const res = await db
+        .prepare(`DELETE FROM Consent WHERE siteId = ?1 AND (deviceId = ?2 OR id = ?2)`)
+        .bind(siteId, visitorId)
+        .run();
+      const deleted = res?.meta?.changes ?? 0;
+
+      // Copies kept for archived sites (Admin-Dashboard-Server archiveSite.js). The table
+      // only exists once a site has been archived, so a failure here is not an error.
+      let archivedDeleted = 0;
+      try {
+        const a = await db
+          .prepare(
+            `DELETE FROM ArchivedConsent WHERE siteId = ?1
+               AND (id = ?2 OR json_extract(consentRow, '$.deviceId') = ?2)`
+          )
+          .bind(siteId, visitorId)
+          .run();
+        archivedDeleted = a?.meta?.changes ?? 0;
+      } catch (_) { /* no ArchivedConsent table */ }
+
+      // Records the retention sweep moved to consentbit-retention-data. An erasure request
+      // must reach them too; counted with the archived copies in the response and log.
+      if (env.RETENTION_DB) {
+        try {
+          const r = await env.RETENTION_DB
+            .prepare(`DELETE FROM RetainedConsent WHERE siteId = ?1 AND (deviceId = ?2 OR id = ?2)`)
+            .bind(siteId, visitorId)
+            .run();
+          archivedDeleted += r?.meta?.changes ?? 0;
+        } catch (_) { /* retention schema not created yet */ }
+      }
+
+      // Record that the request was carried out. Never blocks the deletion itself.
+      try {
+        await db.prepare(
+          `CREATE TABLE IF NOT EXISTS ConsentErasureLog (
+             id TEXT PRIMARY KEY,
+             siteId TEXT NOT NULL,
+             consentIdHash TEXT NOT NULL,
+             recordsDeleted INTEGER NOT NULL,
+             archivedDeleted INTEGER NOT NULL DEFAULT 0,
+             deletedBy TEXT,
+             createdAt TEXT NOT NULL
+           )`
+        ).run();
+        await db.prepare(
+          `INSERT INTO ConsentErasureLog (id, siteId, consentIdHash, recordsDeleted, archivedDeleted, deletedBy, createdAt)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`
+        ).bind(
+          crypto.randomUUID(), siteId, await sha256Hex(visitorId), deleted, archivedDeleted,
+          String(userId), new Date().toISOString(),
+        ).run();
+      } catch (logErr) {
+        console.warn('[ConsentVisitor][POST] erasure log failed (records were deleted):', logErr?.message);
+      }
+
+      return Response.json({ success: true, siteId, deleted, archivedDeleted });
+    } catch (err) {
+      console.error('[ConsentVisitor][POST] failed:', err?.message);
+      return Response.json({ success: false, error: 'Could not delete this visitor\'s records.' }, { status: 500 });
+    }
+  }
+
+  return Response.json({ success: false, error: 'Method Not Allowed' }, { status: 405 });
+}

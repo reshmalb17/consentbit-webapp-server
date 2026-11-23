@@ -23,6 +23,7 @@ import {
 } from '../services/db.js';
 import { listAdminSiteIds, siteInCallersAccount } from '../services/team.js';
 import { safeReturnUrl } from '../utils/returnUrl.js';
+import { freeFallbackFieldsForSite } from '../services/freeFallback.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -110,11 +111,16 @@ export async function handleBillingSummary(request, env) {
   // is the answer, whatever its status. The org fallback then means what it says — this
   // site has never had one of its own.
   const ownLatest = siteId ? (await getLatestSubscriptionsBySiteIds(db, [siteId]))[String(siteId)] ?? null : null;
-  const sub = !access.owner
+  // Free fallback (services/freeFallback.js, 2026-11-05): a site moved to Free after its
+  // plan ended is billed as a Free site — its dead row must not drive the card. A site
+  // that stayed blocked gets `freeBlockedBy` so the card can say why.
+  const ff = siteId ? await freeFallbackFieldsForSite(db, siteId, organizationId) : null;
+  let sub = !access.owner
     ? (await getSubscriptionBySiteId(db, siteId)) || ownLatest
     : siteId
       ? (await getSubscriptionBySiteId(db, siteId)) || ownLatest || (await getSubscriptionByOrganization(db, organizationId))
       : await getSubscriptionByOrganization(db, organizationId);
+  if (ff?.freeFallback) sub = null;
   if (!sub) {
     const { plan } = await getEffectivePlanForOrganization(db, organizationId, env);
     return Response.json({
@@ -130,6 +136,9 @@ export async function handleBillingSummary(request, env) {
       stripeSubscriptionId: null,
       paymentMethod: null,
       domainsLimit: plan ? (plan.domainsIncluded ?? plan.domainsincluded ?? 1) : 1,
+      freeFallback: !!ff?.freeFallback,
+      freeFallbackAt: ff?.freeFallbackAt ?? null,
+      freeBlockedBy: ff?.freeBlockedBy ?? null,
     });
   }
 
@@ -238,6 +247,9 @@ export async function handleBillingSummary(request, env) {
     planType,
     interval,
     licenseCount,
+    // Free fallback (additive): set only for a LAPSED site whose Free slot is taken.
+    freeFallback: false,
+    freeBlockedBy: ff?.freeBlockedBy ?? null,
     nextBillingDate,
     amountCents,
     cancelAtPeriodEnd,

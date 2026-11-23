@@ -1849,7 +1849,7 @@ window.SCRIPT_BLOCK_PROVIDERS = [
   // Intercom / Drift / Zendesk
   { pattern: 'intercom\\\\.io|intercomcdn\\\\.com|drift\\\\.com|js\\\\.driftt\\\\.com|zendesk\\\\.com/embeddable|zdassets\\\\.com', categories: ['marketing', 'preferences'] },
   // HubSpot / Marketo / Pardot / Mailchimp / Klaviyo
-  { pattern: 'hubspot\\\\.com|hs-scripts\\\\.com|hsforms\\\\.com|marketo\\\\.com|mktoresp\\\\.com|pardot\\\\.com|go\\\\.pardot|list-manage\\\\.com|klaviyo\\\\.com|static\\\\.klaviyo', categories: ['marketing'] },
+  { pattern: 'hubspot\\\\.com|hs-scripts\\\\.com|hsforms\\\\.com|hs-analytics\\\\.net|hs-banner\\\\.com|hscollectedforms\\\\.net|hsadspixel\\\\.net|usemessages\\\\.com|marketo\\\\.com|mktoresp\\\\.com|pardot\\\\.com|go\\\\.pardot|list-manage\\\\.com|klaviyo\\\\.com|static\\\\.klaviyo', categories: ['marketing'] },
   // Vimeo / Wistia
   { pattern: 'player\\\\.vimeo\\\\.com|vimeo\\\\.com/api/player|wistia\\\\.com|fast\\\\.wistia', categories: ['marketing'] },
   // Spotify / SoundCloud
@@ -1863,7 +1863,7 @@ window.SCRIPT_BLOCK_PROVIDERS = [
   // Quantcast / LiveRamp / Trade Desk
   { pattern: 'quantcast\\\\.com|quantserve\\\\.com|liveramp\\\\.com|rlcdn\\\\.com|thetradedesk\\\\.com|adsrvr\\\\.org', categories: ['marketing'] },
   // Braze / Iterable
-  { pattern: 'braze\\\\.com|sdk\\\\.braze|iterable\\\\.com|api\\\\.iterable', categories: ['marketing'] },
+  { pattern: 'braze\\\\.com|sdk\\\\.braze|appboycdn\\\\.com|iterable\\\\.com|api\\\\.iterable', categories: ['marketing'] },
   // New Relic / Datadog RUM
   { pattern: 'newrelic\\\\.com|nr-data\\\\.net|datadoghq-browser-agent|datadoghq\\\\.com', categories: ['analytics'] },
   // Sentry
@@ -1882,8 +1882,8 @@ window.SCRIPT_BLOCK_PROVIDERS = [
   { pattern: 'calendly\\\\.com/assets|assets\\\\.calendly|typeform\\\\.com|tally\\\\.so', categories: ['preferences', 'marketing'] },
   // Google Maps JS API
   { pattern: 'maps\\\\.googleapis\\\\.com/maps/api/js', categories: ['preferences'] },
-  // reb2b / rb2b
-  { pattern: 'rb2b\\\\.com|reb2b\\\\.com|ddwl4m2hdecbv\\\\.cloudfront\\\\.net|b2bjsstore', categories: ['marketing'] },
+  // reb2b / rb2b (+ LiveIntent, which it loads)
+  { pattern: 'rb2b\\\\.com|reb2b\\\\.com|ddwl4m2hdecbv\\\\.cloudfront\\\\.net|b2bjsstore|liadm\\\\.com|liveintent\\\\.com', categories: ['marketing'] },
   // 6sense
   { pattern: '6sc\\\\.co|6sense\\\\.com', categories: ['marketing'] },
 ];
@@ -2046,7 +2046,7 @@ function isCategoryAllowed(category) {
  */
 var CB_IAB_COOKIE_PATTERNS = {
   analytics: ["_ga", "_ga_*", "_gid", "_gat", "_gat_*", "_gac_*", "_hjid", "_hjSessionUser_*", "_hjSession_*", "_hjAbsoluteSessionInProgress", "_clck", "_clsk"],
-  marketing: ["_fbp", "_fbc", "_gcl_au", "_gcl_ls", "_gcl_aw", "_ttp", "tt_webid_v2", "_pin_unauth", "_pinterest_ct_ua", "li_sugr", "bcookie", "bscookie", "lidc", "_uetsid", "_uetvid", "IDE", "test_cookie", "fr", "_reb2b*", "_gd_visitor", "_gd_session", "_gd_svisitor", "_an_uid"]
+  marketing: ["_fbp", "_fbc", "_gcl_au", "_gcl_ls", "_gcl_aw", "_ttp", "tt_webid_v2", "_pin_unauth", "_pinterest_ct_ua", "li_sugr", "bcookie", "bscookie", "lidc", "_uetsid", "_uetvid", "IDE", "test_cookie", "fr", "_reb2b*", "_gd_visitor", "_gd_session", "_gd_svisitor", "_an_uid", "__hstc", "__hssc", "__hssrc", "hubspotutk", "messagesUtk", "_li_dcdm_c", "_li_ss", "li_fat_id", "_lc2_fpi*"]
 };
 
 function cbIabDeleteCookie(name) {
@@ -3641,13 +3641,22 @@ function cbRecordIabConsent(status, categories) {
 
     // Consent ID: one random ID per visitor per site, created on their first choice and
     // reused afterwards, so all of a visitor's records can be found and deleted together.
-    // Same localStorage key as the standard banner (cdnM.js). Never blocks the POST.
+    // Kept in the first-party cookie consentbit-consentid (12 months), shared with the standard
+    // banner (cdnM.js); an older localStorage ID is carried over once. Never blocks the POST.
+    // TEST-ONLY: sent only when the CDN set lawFixes (LAW_FIXES="1", test worker).
     try {
-      body.deviceId = (function () {
+      if (((window.__CONSENT_SITE__ || {}).lawFixes) === true) body.deviceId = (function () {
         var k = 'cb_consent_id_' + siteId, v = null, w = window.crypto;
+        var readCk = function () {
+          try {
+            var m = document.cookie.match(/(?:^|; *)consentbit-consentid=([0-9a-fA-F-]{36})(?:;|$)/);
+            return m ? m[1] : null;
+          } catch (x) { return null; }
+        };
+        if ((v = readCk())) return v;
         try { v = localStorage.getItem(k); } catch (x) {}
-        if (v && v.length === 36 && /^[0-9a-f-]+$/i.test(v)) return v;
-        if (w && w.randomUUID) {
+        if (v && v.length === 36 && /^[0-9a-f-]+$/i.test(v)) {
+        } else if (w && w.randomUUID) {
           v = w.randomUUID();
         } else {
           v = '10000000-1000-4000-8000-100000000000'.replace(/[018]/g, function (n) {
@@ -3655,9 +3664,23 @@ function cbRecordIabConsent(status, categories) {
             return (+n ^ b & 15 >> +n / 4).toString(16);
           });
         }
-        try { localStorage.setItem(k, v); } catch (x) {}
+        try {
+          document.cookie = 'consentbit-consentid=' + v + '; path=/; max-age=31536000; SameSite=Lax' + (location.protocol === 'https:' ? '; Secure' : '');
+        } catch (x) {}
+        if (readCk() === v) try { localStorage.removeItem(k); } catch (x) {}
         return v;
       })();
+    } catch (x) {}
+
+    // Which law applied (gap E), same TEST-ONLY switch. The IAB banner is always opt-in,
+    // so only the CDN's country profile (GDPR, UK_GDPR, LGPD, ...) is meaningful here.
+    try {
+      var cbSite = window.__CONSENT_SITE__ || {};
+      if (cbSite.lawFixes === true) {
+        body.law = (cbSite.countryLaw && cbSite.countryLaw.law) || null;
+        body.lawResolved = !!cbSite.countryLaw;
+        body.consentModel = 'optin';
+      }
     } catch (x) {}
 
     fetch(apiBase + '/api/consent', {

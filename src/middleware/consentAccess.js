@@ -40,6 +40,18 @@ async function sessionOwnsSite(request, env, siteId) {
   return userCanAccessSite(db, session.userId, siteId);
 }
 
+// Gate for /api/consent-retention-notice — a session that can open the site. No
+// subscription check: the notice exists to reach Free sites too.
+export async function requireSiteSession(request, env) {
+  const url = new URL(request.url);
+  const siteId = url.searchParams.get('siteId') || url.searchParams.get('site_id');
+  if (!siteId) return { ok: false, status: 400, error: 'siteId is required' };
+  if (!(await sessionOwnsSite(request, env, siteId))) {
+    return { ok: false, status: 401, error: 'Authentication required.' };
+  }
+  return { ok: true };
+}
+
 // Gate for /api/consent-logs and /api/consent-csv — require a session that owns
 // the requested site AND an active subscription on it. Returns { ok } or
 // { ok:false, status, error }.
@@ -51,6 +63,27 @@ export async function requireConsentSession(request, env) {
     return { ok: false, status: 401, error: 'Authentication required.' };
   }
   // Owning the site is not enough — consent reports are a paid deliverable.
+  return requireActiveSubscriptionForConsentReport(env, siteId);
+}
+
+// Gate for /api/consent-csv — a session as above, OR a signed download token bound to
+// this siteId + month. The Framer plugin has no web-app cookie; it gets the token from
+// /api/legacy-consent-framer-raw, which already returns that month's records, so the
+// token grants nothing that endpoint does not.
+export function csvTokenId(year, month) {
+  return `csv:${year}-${String(month).padStart(2, '0')}`;
+}
+
+export async function requireConsentCsvAccess(request, env) {
+  const url = new URL(request.url);
+  const token = url.searchParams.get('token');
+  if (!token) return requireConsentSession(request, env);
+  const siteId = url.searchParams.get('siteId') || url.searchParams.get('site_id');
+  const year = url.searchParams.get('year');
+  const month = url.searchParams.get('month');
+  if (!siteId || !year || !month) return { ok: false, status: 400, error: 'siteId, year and month required' };
+  const valid = env.JWT_SECRET && await verifyDownloadToken(env.JWT_SECRET, token, siteId, csvTokenId(year, month));
+  if (!valid) return requireConsentSession(request, env);
   return requireActiveSubscriptionForConsentReport(env, siteId);
 }
 

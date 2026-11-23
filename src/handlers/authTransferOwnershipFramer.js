@@ -40,6 +40,8 @@ import {
   createOwnershipTransfer,
   cancelPendingOwnershipTransfers,
 } from '../services/db.js';
+import { requireFramerRole, resolveFramerSite, FRAMER_OWNER_ROLES } from '../services/framerAccess.js';
+import { extractBearer } from './framerUpgrade.js';
 
 const TAG = '[framer-transfer-ownership]';
 
@@ -168,6 +170,16 @@ export async function handleFramerTransferOwnershipRequest(request, env, ctx) {
 
   if (!siteId) {
     return Response.json({ success: false, error: 'siteId required' }, { status: 400 });
+  }
+
+  // 2026-10-24: owner only. With the plugin's login the caller must be the site OWNER
+  // (not an admin or member — same as the web app). Without a login: the live plugin
+  // build, unchanged until FRAMER_ROLE_ENFORCE="1" (see handlers/framerBilling.js).
+  if (extractBearer(request)) {
+    const g = await requireFramerRole(request, env, await resolveFramerSite(db, siteId), FRAMER_OWNER_ROLES);
+    if (!g.ok) return g.res;
+  } else if (String(env.FRAMER_ROLE_ENFORCE || '').trim() === '1') {
+    return Response.json({ success: false, error: 'Please sign in to ConsentBit again.', code: 'AUTH_REQUIRED' }, { status: 401 });
   }
 
   // Resolve the current owner for this Framer site.

@@ -11,6 +11,7 @@
 import { ensureSchema } from '../services/db.js';
 import { requestDomainMatchesSite } from '../utils/domainValidate.js';
 import { readConsentBody, invalidFramerConsentFields } from '../utils/consentLimits.js';
+import { truncateIp } from '../utils/ipTruncate.js';
 
 export async function handleFramerConsent(request, env, ctx) {
   const db = env.CONSENT_WEBAPP;
@@ -25,11 +26,12 @@ export async function handleFramerConsent(request, env, ctx) {
   const region    = cf.regionCode || null;     // "CA", "NY", etc.
   const isEU      = cf.isEUCountry === '1' ? 1 : 0;
 
-  // Network info
-  const ipAddress =
+  // Network info — IP is shortened (/24, /48) before it is stored anywhere.
+  const ipAddress = truncateIp(
     request.headers.get('cf-connecting-ip') ||
     request.headers.get('x-forwarded-for') ||
-    null;
+    null
+  );
   const userAgent = request.headers.get('user-agent') || null;
 
   // Expected body (Framer shape):

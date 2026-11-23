@@ -96,19 +96,20 @@ export async function handleWebflowCheckoutToken(request, env) {
 
   // Resolve the workspace email from the OAuth record when not provided.
   // 1. KV mirror (fast, but can be evicted or lack the .email field).
-  if (!payload.email && payload.platformId && env.WEBFLOW_AUTHENTICATION) {
-    try {
-      const kvRaw = await env.WEBFLOW_AUTHENTICATION.get(payload.platformId);
-      if (kvRaw) {
-        const kvEntry = typeof kvRaw === 'string' ? JSON.parse(kvRaw) : kvRaw;
-        if (kvEntry?.email) {
-          payload.email = String(kvEntry.email).trim().toLowerCase();
-        }
-      }
-    } catch (e) {
-      console.warn('[webflow-checkout-token] KV email resolve failed (non-fatal)', e?.message || e);
-    }
-  }
+  //    DISABLED 2026-10-16 (D1 only) — step 2 below reads the D1 OAuth record.
+  // if (!payload.email && payload.platformId && env.WEBFLOW_AUTHENTICATION) {
+  //   try {
+  //     const kvRaw = await env.WEBFLOW_AUTHENTICATION.get(payload.platformId);
+  //     if (kvRaw) {
+  //       const kvEntry = typeof kvRaw === 'string' ? JSON.parse(kvRaw) : kvRaw;
+  //       if (kvEntry?.email) {
+  //         payload.email = String(kvEntry.email).trim().toLowerCase();
+  //       }
+  //     }
+  //   } catch (e) {
+  //     console.warn('[webflow-checkout-token] KV email resolve failed (non-fatal)', e?.message || e);
+  //   }
+  // }
   // 2. Durable D1 OAuth record fallback (authoritative; survives KV eviction).
   //    WebflowOAuthSite[siteId].userKey → WebflowOAuthToken.authorizedBy(.user).email
   if (!payload.email && payload.platformId && env.CONSENT_WEBAPP) {

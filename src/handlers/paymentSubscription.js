@@ -42,6 +42,11 @@ export async function handlePaymentSubscription(request, env) {
     } else {
     }
 
+    // KV fallback — DISABLED 2026-10-16 (D1 only; no Site row → not subscribed).
+    if (!directRow && !platformRow) {
+      console.warn(`[KV-OFF] payment/subscription: no D1 Site for siteId=${siteId} (id or platformSiteId) → isSubscribed=false`);
+    }
+    /*
     // KV fallback: if platformSiteId not set, resolve via WEBFLOW_AUTHENTICATION KV
     if (!directRow && resolvedSiteId === siteId && env.WEBFLOW_AUTHENTICATION) {
       try {
@@ -81,6 +86,7 @@ export async function handlePaymentSubscription(request, env) {
         }
       } catch (e) { console.error('[SUB-CHECK] KV fallback error:', e?.message); }
     }
+    */
 
 
     // 1. Try direct site → subscription link
@@ -99,6 +105,9 @@ export async function handlePaymentSubscription(request, env) {
     let plan = sub?.planId ?? sub?.planid ?? null;
     const updatedAt = sub?.updatedAt ?? sub?.createdAt ?? null;
 
+    // Legacy KV plan / ACTIVE_SITES_CONSENTBIT cross-check — DISABLED 2026-10-16.
+    // All sites are in D1 (KV is a downstream copy); this cost 3–4 KV reads per check.
+    /*
     try {
       if (env.WEBFLOW_AUTHENTICATION) {
         const wfKvRaw = await env.WEBFLOW_AUTHENTICATION.get(siteId);
@@ -133,20 +142,22 @@ export async function handlePaymentSubscription(request, env) {
     } catch (e) {
       console.error('[SUB-CHECK] KV check error:', e?.message);
     }
+    */
 
 
-    // Back-fill: if plan resolved from D1 but KV didn't have it, stamp it now so future lookups are instant
-    if (plan && isSubscribed && env.WEBFLOW_AUTHENTICATION) {
-      try {
-        const raw = await env.WEBFLOW_AUTHENTICATION.get(siteId);
-        if (raw) {
-          const entry = typeof raw === 'string' ? JSON.parse(raw) : raw;
-          if (!entry.plan || entry.plan !== plan) {
-            await env.WEBFLOW_AUTHENTICATION.put(siteId, JSON.stringify({ ...entry, plan }));
-          }
-        }
-      } catch (_) {}
-    }
+    // KV plan back-fill — DISABLED 2026-10-16 (1 KV read per check). The Stripe webhook
+    // already stamps the plan into KV for cb-server / the v1 app.
+    // if (plan && isSubscribed && env.WEBFLOW_AUTHENTICATION) {
+    //   try {
+    //     const raw = await env.WEBFLOW_AUTHENTICATION.get(siteId);
+    //     if (raw) {
+    //       const entry = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    //       if (!entry.plan || entry.plan !== plan) {
+    //         await env.WEBFLOW_AUTHENTICATION.put(siteId, JSON.stringify({ ...entry, plan }));
+    //       }
+    //     }
+    //   } catch (_) {}
+    // }
 
     return Response.json({ subscriptionStatuses: [{ isSubscribed, plan, updatedAt }] }, { status: 200 });
   } catch (err) {

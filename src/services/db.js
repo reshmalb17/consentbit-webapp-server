@@ -1,8 +1,11 @@
 // src/services/db.js
+import { truncateIp } from '../utils/ipTruncate.js';
 
 // --- Schema ---
 
 // Cache per Worker instance — ensureSchema only runs once per cold start.
+import { clearFreeFallbackForSite } from './freeFallback.js';
+
 const _schemaEnsured = new WeakMap();
 
 // ⚠️ BUMP THIS WHENEVER YOU ADD OR CHANGE DDL IN _runEnsureSchema() BELOW. ⚠️
@@ -117,6 +120,19 @@ async function _runEnsureSchema(db) {
     // Column already exists, ignore
   }
 
+  // Free fallback (services/freeFallback.js): stamped when a site's paid plan ended and
+  // it was moved to the Free plan because no other site on the account was using it.
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN freeFallbackAt DATETIME`).run();
+  } catch (e) {
+    // Column already exists, ignore
+  }
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN freeFallbackReason TEXT`).run();
+  } catch (e) {
+    // Column already exists, ignore
+  }
+
   try {
     await db.prepare(`
       ALTER TABLE Site ADD COLUMN trialUsed INTEGER DEFAULT 0
@@ -174,6 +190,13 @@ async function _runEnsureSchema(db) {
     // hostnames. Webflow projects routinely have several; they all serve the same
     // script and must all be authorized.
     await db.prepare(`ALTER TABLE Site ADD COLUMN additionalDomains TEXT`).run();
+  } catch (_) {}
+
+  try {
+    // Hosts serving a translated copy of the site (e.g. Weglot's en.example.com),
+    // as a JSON array of hostnames. Separate from additionalDomains because they
+    // are plan-gated (paid plans, not Free) — see utils/domainValidate.js.
+    await db.prepare(`ALTER TABLE Site ADD COLUMN languageDomains TEXT`).run();
   } catch (_) {}
 
   try {
@@ -2210,6 +2233,17 @@ export async function saveSubscription(db, data) {
       now
     )
     .run();
+
+  // Free fallback (services/freeFallback.js, 2026-11-05): a site that bought a tier plan
+  // again is no longer "the free site" — drop its stamp so the rule is re-judged when
+  // this plan ends. Separate guarded statement after the write above; never fails it.
+  {
+    const st = String(data.status || 'active').toLowerCase();
+    const tier = String(planId || '').toLowerCase();
+    if (siteId && (st === 'active' || st === 'trialing') && ['basic', 'essential', 'growth'].includes(tier)) {
+      await clearFreeFallbackForSite(db, siteId).catch(() => null);
+    }
+  }
   return id;
 }
 
@@ -2849,6 +2883,41 @@ export async function setSiteCustomDomain(db, siteId, host, options = {}) {
 }
 
 /**
+ * Add a host to a site's languageDomains (a translated copy of the site).
+ *
+ * Only called after services/domainResolver.js detectTranslatedCopy confirmed
+ * the host's page is a translation of this site, and the script server confirmed
+ * the plan covers it. Read-modify-write: concurrent first visits from the same
+ * host write the same array, so the race is harmless.
+ *
+ * Returns true when a row was actually written.
+ */
+export async function addSiteLanguageDomain(db, siteId, host) {
+  if (!siteId || !host) return false;
+  // The script path does not run ensureSchema, so make sure the column exists.
+  // Runs once per newly detected host, not per request.
+  try {
+    await db.prepare(`ALTER TABLE Site ADD COLUMN languageDomains TEXT`).run();
+  } catch (_) {}
+  const row = await db
+    .prepare('SELECT languageDomains FROM Site WHERE id = ?1')
+    .bind(siteId)
+    .first();
+  let list = [];
+  try {
+    const parsed = JSON.parse(row?.languageDomains ?? row?.languagedomains ?? '[]');
+    if (Array.isArray(parsed)) list = parsed;
+  } catch (_) {}
+  if (list.includes(host)) return false;
+  list.push(host);
+  const res = await db
+    .prepare(`UPDATE Site SET languageDomains = ?2, updatedAt = datetime('now') WHERE id = ?1`)
+    .bind(siteId, JSON.stringify(list))
+    .run();
+  return (res?.meta?.changes ?? 0) > 0;
+}
+
+/**
  * Record the builder's staging URL for a site (foo.webflow.io).
  *
  * Sites registered under their custom domain never had this filled in, and sites
@@ -3194,7 +3263,7 @@ export async function recordConsent(
     .bind(
       id,
       siteId,
-      ipAddress || null,
+      truncateIp(ipAddress),
       userAgent || null,
       consent.necessary ? 1 : 0,
       consent.analytics ? 1 : 0,
@@ -3964,6 +4033,8 @@ export async function upsertCookie(db, { siteId, scanHistoryId, cookie, now }) {
  */
 export async function upsertCookies(db, { siteId, scanHistoryId, cookies }) {
   await ensureSchema(db);
+  // Our own consent-id cookie is never a tracker; keep it out of every inventory.
+  cookies = (cookies || []).filter((c) => !/^consentbit[-_]/i.test(String(c?.name || '')));
   if (!cookies || cookies.length === 0) return [];
 
   const now = new Date().toISOString();
@@ -4620,6 +4691,11 @@ export async function resolveWebflowOAuthToken(db, kv, siteId, siteMeta = {}) {
     .first();
   if (existing?.accessToken) return { ...existing, source: 'db' };
 
+  // KV fallback + D1 backfill — DISABLED 2026-10-16. D1 only: no token row → null →
+  // the user re-authorizes the app (which writes the token to D1).
+  console.warn(`[KV-OFF] resolveWebflowOAuthToken: no D1 WebflowOAuthSite token for siteId=${siteId} → re-authorize`);
+  return null;
+  /*
   // 2. KV fallback — live v1 users still live here.
   if (!kv) return null;
   let kvEntry = null;
@@ -4656,6 +4732,7 @@ export async function resolveWebflowOAuthToken(db, kv, siteId, siteMeta = {}) {
     .bind(siteId)
     .first();
   return migrated?.accessToken ? { ...migrated, source: 'kv-backfill' } : null;
+  */
 }
 
 /**

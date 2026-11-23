@@ -81,7 +81,7 @@ export async function handleScanHistory(request, env) {
             .prepare(
               `SELECT name, domain, category FROM Cookie
                WHERE siteId = ?1 AND scanHistoryId = ?2
-                 AND (isExpected = 0 OR isExpected IS NULL)`,
+                 AND (isExpected = 0 OR isExpected IS NULL) AND name NOT LIKE 'consentbit%'`,
             )
             .bind(siteId, scan.id)
             .all();
@@ -114,7 +114,7 @@ export async function handleScanHistory(request, env) {
             try {
               const { results: siteCookieRows } = await db
                 .prepare(
-                  `SELECT DISTINCT category FROM Cookie WHERE siteId = ?1 AND (isExpected = 0 OR isExpected IS NULL)`
+                  `SELECT DISTINCT category FROM Cookie WHERE siteId = ?1 AND (isExpected = 0 OR isExpected IS NULL) AND name NOT LIKE 'consentbit%'`
                 )
                 .bind(siteId)
                 .all();

@@ -22,6 +22,7 @@ import { isPromotionCodeAllowedForEmail } from '../services/promoRestrictions.js
 import { isTerminalSubscriptionStatus, TERMINAL_SUBSCRIPTION_MESSAGE } from '../utils/subscriptionStatus.js';
 import { flowLog } from '../utils/flowLog.js';
 import { resolveBillingActor, siteInCallersAccount } from '../services/team.js';
+import { defaultPromotionCodeForPlan } from '../services/blackFridayOffer.js';
 
 const PLAN_ORDER = { basic: 1, essential: 2, growth: 3 };
 
@@ -90,7 +91,7 @@ async function prepareChange(request, env) {
   const interval = body.interval === 'yearly' ? 'yearly' : 'monthly';
   const promotionCodeId = body.promotionCodeId && String(body.promotionCodeId).trim()
     ? String(body.promotionCodeId).trim()
-    : null;
+    : defaultPromotionCodeForPlan(planId); // Black Friday offer when no code is sent
   // Option 3: a new card tokenized on the client (Stripe PaymentMethod id). When present,
   // the prorated amount is charged to THIS card and it becomes the subscription default.
   const paymentMethodId = body.paymentMethodId && String(body.paymentMethodId).trim()
@@ -210,7 +211,12 @@ function sumProrationCents(invoiceBody) {
   let total = 0;
   let sawProration = false;
   for (const line of invoiceBody?.lines?.data || []) {
-    if (line.proration === true) { total += line.amount || 0; sawProration = true; }
+    if (line.proration === true) {
+      // Line amounts are before discounts; subtract any promo/coupon applied to this line.
+      const off = (line.discount_amounts || []).reduce((s, d) => s + (d.amount || 0), 0);
+      total += (line.amount || 0) - off;
+      sawProration = true;
+    }
   }
   return sawProration ? total : (invoiceBody?.amount_due ?? invoiceBody?.total ?? null);
 }

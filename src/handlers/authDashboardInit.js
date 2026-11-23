@@ -13,6 +13,7 @@ import {
   canonicalEmbedOrigin,
 } from '../services/db.js';
 import { listMemberSiteGrants, hasPendingInviteForEmail } from '../services/team.js';
+import { freeFallbackFieldsForSite } from '../services/freeFallback.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -180,7 +181,7 @@ export async function handleAuthDashboardInit(request, env) {
         .prepare(
           `SELECT siteId, COUNT(*) as total, COUNT(DISTINCT category) as cats
            FROM Cookie
-           WHERE siteId IN (${placeholders}) AND (isExpected = 0 OR isExpected IS NULL)
+           WHERE siteId IN (${placeholders}) AND (isExpected = 0 OR isExpected IS NULL) AND name NOT LIKE 'consentbit%'
            GROUP BY siteId`
         )
         .bind(...siteIds)
@@ -217,6 +218,28 @@ export async function handleAuthDashboardInit(request, env) {
     } catch (_) { /* ScanHistory may not exist yet */ }
   }
 
+  // Free fallback (services/freeFallback.js, 2026-11-05). Only sites whose own latest
+  // row is terminal are looked up — a paid or never-subscribed site costs nothing here.
+  //   freeFallback   → the site's plan ended and it was moved to Free: report it AS Free
+  //                    (planId 'free', no subscription status/dates), so every screen
+  //                    treats it like a site that chose Free.
+  //   freeBlockedBy  → the plan ended but another site holds the account's Free slot:
+  //                    the site stays LAPSED exactly as before, plus the reason.
+  const TERMINAL_FOR_FALLBACK = ['canceled', 'cancelled', 'deleted', 'unpaid', 'incomplete_expired'];
+  const freeFallbackMap = {};
+  try {
+    const candidates = (sites || []).filter((s) => {
+      const sid = String(s?.id ?? '');
+      const st = String(latestSubMap[sid]?.status ?? latestSubMap[sid]?.Status ?? '').toLowerCase();
+      return sid && !subscriptionMap[sid] && TERMINAL_FOR_FALLBACK.includes(st);
+    });
+    await Promise.all(candidates.map(async (s) => {
+      freeFallbackMap[String(s.id)] = await freeFallbackFieldsForSite(db, s.id, s.organizationId ?? s.organizationid ?? null);
+    }));
+  } catch (e) {
+    console.warn('[DashboardInit] free fallback lookup failed (non-fatal)', e?.message || e);
+  }
+
   // Enrich sites with subscription data (no extra DB queries needed)
   const sitesWithPlan = (sites || []).map(site => {
     const siteId = String(site?.id ?? site?.siteId ?? site?.site_id ?? '');
@@ -243,22 +266,29 @@ export async function handleAuthDashboardInit(request, env) {
 
     const stats = cookieStatsMap[siteId] ?? {};
     const pageStats = pageStatsMap[siteId] ?? pageStatsMap[String(siteId)] ?? {};
+    // Moved to Free after its plan ended → reported as a Free site (see freeFallbackMap).
+    const ff = freeFallbackMap[siteId] ?? null;
+    const onFreeFallback = !!ff?.freeFallback;
     return {
       ...site,
       scriptUrl,
       licenseKey: sub?.licenseKey ?? sub?.licensekey ?? null,
-      planId: sitePlanId,
-      plan_id: sitePlanId,
-      subscriptionStatus: siteSubStatus,
-      subscription_status: siteSubStatus,
+      planId: onFreeFallback ? 'free' : sitePlanId,
+      plan_id: onFreeFallback ? 'free' : sitePlanId,
+      subscriptionStatus: onFreeFallback ? null : siteSubStatus,
+      subscription_status: onFreeFallback ? null : siteSubStatus,
       // All four follow the status above and come from the site's own latest row, so an
       // ended subscription still reports its id and dates. Without them the frontend
       // cannot say WHEN a plan ended, and Resume/Cancel lose the subscription they act on.
-      subscriptionId: (hist ?? sub)?.id ?? null,
-      stripeSubscriptionId: (hist ?? sub)?.stripeSubscriptionId ?? (hist ?? sub)?.stripesubscriptionid ?? null,
-      subscriptionCurrentPeriodEnd: (hist ?? sub)?.currentPeriodEnd ?? (hist ?? sub)?.currentperiodend ?? null,
-      subscriptionCancelAtPeriodEnd: Number((hist ?? sub)?.cancelAtPeriodEnd ?? (hist ?? sub)?.cancelatperiodend ?? 0) === 1 ? 1 : 0,
+      subscriptionId: onFreeFallback ? null : ((hist ?? sub)?.id ?? null),
+      stripeSubscriptionId: onFreeFallback ? null : ((hist ?? sub)?.stripeSubscriptionId ?? (hist ?? sub)?.stripesubscriptionid ?? null),
+      subscriptionCurrentPeriodEnd: onFreeFallback ? null : ((hist ?? sub)?.currentPeriodEnd ?? (hist ?? sub)?.currentperiodend ?? null),
+      subscriptionCancelAtPeriodEnd: onFreeFallback ? 0 : (Number((hist ?? sub)?.cancelAtPeriodEnd ?? (hist ?? sub)?.cancelatperiodend ?? 0) === 1 ? 1 : 0),
       interval: sub?.interval ?? sub?.billing_interval ?? null,
+      // Free fallback (additive): see the block above the map.
+      freeFallback: onFreeFallback,
+      freeFallbackAt: ff?.freeFallbackAt ?? null,
+      freeBlockedBy: ff?.freeBlockedBy ?? null,
       cookieCount: stats.cookieCount ?? 0,
       cookieCategories: stats.cookieCategories ?? 0,
       pagesScanned: pageStats.pagesScanned ?? 0,

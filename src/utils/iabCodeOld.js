@@ -531,7 +531,7 @@ window.SCRIPT_BLOCK_PROVIDERS = [
   // Quantcast / LiveRamp / Trade Desk
   { pattern: 'quantcast\\\\.com|quantserve\\\\.com|liveramp\\\\.com|rlcdn\\\\.com|thetradedesk\\\\.com|adsrvr\\\\.org', categories: ['marketing'] },
   // Braze / Iterable
-  { pattern: 'braze\\\\.com|sdk\\\\.braze|iterable\\\\.com|api\\\\.iterable', categories: ['marketing'] },
+  { pattern: 'braze\\\\.com|sdk\\\\.braze|appboycdn\\\\.com|iterable\\\\.com|api\\\\.iterable', categories: ['marketing'] },
   // New Relic / Datadog RUM
   { pattern: 'newrelic\\\\.com|nr-data\\\\.net|datadoghq-browser-agent|datadoghq\\\\.com', categories: ['analytics'] },
   // Sentry

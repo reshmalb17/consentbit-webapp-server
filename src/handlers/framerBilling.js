@@ -45,25 +45,57 @@ import {
   handleWebflowCancelSubscription,
   handleWebflowSwitchInterval,
 } from './webflowBilling.js';
+import { requireFramerRole, resolveFramerSite, FRAMER_BILLING_ROLES } from '../services/framerAccess.js';
+import { extractBearer } from './framerUpgrade.js';
+
+
+// 2026-10-24 identity check: when the plugin sends its login (Authorization: Bearer),
+// only the site's owner or a web-app admin may read billing or change the plan
+// (services/framerAccess.js). Requests WITHOUT a login are the plugin build that is live
+// today; they keep the old behaviour until FRAMER_ROLE_ENFORCE="1" is set, once the new
+// plugin build (which always sends the login) is approved and released.
+async function framerBillingGate(request, env, siteId) {
+  if (!extractBearer(request)) {
+    if (String(env.FRAMER_ROLE_ENFORCE || '').trim() === '1') {
+      return Response.json({ success: false, error: 'Please sign in to ConsentBit again.', code: 'AUTH_REQUIRED' }, { status: 401 });
+    }
+    return null;
+  }
+  const site = await resolveFramerSite(env.CONSENT_WEBAPP, siteId);
+  const g = await requireFramerRole(request, env, site, FRAMER_BILLING_ROLES);
+  return g.ok ? null : g.res;
+}
+
+async function bodySiteId(request) {
+  try {
+    const b = await request.clone().json();
+    return b?.siteId ? String(b.siteId) : null;
+  } catch {
+    return null;
+  }
+}
 
 // GET /api/framer/billing?siteId=<framerSiteId | webappSiteId>
 // → { success, plan, status, interval, currentPeriodEnd, cancelAtPeriodEnd,
 //     invoices[], scansUsed, scansLimit, pageviewsUsed, pageviewsLimit }
 export async function handleFramerBilling(request, env) {
-  // ← identity check goes here (see SECURITY note above)
+  const denied = await framerBillingGate(request, env, new URL(request.url).searchParams.get('siteId'));
+  if (denied) return denied;
   return handleWebflowBilling(request, env);
 }
 
 // POST /api/framer/cancel-subscription   body: { siteId }
 // → { success, cancelAtPeriodEnd, currentPeriodEnd }
 export async function handleFramerCancelSubscription(request, env) {
-  // ← identity check goes here (see SECURITY note above)
+  const denied = await framerBillingGate(request, env, await bodySiteId(request));
+  if (denied) return denied;
   return handleWebflowCancelSubscription(request, env);
 }
 
 // POST /api/framer/switch-interval   body: { siteId, targetInterval: 'monthly' | 'yearly' }
 // → { success, interval, nextBillingDate }
 export async function handleFramerSwitchInterval(request, env) {
-  // ← identity check goes here (see SECURITY note above)
+  const denied = await framerBillingGate(request, env, await bodySiteId(request));
+  if (denied) return denied;
   return handleWebflowSwitchInterval(request, env);
 }

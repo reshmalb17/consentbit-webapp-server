@@ -2,6 +2,11 @@
 //
 // Single source of truth for "may this site's consent-log data be handed back?"
 //
+// NOTE 2026-10-22: no longer paid-only. requireActiveSubscriptionForConsentReport() lets
+// Free sites (no active subscription) through; Free sees the last 3 months via
+// consentViewCutoff(). The text below is the original intent and still describes
+// getConsentReportEntitlement()'s `entitled` flag.
+//
 // Consent logs / CSV / PDF exports are a PAID deliverable. A site whose subscription
 // is missing, cancelled, deleted, unpaid or past due must NOT receive them — the
 // dashboard shows the upgrade prompt instead of the report.
@@ -37,7 +42,7 @@ export function isEntitledStatus(status) {
 async function resolveSiteRow(db, siteId) {
   return db
     .prepare(
-      `SELECT id, organizationId, domain, platformSiteId FROM Site
+      `SELECT id, organizationId, domain, platformSiteId, platform FROM Site
        WHERE id = ?1 OR platformSiteId = ?1 LIMIT 1`,
     )
     .bind(String(siteId))
@@ -125,16 +130,19 @@ export async function getConsentReportEntitlement(env, siteId) {
       ? 'NO_SUBSCRIPTION'
       : `STATUS_${status.toUpperCase()}`;
 
-  // 3. Legacy KV cross-check (same precedence as handlers/paymentSubscription.js).
-  // KV may only GRANT when D1 had nothing to say — a D1 row that is already cancelled
-  // is authoritative and must not be overridden by a stale KV record.
-  const kvActive = await legacyKvActive(env, site);
-  if (!entitled && kvActive === true && status !== 'canceled') {
-    entitled = true;
-    reason = 'LEGACY_KV_ACTIVE';
-  } else if (entitled && kvActive === false) {
-    entitled = false;
-    reason = 'LEGACY_KV_INACTIVE';
+  // 3. Legacy KV cross-check — DISABLED 2026-10-16 for Webflow (D1 only; this cost
+  // 10–17 KV reads per report view and a stale KV `active:false` could revoke a paying
+  // site). Framer is deliberately left unchanged and still runs it.
+  const isFramer = String(site.platform ?? '').toLowerCase() === 'framer';
+  if (isFramer) {
+    const kvActive = await legacyKvActive(env, site);
+    if (!entitled && kvActive === true && status !== 'canceled') {
+      entitled = true;
+      reason = 'LEGACY_KV_ACTIVE';
+    } else if (entitled && kvActive === false) {
+      entitled = false;
+      reason = 'LEGACY_KV_INACTIVE';
+    }
   }
 
   return { entitled, status, siteRowId: site.id, reason };
@@ -147,6 +155,12 @@ export async function getConsentReportEntitlement(env, siteId) {
 export async function requireActiveSubscriptionForConsentReport(env, siteId) {
   const result = await getConsentReportEntitlement(env, siteId);
   if (result.entitled) return { ok: true };
+  // 2026-10-22: consent logs are available on the Free plan too. A site with no
+  // active/trialing subscription is on Free (never paid, or its plan ended), so it
+  // still gets its reports — the Free 3-month window is applied inside the
+  // consentLogs/consentCsv/consentPdf handlers (consentViewCutoff), not here.
+  // Only an unknown site is refused.
+  if (result.siteRowId) return { ok: true };
   return {
     ok: false,
     status: 403,

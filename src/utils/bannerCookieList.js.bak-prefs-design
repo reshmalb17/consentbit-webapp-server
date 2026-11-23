@@ -1,0 +1,206 @@
+// src/utils/bannerCookieList.js
+//
+// The cookie list shown inside the banner's preferences popup: under each category,
+// the vendors that set cookies there, each with a privacy-policy link and its cookies
+// (name, description, type, retention). TEST-ONLY — wired into handlers/cdnTest.js
+// (/cdn-test/<id>.js); the live script.js (cdnM.js) does not ship it yet.
+//
+// Data = the Scan tab's list (handleCookies: latest scan + published rules + manual
+// cookies). Never cookie values. Uncategorized cookies have no toggle to sit under,
+// so they are left out unless a well-known name tells us the category.
+
+import { handleCookies } from '../handlers/cookies.js';
+import { vendorPrivacyLink } from '../data/vendorPrivacyLinks.js';
+
+const MAX_COOKIES = 150;
+
+// Scan/rule categories → the banner's four toggles.
+const TOGGLE_OF = {
+  necessary: 'necessary', essential: 'necessary', strictly_necessary: 'necessary',
+  analytics: 'analytics', performance: 'analytics', statistics: 'analytics', behavioral: 'analytics',
+  marketing: 'marketing', advertisement: 'marketing', advertising: 'marketing', targeting: 'marketing',
+  functional: 'preferences', functionality: 'preferences', preferences: 'preferences',
+};
+
+// Well-known cookies: fills an empty description, and a category when the scan left
+// it uncategorized. Keyed by exact name or by prefix ending in '*'.
+const KNOWN_COOKIES = {
+  __cf_bm: { cat: 'necessary', vendor: 'Cloudflare', desc: 'Bot Management - identifies and mitigates automated traffic' },
+  cf_clearance: { cat: 'necessary', vendor: 'Cloudflare', desc: 'Records that the visitor passed a Cloudflare security challenge' },
+  __cfruid: { cat: 'necessary', vendor: 'Cloudflare', desc: 'Identifies trusted web traffic for rate limiting' },
+  _cfuvid: { cat: 'necessary', vendor: 'Cloudflare', desc: 'Distinguishes visitors sharing an IP address for rate limiting' },
+  'consentbit*': { cat: 'necessary', vendor: 'ConsentBit', desc: "Stores the visitor's cookie consent choices" },
+  _ga: { cat: 'analytics', vendor: 'Google', desc: 'Distinguishes unique visitors for Google Analytics' },
+  '_ga_*': { cat: 'analytics', vendor: 'Google', desc: 'Keeps the session state for Google Analytics 4' },
+  _gid: { cat: 'analytics', vendor: 'Google', desc: 'Distinguishes visitors for 24 hours in Google Analytics' },
+  _gat: { cat: 'analytics', vendor: 'Google', desc: 'Throttles the Google Analytics request rate' },
+  _gcl_au: { cat: 'marketing', vendor: 'Google', desc: 'Stores ad click information for Google Ads conversion tracking' },
+  _fbp: { cat: 'marketing', vendor: 'Meta', desc: 'Identifies browsers for Meta (Facebook) advertising' },
+  _fbc: { cat: 'marketing', vendor: 'Meta', desc: 'Stores the last Facebook ad click' },
+  'ph_*': { cat: 'analytics', vendor: 'PostHog', desc: 'Identifies the visitor and session for PostHog product analytics' },
+  _clck: { cat: 'analytics', vendor: 'Microsoft', desc: 'Keeps the Microsoft Clarity user ID across visits' },
+  _clsk: { cat: 'analytics', vendor: 'Microsoft', desc: 'Joins page views into one Microsoft Clarity session' },
+  _uetsid: { cat: 'marketing', vendor: 'Microsoft', desc: 'Microsoft Advertising (UET) session identifier' },
+  _uetvid: { cat: 'marketing', vendor: 'Microsoft', desc: 'Microsoft Advertising (UET) visitor identifier' },
+  bcookie: { cat: 'marketing', vendor: 'LinkedIn', desc: 'Browser identifier used by LinkedIn' },
+  lidc: { cat: 'marketing', vendor: 'LinkedIn', desc: 'Routes requests to LinkedIn data centers' },
+  '_hjSession*': { cat: 'analytics', vendor: 'Hotjar', desc: 'Keeps the current Hotjar session' },
+  _ttp: { cat: 'marketing', vendor: 'TikTok', desc: 'Measures TikTok ad performance' },
+  hubspotutk: { cat: 'marketing', vendor: 'HubSpot', desc: 'Tracks the visitor for HubSpot' },
+};
+
+function knownCookie(name) {
+  const n = String(name || '');
+  if (KNOWN_COOKIES[n]) return KNOWN_COOKIES[n];
+  for (const key of Object.keys(KNOWN_COOKIES)) {
+    if (key.endsWith('*') && n.startsWith(key.slice(0, -1))) return KNOWN_COOKIES[key];
+  }
+  return null;
+}
+
+function hostOf(d) {
+  return String(d || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
+    .replace(/^\.+/, '').replace(/^www\./, '');
+}
+
+function parseTime(v) {
+  if (!v) return NaN;
+  const s = String(v);
+  return Date.parse(s.includes('T') || s.endsWith('Z') ? s : `${s.replace(' ', 'T')}Z`);
+}
+
+// expires is an absolute date taken at scan time, so retention = expires - seen.
+function retention(expires, seenAt) {
+  const end = parseTime(expires);
+  if (!Number.isFinite(end)) return expires ? String(expires).slice(0, 40) : 'Session';
+  const start = Number.isFinite(parseTime(seenAt)) ? parseTime(seenAt) : Date.now();
+  const mins = Math.max(0, Math.round((end - start) / 60000));
+  if (mins < 1) return 'Session';
+  const plural = (n, unit) => `${n} ${unit}${n === 1 ? '' : 's'}`;
+  if (mins < 60) return plural(mins, 'minute');
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return plural(hours, 'hour');
+  const days = Math.round(hours / 24);
+  if (days < 30) return plural(days, 'day');
+  const months = Math.round(days / 30.44);
+  if (months < 12) return plural(months, 'month');
+  return plural(Math.round(days / 365.25), 'year');
+}
+
+/**
+ * { necessary: [vendor], analytics: [...], marketing: [...], preferences: [...] }
+ * where vendor = { v: name, u: privacy URL | null, c: [{ n, d, t, r }] }.
+ * Short keys keep the served script small.
+ */
+export async function buildBannerCookieList(env, siteId, siteDomain) {
+  const res = await handleCookies(new Request(`https://internal/api/cookies?siteId=${encodeURIComponent(siteId)}`), env);
+  const data = await res.json().catch(() => null);
+  const rows = data?.success && Array.isArray(data.cookies) ? data.cookies : [];
+  const siteHost = hostOf(siteDomain);
+
+  const out = { necessary: [], analytics: [], marketing: [], preferences: [] };
+  const vendors = {};
+  const seen = new Set();
+  let count = 0;
+
+  for (const row of rows) {
+    if (count >= MAX_COOKIES) break;
+    const name = String(row.name || '').trim();
+    if (!name) continue;
+    const known = knownCookie(name);
+    const rawCat = String(row.category || '').trim().toLowerCase();
+    const toggle = TOGGLE_OF[rawCat] || (known ? known.cat : null);
+    if (!toggle) continue;
+
+    const link = vendorPrivacyLink(row.provider) || (known ? vendorPrivacyLink(known.vendor) : null);
+    const cookieHost = hostOf(row.domain);
+    const vendorName =
+      (link && link.name) || String(row.provider || '').trim() || (known && known.vendor) ||
+      (cookieHost && cookieHost !== siteHost && !siteHost.endsWith(`.${cookieHost}`) ? cookieHost : siteHost) ||
+      'This website';
+
+    const dedupe = `${toggle}|${vendorName}|${name}`;
+    if (seen.has(dedupe)) continue;
+    seen.add(dedupe);
+
+    const vkey = `${toggle}|${vendorName}`;
+    if (!vendors[vkey]) {
+      vendors[vkey] = { v: vendorName, u: link ? link.url : null, c: [] };
+      out[toggle].push(vendors[vkey]);
+    }
+    vendors[vkey].c.push({
+      n: name.slice(0, 80),
+      d: String(row.description || (known && known.desc) || '').trim().slice(0, 200),
+      t: 'Cookie',
+      r: retention(row.expires, row.lastSeenAt || row.firstSeenAt),
+    });
+    count++;
+  }
+
+  for (const key of Object.keys(out)) {
+    out[key].sort((a, b) => a.v.localeCompare(b.v));
+    for (const v of out[key]) v.c.sort((a, b) => a.n.localeCompare(b.n));
+  }
+  return out;
+}
+
+/** Short fingerprint for the script ETag, so a new scan busts cached copies. */
+export async function cookieListSignature(list) {
+  try {
+    const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(JSON.stringify(list)));
+    return Array.from(new Uint8Array(buf)).slice(0, 6).map((b) => b.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Client add-on, appended after the banner runtime. Waits for the GDPR preferences
+ * popup (#cb-preferences-banner) and adds the vendor/cookie list inside each
+ * category's expandable panel. Plain DOM + textContent only (no innerHTML), so
+ * scanned names can't inject markup. Reads window.__CONSENT_SITE__.cookieList.
+ */
+export function getBannerCookieListScript() {
+  return `
+(function(){try{
+var L=(window.__CONSENT_SITE__||{}).cookieList;if(!L)return;
+var LABEL={policy:"Privacy Policy",name:"Name",desc:"Description",type:"Type",ret:"Retention"};
+function el(tag,css,text){var e=document.createElement(tag);if(css)e.style.cssText=css;if(text!=null)e.textContent=text;return e;}
+function row(k,v){var r=el("div","display:grid;grid-template-columns:110px 1fr;gap:8px;padding:3px 0;");r.appendChild(el("div","font-weight:600;",k));r.appendChild(el("div","word-break:break-word;",v||"-"));return r;}
+function vendorBox(vd){
+  var box=el("div","border:1px solid #e5e7eb;border-radius:6px;margin-top:8px;overflow:hidden;");
+  var head=el("button","display:flex;width:100%;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;background:transparent;border:0;cursor:pointer;font:inherit;color:inherit;text-align:left;");
+  head.type="button";head.setAttribute("aria-expanded","false");
+  var left=el("div","display:flex;flex-direction:column;gap:2px;");
+  left.appendChild(el("span","font-weight:600;font-size:13px;",vd.v+" ("+vd.c.length+")"));
+  if(vd.u){var a=el("a","font-size:12px;color:#2563eb;text-decoration:underline;",LABEL.policy);a.href=vd.u;a.target="_blank";a.rel="noopener noreferrer";a.addEventListener("click",function(ev){ev.stopPropagation();});left.appendChild(a);}
+  var caret=el("span","font-size:12px;transition:transform .2s;","\\u25BE");
+  head.appendChild(left);head.appendChild(caret);
+  var body=el("div","display:none;padding:0 10px 10px;");
+  for(var i=0;i<vd.c.length;i++){var c=vd.c[i];var card=el("div","background:#f3f4f6;border-radius:4px;padding:8px 10px;margin-top:6px;font-size:12px;line-height:1.45;");
+    card.appendChild(row(LABEL.name,c.n));card.appendChild(row(LABEL.desc,c.d));card.appendChild(row(LABEL.type,c.t));card.appendChild(row(LABEL.ret,c.r));body.appendChild(card);}
+  head.addEventListener("click",function(){var open=body.style.display!=="none";body.style.display=open?"none":"block";head.setAttribute("aria-expanded",open?"false":"true");caret.style.transform=open?"":"rotate(180deg)";});
+  box.appendChild(head);box.appendChild(body);return box;}
+function catOf(item){
+  var cb=item.querySelector('input[type="checkbox"][id^="cb-pref-"]');
+  if(!cb)return "necessary";
+  var k=cb.id.replace("cb-pref-","");return L[k]?k:null;}
+function enhance(){
+  var acc=document.querySelector("#cb-preferences-banner .cb-gdpr-accordion");
+  if(!acc||acc.getAttribute("data-cb-cookie-list"))return !!acc;
+  acc.setAttribute("data-cb-cookie-list","1");
+  var items=acc.children;
+  for(var i=0;i<items.length;i++){
+    var item=items[i],k=catOf(item),vendors=k&&L[k];
+    if(!vendors||!vendors.length)continue;
+    var panel=item.querySelector(".cb-gdpr-cat-desc > div");if(!panel)continue;
+    var wrap=el("div","margin-top:8px;");wrap.className="cb-cookie-list";
+    for(var j=0;j<vendors.length;j++)wrap.appendChild(vendorBox(vendors[j]));
+    panel.appendChild(wrap);}
+  return true;}
+if(!enhance()){var mo=new MutationObserver(function(){if(enhance())mo.disconnect();});
+  mo.observe(document.documentElement,{childList:true,subtree:true});
+  setTimeout(function(){mo.disconnect();},30000);}
+}catch(e){}})();
+`;
+}

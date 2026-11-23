@@ -489,7 +489,11 @@ async function postCheckoutWebflowInject(env, { wfSiteId, site, request, user, b
     const scriptUrl = buildEmbedScriptUrl(embedOrigin, site.cdnScriptId)
       || `${new URL(request.url).origin}/consentbit/${site.cdnScriptId}/script.js`;
 
-    const result = await injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, '[CustomCheckout]', kvEntry.webflowScriptId ?? null);
+    // Updated app installs by manual copy-paste (KV stamped manualInstall:true at
+    // free-register / banner save) — never auto-inject into the head or publish.
+    const result = kvEntry.manualInstall === true
+      ? { success: false, webflowScriptId: null }
+      : await injectScriptIntoWebflowHead(wfSiteId, scriptUrl, accessToken, '[CustomCheckout]', kvEntry.webflowScriptId ?? null);
 
     // Update KV with webapp linkage flags
     const updatedKv = {

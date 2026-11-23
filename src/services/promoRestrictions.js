@@ -17,6 +17,7 @@
 const RESTRICTED_CODES = {
   consent35: ['rodrigo.rejman@platanhotels.pl'],
   demo100: ['reshma@seattlenewmedia.com'],
+  mtcweb44: ['michele@mtcweb.co'],
 };
 
 const norm = (v) => (v == null ? '' : String(v).trim().toLowerCase());

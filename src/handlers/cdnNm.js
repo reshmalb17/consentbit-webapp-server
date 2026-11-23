@@ -3,6 +3,7 @@ import { authorizeRequestHost } from '../utils/domainValidate.js';
 import { trackCustomDomain } from '../services/domainResolver.js';
 import { mergeTranslations } from '../data/defaultTranslations.js';
 import { SCRIPT_BLOCK_PROVIDERS } from '../data/scriptBlockProviders.js';
+import { buildBannerCookieList, cookieListSignature, getBannerCookieListScript } from '../utils/bannerCookieList.js';
 import { getLoaderIabScript } from '../utils/IabCode.js';
 import { prefetchGvlBannerText } from '../utils/gvlPrefetch.js';
 import { getWebflowSetupScript } from '../utils/webflowSetup.js';
@@ -222,25 +223,9 @@ async function _handleCDNScript(request, env, url) {
         effectiveBannerType = 'gdpr';
       }
     } else if (regionMode === 'ccpa') {
-      if (country === 'US') {
-        effectiveBannerType = 'ccpa';
-      } else if (isEU || BANNER_REQUIRED_COUNTRIES.has(country)) {
-        // Previously every non-US visitor got bannerEnabled=false — no banner,
-        // no consent captured, in the EU and every country whose law requires
-        // one. Suppression is the worst outcome available: there is no record
-        // to show anyone. Fall back to the opt-in banner, lawful in all of them.
-        effectiveBannerType = 'gdpr';
-      } else {
-        bannerEnabled = false;
-      }
-    } else if (effectiveBannerType === 'ccpa') {
-      if (country === 'US') {
-        // unchanged
-      } else if (isEU || BANNER_REQUIRED_COUNTRIES.has(country)) {
-        effectiveBannerType = 'gdpr';   // same reasoning as above
-      } else {
-        bannerEnabled = false;
-      }
+      // CCPA-only site: every visitor, in every country, gets the CCPA banner
+      // (decided 2026-10-19).
+      effectiveBannerType = 'ccpa';
     }
   }
 
@@ -345,6 +330,15 @@ async function _handleCDNScript(request, env, url) {
     var custTx = customization.customiseButtonText || '#0284c7';
     var saveBg = customization.saveButtonBg || custBg;
     var saveTx = customization.saveButtonText || '#0284c7';
+    // Button border: when the button background is white the outline uses the
+    // button's own text colour (otherwise a white button on a white banner has no
+    // edge). Any other background keeps a border in that same background colour,
+    // so the text colour never shows up as a stray outline around a filled button.
+    var isWhiteColor = function (c) {
+      var h = String(c || '').trim().toLowerCase().replace(/s+/g, '');
+      return h === '#fff' || h === '#ffffff' || h === '#ffffffff' || h === 'white' || h === 'rgb(255,255,255)' || h === 'rgba(255,255,255,1)';
+    };
+    var btnBorder = function (bg, tx) { return isWhiteColor(bg) ? tx : bg; };
 
     var configTrans = {};
     try {
@@ -587,19 +581,23 @@ async function _handleCDNScript(request, env, url) {
       ".cb-banner button#cb-accept-all-btn{" +
         "background-color:" + acceptBg + ";" +
         "color:" + acceptTx + ";" +
+        "border-color:" + btnBorder(acceptBg, acceptTx) + ";" +
       "}" +
       ".cb-banner button#cb-reject-all-btn{" +
         "background-color:" + rejectBg + ";" +
         "color:" + rejectTx + ";" +
+        "border-color:" + btnBorder(rejectBg, rejectTx) + ";" +
       "}" +
       ".cb-banner button#cb-preferences-btn," +
       ".cb-banner button#cb-ccpa-donotsell-link{" +
         "background-color:" + custBg + ";" +
         "color:" + custTx + ";" +
+        "border-color:" + btnBorder(custBg, custTx) + ";" +
       "}" +
       ".cb-banner button#cb-prefs-reject-btn{" +
         "background-color:" + rejectBg + ";" +
         "color:" + rejectTx + ";" +
+        "border-color:" + btnBorder(rejectBg, rejectTx) + ";" +
       "}" +
       "#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer{" +
         "display:flex!important;" +
@@ -616,14 +614,17 @@ async function _handleCDNScript(request, env, url) {
       "#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{" +
         "background-color:" + acceptBg + ";" +
         "color:" + acceptTx + ";" +
+        "border-color:" + btnBorder(acceptBg, acceptTx) + ";" +
       "}" +
       "#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-save-prefs-btn{" +
         "background-color:" + saveBg + ";" +
         "color:" + saveTx + ";" +
+        "border-color:" + btnBorder(saveBg, saveTx) + ";" +
       "}" +
       "#cb-preferences-banner.cb-banner:not(.cb-ccpa-prefs) .cb-banner-footer button#cb-save-prefs-btn{" +
         "background-color:" + saveBg + ";" +
         "color:" + saveTx + ";" +
+        "border-color:" + btnBorder(saveBg, saveTx) + ";" +
       "}" +
       "#cb-preferences-banner.cb-banner .cb-banner-footer button{" +
         "padding:10px 36px!important;" +
@@ -663,6 +664,7 @@ async function _handleCDNScript(request, env, url) {
       "#cb-initial-banner.cb-banner #cb-preferences-btn{" +
         "background:" + custBg + "!important;" +
         "color:" + custTx + "!important;" +
+        "border-color:" + btnBorder(custBg, custTx) + "!important;" +
         "font-size:13px!important;" +
         "padding:10px 32px!important;" +
         "font-weight:600!important;" +
@@ -670,6 +672,7 @@ async function _handleCDNScript(request, env, url) {
       "#cb-initial-banner.cb-banner #cb-reject-all-btn{" +
         "background:" + rejectBg + "!important;" +
         "color:" + rejectTx + "!important;" +
+        "border-color:" + btnBorder(rejectBg, rejectTx) + "!important;" +
         "font-size:13px!important;" +
         "padding:10px 32px!important;" +
         "font-weight:600!important;" +
@@ -677,6 +680,7 @@ async function _handleCDNScript(request, env, url) {
       "#cb-initial-banner.cb-banner #cb-accept-all-btn{" +
         "background:" + acceptBg + "!important;" +
         "color:" + acceptTx + "!important;" +
+        "border-color:" + btnBorder(acceptBg, acceptTx) + "!important;" +
         "font-size:13px!important;" +
         "padding:10px 32px!important;" +
         "font-weight:600!important;" +
@@ -794,7 +798,100 @@ async function _handleCDNScript(request, env, url) {
           "margin:16px -20px -20px!important;" +
           "padding:0 16px!important;" +
         "}" +
-      "}";
+      "}" +
+      prefsDesignCss();
+  }
+
+  // GDPR preferences popup — design port of Claude Design "Cookie Preferences"
+  // (2026-11-05): 560px white modal, header strip, stacked bordered category rows
+  // with chevron + cookie-count pill + pill switch, vendor sub-accordions with
+  // cookie cards, grey footer with Reject / Save / Accept and a muted "Powered by".
+  // Only applies once the client add-on (utils/bannerCookieList.js) has tagged the
+  // popup with .cb-cl-design, so the CCPA panel and any page where the add-on did
+  // not run keep the previous look. Selector weight (#id.class.class) deliberately
+  // outranks the runtime's own !important rules. Colours are the design-system
+  // tokens, not the customer's banner colours; the font still inherits from the
+  // banner (DM Sans is not loaded — no third-party font request on customer sites).
+  // TEST-ONLY (/cdn-test/).
+  function prefsDesignCss() {
+    var P = '#cb-preferences-banner.cb-banner.cb-cl-design';
+    return [
+      P + '{width:560px!important;max-width:min(560px,calc(100vw - 32px))!important;max-height:min(760px,calc(100vh - 48px))!important;padding:0!important;border:0!important;border-radius:16px!important;background:#fff!important;color:#111827!important;box-shadow:0 24px 64px rgba(10,9,31,.28)!important;letter-spacing:-0.01em;overflow:hidden!important;}',
+      // Header strip (title + intro moved out of the scroll body by the add-on).
+      P + ' .cb-cl-hd{flex:0 0 auto;padding:24px 24px 16px;border-bottom:1px solid #EDEDED;}',
+      P + ' .cb-cl-hd h3{margin:0 0 8px!important;padding:0 40px 0 0!important;font-size:20px!important;line-height:28px!important;font-weight:700!important;color:#111827!important;text-align:left!important;}',
+      P + ' .cb-cl-hd p{margin:0!important;font-size:14px!important;line-height:21px!important;color:#4B5563!important;text-align:left!important;opacity:1!important;}',
+      P + ' .cb-cl-hd p a{color:#007AFF!important;}',
+      P + ' .cb-banner-body{flex:1 1 auto;min-height:0;margin:0!important;padding:16px 24px!important;overflow-y:auto;scrollbar-width:thin;}',
+      // Category rows: one bordered stack, rounded at the ends.
+      P + ' .cb-gdpr-accordion{margin:0!important;border:0!important;border-radius:0!important;background:transparent!important;overflow:visible!important;}',
+      P + ' .cb-cl-cat{margin:0!important;border:1px solid #E5E5E5!important;background:#fff;}',
+      P + ' .cb-cl-cat+.cb-cl-cat{border-top:0!important;}',
+      P + ' .cb-cl-cat:first-child{border-radius:12px 12px 0 0;}',
+      P + ' .cb-cl-cat:last-child{border-radius:0 0 12px 12px;}',
+      P + ' .cb-cl-cat-h{display:flex!important;align-items:center!important;gap:12px!important;padding:14px 16px!important;min-height:0!important;cursor:pointer;}',
+      P + ' .cb-cl-ctl{margin-left:auto;display:flex;align-items:center;flex-shrink:0;}',
+      // Chevron: the runtime toggles the button text between + and −; we hide the
+      // text and draw a CSS chevron that rotates on aria-expanded.
+      P + ' button.cb-cl-chev,' + P + ' span.cb-cl-chev{position:relative;display:flex!important;align-items:center!important;justify-content:center!important;width:24px!important;height:24px!important;min-width:0!important;margin:0!important;padding:0!important;border:0!important;border-radius:6px!important;background:#F1F5F9!important;color:#111827!important;font-size:0!important;line-height:0!important;flex-shrink:0;cursor:pointer;transition:transform .2s;}',
+      P + ' .cb-cl-chev::before{content:"";display:block;width:6px;height:6px;margin-top:-3px;border-right:1.6px solid #111827;border-bottom:1.6px solid #111827;transform:rotate(45deg);}',
+      P + ' .cb-cl-chev[aria-expanded="true"],' + P + ' .cb-cl-open>.cb-cl-ven-h .cb-cl-chev{transform:rotate(180deg);}',
+      P + ' .cb-gdpr-cat-label{flex:0 1 auto!important;min-width:0;font-size:15px!important;font-weight:600!important;line-height:22px!important;color:#111827!important;}',
+      P + ' .cb-cl-cnt{flex-shrink:0;font-size:12px;line-height:18px;font-weight:500;color:#4B5563;background:#F6F6F6;border-radius:99px;padding:2px 8px;white-space:nowrap;}',
+      P + ' .cb-cl-always{font-size:12px!important;line-height:16px!important;font-weight:600!important;color:#118A41!important;background:rgba(46,192,79,.1)!important;border-radius:99px;padding:4px 10px;white-space:nowrap;}',
+      // Switch (40x24, blue when on).
+      P + ' .cb-pref-toggle-track{width:40px!important;min-width:40px!important;height:24px!important;border-radius:99px!important;background:#D9D9D9!important;transition:background .15s!important;}',
+      P + ' .cb-pref-toggle-track[aria-checked="true"]{background:#007AFF!important;}',
+      P + ' .cb-pref-toggle-track::after{top:3px!important;left:3px!important;width:18px!important;height:18px!important;box-shadow:0 1px 2px rgba(0,0,0,.2)!important;transition:left .15s ease!important;}',
+      P + ' .cb-pref-toggle-track[aria-checked="true"]::after{left:19px!important;}',
+      P + ' .cb-pref-toggle-track:focus-visible,' + P + ' .cb-cl-chev:focus-visible,' + P + ' .cb-cl-ven-h:focus-visible,' + P + ' .cb-banner-footer button:focus-visible,' + P + ' #cb-close-prefs-btn:focus-visible{outline:2px solid #007AFF!important;outline-offset:2px;}',
+      // Expanded panel: description + vendor list.
+      P + ' .cb-gdpr-cat-desc{color:#4B5563!important;}',
+      P + ' .cb-cl-cat-b{padding:0 16px 16px 52px!important;}',
+      P + ' .cb-cl-cat-d{margin:0!important;width:auto!important;font-size:13px!important;line-height:20px!important;color:#4B5563!important;text-align:left!important;opacity:1!important;}',
+      P + ' .cb-cl-vens{display:flex;flex-direction:column;margin-top:12px;border:1px solid #EDEDED;border-radius:10px;overflow:hidden;}',
+      P + ' .cb-cl-ven+.cb-cl-ven{border-top:1px solid #EDEDED;}',
+      P + ' .cb-cl-ven-h{display:flex;align-items:flex-start;gap:10px;padding:12px;text-align:left;cursor:pointer;}',
+      P + ' .cb-cl-ven-h:hover{background:#F9F9FA;}',
+      P + ' span.cb-cl-chev-s{width:18px!important;height:18px!important;background:none!important;}',
+      P + ' .cb-cl-ven-n{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;font-size:14px;line-height:20px;font-weight:700;color:#111827;}',
+      P + ' .cb-cl-ven-p{align-self:flex-start;font-size:13px!important;line-height:18px;font-weight:500;color:#007AFF!important;text-decoration:underline!important;text-underline-offset:2px;}',
+      P + ' .cb-cl-ven-p:hover{color:#0777E6!important;}',
+      P + ' .cb-cl-ven-b{display:none;padding:0 12px 12px;flex-direction:column;gap:8px;}',
+      P + ' .cb-cl-open>.cb-cl-ven-b{display:flex;}',
+      P + ' .cb-cl-ck{display:grid;grid-template-columns:76px minmax(0,1fr);gap:6px 12px;margin:0;padding:10px 12px;background:#F9F9FA;border-radius:8px;font-size:12px;line-height:18px;}',
+      P + ' .cb-cl-ck dt{margin:0;font-weight:600;color:#111827;}',
+      P + ' .cb-cl-ck dd{margin:0;color:#111827;word-break:break-word;}',
+      P + ' .cb-cl-ck code{font-family:ui-monospace,Menlo,monospace!important;font-size:12px;font-weight:600;background:none;padding:0;}',
+      // Footer: three equal buttons on a grey strip, then the brand line.
+      P + ' .cb-banner-footer{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:8px!important;flex:0 0 auto!important;width:100%!important;margin:0!important;padding:16px 24px 0!important;border-top:1px solid #EDEDED!important;background:#F9F9FA!important;}',
+      P + '.cb-cl-nobrand .cb-banner-footer{padding-bottom:16px!important;}',
+      P + ' .cb-banner-footer button{width:auto!important;min-width:0!important;height:44px!important;margin:0!important;padding:0 12px!important;border:1px solid #D9D9D9!important;border-radius:10px!important;background:transparent!important;color:#111827!important;font-size:14px!important;font-weight:600!important;white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis!important;transition:background .15s,opacity .15s;}',
+      P + ' .cb-banner-footer button:hover{background:#F1F5F9!important;opacity:1!important;}',
+      P + ' .cb-banner-footer button#cb-prefs-accept-btn{background:#007AFF!important;border-color:#007AFF!important;color:#fff!important;}',
+      P + ' .cb-banner-footer button#cb-prefs-accept-btn:hover{background:#0777E6!important;border-color:#0777E6!important;}',
+      P + ' .cb-brand-footer{height:auto!important;max-height:none!important;width:100%!important;margin:0!important;padding:8px 24px 12px!important;justify-content:flex-end!important;gap:6px!important;background:#F9F9FA!important;border-top:0!important;}',
+      P + ' .cb-brand-footer a{margin:0!important;padding:0!important;gap:6px!important;}',
+      P + ' .cb-brand-credit{font-size:12px!important;font-weight:400!important;letter-spacing:0!important;color:#848199!important;}',
+      P + ' .cb-brand-mark{opacity:.45!important;filter:grayscale(1);}',
+      P + ' .cb-brand-mark svg{height:14px!important;}',
+      // Close (×): the runtime sets the glyph inline; hide it and draw a 16px X.
+      P + ' #cb-close-prefs-btn{top:20px!important;right:20px!important;width:32px!important;height:32px!important;border-radius:8px!important;background:transparent!important;color:#4B5563!important;opacity:1!important;font-size:0!important;line-height:0!important;}',
+      P + ' #cb-close-prefs-btn:hover{background:#F1F5F9!important;color:#111827!important;}',
+      P + ' #cb-close-prefs-btn::before,' + P + ' #cb-close-prefs-btn::after{content:"";position:absolute;left:50%;top:50%;width:14px;height:2px;border-radius:1px;background:currentColor;transform:translate(-50%,-50%) rotate(45deg);}',
+      P + ' #cb-close-prefs-btn::after{transform:translate(-50%,-50%) rotate(-45deg);}',
+      '@media(max-width:660px){' +
+        P + '{width:calc(100vw - 32px)!important;padding:0!important;}' +
+        P + ' .cb-banner-footer{display:grid!important;}' +
+        P + ' .cb-brand-footer{width:100%!important;margin:0!important;padding:8px 24px 12px!important;}' +
+      '}',
+      '@media(max-width:480px){' +
+        P + ' .cb-banner-footer{grid-template-columns:1fr!important;}' +
+        P + ' .cb-cl-cat-b{padding-left:16px!important;}' +
+        P + ' .cb-cl-hd{padding:20px 20px 14px;}' +
+        P + ' .cb-banner-body{padding:12px 16px!important;}' +
+      '}',
+    ].join('');
   }
 
   function jsonForInlineScript(value) {
@@ -922,9 +1019,19 @@ async function _handleCDNScript(request, env, url) {
   const iabBundleServed = String(resolvedSite.banner_type || '').toLowerCase() === 'iab' &&
     (effectivePlanId === 'growth' || effectivePlanId === 'essential');
 
+  // Vendor + cookie list for the preferences popup (utils/bannerCookieList.js):
+  // the Scan tab's cookies grouped by category and vendor. Additive - null on any
+  // failure, and the runtime add-on simply renders no vendor rows then.
+  const cookieList = await buildBannerCookieList(env, resolvedSite.id, resolvedSite.domain).catch((err) => {
+    console.error('[CDN] cookie list failed:', err?.message);
+    return null;
+  });
+  const cookieListSig = cookieList ? await cookieListSignature(cookieList) : '';
+
   const siteConfigPayload = {
     id: resolvedSite.id,
     bannerType: effectiveBannerType,
+    cookieList,
     // Which US statute applies to THIS request (null outside the US opt-out path).
     // Additive: bannerType is untouched, so every existing runtime branch behaves
     // exactly as before for sites/visitors that ignore this field.
@@ -957,7 +1064,10 @@ async function _handleCDNScript(request, env, url) {
     //     attach to. This flag closes that gap; it does not widen what the runtime allows.
     gtmConsentMode: resolvedSite.gtmConsentMode !== 0 && resolvedSite.gtmConsentMode !== false,
     platform: resolvedSite.platform || null,
-    styles: customStyles || null,
+    // customStyles is only built when the site has a BannerCustomization row; the
+    // preferences-popup design CSS must reach the page either way (it is already
+    // folded into customStyles when that row exists).
+    styles: customStyles || prefsDesignCss(),
     customization: customization
       ? {
           position: (function () {
@@ -1119,12 +1229,14 @@ ${inlineConfig}
     // Honor navigator.globalPrivacyControl as a CCPA "Do Not Sell/Share" opt-out.
     // MUST run here — before the script blocker (shouldBlockScript/isCategoryAllowed)
     // and boot() read consentState — so non-essential scripts are blocked from first
-    // paint. Scoped to CCPA; first visit only: a stored choice always wins, so a user
-    // who opted back in is never overridden. navigator.globalPrivacyControl is
+    // paint. Scoped to CCPA. GPC overrides a stored choice made WITHOUT the signal
+    // (CCPA regs: the signal wins over an earlier opt-in). A choice saved while GPC
+    // was on carries gpc:true (stamped in saveConsentState), so a visitor who opts
+    // back in with GPC on is never overridden. navigator.globalPrivacyControl is
     // browser-set and synchronous, so no async/geo wait is needed (the banner type is
     // already resolved server-side).
     try {
-      if (navigator.globalPrivacyControl === true && "ccpa" === bannerType && (!consentState || !consentState.accepted)) {
+      if (navigator.globalPrivacyControl === true && "ccpa" === bannerType && !(consentState && consentState.accepted && (consentState.gpc || consentState.ccpa && consentState.ccpa.doNotSell))) {
         consentState = {
           accepted: true,
           timestamp: (new Date).toISOString(),
@@ -1538,6 +1650,8 @@ ${inlineConfig}
   /** Persist a decision, clear the "dismissed" marker, and release any scripts it now allows. */
   function saveConsentState(state) {
     try {
+      // Choice made with GPC on: the GPC gate must not override it on later loads.
+      if (navigator.globalPrivacyControl === true) state.gpc = true;
       var lifetimeMs = 24 * cookieExpirationDays * 60 * 60 * 1000;
       state.expiresAt = state.expiresAt || new Date(Date.now() + lifetimeMs).toISOString();
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -1596,13 +1710,21 @@ ${inlineConfig}
       };
       // Consent ID: one random ID per visitor per site, created on their first choice and
       // reused afterwards, so all of a visitor's records can be found and deleted together.
-      // Same localStorage key as the IAB banner (IabCode.js). Never blocks the POST.
+      // Kept in the first-party cookie consentbit-consentid (12 months), shared with the IAB
+      // banner (IabCode.js); an older localStorage ID is carried over once. Never blocks the POST.
       try {
         payload.deviceId = function () {
           var key = "cb_consent_id_" + siteId, id = null, cr = window.crypto;
+          var readCk = function () {
+            try {
+              var m = document.cookie.match(/(?:^|; *)consentbit-consentid=([0-9a-fA-F-]{36})(?:;|$)/);
+              return m ? m[1] : null
+            } catch (x) { return null }
+          };
+          if ((id = readCk())) return id;
           try { id = localStorage.getItem(key) } catch (x) {}
-          if (id && id.length === 36 && /^[0-9a-f-]+$/i.test(id)) return id;
-          if (cr && cr.randomUUID) {
+          if (id && id.length === 36 && /^[0-9a-f-]+$/i.test(id)) {
+          } else if (cr && cr.randomUUID) {
             id = cr.randomUUID()
           } else {
             id = "10000000-1000-4000-8000-100000000000".replace(/[018]/g, function (n) {
@@ -1610,7 +1732,10 @@ ${inlineConfig}
               return (+n ^ b & 15 >> +n / 4).toString(16)
             })
           }
-          try { localStorage.setItem(key, id) } catch (x) {}
+          try {
+            document.cookie = "consentbit-consentid=" + id + "; path=/; max-age=31536000; SameSite=Lax" + ("https:" === location.protocol ? "; Secure" : "")
+          } catch (x) {}
+          if (readCk() === id) try { localStorage.removeItem(key) } catch (x) {}
           return id
         }()
       } catch (x) {}
@@ -2333,7 +2458,7 @@ ${inlineConfig}
   /** Cookies known to be dropped by the trackers in each category. */
   var COOKIE_PATTERNS_BY_CATEGORY = {
     analytics: ["_ga", "_ga_*", "_gid", "_gat", "_gat_*", "_gac_*", "_hjid", "_hjSessionUser_*", "_hjSession_*", "_hjAbsoluteSessionInProgress", "_clck", "_clsk"],
-    marketing: ["_fbp", "_fbc", "_gcl_au", "_gcl_ls", "_gcl_aw", "_ttp", "tt_webid_v2", "_pin_unauth", "_pinterest_ct_ua", "li_sugr", "bcookie", "bscookie", "lidc", "_uetsid", "_uetvid", "IDE", "test_cookie", "fr", "_reb2b*", "_gd_visitor", "_gd_session", "_gd_svisitor", "_an_uid"],
+    marketing: ["_fbp", "_fbc", "_gcl_au", "_gcl_ls", "_gcl_aw", "_ttp", "tt_webid_v2", "_pin_unauth", "_pinterest_ct_ua", "li_sugr", "bcookie", "bscookie", "lidc", "_uetsid", "_uetvid", "IDE", "test_cookie", "fr", "_reb2b*", "_gd_visitor", "_gd_session", "_gd_svisitor", "_an_uid", "__hstc", "__hssc", "__hssrc", "hubspotutk", "messagesUtk", "_li_dcdm_c", "_li_ss", "li_fat_id", "_lc2_fpi*"],
     preferences: []
   };
 
@@ -2688,7 +2813,7 @@ ${inlineConfig}
    */
   function injectStyles() {
     if (!document.getElementById("cb-styles")) {
-      var saveAndCancelButtonCss = "#cb-preferences-banner .cb-banner-footer button#cb-save-prefs-btn{background-color:" + (customization && customization.saveButtonBg ? String(customization.saveButtonBg) : "#ffffff") + " !important;color:" + (customization && customization.saveButtonText ? String(customization.saveButtonText) : "#334155") + " !important;border-color:#e2e8f0 !important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{background-color:" + (customization && customization.acceptButtonBg ? String(customization.acceptButtonBg) : "#ffffff") + " !important;color:" + (customization && customization.acceptButtonText ? String(customization.acceptButtonText) : "#334155") + " !important;border-color:" + (customization && customization.acceptButtonBg ? String(customization.acceptButtonBg) : "#e2e8f0") + " !important;}";
+      var saveAndCancelButtonCss = "#cb-preferences-banner .cb-banner-footer button#cb-save-prefs-btn{background-color:" + (customization && customization.saveButtonBg ? String(customization.saveButtonBg) : "#ffffff") + " !important;color:" + (customization && customization.saveButtonText ? String(customization.saveButtonText) : "#334155") + " !important;border-color:" + (function (bg, tx) { var h = String(bg || "").trim().toLowerCase().replace(/ /g, ""); return h === "#fff" || h === "#ffffff" || h === "white" || h === "rgb(255,255,255)" ? tx : bg; })(customization && customization.saveButtonBg ? String(customization.saveButtonBg) : "#ffffff", customization && customization.saveButtonText ? String(customization.saveButtonText) : "#334155") + " !important;}#cb-preferences-banner.cb-ccpa-prefs .cb-banner-footer button#cb-cancel-prefs-btn{background-color:" + (customization && customization.acceptButtonBg ? String(customization.acceptButtonBg) : "#ffffff") + " !important;color:" + (customization && customization.acceptButtonText ? String(customization.acceptButtonText) : "#334155") + " !important;border-color:" + (customization && customization.acceptButtonBg ? String(customization.acceptButtonBg) : "#e2e8f0") + " !important;}";
 
       var backgroundCss = "";
       if (customization && customization.backgroundColor) {
@@ -3925,9 +4050,10 @@ ${inlineConfig}
     "loading" === document.readyState ? document.addEventListener("DOMContentLoaded", bindConsentTriggers) : bindConsentTriggers()
   }
 }();
+${getBannerCookieListScript()}
 `;
 
-  const SCRIPT_VERSION = '2026-10-07-consent-id';
+  const SCRIPT_VERSION = '2026-11-05-prefs-design';
   const customizationUpdatedAt = customization?.updatedAt || customization?.updated_at || '';
   const translationsSig = await (async () => {
     try {
@@ -3940,7 +4066,7 @@ ${inlineConfig}
       return '';
     }
   })();
-  const etag = `"${resolvedSite.id}-${resolvedSite.updatedAt || ''}-${customizationUpdatedAt}-${translationsSig}-${SCRIPT_VERSION}"`;
+  const etag = `"${resolvedSite.id}-${resolvedSite.updatedAt || ''}-${customizationUpdatedAt}-${translationsSig}-${cookieListSig}-${SCRIPT_VERSION}"`;
   const ifNoneMatch = request.headers.get('If-None-Match');
   if (ifNoneMatch === etag) {
     return new Response(null, { status: 304 });
@@ -4052,7 +4178,7 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
   // Webflow's built-in Google Analytics integration queues gtag('js') + gtag('config') ABOVE our
   // tag, so without it config ran with no consent state: _ga, _gcl_au, Ads remarketing and Xandr
   // fired before any choice (Monitaur, 2026-09-17, measured in a real browser).
-  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? 'true' : 'false'};var d=null,e=false,hasStored=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!hasStored){e=true;}}catch(_){}${clarityBootstrap}${uetBootstrap}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);window.gtag('set','developer_id.dN2Q3Yj',true);var g=window.__cbConsentDefaultSet===true;if(!c){if(!g){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});}if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else if(!g){window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}try{var L=window.dataLayer;if(L&&L.push===Array.prototype.push){var h=[],r=[];for(var k=0;k<L.length;k++){var it=L[k];(it&&it[0]==='consent'?h:r).push(it);}if(h.length&&r.length&&L[0]!==h[0]){L.length=0;Array.prototype.push.apply(L,h.concat(r));}}}catch(_){}window.__cbConsentDefaultSet=true;}catch(_){}})();\n`;
+  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? 'true' : 'false'};var d=null,e=false,hasStored=false,sg=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(v.gpc)sg=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!(hasStored&&sg)){e=true;}}catch(_){}${clarityBootstrap}${uetBootstrap}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);window.gtag('set','developer_id.dN2Q3Yj',true);var g=window.__cbConsentDefaultSet===true;if(!c){if(!g){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});}if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else if(!g){window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}try{var L=window.dataLayer;if(L&&L.push===Array.prototype.push){var h=[],r=[];for(var k=0;k<L.length;k++){var it=L[k];(it&&it[0]==='consent'?h:r).push(it);}if(h.length&&r.length&&L[0]!==h[0]){L.length=0;Array.prototype.push.apply(L,h.concat(r));}}}catch(_){}window.__cbConsentDefaultSet=true;}catch(_){}})();\n`;
 
   const scriptToServe =
     getDebugModeScript() +

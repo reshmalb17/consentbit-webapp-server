@@ -28,6 +28,13 @@ binding = "COOKIE_SCANNER_DB"
 database_name = "cookie-scanner-db"
 database_id = "b66e816a-d6df-463f-97aa-45ee475f6bbc"
 
+# Expired consent records are MOVED here by the retention sweep (services/consentRetention.js)
+# instead of being deleted. Schema: scripts/retention-db-schema.sql. Created 2026-10-15.
+[[d1_databases]]
+binding = "RETENTION_DB"
+database_name = "consentbit-retention-data"
+database_id = "3a0dd7c5-caa8-4355-a134-4e5c1e9e35e4"
+
 [[kv_namespaces]]
 binding = "WEBFLOW_AUTHENTICATION"
 id = "aa64050ef7804e7783fe9680daae80c5"
@@ -69,10 +76,53 @@ id = "353f494f977440feb2120b3464aa917a"
 # (src/utils/flowLog.js). TEST WORKER ONLY — deliberately NOT in [env.production.vars].
 # Watch with: npx wrangler tail --search "CB-FLOW"
 CB_FLOW_LOG = "1"
+# Minimum-legal-requirements banner fixes (docs/minimum-legal-requirements.md): law
+# recorded on consent rows, "Do Not Sell or Share" link title, 12-month CCPA opt-out,
+# visitor consent ID. TEST WORKER ONLY — read in handlers/cdnM.js + consentLogs.js;
+# "0" in [env.production.vars].
+LAW_FIXES = "1"
+# Page-language banner (services/pageLanguages.js, 2026-11-18): banner follows <html lang>
+# for the languages the owner enabled. TEST WORKER ONLY; "0" in [env.production.vars].
+PAGE_LANGUAGES = "1"
+# Where banners served by THIS worker post consents (cdnM.js apiBase). Unset, it falls
+# back to https://manager.consentbit.com — the PRODUCTION worker — so test sites' consents
+# were saved by prod code and law work (lawNames.js) never reached them. TEST WORKER ONLY;
+# production keeps the fallback (not set in [env.production.vars]).
+API_BASE_URL = "https://consent-webapp-manager.web-8fb.workers.dev"
+# Hosted cookie transparency page — /cookie-list/<domain> + /api/transparency-page
+# (handlers/transparencyPage.js). TEST WORKER ONLY — "0" in [env.production.vars].
+# TRANSPARENCY_INDEX = "1" lets search engines index the pages (default noindex).
+TRANSPARENCY_PAGE = "1"
+TRANSPARENCY_INDEX = "0"
 # Workflow switches. Unset in production until verified on Test.
 #   CANCEL_INVOICE_VOID_MODE / CARD_PIN_FOLLOW_MODE: "off" | "dry-run" | "on"
 CANCEL_INVOICE_VOID_MODE = "dry-run"
 CARD_PIN_FOLLOW_MODE = "dry-run"
+# Consent-record retention (services/consentRetention.js): rows older than 12 months
+# (US/ccpa: 24 months) are MOVED to consentbit-retention-data (RETENTION_DB), then removed
+# from Consent. ON by decision 2026-10-15. "dry-run" only COUNTS; "off" stops it.
+# Test and production share the consent-webapp-eu D1, so ONE worker's setting covers every
+# site. Moved to production 2026-10-17 — keep Test "off". Needs idx_consent_site_created.
+CONSENT_RETENTION_MODE = "off"
+# Owner emails before consent records are hidden (Free, 3 months) or removed (paid,
+# 12 months) — services/retentionReminders.js. "off" | "dry-run" | "on". Shared D1 and
+# claim table: ONE worker only, the same one as CONSENT_RETENTION_MODE.
+RETENTION_REMINDERS = "off"
+# Monthly combined invoice (services/combinedInvoice.js) — live Stripe only, so "off" in Test.
+COMBINED_INVOICES = "off"
+# "A new tracker showed up" emails after scheduled scans (services/newTrackerAlerts.js).
+# "off" | "dry-run" (log only) | "on". Shared D1: enable on ONE worker only.
+NEW_TRACKER_ALERTS = "on"
+# Free fallback (services/freeFallback.js, 2026-11-05): when a site's paid plan ENDS
+# (card failed through dunning, or a cancellation reached its period end) the site moves
+# to the Free plan — only if no other site on the account already uses Free; otherwise it
+# stays blocked (402) as before. "on" | "dry-run" (log only) | "off". Idempotent, so both
+# workers may run it against the shared D1.
+FREE_FALLBACK = "on"
+# STRICT_SUBDOMAINS: "on" stops any-subdomain matching — shop.example.com no longer gets
+# example.com's banner unless proven the same site (Webflow project / Framer fid /
+# translated copy). Leave "off" until the [CDN] subdomain-legacy log lines are reviewed.
+STRICT_SUBDOMAINS = "off"
 # TRIAL_RESTRICT_RETURNING_SITES: "on" withholds the 14-day trial from a site that has any
 # earlier subscription (item A). Anything else = returning sites get the trial again.
 # Decided 2026-09-18: allow (services/db.js isSiteTrialIneligible).
@@ -174,8 +224,37 @@ name = "consent-webapp-manager-production"
 # Renewal / cancellation workflow — explicitly OFF in production until verified on Test.
 # (Top-level [vars] are not inherited here; declaring them makes that intent visible.)
 CB_FLOW_LOG = "0"
+# Law-requirement banner fixes — ON in production from 2026-10-16 (user decision).
+LAW_FIXES = "1"
+# Page-language banner — OFF in production until tested on the test worker.
+PAGE_LANGUAGES = "0"
+# Empty = banners post consents to https://manager.consentbit.com (cdnM.js fallback).
+API_BASE_URL = ""
+# Hosted cookie transparency page — OFF in production until verified on Test.
+TRANSPARENCY_PAGE = "0"
 CANCEL_INVOICE_VOID_MODE = "off"
 CARD_PIN_FOLLOW_MODE = "off"
+# Consent-record retention — ON in production (moved from Test 2026-10-17). The D1 is
+# shared with Test, so this covers every site; never turn it on in both.
+CONSENT_RETENTION_MODE = "on"
+# Retention reminder emails (services/retentionReminders.js) — "off" in Test.
+# 2026-10-26: "dry-run" (log only, no emails) at the user's request after the level3.ai
+# complaint (its org's Basic sub is pinned to a different domain, www.lv3.ai).
+RETENTION_REMINDERS = "dry-run"
+# Monthly combined invoice for Platan Hotels (services/combinedInvoice.js), sent on the 11th
+# from 09:00 UTC. "off" | "dry-run" (logs only) | "on" (emails Rodrigo + Magdalena + web@).
+# COMBINED_INVOICE_TEST_TO: while set, the invoice goes ONLY to this address (any day,
+# latest month, once). Must stay absent, or the real invoice will not go out.
+COMBINED_INVOICES = "on"
+NEW_TRACKER_ALERTS = "off"
+# Free fallback — see the [vars] note. Live Stripe webhooks land on this worker, so the
+# move usually happens here; the Test worker's sweep would reach the same answer.
+FREE_FALLBACK = "on"
+# COMBINED_INVOICE_TEST_TO removed 2026-11-03 so the real invoice goes to Platan
+# STRICT_SUBDOMAINS: "on" stops any-subdomain matching — shop.example.com no longer gets
+# example.com's banner unless proven the same site (Webflow project / Framer fid /
+# translated copy). Leave "off" until the [CDN] subdomain-legacy log lines are reviewed.
+STRICT_SUBDOMAINS = "off"
 # TRIAL_RESTRICT_RETURNING_SITES: "on" withholds the 14-day trial from a site that has any
 # earlier subscription (item A). Anything else = returning sites get the trial again.
 # Decided 2026-09-18: allow (services/db.js isSiteTrialIneligible).
@@ -242,6 +321,12 @@ database_id = "8b467c8c-2ff8-43b5-9338-a4e9191e6014"
 binding = "COOKIE_SCANNER_DB"
 database_name = "cookie-scanner-db"
 database_id = "b66e816a-d6df-463f-97aa-45ee475f6bbc"
+
+# Bound so visitor export/erasure reaches moved records. The sweep itself stays off here.
+[[env.production.d1_databases]]
+binding = "RETENTION_DB"
+database_name = "consentbit-retention-data"
+database_id = "3a0dd7c5-caa8-4355-a134-4e5c1e9e35e4"
 
 [[env.production.kv_namespaces]]
 binding = "WEBFLOW_AUTHENTICATION"

@@ -131,6 +131,90 @@ export async function verifyFramerSameSite(knownHost, candidateHost) {
   return knownFid === candidateFid;
 }
 
+// ── Translated copies (Weglot and similar, any platform) ────────────────────
+
+/**
+ * Is `candidateHost` serving a translated copy of `site`?
+ *
+ * Translation tools mark the translated page with the original it came from.
+ * On Coeo's en.coeo.events (Weglot) the raw HTML carries:
+ *   <link href="https://www.coeo.events/" hreflang="sv" rel="alternate">
+ *   <script id="weglot-data">{"originalCanonicalUrl":"https://www.coeo.events/", ...}
+ *   <html ... data-wf-site="68496f4a3585a13831ea2697">
+ * The ORIGINAL page carries none of these in its raw HTML (Weglot adds them
+ * client-side), so all checks run on the candidate page only.
+ *
+ * Proof required:
+ *   1. The page points back to a host already on file for this site — via an
+ *      hreflang alternate link or the Weglot original URL.
+ *   2. Where the platform stamps its own project id, it matches:
+ *      Webflow data-wf-site === site.platformSiteId; Framer data-fid equal to
+ *      the fid on a host already on file. This rules out a different site that
+ *      merely links to this one.
+ *
+ * Never throws. Returns { translated, reason }.
+ */
+export async function detectTranslatedCopy(site, candidateHost) {
+  const host = normalizeHostname(candidateHost);
+  const known = siteKnownHosts(site).filter((h) => h !== host);
+  if (!host || !known.length) return { translated: false, reason: 'no-known-host' };
+
+  // Only a SUBDOMAIN of the licensed domain can be a covered translation
+  // (en.coeo.events for coeo.events). A translation on a separate domain
+  // (coeo.de) needs its own licence — decided 2026-10-14. Checked before any fetch.
+  if (!known.some((k) => hostMatches(host, k))) {
+    return { translated: false, reason: 'not-same-domain' };
+  }
+
+  let html = '';
+  try {
+    const res = await fetch(`https://${host}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ConsentBit/1.0)' },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!res.ok) return { translated: false, reason: `http-${res.status}` };
+    // A redirect off the candidate (e.g. to the original site) is not a copy.
+    if (normalizeHostname(res.url) !== host) return { translated: false, reason: 'redirected' };
+    html = await res.text();
+  } catch (_) {
+    return { translated: false, reason: 'fetch-failed' };
+  }
+
+  const pointsTo = [];
+  for (const tag of html.match(/<link\b[^>]*>/gi) || []) {
+    if (!/\bhreflang\s*=/i.test(tag)) continue;
+    const href = tag.match(/\bhref\s*=\s*["']([^"']+)["']/i);
+    if (href) pointsTo.push(href[1]);
+  }
+  const weglotOriginal = html.match(/"originalCanonicalUrl"\s*:\s*"([^"]+)"/);
+  if (weglotOriginal) pointsTo.push(weglotOriginal[1].replace(/\\\//g, '/'));
+
+  const pointsBack = pointsTo
+    .map(normalizeHostname)
+    .some((h) => h && h !== host && known.includes(h));
+  if (!pointsBack) return { translated: false, reason: 'no-link-to-original' };
+
+  const platform = String(site?.platform || '').toLowerCase();
+  if (platform === 'webflow') {
+    const platformSiteId = site.platformSiteId ?? site.platformsiteid ?? null;
+    const pageSiteId = html.match(/<html\b[^>]*\bdata-wf-site\s*=\s*["']([^"']+)["']/i)?.[1] || null;
+    if (!platformSiteId || pageSiteId !== platformSiteId) {
+      return { translated: false, reason: 'webflow-site-id-mismatch' };
+    }
+  } else if (platform === 'framer') {
+    const pageFid = html.match(
+      /<script[^>]*src="https:\/\/events\.framer\.com\/script\?v=2"[^>]*data-fid="([^"]+)"/i
+    )?.[1] || null;
+    const knownFid = pageFid ? await resolveFramerSiteId(known[0]) : null;
+    if (!pageFid || pageFid !== knownFid) {
+      return { translated: false, reason: 'framer-fid-mismatch' };
+    }
+  }
+
+  return { translated: true, reason: 'translated-copy' };
+}
+
 // ── Entry point ─────────────────────────────────────────────────────────────
 
 /**
@@ -147,6 +231,25 @@ export async function verifyFramerSameSite(knownHost, candidateHost) {
  * Never throws: a resolver failure must not turn into a failed page load.
  */
 export async function trackCustomDomain(db, env, site, candidateHost, options = {}) {
+  const result = await trackPlatformDomain(db, env, site, candidateHost, options);
+  // Not on the platform's own records — it may still be a translated copy of the
+  // site (Weglot etc.). Never recorded here: the caller decides, once it knows
+  // the plan, whether the licence covers it (LANGUAGE_DOMAIN_PLANS).
+  if (!result.matched && result.checked && result.reason !== 'error') {
+    try {
+      const copy = await detectTranslatedCopy(site, candidateHost);
+      if (copy.translated) {
+        result.translated = true;
+        result.reason = copy.reason;
+      } else {
+        result.reason = `${result.reason}|${copy.reason}`;
+      }
+    } catch (_) {}
+  }
+  return result;
+}
+
+async function trackPlatformDomain(db, env, site, candidateHost, options = {}) {
   const host = normalizeHostname(candidateHost);
   const siteId = site?.id;
   const result = {
@@ -181,7 +284,9 @@ export async function trackCustomDomain(db, env, site, candidateHost, options = 
       // Match on the whole list, not just the candidate: the visitor may have
       // arrived on the second domain of a multi-domain project, and every one of
       // them serves this same script.
-      const hit = domains.customDomains.find((d) => hostMatches(host, d));
+      // Exact match: a subdomain of one of the project's domains is not on the
+      // project unless Webflow lists it itself.
+      const hit = domains.customDomains.find((d) => normalizeHostname(d) === host);
       if (!hit) {
         console.warn(`${TAG} ${host} is NOT a domain of webflow site ${platformSiteId} (site ${siteId})`);
         result.reason = 'not-on-platform';

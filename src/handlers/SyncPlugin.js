@@ -23,6 +23,7 @@
 //   3. Persist { userId, siteId } in env.AUTH_STORE_FRAMER KV keyed by platformSiteId.
 //   4. Return { success: true, userId, siteId }.
 
+import { carryOverPageLanguages } from '../services/pageLanguages.js';
 import {
   getUserByEmail,
   createUser,
@@ -37,6 +38,7 @@ import {
   canonicalEmbedOrigin,
   markSiteVerified,
 } from '../services/db.js';
+import { findOtherFreeSite, moveSiteToFreeIfAllowed } from '../services/freeFallback.js';
 
 const VERIFY_SCRIPT_BASE_URL = 'https://consent-webapp-manager.web-8fb.workers.dev/consentbit';
 
@@ -78,15 +80,19 @@ async function capturePosthog(env, { event, distinctId, properties }) {
   }
 }
 
-/** Returns the first site under this org that is NOT on a paid plan (no active/trialing subscription). */
+/**
+ * The site under this org that is USING the Free plan, or null.
+ *
+ * Was: "first site with no active/trialing subscription". That counted a site whose paid
+ * plan had ENDED (blocked, 402) as the account's free site, so a customer with one dead
+ * paid site could never add a free one — and, the other way round, two sites could both
+ * end up on Free. Now judged by services/freeFallback.js: a site is on Free when it never
+ * had a subscription row, or when its plan ended and it was moved to Free; an ended
+ * site that was NOT moved is using nothing and does not hold the slot. (2026-11-05)
+ */
 async function findFreePlanSite(db, organizationId) {
   if (!organizationId) return null;
-  const sites = await listSites(db, { organizationId });
-  for (const site of sites || []) {
-    const sub = await getSubscriptionBySiteId(db, site.id);
-    if (!sub) return site;
-  }
-  return null;
+  return findOtherFreeSite(db, organizationId, null);
 }
 
 /**
@@ -353,6 +359,7 @@ export async function handleSyncPlugin(request, env) {
 
   // ── 5. Save customization (always, new or existing) ──────────────────────
   if (customization) {
+    await carryOverPageLanguages(db, site.id, customization);
     try {
       await saveBannerCustomization(db, site.id, customization);
     } catch (e) {
@@ -391,6 +398,27 @@ export async function handleSyncPlugin(request, env) {
   } catch (e) {
     console.error('[SyncPlugin] KV put failed', e);
     return Response.json({ success: false, error: 'Failed to persist platform mapping' }, { status: 500 });
+  }
+
+  // ── 6b. Existing site whose paid plan ENDED → "Continue free" moves it to Free ──
+  // The one-free-site guard in step 3 already refused when another site holds the
+  // slot, so this normally succeeds; a new or still-free site is a no-op. Flag-gated
+  // (FREE_FALLBACK) and never fails the publish: if blocked, the site simply stays
+  // as it was and the plugin shows the usual FREE_SITE_LIMIT answer.
+  try {
+    const ff = await moveSiteToFreeIfAllowed(db, env, { siteId: site.id, organizationId, trigger: 'framer:sync-plugin' });
+    if (ff.outcome === 'blocked') {
+      console.warn('[SyncPlugin] plan ended, Free slot taken by another site', { siteId: site.id, blockedBy: ff.blockedBy?.domain || ff.blockedBy?.id });
+      return Response.json({
+        success: false,
+        code: 'FREE_SITE_LIMIT',
+        error: 'You already have a free site in your account. Upgrade an existing site or remove the free one before adding another.',
+        existingFreeSite: { id: ff.blockedBy.id, domain: ff.blockedBy.domain, name: ff.blockedBy.name },
+      }, { status: 409 });
+    }
+    if (ff.outcome === 'moved') console.log('[SyncPlugin] moved ended site to Free', { siteId: site.id });
+  } catch (e) {
+    console.warn('[SyncPlugin] free fallback failed (non-fatal)', e?.message);
   }
 
   // ── 7. Done ──────────────────────────────────────────────────────────────
@@ -473,6 +501,9 @@ export async function handleSyncPluginCustomization(request, env) {
   if (!customization) {
     return Response.json({ success: false, error: 'customization object is required' }, { status: 400 });
   }
+
+  // Page languages are webapp-only; keep them when the Framer plugin saves (services/pageLanguages.js).
+  await carryOverPageLanguages(db, webAppSiteId, customization);
 
   try {
     await saveBannerCustomization(db, webAppSiteId, customization);

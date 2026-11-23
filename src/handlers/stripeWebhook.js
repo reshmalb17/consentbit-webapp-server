@@ -41,6 +41,7 @@ import { syncCustomerDefaultFromSubscription } from '../services/stripeCardPin.j
 import { followCustomerDefaultCard, repinAfterCardDetached } from '../services/cardPinFollow.js';
 import { flowLog } from '../utils/flowLog.js';
 import { clampSiteToPlanEntitlements, planAllowsPaidRegions } from '../services/planEntitlementClamp.js';
+import { moveSiteToFreeIfAllowed } from '../services/freeFallback.js';
 import {
   classifyTransition,
   recordPlanTransition,
@@ -317,6 +318,8 @@ async function handleLegacyWebflowUpgrade(env, db, siteId, newSubId, resolvedPla
     const wfData = typeof raw === 'string' ? JSON.parse(raw) : raw;
     const accessToken = wfData.accessToken;
     if (!accessToken) { return; }
+    // Updated app installs by manual copy-paste — never auto-inject or publish.
+    if (wfData.manualInstall === true) { return; }
 
     const cdnBase = env.CDN_BASE_URL || 'https://manager.consentbit.com';
     const scriptSrc = `${cdnBase}/consentbit/${cdnScriptId}/script.js`;
@@ -1830,6 +1833,31 @@ export async function handleStripeWebhook(request, env, ctx) {
         }
       }
 
+      // --- Free fallback: the plan ENDED → move the site to Free if the slot is open --
+      // Decided 2026-11-05: a site whose paid plan ends moves to the Free plan only when
+      // no other site on the account is already using Free; otherwise it stays blocked
+      // exactly as before (402 from cdnM.js, "No active plan" in the apps). The service
+      // re-reads the site's own rows AFTER the saveSubscription above, so a cancelled
+      // plan with paid time left is left alone until its period-end `deleted` event, and
+      // a site that has since bought a new plan is never touched. Idempotent, flag-gated
+      // (FREE_FALLBACK), and a failure here can never fail the webhook.
+      let freeFallbackOutcome = null;
+      if (type === 'customer.subscription.deleted' || ['canceled', 'unpaid', 'incomplete_expired'].includes(String(sub.status || ''))) {
+        try {
+          const ffSiteId = existing?.siteId ?? existing?.siteid ?? sub.metadata?.siteId ?? null;
+          if (ffSiteId) {
+            freeFallbackOutcome = await moveSiteToFreeIfAllowed(db, env, {
+              siteId: ffSiteId,
+              organizationId: orgIdFinal,
+              trigger: `stripe:${type}:${sub.status}`,
+            });
+            console.log('[StripeWebhook] free fallback', { siteId: ffSiteId, ...freeFallbackOutcome });
+          }
+        } catch (ffErr) {
+          console.warn('[StripeWebhook] free fallback failed (non-fatal):', ffErr?.message || ffErr);
+        }
+      }
+
       // --- Admin dashboard notification: subscription cancelled -------------
       // Raised here rather than in the refund path because a cancellation does
       // not have to involve a refund — the customer may simply have cancelled,
@@ -1838,6 +1866,15 @@ export async function handleStripeWebhook(request, env, ctx) {
       // cancellation legitimately produces one of each.
       if (type === 'customer.subscription.deleted' || sub.status === 'canceled' || sub.status === 'unpaid') {
         try {
+          // What the Free-fallback rule did with the site, appended to the message so the
+          // operator sees it without opening D1.
+          const ffNote = freeFallbackOutcome?.outcome === 'moved'
+            ? ' Moved to the Free plan (no other site on the account was using it).'
+            : freeFallbackOutcome?.outcome === 'blocked'
+              ? ` Not moved to Free: ${freeFallbackOutcome.blockedBy?.domain || freeFallbackOutcome.blockedBy?.id || 'another site'} already uses the account's Free site.`
+              : freeFallbackOutcome?.outcome === 'dry-run'
+                ? ' Free fallback dry-run: would have moved to the Free plan.'
+                : '';
           let cnEmail = null;
           let cnDomain = null;
           const cnSiteId = existing?.siteId ?? existing?.siteid ?? sub.metadata?.siteId ?? null;
@@ -1866,9 +1903,9 @@ export async function handleStripeWebhook(request, env, ctx) {
             title: unpaid
               ? `Subscription unpaid — ${where}`
               : `Subscription cancelled — ${where}`,
-            message: unpaid
+            message: (unpaid
               ? `Stripe marked this subscription unpaid after its retries were exhausted. The site is no longer served.`
-              : `The ${planIdFromMeta || 'paid'} ${intervalFromSub || ''} subscription for ${where} ended${atPeriodEnd ? ' at the end of its billing period' : ''}. The site is no longer served.`,
+              : `The ${planIdFromMeta || 'paid'} ${intervalFromSub || ''} subscription for ${where} ended${atPeriodEnd ? ' at the end of its billing period' : ''}. The site is no longer served.`) + ffNote,
             siteId: cnSiteId,
             domain: cnDomain,
             organizationId: orgIdFinal,
@@ -1887,6 +1924,8 @@ export async function handleStripeWebhook(request, env, ctx) {
               plan: planIdFromMeta,
               interval: intervalFromSub,
               matchedSubscriptionRow: !!existing,
+              freeFallback: freeFallbackOutcome?.outcome ?? null,
+              freeBlockedBy: freeFallbackOutcome?.blockedBy?.domain ?? null,
             },
             // One row per subscription per terminal status, however many times
             // Stripe re-delivers the event.

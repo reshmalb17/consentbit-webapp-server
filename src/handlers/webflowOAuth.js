@@ -38,6 +38,7 @@ import {
   getBannerCustomization,
 } from '../services/db.js';
 import { capturePostHogEvent } from '../services/posthog.js';
+import { siteIsOnFreeFallback } from '../services/freeFallback.js';
 
 const TAG = '[webflow-oauth]';
 
@@ -304,13 +305,15 @@ export async function handleWebflowOAuthStatus(request, env, opts = {}) {
   let cdnScriptId = null;
   let bannerCreated = false; // true once a BannerCustomization row exists (Save written)
   let ownerEmail = null;     // authoritative "Account Owner" from D1 (org owner user)
+  let siteBillingEmail = null; // D1 Site.billingEmail (stamped at checkout)
   try {
     const site = await db
-      .prepare('SELECT id, organizationId, version, cdnScriptId, embedScriptUrl FROM Site WHERE platformSiteId = ?1 ORDER BY createdAt ASC LIMIT 1')
+      .prepare('SELECT id, organizationId, version, cdnScriptId, embedScriptUrl, billingEmail FROM Site WHERE platformSiteId = ?1 ORDER BY createdAt ASC LIMIT 1')
       .bind(siteId)
       .first();
     if (site) {
       registered = true;
+      if (site.billingEmail) siteBillingEmail = String(site.billingEmail).trim().toLowerCase();
       webappSiteId = site.id;
       version = site.version ?? null;
       cdnScriptId = site.cdnScriptId ?? null;
@@ -329,6 +332,14 @@ export async function handleWebflowOAuthStatus(request, env, opts = {}) {
       // Plan: active site subscription → org effective plan → 'free'.
       const sub = await getSubscriptionBySiteId(db, site.id);
       let planId = sub ? (sub.planId ?? sub.planid ?? null) : null;
+      // Free fallback (services/freeFallback.js, 2026-11-05): a site moved to Free after
+      // its plan ended IS on Free — never let the org fallback below hand it a sibling's
+      // tier. Only consulted when the site has no live subscription of its own.
+      let onFreeFallback = false;
+      if (!sub) {
+        try { onFreeFallback = await siteIsOnFreeFallback(db, site.id); } catch (_) { /* treat as not moved */ }
+        if (onFreeFallback) planId = 'free';
+      }
       if (!planId && site.organizationId) {
         try {
           const orgResult = await getEffectivePlanForOrganization(db, site.organizationId, env);
@@ -360,26 +371,41 @@ export async function handleWebflowOAuthStatus(request, env, opts = {}) {
   // Account Owner: the D1 org-owner user (authoritative). Only fall back to the KV
   // billing/OAuth email when there's no registered site/owner yet.
   let email = ownerEmail || null;
-  let billingEmail = null;
-  try {
-    const kvRaw = await env.WEBFLOW_AUTHENTICATION?.get(siteId);
-    if (kvRaw) {
-      const kvEntry = typeof kvRaw === 'string' ? JSON.parse(kvRaw) : kvRaw;
-      // Billing email (stamped at checkout) — used for checkout prefill, kept separate
-      // from the Account Owner above.
-      if (kvEntry?.billingEmail) billingEmail = String(kvEntry.billingEmail).trim().toLowerCase();
-      if (!email) email = billingEmail || (kvEntry?.email ? String(kvEntry.email).trim().toLowerCase() : null);
-      // Plan fallback: the D1 Subscription/org plan is primary. If the DB has no
-      // paid plan for this site (plan is null or 'free'), fall back to the plan
-      // stamped on the KV entry (written by checkout / the Stripe webhook).
-      if ((!plan || plan === 'free') && kvEntry?.plan) {
-        const kvPlan = String(kvEntry.plan).trim().toLowerCase();
-        if (['basic', 'essential', 'growth'].includes(kvPlan)) {
-          plan = kvPlan;
-        }
-      }
-    }
-  } catch (_) { /* non-fatal */ }
+  // D1 only (KV read DISABLED 2026-10-16): billing email from Site.billingEmail, and
+  // before registration the email from the D1 OAuth record. No KV plan fallback.
+  let billingEmail = siteBillingEmail;
+  if (!email) email = billingEmail;
+  if (!email) {
+    try {
+      const row = await db.prepare(
+        `SELECT t.authorizedBy AS authorizedBy FROM WebflowOAuthSite s
+           JOIN WebflowOAuthToken t ON t.userKey = s.userKey
+          WHERE s.siteId = ?1 LIMIT 1`
+      ).bind(siteId).first();
+      const authorizedBy = row?.authorizedBy ? JSON.parse(row.authorizedBy) : null;
+      const oauthEmail = authorizedBy?.email || authorizedBy?.user?.email || null;
+      if (oauthEmail) email = String(oauthEmail).trim().toLowerCase();
+    } catch (_) { /* non-fatal */ }
+  }
+  // try {
+  //   const kvRaw = await env.WEBFLOW_AUTHENTICATION?.get(siteId);
+  //   if (kvRaw) {
+  //     const kvEntry = typeof kvRaw === 'string' ? JSON.parse(kvRaw) : kvRaw;
+  //     // Billing email (stamped at checkout) — used for checkout prefill, kept separate
+  //     // from the Account Owner above.
+  //     if (kvEntry?.billingEmail) billingEmail = String(kvEntry.billingEmail).trim().toLowerCase();
+  //     if (!email) email = billingEmail || (kvEntry?.email ? String(kvEntry.email).trim().toLowerCase() : null);
+  //     // Plan fallback: the D1 Subscription/org plan is primary. If the DB has no
+  //     // paid plan for this site (plan is null or 'free'), fall back to the plan
+  //     // stamped on the KV entry (written by checkout / the Stripe webhook).
+  //     if ((!plan || plan === 'free') && kvEntry?.plan) {
+  //       const kvPlan = String(kvEntry.plan).trim().toLowerCase();
+  //       if (['basic', 'essential', 'growth'].includes(kvPlan)) {
+  //         plan = kvPlan;
+  //       }
+  //     }
+  //   }
+  // } catch (_) { /* non-fatal */ }
 
   // ── Free-plan availability (account-level) ────────────────────────────────
   // The free tier allows one site per account. If this account (email) already

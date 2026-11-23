@@ -75,14 +75,14 @@ export async function handlePageview(request, env) {
 
   const siteDomain = site.domain || site.siteDomain || site.sitedomain || '';
   if (requestHost) {
-    let decision = authorizeRequestHost(site, requestHost);
+    let decision = authorizeRequestHost(site, requestHost, { strictSubdomains: env.STRICT_SUBDOMAINS === 'on' });
 
     if (!decision.allowed && decision.candidate) {
       const tracked = await trackCustomDomain(db, env, site, decision.candidate);
       if (tracked.matched) {
         site.customDomain = tracked.customDomain;
         if (tracked.stagingUrl) site.stagingUrl = tracked.stagingUrl;
-        decision = authorizeRequestHost(site, requestHost);
+        decision = authorizeRequestHost(site, requestHost, { strictSubdomains: env.STRICT_SUBDOMAINS === 'on' });
       }
     }
 

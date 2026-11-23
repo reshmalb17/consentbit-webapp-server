@@ -2,6 +2,7 @@
 import { getSessionById } from '../services/db.js';
 import { requireActiveSubscriptionForConsentReport } from '../services/subscriptionGate.js';
 import { buildSearchKeys, getConsentRowsFromR2, getConsentRowsFromKV, transformEntry } from './legacyConsentHelpers.js';
+import { truncateIp } from '../utils/ipTruncate.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -143,7 +144,7 @@ export async function handleLegacyConsentLogs(request, env) {
           id: row.id,
           siteId: row.siteId,
           deviceId: null,
-          ipAddress: row.ipAddress,
+          ipAddress: truncateIp(row.ipAddress),
           userAgent: row.userAgent,
           country: row.country,
           region: row.region,
@@ -166,7 +167,7 @@ export async function handleLegacyConsentLogs(request, env) {
         .prepare(
           `SELECT id, name, domain, path, category, provider, description, expires, source, lastSeenAt FROM (
             SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
-            FROM Cookie WHERE siteId = ?1 AND (isExpected = 0 OR isExpected IS NULL)
+            FROM Cookie WHERE siteId = ?1 AND (isExpected = 0 OR isExpected IS NULL) AND name NOT LIKE 'consentbit%'
           ) WHERE rn = 1 ORDER BY category, provider, name`
         )
         .bind(resolvedSiteId2)
@@ -228,7 +229,7 @@ export async function handleLegacyConsentLogs(request, env) {
       `SELECT id, name, domain, path, category, provider, description, expires, source, lastSeenAt FROM (
         SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
         FROM Cookie
-        WHERE siteId = ?1 AND (isExpected = 0 OR isExpected IS NULL)
+        WHERE siteId = ?1 AND (isExpected = 0 OR isExpected IS NULL) AND name NOT LIKE 'consentbit%'
       ) WHERE rn = 1
       ORDER BY category, provider, name`,
     )

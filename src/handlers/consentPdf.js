@@ -2,6 +2,10 @@
 import puppeteer from '@cloudflare/puppeteer';
 import { getSessionById } from '../services/db.js';
 import { verifyDownloadToken } from '../utils/signedToken.js';
+import { truncateIp } from '../utils/ipTruncate.js';
+import { lawName } from '../utils/lawNames.js';
+import { consentViewCutoff } from '../services/consentRetention.js';
+import { resolveEffectivePlanId } from './bannerCustomization.js';
 
 // favicon1.png embedded as base64 — Workers cannot fetch their own origin (522 loop).
 const LOGO_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAACXBIWXMAAAsTAAALEwEAmpwYAAAFIGlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNS42LWMxNDUgNzkuMTYzNDk5LCAyMDE4LzA4LzEzLTE2OjQwOjIyICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6cGhvdG9zaG9wPSJodHRwOi8vbnMuYWRvYmUuY29tL3Bob3Rvc2hvcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RFdnQ9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZUV2ZW50IyIgeG1wOkNyZWF0b3JUb29sPSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxOSAoTWFjaW50b3NoKSIgeG1wOkNyZWF0ZURhdGU9IjIwMjUtMDItMTlUMTk6NDM6MTQrMDU6MzAiIHhtcDpNb2RpZnlEYXRlPSIyMDI1LTAyLTE5VDE5OjQzOjU4KzA1OjMwIiB4bXA6TWV0YWRhdGFEYXRlPSIyMDI1LTAyLTE5VDE5OjQzOjU4KzA1OjMwIiBkYzpmb3JtYXQ9ImltYWdlL3BuZyIgcGhvdG9zaG9wOkNvbG9yTW9kZT0iMyIgcGhvdG9zaG9wOklDQ1Byb2ZpbGU9InNSR0IgSUVDNjE5NjYtMi4xIiB4bXBNTTpJbnN0YW5jZUlEPSJ4bXAuaWlkOjMyMTFhNTBjLWYz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';
@@ -45,7 +49,37 @@ function cookieDuration(expires) {
   }
 }
 
-export function buildHtml(consent, cookies, customCookieRules, siteDomain, logoUrl = null) {
+// Opt-in / opt-out, from the banner the visitor actually got. A Quebec visitor on a
+// CCPA-only site gets the opt-out banner with everything off (Law 25), so say so.
+function bannerTypeLabel(consent, proof) {
+  const t = String(consent.bannerType || consent.regulation || (proof.notice && proof.notice.bannerType) || '').toLowerCase();
+  if (t === 'ccpa') {
+    return proof.law === 'LAW25' ? 'Opt-out (everything off until the visitor chooses)' : 'Opt-out';
+  }
+  if (t === 'gdpr' || t === 'iab') return 'Opt-in';
+  return null;
+}
+
+/**
+ * `proof` (optional, TEST-ONLY via LAW_FIXES) adds the gap C/D/E fields: visitor consent ID,
+ * which law applied, banner type / language / version and the privacy-policy link the
+ * visitor saw (from NoticeVersion). The banner's full text is not printed. Omitted → the PDF is exactly as before (legacy callers pass 5 args).
+ */
+function proofRowsHtml(consent, proof) {
+  if (!proof) return '';
+  const row = (label, value) =>
+    `<tr><td class="proof-label">${escapeHtml(label)}</td><td class="proof-value">${escapeHtml(value || '—')}</td></tr>`;
+  return [
+    // lawName(): rows saved before utils/lawNames.js hold the code (LAW25), not the name.
+    row('Law applied', lawName(proof.law) || (consent.regulation ? String(consent.regulation).toUpperCase() : null)),
+    row('Banner type', bannerTypeLabel(consent, proof)),
+    row('Banner language', proof.consentLanguage),
+    row('Banner version', proof.noticeVersion),
+    row('Privacy policy', proof.policyUrl ? `${proof.policyUrl}${proof.policyVersion ? ` (version ${proof.policyVersion})` : ''}` : (proof.noticeVersion ? 'No link on the banner' : null)),
+  ].join('');
+}
+
+export function buildHtml(consent, cookies, customCookieRules, siteDomain, logoUrl = null, proof = null) {
   const cats = normalizeCategories(consent.categories) || {};
   const isCcpa = consent.regulation === 'ccpa' ||
     (!consent.regulation && cats.ccpa !== undefined && cats.essential === undefined && cats.analytics === undefined);
@@ -63,19 +97,8 @@ export function buildHtml(consent, cookies, customCookieRules, siteDomain, logoU
       })()
     : '—';
 
-  // Anonymize IP (zero out last octet for IPv4)
-  const rawIp = consent.ipAddress || '';
-  const anonIp = (() => {
-    const s = rawIp.trim();
-    if (!s) return '—';
-    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(s)) {
-      const parts = s.split('.');
-      parts[3] = '0';
-      return parts.join('.');
-    }
-    if (s.includes(':')) return s.split(':').slice(0, 4).join(':') + '::';
-    return s;
-  })();
+  // Shortened IP (/24 IPv4, /48 IPv6) — same rule as storage.
+  const anonIp = truncateIp(consent.ipAddress) || '—';
 
   // Build accepted categories list
   const acceptedCats = [];
@@ -125,10 +148,22 @@ export function buildHtml(consent, cookies, customCookieRules, siteDomain, logoU
         <td class="proof-td">${escapeHtml(r.description || '—')}</td>
       </tr>`);
     const all = [...scanned, ...custom];
-    return all.length > 0
-      ? all.join('')
-      : `<tr><td class="proof-td" colspan="3" style="color:#6b7280;text-align:center">No cookies recorded for accepted categories.</td></tr>`;
+    return all.join('');
   })();
+
+  // No cookies for the accepted categories → a short note instead of an empty table.
+  const cookieTableHtml = cookieRows
+    ? `<table class="proof-cookie-table">
+      <thead>
+        <tr>
+          <th class="proof-th">Cookie Name</th>
+          <th class="proof-th">Duration</th>
+          <th class="proof-th">Description</th>
+        </tr>
+      </thead>
+      <tbody>${cookieRows}</tbody>
+    </table>`
+    : `<p class="proof-no-cookies">No cookie details are tracked for the accepted categories.</p>`;
 
   // Three-way status label — 'partial' must NOT collapse into 'Rejected'.
   const consentStatusLabel = (() => {
@@ -164,6 +199,7 @@ export function buildHtml(consent, cookies, customCookieRules, siteDomain, logoU
   .proof-categories-line { color: #374151; font-size: 12px; }
 
   .proof-cookie-table { border-collapse: collapse; width: 100%; }
+  .proof-no-cookies { margin: 0; padding: 12px 16px; font-size: 12px; color: #6b7280; border-top: 1px solid #bfdbfe; }
   .proof-th { border: 1px solid #bfdbfe; padding: 10px 12px; text-align: left; vertical-align: top; background: #e6f1fd; color: #1e3a5f; font-weight: 600; font-size: 12px; }
   .proof-td { border: 1px solid #bfdbfe; padding: 10px 12px; text-align: left; vertical-align: top; color: #111827; font-size: 11.5px; }
 
@@ -185,10 +221,11 @@ export function buildHtml(consent, cookies, customCookieRules, siteDomain, logoU
   <table class="proof-meta" role="presentation">
     <tr><td class="proof-label">Consented domain</td><td class="proof-value">${escapeHtml(siteDomain)}</td></tr>
     <tr><td class="proof-label">Consent date</td><td class="proof-value">${escapeHtml(ts)}</td></tr>
-    <tr><td class="proof-label">Consent ID</td><td class="proof-value">${escapeHtml(consent.id || '—')}</td></tr>
+    <tr><td class="proof-label">Consent ID</td><td class="proof-value">${escapeHtml((proof ? consent.deviceId : consent.id) || '—')}</td></tr>
     <tr><td class="proof-label">Country</td><td class="proof-value">${escapeHtml(consent.country || '—')}</td></tr>
     <tr><td class="proof-label">Anonymized IP address</td><td class="proof-value">${escapeHtml(anonIp)}</td></tr>
     <tr><td class="proof-label">Consent status</td><td class="proof-value">${escapeHtml(consentStatusLabel)}</td></tr>
+    ${proofRowsHtml(consent, proof)}
   </table>
 
   <div class="proof-section-box">
@@ -196,16 +233,7 @@ export function buildHtml(consent, cookies, customCookieRules, siteDomain, logoU
       <p class="proof-categories-title">Accepted Categories</p>
       <p class="proof-categories-line">${escapeHtml(acceptedLabels)}</p>
     </div>
-    <table class="proof-cookie-table">
-      <thead>
-        <tr>
-          <th class="proof-th">Cookie Name</th>
-          <th class="proof-th">Duration</th>
-          <th class="proof-th">Description</th>
-        </tr>
-      </thead>
-      <tbody>${cookieRows}</tbody>
-    </table>
+    ${cookieTableHtml}
   </div>
 
   <p class="proof-footer">Page 1 of 1</p>
@@ -251,6 +279,12 @@ export async function handleConsentPdf(request, env) {
 
   if (!consentRow) return new Response('Consent record not found', { status: 404 });
 
+  // Free plan: records older than 3 months are not available (TEST-ONLY via LAW_FIXES).
+  const viewCutoff = await consentViewCutoff(env, siteId, resolveEffectivePlanId);
+  if (viewCutoff && String(consentRow.createdAt || '') < viewCutoff) {
+    return new Response('This record is older than your plan keeps (Free plan: 3 months).', { status: 404 });
+  }
+
   let categories = null;
   if (consentRow.consent_categories) {
     try {
@@ -269,7 +303,7 @@ export async function handleConsentPdf(request, env) {
       `SELECT id, name, domain, category, provider, description, expires FROM (
         SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
         FROM Cookie
-        WHERE siteId = ?1 AND (isExpected = 0 OR isExpected IS NULL)
+        WHERE siteId = ?1 AND (isExpected = 0 OR isExpected IS NULL) AND name NOT LIKE 'consentbit%'
       ) WHERE rn = 1
       ORDER BY category, name`,
     )
@@ -292,14 +326,54 @@ export async function handleConsentPdf(request, env) {
 
   const customCookieRules = customRuleRows || [];
 
+  // Consent proof (gaps C/D/E), TEST-ONLY (LAW_FIXES="1"). Guarded: the proof columns and
+  // NoticeVersion may not exist yet (scripts/consent-proof-columns.sql); the PDF must still
+  // render, so any failure here just leaves the fields empty.
+  let proof = null;
+  if (env.LAW_FIXES === '1') {
+    proof = {};
+    try {
+      const p = await db
+        .prepare(`SELECT law, consent_language, consent_model, notice_version, policy_version FROM Consent WHERE id = ?1`)
+        .bind(consentId)
+        .first();
+      if (p) {
+        Object.assign(proof, {
+          law: p.law, consentLanguage: p.consent_language, consentModel: p.consent_model,
+          noticeVersion: p.notice_version, policyVersion: p.policy_version,
+        });
+      }
+      const ids = [proof.noticeVersion, proof.policyVersion].filter(Boolean);
+      if (ids.length) {
+        const { results: nv = [] } = await db
+          .prepare(`SELECT id, kind, content FROM NoticeVersion WHERE siteId = ?1 AND id IN (${ids.map((_, i) => `?${i + 2}`).join(', ')})`)
+          .bind(siteId, ...ids)
+          .all();
+        for (const r of nv) {
+          if (r.kind === 'notice') { try { proof.notice = JSON.parse(r.content); } catch { /* ignore */ } }
+          if (r.kind === 'policy') proof.policyUrl = r.content;
+        }
+        if (!proof.policyUrl && proof.notice) proof.policyUrl = proof.notice.privacyPolicyUrl || null;
+      }
+    } catch (e) {
+      console.warn('[consentPdf] proof fields unavailable:', e?.message);
+    }
+  }
+
   const logoUrl = await fetchImageAsDataUrl();
-  const html = buildHtml(consent, cookies, customCookieRules, site.domain || siteId, logoUrl);
+  const html = buildHtml(consent, cookies, customCookieRules, site.domain || siteId, logoUrl, proof);
 
   let browser;
   try {
     browser = await puppeteer.launch(env.BROWSER);
     const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    // 'load' not 'networkidle0': the HTML is self-contained (inline CSS, data: logo), and on
+    // Cloudflare Browser Rendering networkidle0 never fires -> 30 s navigation timeout
+    // (seen live 2026-11-04: "Navigation timeout of 30000 ms exceeded"). If even 'load' is
+    // late, render whatever is in the DOM rather than failing the download.
+    await page.setContent(html, { waitUntil: 'load', timeout: 15000 }).catch((e) => {
+      console.warn('[pdf] setContent wait timed out, rendering anyway:', e?.message);
+    });
     const pdf = await page.pdf({ format: 'A4', printBackground: true, margin: { top: '0', right: '0', bottom: '0', left: '0' } });
     await browser.close();
 

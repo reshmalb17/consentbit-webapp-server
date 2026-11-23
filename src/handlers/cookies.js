@@ -134,7 +134,7 @@ export async function handleCookies(request, env) {
         `SELECT * FROM (
           SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
           FROM Cookie
-          WHERE siteId = ?1 AND (isExpected = 0 OR isExpected IS NULL)
+          WHERE siteId = ?1 AND (isExpected = 0 OR isExpected IS NULL) AND name NOT LIKE 'consentbit%'
         ) WHERE rn = 1
         ORDER BY lastSeenAt DESC, category ASC`
       )
@@ -146,7 +146,7 @@ export async function handleCookies(request, env) {
             `SELECT * FROM (
               SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
               FROM Cookie
-              WHERE siteId = ?1 AND scanHistoryId = ?2 AND (isExpected = 0 OR isExpected IS NULL)
+              WHERE siteId = ?1 AND scanHistoryId = ?2 AND (isExpected = 0 OR isExpected IS NULL) AND name NOT LIKE 'consentbit%'
             ) WHERE rn = 1
             ORDER BY lastSeenAt DESC, category ASC`
           )

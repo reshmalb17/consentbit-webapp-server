@@ -1,6 +1,6 @@
 /**
  * TCF String Manager
- * Exposes a TCF v2.2-compatible __tcfapi bridge and stores consent locally.
+ * Exposes a TCF v2.3 __tcfapi bridge and stores consent locally.
  */
 function mapPreferencesToGoogle(preferences) {
   if (!preferences) return;
@@ -328,7 +328,9 @@ class TCFManager {
           cmpLoaded: this.isInitialized,
           cmpStatus: this.isInitialized ? 'loaded' : 'loading',
           displayStatus: hasStoredConsent ? 'hidden' : 'visible',
-          apiVersion: '2.2',
+          // CMP API version this bridge implements. TCF v2.3 (policy 5,
+          // Disclosed Vendors segment always written) — was a stale '2.2' label.
+          apiVersion: '2.3',
           cmpVersion: this.config.cmpVersion,
           cmpId: this.config.cmpId,
           gvlVersion: this.gvl ? this.gvl.vendorListVersion : undefined,

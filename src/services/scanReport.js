@@ -180,7 +180,13 @@ export async function sendScanReportForId(env, { to, name, scanId, force = false
   try {
     browser = await puppeteer.launch(env.BROWSER);
     const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    // 'load' not 'networkidle0': the HTML is self-contained (inline CSS, data: logo), and on
+    // Cloudflare Browser Rendering networkidle0 never fires -> 30 s navigation timeout
+    // (seen live 2026-11-04: "Navigation timeout of 30000 ms exceeded"). If even 'load' is
+    // late, render whatever is in the DOM rather than failing the download.
+    await page.setContent(html, { waitUntil: 'load', timeout: 15000 }).catch((e) => {
+      console.warn('[pdf] setContent wait timed out, rendering anyway:', e?.message);
+    });
     const pdf = await page.pdf({ format: 'A4', printBackground: true, margin: { top: '20px', bottom: '20px' } });
     pdfBase64 = bytesToBase64(pdf);
   } catch (e) {

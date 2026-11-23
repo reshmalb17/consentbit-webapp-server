@@ -2,6 +2,9 @@
 import { getSessionById } from '../services/db.js';
 import { createDownloadToken } from '../utils/signedToken.js';
 import { capturePostHogEvent } from '../services/posthog.js';
+import { truncateIp } from '../utils/ipTruncate.js';
+import { consentViewCutoff } from '../services/consentRetention.js';
+import { resolveEffectivePlanId } from './bannerCustomization.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -68,32 +71,35 @@ export async function handleConsentCsv(request, env) {
     }
   } catch { /* analytics only */ }
 
+  // Free plan: only the last 3 months are exported (TEST-ONLY via LAW_FIXES).
+  const viewCutoff = await consentViewCutoff(env, siteId, resolveEffectivePlanId);
+
   const hasDateFilter = year && month;
   const paddedMonth = hasDateFilter ? month.padStart(2, '0') : '';
 
   const { results: rows } = hasDateFilter
     ? await db
         .prepare(
-          `SELECT id, ipAddress, userAgent, country, region, createdAt, regulation, bannerType, consentMethod, status, consent_categories
+          `SELECT id, deviceId, ipAddress, userAgent, country, region, createdAt, regulation, bannerType, consentMethod, status, consent_categories
            FROM Consent WHERE siteId = ?1
              AND strftime('%Y', createdAt) = ?2
-             AND strftime('%m', createdAt) = ?3
+             AND strftime('%m', createdAt) = ?3 AND (?4 IS NULL OR createdAt >= ?4)
            ORDER BY createdAt DESC`,
         )
-        .bind(siteId, year, paddedMonth)
+        .bind(siteId, year, paddedMonth, viewCutoff)
         .all()
     : await db
         .prepare(
-          `SELECT id, ipAddress, userAgent, country, region, createdAt, regulation, bannerType, consentMethod, status, consent_categories
-           FROM Consent WHERE siteId = ?1 ORDER BY createdAt DESC`,
+          `SELECT id, deviceId, ipAddress, userAgent, country, region, createdAt, regulation, bannerType, consentMethod, status, consent_categories
+           FROM Consent WHERE siteId = ?1 AND (?2 IS NULL OR createdAt >= ?2) ORDER BY createdAt DESC`,
         )
-        .bind(siteId)
+        .bind(siteId, viewCutoff)
         .all();
 
   // PDF links go directly to the worker (token handles auth — no proxy/cookie needed)
   const workerOrigin = new URL(request.url).origin;
 
-  const headers = ['#', 'Consent ID', 'Timestamp (UTC)', 'Status', 'Regulation', 'Country', 'Region', 'IP Address', 'User Agent', 'Necessary', 'Analytics', 'Marketing', 'Preferences', 'Do Not Sell', 'Download PDF'];
+  const headers = ['#', 'Consent ID', 'Timestamp (UTC)', 'Status', 'Banner type', 'Regulation', 'Country', 'Region', 'IP Address', 'User Agent', 'Necessary', 'Analytics', 'Marketing', 'Preferences', 'Do Not Sell', 'Download PDF'];
 
   const headerRow = `<Row>${headers.map(h => `<Cell ss:StyleID="header"><Data ss:Type="String">${x(h)}</Data></Cell>`).join('')}</Row>`;
 
@@ -120,13 +126,14 @@ export async function handleConsentCsv(request, env) {
 
     return `<Row>
       ${cell(i + 1)}
-      ${cell(row.id || '')}
+      ${cell((env.LAW_FIXES === '1' ? row.deviceId : row.id) || '')}
       ${cell(row.createdAt ? new Date(row.createdAt).toUTCString() : '')}
       ${cell(statusLabel)}
+      ${cell(isCcpa ? 'Opt-out' : 'Opt-in')}
       ${cell((row.regulation || 'gdpr').toUpperCase())}
       ${cell(row.country || '')}
       ${cell(row.region || '')}
-      ${cell(row.ipAddress || '')}
+      ${cell(truncateIp(row.ipAddress) || '')}
       ${cell(row.userAgent || '')}
       ${cell(isCcpa ? '' : yesNo(cats?.essential ?? true))}
       ${cell(isCcpa ? '' : yesNo(cats?.analytics))}

@@ -41,7 +41,12 @@ export function requestDomainMatchesSite(site, request) {
   const allowed = normalizeHostname(site.domain);
   const actual = getRequestOriginHostname(request);
   if (!allowed || !actual) return false;
-  return actual === allowed;
+  if (actual === allowed) return true;
+  // Every host the script server would serve this site on — its other recorded
+  // domains and its translated copies. Without this, a banner served on one of
+  // them could never save a consent (403 DOMAIN_MISMATCH).
+  if (siteKnownHosts(site).includes(actual)) return true;
+  return siteLanguageHosts(site).includes(actual);
 }
 
 // ── Staging hosts vs. the customer's own domain ──────────────────────────────
@@ -102,6 +107,26 @@ export function siteKnownHosts(site) {
 }
 
 /**
+ * Hosts serving a translated copy of this site (Weglot and similar), as recorded
+ * by services/domainResolver.js detectTranslatedCopy. Kept apart from
+ * additionalDomains because these are plan-gated: the script server only serves
+ * them on LANGUAGE_DOMAIN_PLANS.
+ */
+export function siteLanguageHosts(site) {
+  const raw = site?.languageDomains ?? site?.languagedomains;
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? [...new Set(parsed.map(normalizeHostname).filter(Boolean))] : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+/** Plans whose licence covers translated copies of the site on other hosts — every paid plan; Free is blocked. */
+export const LANGUAGE_DOMAIN_PLANS = ['basic', 'essential', 'growth'];
+
+/**
  * Decide what to do with an incoming host.
  *
  *   { allowed: true,  candidate: null }  → already on file, serve it
@@ -116,8 +141,26 @@ export function authorizeRequestHost(site, rawHost, options = {}) {
   // No Origin/Referer at all — nothing to judge. Unchanged: such requests pass.
   if (!host) return { allowed: true, candidate: null, reason: 'no-host' };
 
-  for (const known of siteKnownHosts(site)) {
-    if (hostMatches(host, known)) return { allowed: true, candidate: null, reason: 'known-host' };
+  // Exact match only (normalizeHostname already folds www.). A different
+  // subdomain — shop.example.com next to example.com — is usually a different
+  // site, so it is never authorized just for sharing the parent domain: it must
+  // be proven below (same Webflow project / Framer fid / translated copy).
+  const knownHosts = siteKnownHosts(site);
+  for (const known of knownHosts) {
+    if (host === known) return { allowed: true, candidate: null, reason: 'known-host' };
+  }
+
+  // Previous rule: any subdomain of a known host passed. Kept until
+  // STRICT_SUBDOMAINS is switched on (options.strictSubdomains), so the callers
+  // can log 'subdomain-legacy' hits first and see which live sites rely on it.
+  if (!options.strictSubdomains && knownHosts.some((known) => hostMatches(host, known))) {
+    return { allowed: true, candidate: null, reason: 'subdomain-legacy' };
+  }
+
+  // A recorded translated copy. Allowed here; the caller applies the plan gate
+  // (LANGUAGE_DOMAIN_PLANS) once it knows the site's plan.
+  if (siteLanguageHosts(site).includes(host)) {
+    return { allowed: true, candidate: null, reason: 'language-host' };
   }
 
   const stagingHint = normalizeHostname(options.stagingHost || '');
@@ -131,10 +174,10 @@ export function authorizeRequestHost(site, rawHost, options = {}) {
     return { allowed: true, candidate: null, reason: 'webflow-staging' };
   }
 
-  // A real-looking host on a platform whose records we can check. Worth asking
-  // the platform about — but not worth trusting yet.
-  const platform = String(site?.platform || '').toLowerCase();
-  if (!isStagingHost(host) && (platform === 'webflow' || platform === 'framer')) {
+  // A real-looking host. Worth asking the platform about (Webflow/Framer), or
+  // checking for a translated copy of the site (any platform) — but not worth
+  // trusting yet.
+  if (!isStagingHost(host)) {
     return { allowed: false, candidate: host, reason: 'unproven-host' };
   }
 

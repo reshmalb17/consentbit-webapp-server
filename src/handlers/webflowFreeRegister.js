@@ -16,6 +16,38 @@ import {
   setSignupSourceIfMissing,
 } from '../services/db.js';
 import { capturePostHogEvent, identifyPostHogPerson, identifyPostHogSite } from '../services/posthog.js';
+import { moveSiteToFreeIfAllowed } from '../services/freeFallback.js';
+
+/**
+ * "Continue free" on a site that is ALREADY registered. Nothing to create — but if
+ * the site's paid plan has ended, this is the customer choosing the Free plan for
+ * it, which is allowed only while no other site on the account uses Free
+ * (services/freeFallback.js, 2026-11-05). Returns a 403 Response when blocked, so the
+ * app shows its existing "already has a free site" message instead of "You're on the
+ * Free plan" while the banner is actually off; null otherwise (including flag off,
+ * still paid, or already free — the re-publish continues as before).
+ */
+async function freeFallbackOnRepublish(db, env, siteId, tag) {
+  try {
+    const ff = await moveSiteToFreeIfAllowed(db, env, { siteId, trigger: 'webflow:continue-free' });
+    if (ff.outcome === 'blocked') {
+      console.warn(`${tag} plan ended, Free slot taken — siteId=${siteId} blockedBy=${ff.blockedBy?.domain || ff.blockedBy?.id}`);
+      return Response.json(
+        {
+          success: false,
+          code: 'SITE_LIMIT_REACHED',
+          error: 'Your account already has a free site registered on a different domain.',
+          existingDomain: ff.blockedBy?.domain || null,
+        },
+        { status: 403 },
+      );
+    }
+    if (ff.outcome === 'moved') console.log(`${tag} moved ended site to Free — siteId=${siteId}`);
+  } catch (e) {
+    console.warn(`${tag} free fallback failed (non-fatal):`, e?.message || e);
+  }
+  return null;
+}
 
 const TAG = '[webflow-free-register][webapp]';
 
@@ -120,6 +152,8 @@ export async function handleWebflowFreeRegister(request, env) {
         // Verify the site still exists in D1 — KV can be stale after data deletion
         const siteExists = await db.prepare('SELECT id FROM Site WHERE id = ?1 LIMIT 1').bind(kvEntry.webappSiteId).first();
         if (siteExists) {
+          const blocked = await freeFallbackOnRepublish(db, env, kvEntry.webappSiteId, TAG);
+          if (blocked) return blocked;
           return Response.json({
             success: true,
             alreadyRegistered: true,
@@ -270,6 +304,8 @@ export async function handleWebflowFreeRegister(request, env) {
         }
       } catch (_) { /* best-effort */ }
 
+      const blockedByFreeRule = await freeFallbackOnRepublish(db, env, platformMatch.id, TAG);
+      if (blockedByFreeRule) return blockedByFreeRule;
       return Response.json({
         success: true,
         alreadyRegistered: true,
@@ -440,7 +476,7 @@ export async function handleWebflowFreeRegister(request, env) {
         } else {
           // Update KV linkage (webappSiteId + scriptUrl) regardless of install
           // mode — status/checkout resolution needs it.
-          const updatedKv = { ...kvEntry, webappSiteId: site.id, webappScriptUrl: scriptUrl, cdnScriptId: site.cdnScriptId, userId: user.id, email: user.email, registeredThroughApp: true, isWebappMigrated: true };
+          const updatedKv = { ...kvEntry, webappSiteId: site.id, webappScriptUrl: scriptUrl, cdnScriptId: site.cdnScriptId, userId: user.id, email: user.email, registeredThroughApp: true, isWebappMigrated: true, ...(manualInstall ? { manualInstall: true } : {}) };
           await env.WEBFLOW_AUTHENTICATION?.put(wfSiteId, JSON.stringify(updatedKv));
 
           if (manualInstall) {

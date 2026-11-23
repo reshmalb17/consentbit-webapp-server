@@ -132,6 +132,40 @@ async function tryAcceptConsent(page, cssSelectors) {
   }
 }
 
+// Fallback for a consented scan when no accept button could be clicked. The Cloudflare
+// browser runs from a US data centre, so a GDPR-only site serves it the CCPA opt-out
+// banner (a "Do Not Sell" link, no Accept). Write the same all-accepted decision the
+// banner itself would store (loadConsentState in the cdn runtime: accepted + categories
+// + expiresAt under "consentbit_<siteId>", plus the prefs mirror) and let the caller
+// reload: the runtime then releases every category on load and the gated tags drop their
+// cookies. Nothing is POSTed to /api/consent by this path, and the interceptor above
+// aborts any consent POST anyway. Returns a source label or null.
+async function seedStoredConsent(page, fallbackSiteId) {
+  try {
+    return await page.evaluate((fallbackId) => {
+      try {
+        var cfg = window.__CONSENT_SITE__ || {};
+        var id = cfg.id || fallbackId;
+        if (!id) return null;
+        var now = new Date();
+        var state = {
+          accepted: true,
+          timestamp: now.toISOString(),
+          expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+          categories: { essential: true, analytics: true, marketing: true, preferences: true },
+          cbScanSeed: true,
+        };
+        localStorage.setItem('consentbit_' + id, JSON.stringify(state));
+        localStorage.setItem('consentbit_prefs_' + id, btoa(JSON.stringify({ analytics: true, preferences: true, marketing: true })));
+        localStorage.removeItem('consentbit_' + id + '_closed');
+        return 'seeded-storage';
+      } catch (_) { return null; }
+    }, fallbackSiteId || null);
+  } catch (_) {
+    return null;
+  }
+}
+
 async function scanWithBrowser(browserBinding, scanUrl, options = {}) {
   const browser = await puppeteer.launch(browserBinding);
   try {
@@ -234,6 +268,9 @@ async function scanWithBrowser(browserBinding, scanUrl, options = {}) {
     if (options.acceptConsent) {
       preJar = await readJar();
       consentClicked = await tryAcceptConsent(page, options.acceptSelectors || []);
+      if (!consentClicked && options.seedConsentSiteId) {
+        consentClicked = await seedStoredConsent(page, options.seedConsentSiteId);
+      }
       if (consentClicked) {
         // Let the consent choice persist (cookie/localStorage), then RELOAD so the now-
         // unblocked tags initialise from the start of a fresh pageview and drop their
@@ -248,6 +285,15 @@ async function scanWithBrowser(browserBinding, scanUrl, options = {}) {
     }
 
     const postJar = await readJar();
+    // Diagnostic: what a consented scan ended up with. Read in `wrangler tail` when a tag
+    // (e.g. GA) is missing from a site's inventory: shows whether the banner was clicked,
+    // the storage seed was used, or neither, and which cookie names were in the jar.
+    if (options.acceptConsent) {
+      try {
+        const names = (j) => [...new Set((j?.rawCookies || []).map((c) => c.name))].sort().join(',');
+        console.log(`[ScanSite] consented capture url=${page.url()} consent=${consentClicked || 'none'} pre=[${names(preJar)}] post=[${names(postJar)}] scripts=${scriptUrls.size}`);
+      } catch (_) {}
+    }
     let html = '';
     try { html = await page.content(); } catch (_) {}
 
@@ -281,7 +327,7 @@ async function performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId,
   const siteHints = hostHintsFromSiteDomain(site?.domain ?? site?.DOMAIN ?? '');
   try {
     const scanOptions = { ...options };
-    if (options.acceptConsent) scanOptions.acceptSelectors = loadAcceptSelectors();
+    if (options.acceptConsent) { scanOptions.acceptSelectors = loadAcceptSelectors(); scanOptions.seedConsentSiteId = siteId; /* storage-seed fallback when no accept button is served */ }
     const browserResult = await scanWithBrowser(env.BROWSER, scanUrl, scanOptions);
     const cookies = [];
     const scripts = [];
@@ -355,6 +401,10 @@ async function performBrowserScan(db, env, siteId, site, scanUrl, scanHistoryId,
       .map(url => ({ url, category: categorizeScriptByProviders(url) }))
       .filter(s => s.category !== null);
 
+    // ConsentBit's own cookies (consentbit-consentid, consentbit_*) are not trackers and must
+    // not appear in the inventory, the PDF or the scan history. Filtered in place so the
+    // cookiesFound count below matches what was stored.
+    cookies.splice(0, cookies.length, ...cookies.filter((c) => !/^consentbit[-_]/i.test(String(c?.name || ''))));
     await upsertCookies(db, { siteId, scanHistoryId, cookies });
     await upsertScripts(db, { siteId, scripts: trackingScripts });
 
@@ -586,7 +636,7 @@ export async function handleScanSite(request, env, ctx, options = {}) {
       // ── Full browser scan (Cloudflare Browser Rendering) ──────────────────
       // Captures ALL cookies from ALL domains including third-party ad/tracking cookies.
       const scanOptions = { ...options };
-      if (options.acceptConsent) scanOptions.acceptSelectors = loadAcceptSelectors();
+      if (options.acceptConsent) { scanOptions.acceptSelectors = loadAcceptSelectors(); scanOptions.seedConsentSiteId = siteId; /* storage-seed fallback when no accept button is served */ }
       const browserResult = await scanWithBrowser(env.BROWSER, scanUrl, scanOptions);
       html = browserResult.html;
       for (const s of browserResult.scripts) scripts.push(s);
@@ -704,6 +754,10 @@ export async function handleScanSite(request, env, ctx, options = {}) {
     await incrementScanUsage(db, siteId);
 
     // Store only real detected cookies — no inference or script-pattern phantoms
+    // ConsentBit's own cookies (consentbit-consentid, consentbit_*) are not trackers and must
+    // not appear in the inventory, the PDF or the scan history. Filtered in place so the
+    // cookiesFound count below matches what was stored.
+    cookies.splice(0, cookies.length, ...cookies.filter((c) => !/^consentbit[-_]/i.test(String(c?.name || ''))));
     await upsertCookies(db, { siteId, scanHistoryId, cookies });
 
     await upsertScripts(db, { siteId, scripts: trackingScripts });

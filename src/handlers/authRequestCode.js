@@ -183,7 +183,9 @@ export async function handleAuthRequestCode(request, env, ctx) {
   }
 
   const loginUser = purpose === 'login' ? existingUser : null;
-  const displayName = name || loginUser?.name || '';
+  const rawDisplayName = String(name || loginUser?.name || '').trim();
+  // Capitalise the first letter for the greeting ("reshma" -> "Reshma").
+  const displayName = rawDisplayName ? rawDisplayName.charAt(0).toUpperCase() + rawDisplayName.slice(1) : '';
 
   const ttlMinutes = Number(env.OTP_TTL_MINUTES || 10) || 10;
   // A large insertMs here means this request paid for the cold-start schema
@@ -200,8 +202,92 @@ export async function handleAuthRequestCode(request, env, ctx) {
   pwDebug('request-code:parked', { requestId: row.id, purpose, parkedHash: !!signupPasswordHash, hashLen: signupPasswordHash ? signupPasswordHash.length : 0 });
 
   const subject = `Your ConsentBit verification code`;
-  const text = `Hello${displayName ? ` ${displayName}` : ''},\n\nYour verification code is: ${code}\n\nThis code will expire in ${ttlMinutes} minutes, so please use it as soon as possible.\n\nIf you did not request this verification code, you can safely ignore this email.\n\nBest regards,\nConsentBit Team\n`;
-  const html = `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f3f4f6;">
+  // Plain-text body; the old templated versions are kept below, commented out.
+  // Kept above ~800 bytes of words: spam filters penalise short mails that carry an
+  // image (Brevo's open-tracking pixel) — SpamAssassin HTML_IMAGE_ONLY_08.
+  const text = [
+    `Hi${displayName ? ` ${displayName}` : ''},`,
+    ``,
+    `We received a request to sign in to your ConsentBit account. Use the code below to complete your login:`,
+    ``,
+    `${code}`,
+    ``,
+    `This code will expire in ${ttlMinutes} minutes and can only be used once. For your security, please don't share this code with anyone. The ConsentBit team will never ask you for it by email, phone, or chat.`,
+    ``,
+    `Didn't try to sign in?`,
+    `If you didn't request this code, you can safely ignore this email. Your account remains secure, and no one can access it without this code. If you keep receiving login codes you didn't request, we recommend contacting our support team so we can help protect your account.`,
+    ``,
+    `Need help?`,
+    `If you have any trouble signing in, reply to this email or contact us at web@consentbit.com and our team will be happy to assist you.`,
+    ``,
+    `Thanks,`,
+    `The ConsentBit Team`,
+  ].join('\n');
+  // const text = `Hello${displayName ? ` ${displayName}` : ''},\n\nYour verification code is: ${code}\n\nThis code will expire in ${ttlMinutes} minutes, so please use it as soon as possible.\n\nIf you did not request this verification code, you can safely ignore this email.\n\nBest regards,\nConsentBit Team\n`;
+  // HTML version: same wording as the text body above, styled to match the Framer OTP email
+  // (Framer-server/consentbitapp-cf-server/src/routes/verifyOTP.js). Plenty of words, so the
+  // Brevo tracking pixel no longer trips SpamAssassin HTML_IMAGE_ONLY_08.
+  const esc = (v) => String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const html = `
+<!DOCTYPE html>
+<html>
+  <head><meta charset="UTF-8"><title>Your ConsentBit verification code</title></head>
+  <body style="font-family: Arial, sans-serif; background:#f5f7fb; margin:0; padding:32px; color:#1f2937;">
+    <table align="center" cellpadding="0" cellspacing="0" width="480" style="background:#ffffff; border-radius:12px; box-shadow:0 2px 8px rgba(15,23,42,0.06); padding:32px;">
+      <tr>
+        <td>
+          <h2 style="margin:0 0 16px 0; color:#111827;">Your ConsentBit verification code</h2>
+          <p style="margin:0 0 16px 0; color:#374151; line-height:1.6;">
+            Hi${displayName ? ` <strong>${esc(displayName)}</strong>` : ""},
+          </p>
+          <p style="margin:0 0 20px 0; color:#374151; line-height:1.6;">
+            We received a request to sign in to your ConsentBit account. Use the code below to complete your login:
+          </p>
+          <div style="text-align:center; margin:24px 0;">
+            <div style="
+              display:inline-block;
+              font-family: 'Courier New', monospace;
+              font-size:32px;
+              letter-spacing:8px;
+              font-weight:700;
+              padding:16px 24px;
+              background:#262e84;
+              color:#ffffff;
+              border-radius:10px;
+              -webkit-user-select: all;
+              -moz-user-select: all;
+              -ms-user-select: all;
+              user-select: all;
+              cursor: pointer;
+            ">${code}</div>
+          </div>
+          <p style="margin:16px 0 0 0; color:#374151; line-height:1.6;">
+            This code will expire in <strong>${ttlMinutes} minutes</strong> and can only be used once. For your security, please don't share this code with anyone. The ConsentBit team will never ask you for it by email, phone, or chat.
+          </p>
+          <p style="margin:20px 0 0 0; color:#111827; line-height:1.6;">
+            <strong>Didn't try to sign in?</strong>
+          </p>
+          <p style="margin:4px 0 0 0; color:#6b7280; font-size:13px; line-height:1.6;">
+            If you didn't request this code, you can safely ignore this email. Your account remains secure, and no one can access it without this code. If you keep receiving login codes you didn't request, we recommend contacting our support team so we can help protect your account.
+          </p>
+          <p style="margin:20px 0 0 0; color:#111827; line-height:1.6;">
+            <strong>Need help?</strong>
+          </p>
+          <p style="margin:4px 0 0 0; color:#6b7280; font-size:13px; line-height:1.6;">
+            If you have any trouble signing in, reply to this email or contact us at <a href="mailto:web@consentbit.com" style="color:#262e84;">web@consentbit.com</a> and our team will be happy to assist you.
+          </p>
+          <hr style="border:none; border-top:1px solid #e5e7eb; margin:24px 0;">
+          <p style="margin:0; color:#374151; font-size:13px; line-height:1.6;">
+            Thanks,<br>
+            <strong>The ConsentBit Team</strong>
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+`;
+  /* const html = `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f3f4f6;">
   <div style="max-width:520px;margin:0 auto;padding:32px 24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
     <div style="background:#ffffff;border-radius:12px;padding:32px 28px;border:1px solid #e5e7eb;">
       <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hello${displayName ? ` ${displayName}` : ''},</p>
@@ -217,7 +303,7 @@ export async function handleAuthRequestCode(request, env, ctx) {
       <p style="margin:0;color:#6b7280;font-size:14px;line-height:1.6;">Best regards,<br/>ConsentBit Team</p>
     </div>
   </div>
-  </body></html>`;
+  </body></html>`; */
 
   const hasBrevoConfig = Boolean(env.BREVO_API_KEY && env.BREVO_FROM_EMAIL);
   const allowReturn = String(env.RETURN_OTP_IN_RESPONSE || '').toLowerCase() === 'true';

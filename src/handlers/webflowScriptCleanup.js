@@ -53,17 +53,32 @@ const CB_URL_MARKERS = [
   '/consentbit/',                                // worker-hosted /consentbit/<id>/script.js
 ];
 
-// Read the stored Webflow OAuth access token for a site from KV. Returns null
-// when the site was never authorized through the app.
+// Read the stored Webflow OAuth access token for a site. Returns null when the
+// site was never authorized through the app.
+//
+// D1 (WebflowOAuthSite) first — the app stores tokens there now — then the KV
+// entry older v1 installs still carry. Same order as db.js resolveWebflowOAuthToken,
+// but a plain SELECT: that helper runs ensureSchema, which this path doesn't need.
 async function resolveAccessToken(env, siteId) {
   try {
-    const raw = await env.WEBFLOW_AUTHENTICATION?.get(siteId);
-    if (!raw) return null;
-    const entry = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    return entry?.accessToken || null;
-  } catch {
-    return null;
+    const row = await env.CONSENT_WEBAPP
+      ?.prepare('SELECT accessToken FROM WebflowOAuthSite WHERE siteId = ?1')
+      .bind(siteId)
+      .first();
+    if (row?.accessToken) return row.accessToken;
+  } catch (e) {
+    console.warn(`${TAG} D1 token lookup failed for ${siteId}: ${e?.message || e}`);
   }
+  // KV token fallback — DISABLED 2026-10-16 (D1 only).
+  // try {
+  //   const raw = await env.WEBFLOW_AUTHENTICATION?.get(siteId);
+  //   if (!raw) return null;
+  //   const entry = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  //   return entry?.accessToken || null;
+  // } catch {
+  //   return null;
+  // }
+  return null;
 }
 
 function webflowHeaders(accessToken) {
@@ -81,12 +96,45 @@ function webflowHeaders(accessToken) {
  * NOT decide removal — the current install matches too; see referencesCurrentInstall.
  */
 function isConsentBitScript(reg, sourceCode) {
-  const name = reg?.displayName || '';
-  const hay = `${(reg?.hostedLocation || '')} ${(sourceCode || '')}`.toLowerCase();
+  const name = (reg?.displayName || '').toLowerCase();
+  const hay = `${decodeLocation(reg?.hostedLocation)} ${(sourceCode || '')}`.toLowerCase();
 
-  const byName = CB_NAME_PREFIXES.some((p) => name.startsWith(p));
+  const byName = CB_NAME_PREFIXES.some((p) => name.startsWith(p.toLowerCase()));
   const byUrl = CB_URL_MARKERS.some((m) => hay.includes(m));
-  return byName || byUrl;
+  const byHostedLoader = HOSTED_LOADER_FILE.test(decodeLocation(reg?.hostedLocation));
+  return byName || byUrl || byHostedLoader;
+}
+
+// The inline loader is often stored by Webflow as a HOSTED copy, e.g.
+//   https://cdn.prod.website-files.com/<site>%2F<app>%2F<id>%2Fappscript1765433092634-1.0.0.js
+// Its URL never contains api.consentbit.com, and the displayName is not reliable,
+// so match the filename itself (path separators may be %2F-encoded).
+const HOSTED_LOADER_FILE = /(?:^|\/)appscript\d*[-\w.]*\.js(?:$|[?#])/i;
+
+function decodeLocation(loc) {
+  const s = String(loc || '');
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s.replace(/%2f/gi, '/');
+  }
+}
+
+// Last resort for a Webflow-hosted script nothing above recognised: read the file
+// and look for our markers. Webflow-hosted files are our app's own uploads (the
+// API only lists this client id's scripts), small, and public. Never throws.
+const WEBFLOW_HOSTED_FILE = /^https:\/\/(?:cdn\.prod\.website-files\.com|uploads-ssl\.webflow\.com|assets\.website-files\.com)\//i;
+
+async function hostedFileIsConsentBit(hostedLocation) {
+  if (!hostedLocation || !WEBFLOW_HOSTED_FILE.test(hostedLocation)) return false;
+  try {
+    const res = await fetch(hostedLocation, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return false;
+    const body = (await res.text()).slice(0, 20000).toLowerCase();
+    return CB_URL_MARKERS.some((m) => body.includes(m));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -197,7 +245,8 @@ async function analyzeSite(siteId, accessToken, currentCdnScriptId) {
       }
     }
     const sourceCode = reg.sourceCode || null;
-    const looksConsentBit = isConsentBitScript(reg, sourceCode);
+    const looksConsentBit = isConsentBitScript(reg, sourceCode)
+      || await hostedFileIsConsentBit(reg.hostedLocation);
     const keepEntry = { id: applied.id, location: applied.location, version: applied.version };
 
     if (looksConsentBit && referencesCurrentInstall(reg, sourceCode, currentCdnScriptId)) {
@@ -260,18 +309,45 @@ export async function handleWebflowScriptCleanupRemove(request, env) {
   const siteId = body.siteId || body.site_id;
   if (!siteId) return Response.json({ success: false, error: 'Missing siteId' }, { status: 400 });
 
+  const r = await removeLegacyScriptsForSite(env, siteId);
+  if (!r.success) {
+    return Response.json({
+      success: false,
+      error: r.error,
+      ...(r.code ? { code: r.code } : {}),
+      ...(r.webflowStatus ? { webflowStatus: r.webflowStatus } : {}),
+    }, { status: r.status });
+  }
+  if (r.removed.length === 0) {
+    return Response.json({ success: true, removed: [], removedCount: 0, message: 'No legacy scripts found' });
+  }
+  return Response.json({
+    success: true,
+    removed: r.removed,
+    removedCount: r.removed.length,
+    legacyScripts: r.legacy,
+    remainingCount: r.kept.length,
+  });
+}
+
+/**
+ * Remove the legacy ConsentBit scripts from a Webflow site's "Code added by Apps".
+ * Shared by POST /api/webflow/script-cleanup and the Webflow-app banner save
+ * (bannerCustomization.js). Never throws.
+ * Returns { success: true, removed: [ids], legacy, kept }
+ *      or { success: false, status, error, code?, webflowStatus? }.
+ */
+export async function removeLegacyScriptsForSite(env, siteId) {
   const accessToken = await resolveAccessToken(env, siteId);
   if (!accessToken) {
-    return Response.json({ success: false, error: 'Site not authorized', code: 'NOT_AUTHORIZED' }, { status: 401 });
+    return { success: false, status: 401, error: 'Site not authorized', code: 'NOT_AUTHORIZED' };
   }
 
   try {
     const currentCdnScriptId = await resolveCurrentCdnScriptId(env, siteId);
     const { legacy, kept } = await analyzeSite(siteId, accessToken, currentCdnScriptId);
 
-    if (legacy.length === 0) {
-      return Response.json({ success: true, removed: [], removedCount: 0, message: 'No legacy scripts found' });
-    }
+    if (legacy.length === 0) return { success: true, removed: [], legacy, kept };
 
     // Re-apply the custom-code block with only the kept (non-legacy) scripts.
     // This removes the legacy entries from "Code added by Apps" without touching
@@ -286,19 +362,15 @@ export async function handleWebflowScriptCleanupRemove(request, env) {
     if (!res.ok && res.status !== 404) {
       const msg = (await res.json().catch(() => ({})))?.message || `HTTP ${res.status}`;
       console.warn(`${TAG} remove failed for ${siteId}`, msg);
-      return Response.json({ success: false, error: `Webflow update failed: ${msg}`, webflowStatus: res.status }, { status: 502 });
+      return { success: false, status: 502, error: `Webflow update failed: ${msg}`, webflowStatus: res.status };
     }
 
-    const removedIds = legacy.map((s) => s.id);
-    return Response.json({
-      success: true,
-      removed: removedIds,
-      removedCount: removedIds.length,
-      legacyScripts: legacy,
-      remainingCount: kept.length,
-    });
+    return { success: true, removed: legacy.map((s) => s.id), legacy, kept };
   } catch (e) {
     console.error(`${TAG} remove error for ${siteId}`, e?.message || e);
-    return Response.json({ success: false, error: e?.message || 'Cleanup failed' }, { status: 502 });
+    return { success: false, status: 502, error: e?.message || 'Cleanup failed' };
   }
 }
+
+// Exported for tests.
+export { isConsentBitScript, hostedFileIsConsentBit, resolveAccessToken };

@@ -1,3 +1,4 @@
+import { truncateIp } from '../utils/ipTruncate.js';
 // Shared helpers for legacy consent data retrieval (R2 + KV).
 // Used by legacyConsentLogs.js and legacyConsentCsv.js.
 
@@ -215,7 +216,7 @@ export function transformEntry(entry, siteId) {
     id: entry._visitorId || entry.visitorId || String(Math.random()),
     siteId,
     deviceId: null,
-    ipAddress: meta.ip || prefs.ip || null,
+    ipAddress: truncateIp(meta.ip || prefs.ip),
     userAgent: meta.userAgent || null,
     country: entry.country || meta.country || prefs.country || null,
     region: entry.state || meta.state || null,

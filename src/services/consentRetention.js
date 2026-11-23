@@ -9,18 +9,22 @@
 //   site  → Site.consent_retention_days, the customer's pick inside the plan
 // The generated policy must print the same number this job enforces.
 //
-// ─── STATUS: MECHANISM ONLY — THE NUMBERS BELOW ARE PLACEHOLDERS ────────────
-// The plan ranges and legal bounds are not decided yet. Every value marked
-// PLACEHOLDER is to be replaced once the plans and limits are agreed.
+// ─── STATUS: MOVE, NOT DELETE (2026-10-15) ──────────────────────────────────
+// The sweep no longer deletes. Expired rows are COPIED to the separate D1
+// `consentbit-retention-data` (binding RETENTION_DB, schema in
+// scripts/retention-db-schema.sql) and only then removed from Consent. Nothing in the
+// dashboard / CSV / PDF reads that database, so to the customer the records are gone.
+// Periods (user, 2026-10-15), every plan alike:
+//   regulation 'ccpa'  → moved after 24 months (MOVE_CCPA_DAYS)
+//   everything else    → moved after 12 months (MOVE_GDPR_DAYS)
+// The plan/customer-pick resolvers below are still used for what a Free site may SEE.
 //
-// ─── DELETION IS OFF BY DEFAULT ─────────────────────────────────────────────
 // env.CONSENT_RETENTION_MODE:
-//   unset / 'off'  nothing runs (the default — no wrangler var is set)
-//   'dry-run'      counts what WOULD be deleted, logs it, deletes nothing
-//   'on'           deletes
+//   unset / 'off'  nothing runs
+//   'dry-run'      counts what WOULD be moved, logs it, moves nothing
+//   'on'           moves. Refuses to run without RETENTION_DB — never deletes outright.
 // The test and production workers bind the SAME D1. Turning this on for either
-// one deletes production consent records. Enable deliberately, and only after
-// the index below exists.
+// one moves production consent records. Enable it on ONE worker only.
 //
 // ─── REQUIRED BEFORE ENABLING: create the index by hand ─────────────────────
 //   CREATE INDEX IF NOT EXISTS idx_consent_site_created ON Consent (siteId, createdAt);
@@ -33,34 +37,81 @@
 // when a site is archived) is kept forever today. How long to keep records of
 // sites that have left is decision D3 — still open, so not implemented.
 
-// ─── Placeholders — replace when D1 is decided ───────────────────────────────
+// ─── Period — decided 2026-10-12 ──────────────────────────────────────────────
+// Free plan: 3 months. Every other plan: 12 months. US records: 24 months on every plan
+// (CCPA §7101 / Colorado Rule 6.11), see CCPA_RETENTION_DAYS.
+// A customer pick saved earlier (Site.consent_retention_days) is clamped to the plan.
 
-/** Outer bounds from the law, in days. PLACEHOLDER. */
+/** Free plan: 3 months in days (3 × 30.44). */
+export const FREE_RETENTION_DAYS = 91;
+/** Basic, Essential, Growth: 12 months. */
+export const PAID_RETENTION_DAYS = 365;
+
+/**
+ * US (regulation 'ccpa') records are kept 24 months on every plan, Free included:
+ * CCPA Regulations §7101 and Colorado Rule 6.11 require 24 months of request records,
+ * opt-outs included. Only ever keeps MORE than the plan period. Re-confirmed 2026-10-12.
+ */
+export const CCPA_RETENTION_DAYS = 730;
+
+/** Sweep periods (2026-10-15): rows older than these move to RETENTION_DB. */
+export const MOVE_GDPR_DAYS = 365;
+export const MOVE_CCPA_DAYS = 730;
+
+/** Outer bounds, in days. */
 export const RETENTION_LEGAL_BOUNDS = {
-  minDays: 365,   // PLACEHOLDER — long enough to prove consent; CCPA opt-out 12-month floor
-  maxDays: 1825,  // PLACEHOLDER — 5 years
+  minDays: FREE_RETENTION_DAYS,
+  maxDays: PAID_RETENTION_DAYS,
 };
 
-/** Range each plan offers, in days. PLACEHOLDER. Plan ids match ensureDefaultPlans. */
+/** Range each plan offers, in days. Plan ids match ensureDefaultPlans. */
 export const RETENTION_PLAN_LIMITS = {
-  free:      { minDays: 365, maxDays: 365,  defaultDays: 365 }, // PLACEHOLDER
-  basic:     { minDays: 365, maxDays: 1825, defaultDays: 365 }, // PLACEHOLDER
-  essential: { minDays: 365, maxDays: 1825, defaultDays: 365 }, // PLACEHOLDER
-  growth:    { minDays: 365, maxDays: 1825, defaultDays: 365 }, // PLACEHOLDER
+  free:      { minDays: FREE_RETENTION_DAYS, maxDays: FREE_RETENTION_DAYS, defaultDays: FREE_RETENTION_DAYS },
+  basic:     { minDays: PAID_RETENTION_DAYS, maxDays: PAID_RETENTION_DAYS, defaultDays: PAID_RETENTION_DAYS },
+  essential: { minDays: PAID_RETENTION_DAYS, maxDays: PAID_RETENTION_DAYS, defaultDays: PAID_RETENTION_DAYS },
+  growth:    { minDays: PAID_RETENTION_DAYS, maxDays: PAID_RETENTION_DAYS, defaultDays: PAID_RETENTION_DAYS },
 };
 
 /** Periods offered in the dashboard; filtered to the site's plan range. */
-export const RETENTION_CHOICES_DAYS = [365, 730, 1095, 1825];
+export const RETENTION_CHOICES_DAYS = [FREE_RETENTION_DAYS, PAID_RETENTION_DAYS];
+
+// ─── Pre-2026-10-12 numbers — what PRODUCTION still uses ─────────────────────
+// The decided period above is law work and stays TEST-ONLY (LAW_FIXES="1"). Without
+// it, every resolver below falls back to these, exactly as production behaved before.
+const PRE_LAW_LEGAL_BOUNDS = { minDays: 365, maxDays: 1825 };
+const PRE_LAW_PLAN_LIMITS = {
+  free:      { minDays: 365, maxDays: 365,  defaultDays: 365 },
+  basic:     { minDays: 365, maxDays: 1825, defaultDays: 365 },
+  essential: { minDays: 365, maxDays: 1825, defaultDays: 365 },
+  growth:    { minDays: 365, maxDays: 1825, defaultDays: 365 },
+};
+const PRE_LAW_CHOICES_DAYS = [365, 730, 1095, 1825];
+
+function lawFixesOn(env) {
+  return env?.LAW_FIXES === '1';
+}
 
 // ─── Sweep tuning ────────────────────────────────────────────────────────────
 
-/** The sweep runs during this UTC hour, one slice per cron tick (cron is every minute). */
+/**
+ * Twice a month (user, 2026-10-15): on these UTC days of the month, from SWEEP_HOUR_UTC
+ * to midnight, one slice per cron tick (cron is every minute). Each sweep stops for the
+ * day once its pass is finished, so the rest of the day's ticks are no-ops.
+ */
+export const SWEEP_DAYS_OF_MONTH = [1, 15];
 const SWEEP_HOUR_UTC = 3;
+
+/** true when `now` falls inside a sweep window. Shared with legacyRetention.js. */
+export function inSweepWindow(now) {
+  return SWEEP_DAYS_OF_MONTH.includes(now.getUTCDate()) && now.getUTCHours() >= SWEEP_HOUR_UTC;
+}
 /** Sites looked at per tick. */
 const SITES_PER_TICK = 25;
-/** Rows deleted per statement, and statements per site per tick. */
-const DELETE_BATCH = 500;
-const MAX_BATCHES_PER_SITE = 5;
+/** Rows moved per batch, and batches per site per tick. Each batch is 4 queries
+ *  (select, copy, confirm, delete) and rides in one JSON parameter — keep it well under
+ *  D1's 2 MB value limit (TCF rows run a few KB). */
+const MOVE_BATCH = 100;
+const MAX_BATCHES_PER_SITE = 3;
 const INDEX_NAME = 'idx_consent_site_created';
 
 // ─── Resolution ──────────────────────────────────────────────────────────────
@@ -74,10 +125,12 @@ export function retentionMode(env) {
 }
 
 /** The plan's range, clamped inside the legal bounds. Unknown plans get free's range. */
-export function getPlanRetentionLimits(planId) {
-  const plan = RETENTION_PLAN_LIMITS[String(planId || '').toLowerCase()] || RETENTION_PLAN_LIMITS.free;
-  const minDays = Math.max(plan.minDays, RETENTION_LEGAL_BOUNDS.minDays);
-  const maxDays = Math.max(minDays, Math.min(plan.maxDays, RETENTION_LEGAL_BOUNDS.maxDays));
+export function getPlanRetentionLimits(planId, env) {
+  const table = lawFixesOn(env) ? RETENTION_PLAN_LIMITS : PRE_LAW_PLAN_LIMITS;
+  const bounds = lawFixesOn(env) ? RETENTION_LEGAL_BOUNDS : PRE_LAW_LEGAL_BOUNDS;
+  const plan = table[String(planId || '').toLowerCase()] || table.free;
+  const minDays = Math.max(plan.minDays, bounds.minDays);
+  const maxDays = Math.max(minDays, Math.min(plan.maxDays, bounds.maxDays));
   const defaultDays = Math.min(maxDays, Math.max(minDays, plan.defaultDays));
   return { minDays, maxDays, defaultDays };
 }
@@ -86,17 +139,18 @@ export function getPlanRetentionLimits(planId) {
  * The period actually enforced: the customer's pick if set, clamped into the plan's
  * range. A downgrade therefore shortens retention automatically on the next sweep.
  */
-export function resolveRetentionDays(planId, chosenDays) {
-  const { minDays, maxDays, defaultDays } = getPlanRetentionLimits(planId);
+export function resolveRetentionDays(planId, chosenDays, env) {
+  const { minDays, maxDays, defaultDays } = getPlanRetentionLimits(planId, env);
   const n = Number(chosenDays);
   if (!Number.isFinite(n) || n <= 0) return defaultDays;
   return Math.min(maxDays, Math.max(minDays, Math.round(n)));
 }
 
 /** Choices to show for a plan: the fixed list, filtered to the range, plus the bounds. */
-export function retentionChoicesForPlan(planId) {
-  const { minDays, maxDays } = getPlanRetentionLimits(planId);
-  const set = new Set(RETENTION_CHOICES_DAYS.filter((d) => d >= minDays && d <= maxDays));
+export function retentionChoicesForPlan(planId, env) {
+  const { minDays, maxDays } = getPlanRetentionLimits(planId, env);
+  const choices = lawFixesOn(env) ? RETENTION_CHOICES_DAYS : PRE_LAW_CHOICES_DAYS;
+  const set = new Set(choices.filter((d) => d >= minDays && d <= maxDays));
   set.add(minDays);
   set.add(maxDays);
   return [...set].sort((a, b) => a - b);
@@ -168,7 +222,7 @@ export async function writeSiteRetentionDays(db, siteId, days) {
 
 // ─── Sweep ───────────────────────────────────────────────────────────────────
 
-/** YYYY-MM-DD, `days` before `now`. Date-only on purpose — see purgeSite. */
+/** YYYY-MM-DD, `days` before `now`. Date-only on purpose — see moveSite. */
 function cutoffDateFor(now, days) {
   const d = new Date(now.getTime() - days * 86400000);
   return d.toISOString().slice(0, 10);
@@ -184,28 +238,93 @@ function cutoffDateFor(now, days) {
  *
  * Returns { affected, more } — `more` means rows remain past the batch cap.
  */
-async function purgeSite(db, siteId, cutoffDate, mode) {
+// A US opt-out (ccpa) row is only expired once it is also past `ccpaCutoffDate`.
+// regulation is NULL on some old rows — those follow the normal period.
+const EXPIRED = `siteId = ?1 AND createdAt < ?2
+  AND (COALESCE(regulation, '') <> 'ccpa' OR createdAt < ?3)`;
+
+/**
+ * Snapshot the Site row into RetainedSite (apiKey dropped) and bump its counter.
+ * Runs once per site per tick that moved rows.
+ */
+async function retainSite(db, rdb, siteId, moved, nowIso) {
+  const site = await db.prepare('SELECT * FROM Site WHERE id = ?1 LIMIT 1').bind(siteId).first();
+  const snapshot = site ? { ...site } : null;
+  if (snapshot) delete snapshot.apiKey;
+  await rdb
+    .prepare(
+      `INSERT INTO RetainedSite (siteId, domain, organizationId, siteJson, firstRetainedAt, lastRetainedAt, retainedCount)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)
+       ON CONFLICT(siteId) DO UPDATE SET
+         domain = COALESCE(?2, domain),
+         organizationId = COALESCE(?3, organizationId),
+         siteJson = COALESCE(?4, siteJson),
+         lastRetainedAt = ?5,
+         retainedCount = retainedCount + ?6`,
+    )
+    .bind(
+      siteId,
+      snapshot?.domain ?? null,
+      snapshot?.organizationId ?? null,
+      snapshot ? JSON.stringify(snapshot) : null,
+      nowIso,
+      moved,
+    )
+    .run();
+}
+
+/**
+ * Move (or, in dry-run, count) one site's expired Consent rows into RETENTION_DB.
+ * Per batch: read rows → INSERT OR IGNORE copies → read back which ids the retention
+ * DB now holds → delete exactly those from Consent. D1 has no cross-database
+ * transaction, so a row is only ever deleted once its copy is confirmed; a failure
+ * between copy and delete leaves a duplicate that the next run's OR IGNORE absorbs.
+ */
+async function moveSite(db, rdb, siteId, cutoffDate, ccpaCutoffDate, mode, nowIso) {
   if (mode === 'dry-run') {
     const row = await db
-      .prepare('SELECT COUNT(*) AS n FROM Consent WHERE siteId = ?1 AND createdAt < ?2')
-      .bind(siteId, cutoffDate)
+      .prepare(`SELECT COUNT(*) AS n FROM Consent WHERE ${EXPIRED}`)
+      .bind(siteId, cutoffDate, ccpaCutoffDate)
       .first();
     return { affected: Number(row?.n || 0), more: false };
   }
 
   let affected = 0;
   for (let i = 0; i < MAX_BATCHES_PER_SITE; i++) {
-    const res = await db
+    const { results: rows } = await db
+      .prepare(`SELECT * FROM Consent WHERE ${EXPIRED} ORDER BY createdAt LIMIT ${MOVE_BATCH}`)
+      .bind(siteId, cutoffDate, ccpaCutoffDate)
+      .all();
+    if (!rows || rows.length === 0) return { affected, more: false };
+
+    await rdb
       .prepare(
-        `DELETE FROM Consent WHERE id IN (
-           SELECT id FROM Consent WHERE siteId = ?1 AND createdAt < ?2 LIMIT ${DELETE_BATCH}
-         )`,
+        `INSERT OR IGNORE INTO RetainedConsent (id, siteId, deviceId, regulation, createdAt, retainedAt, consentRow)
+         SELECT json_extract(value, '$.id'), json_extract(value, '$.siteId'),
+                json_extract(value, '$.deviceId'), json_extract(value, '$.regulation'),
+                json_extract(value, '$.createdAt'), ?2, json(value)
+         FROM json_each(?1)`,
       )
-      .bind(siteId, cutoffDate)
+      .bind(JSON.stringify(rows), nowIso)
       .run();
-    const changed = Number(res?.meta?.changes || 0);
-    affected += changed;
-    if (changed < DELETE_BATCH) return { affected, more: false };
+
+    const ids = JSON.stringify(rows.map((r) => String(r.id)));
+    const { results: kept } = await rdb
+      .prepare('SELECT id FROM RetainedConsent WHERE id IN (SELECT value FROM json_each(?1))')
+      .bind(ids)
+      .all();
+    const keptIds = (kept || []).map((r) => String(r.id));
+    if (keptIds.length === 0) throw new Error('copy to RETENTION_DB not confirmed');
+
+    const res = await db
+      .prepare('DELETE FROM Consent WHERE siteId = ?1 AND id IN (SELECT value FROM json_each(?2))')
+      .bind(siteId, JSON.stringify(keptIds))
+      .run();
+    affected += Number(res?.meta?.changes || 0);
+
+    // Some copies unconfirmed: stop on this site; the next tick retries them.
+    if (keptIds.length < rows.length) return { affected, more: true };
+    if (rows.length < MOVE_BATCH) return { affected, more: false };
   }
   return { affected, more: true };
 }
@@ -221,20 +340,26 @@ async function indexExists(db) {
 
 /**
  * Called from the worker's scheduled() handler on every cron tick. Does nothing
- * unless CONSENT_RETENTION_MODE is set, and only works during SWEEP_HOUR_UTC.
+ * unless CONSENT_RETENTION_MODE is set, and only works inside inSweepWindow().
  * Walks the Site table in id order, a slice per tick, with a cursor in
  * ConsentRetentionState so a day's sweep resumes where the last tick stopped.
  *
- * `resolvePlanId(db, env, siteId)` returns a plan id, or null when resolution
- * failed. A site with an unknown plan is SKIPPED — never delete on a guess.
+ * Rows are moved to RETENTION_DB, never deleted outright: 'on' without that binding
+ * refuses to run. (`resolvePlanId` is accepted for the caller's sake but no longer
+ * used — the move periods are the same on every plan.)
  */
-export async function runConsentRetentionSweep(env, { now = new Date(), resolvePlanId } = {}) {
+export async function runConsentRetentionSweep(env, { now = new Date() } = {}) {
   const mode = retentionMode(env);
   if (mode === 'off') return { skipped: 'off' };
-  if (now.getUTCHours() !== SWEEP_HOUR_UTC) return { skipped: 'outside-window' };
+  if (!inSweepWindow(now)) return { skipped: 'outside-window' };
 
   const db = env?.CONSENT_WEBAPP;
-  if (!db || typeof resolvePlanId !== 'function') return { skipped: 'no-db' };
+  const rdb = env?.RETENTION_DB;
+  if (!db) return { skipped: 'no-db' };
+  if (mode === 'on' && !rdb) {
+    console.warn('[ConsentRetention] RETENTION_DB not bound — sweep refused (records are moved, never just deleted).');
+    return { skipped: 'no-retention-db' };
+  }
 
   if (!(await indexExists(db))) {
     console.warn(
@@ -269,26 +394,18 @@ export async function runConsentRetentionSweep(env, { now = new Date(), resolveP
   let processed = 0;
   let totalAffected = 0;
 
+  // Same periods for every plan (2026-10-15), so no plan lookup is needed here.
+  const days = MOVE_GDPR_DAYS;
+  const cutoffDate = cutoffDateFor(now, MOVE_GDPR_DAYS);
+  const ccpaCutoffDate = cutoffDateFor(now, MOVE_CCPA_DAYS);
+  const nowIso = now.toISOString();
+
   for (const site of sites || []) {
     const siteId = String(site.id);
-    let planId = null;
-    try {
-      planId = await resolvePlanId(db, env, siteId);
-    } catch (_) {
-      planId = null;
-    }
-
-    if (planId === null) {
-      console.warn(`[ConsentRetention] plan unknown for site ${siteId} — skipped`);
-      cursor = siteId;
-      continue;
-    }
-
-    const days = resolveRetentionDays(planId, site.days);
-    const cutoffDate = cutoffDateFor(now, days);
     let result;
     try {
-      result = await purgeSite(db, siteId, cutoffDate, mode);
+      result = await moveSite(db, rdb, siteId, cutoffDate, ccpaCutoffDate, mode, nowIso);
+      if (mode === 'on' && result.affected > 0) await retainSite(db, rdb, siteId, result.affected, nowIso);
     } catch (err) {
       console.warn(`[ConsentRetention] site ${siteId} failed:`, err?.message);
       cursor = siteId;
@@ -302,7 +419,7 @@ export async function runConsentRetentionSweep(env, { now = new Date(), resolveP
           `INSERT INTO ConsentRetentionLog (siteId, runAt, mode, retentionDays, cutoffDate, affectedCount)
            VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
         )
-        .bind(siteId, now.toISOString(), mode, days, cutoffDate, result.affected)
+        .bind(siteId, nowIso, mode === 'on' ? 'moved' : mode, days, cutoffDate, result.affected)
         .run()
         .catch(() => {});
     }
@@ -330,4 +447,54 @@ export async function runConsentRetentionSweep(env, { now = new Date(), resolveP
     .run();
 
   return { mode, processed, totalAffected, cursor, done: !!done };
+}
+
+// ─── What a site may SEE (added 2026-10-13) ─────────────────────────────────
+// A Free site sees only the consent records inside its retention period (3 months), in
+// the dashboard, CSV and PDF, whether or not the deletion sweep is switched on. Paid plans
+// see everything they hold. Deleting a visitor's records (consentVisitor.js POST) is NOT
+// limited: an erasure request must cover every record. TEST-ONLY via LAW_FIXES.
+//
+// Returns a bare date 'YYYY-MM-DD' (records older than it are hidden) or null (no limit).
+// An unknown plan returns null: never hide a paying customer's records on a guess.
+//
+// 2026-10-16: the plan is judged on THIS site, not its organization. resolveEffectivePlanId
+// falls back to the org's newest subscription, so a Free site in an account that also has a
+// paid site (Free dev-4s-amazing-site in an org with a Growth sub) saw everything.
+// A site with no subscription of its own is Free here, unless the org holds an active
+// subscription not tied to any site (siteId empty), which covers the whole org.
+export async function consentViewCutoff(env, siteId, resolvePlanId, now = new Date()) {
+  if (!env || env.LAW_FIXES !== '1' || !siteId || typeof resolvePlanId !== 'function') return null;
+  const isFree = await siteHasNoPaidPlan(env, siteId);
+  if (isFree !== true) return null; // false = paid, null = unknown → never hide
+  return cutoffDateFor(now, FREE_RETENTION_DAYS);
+}
+
+// true = Free, false = paid, null = could not tell. Any active/trialing subscription counts as
+// paid, whatever its planId: hiding a paying customer's records on a bad planId is worse.
+export async function siteHasNoPaidPlan(env, siteId) {
+  const db = env.CONSENT_WEBAPP;
+  if (!db) return null;
+  try {
+    const own = await db
+      .prepare(
+        `SELECT 1 AS paid FROM Subscription
+          WHERE siteId = ?1 AND status IN ('active', 'trialing') LIMIT 1`,
+      )
+      .bind(siteId)
+      .first();
+    if (own) return false;
+    const orgWide = await db
+      .prepare(
+        `SELECT 1 AS paid FROM Subscription sub
+           JOIN Site s ON s.organizationId = sub.organizationId
+          WHERE s.id = ?1 AND (sub.siteId IS NULL OR sub.siteId = '')
+            AND sub.status IN ('active', 'trialing') LIMIT 1`,
+      )
+      .bind(siteId)
+      .first();
+    return orgWide ? false : true;
+  } catch (_) {
+    return null;
+  }
 }

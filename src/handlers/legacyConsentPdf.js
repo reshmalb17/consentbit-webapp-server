@@ -5,6 +5,7 @@ import { requireActiveSubscriptionForConsentReport } from '../services/subscript
 import { buildSearchKeys, getConsentRowsFromR2, getConsentRowsFromKV, transformEntry } from './legacyConsentHelpers.js';
 import { verifyDownloadToken } from '../utils/signedToken.js';
 import { buildHtml, fetchImageAsDataUrl } from './consentPdf.js';
+import { truncateIp } from '../utils/ipTruncate.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -103,7 +104,7 @@ export async function handleLegacyConsentPdf(request, env) {
       id: d1Row.id,
       siteId: d1Row.siteId,
       deviceId: null,
-      ipAddress: d1Row.ipAddress,
+      ipAddress: truncateIp(d1Row.ipAddress),
       userAgent: d1Row.userAgent,
       country: d1Row.country,
       region: d1Row.region,
@@ -129,7 +130,7 @@ export async function handleLegacyConsentPdf(request, env) {
       `SELECT name, category, expires, description FROM (
         SELECT *, ROW_NUMBER() OVER (PARTITION BY siteId, name, COALESCE(domain, '') ORDER BY lastSeenAt DESC) as rn
         FROM Cookie
-        WHERE siteId = ?1
+        WHERE siteId = ?1 AND name NOT LIKE 'consentbit%'
       ) WHERE rn = 1
       ORDER BY category, name`,
     )
@@ -159,7 +160,13 @@ export async function handleLegacyConsentPdf(request, env) {
   try {
     browser = await puppeteer.launch(env.BROWSER);
     const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    // 'load' not 'networkidle0': the HTML is self-contained (inline CSS, data: logo), and on
+    // Cloudflare Browser Rendering networkidle0 never fires -> 30 s navigation timeout
+    // (seen live 2026-11-04: "Navigation timeout of 30000 ms exceeded"). If even 'load' is
+    // late, render whatever is in the DOM rather than failing the download.
+    await page.setContent(html, { waitUntil: 'load', timeout: 15000 }).catch((e) => {
+      console.warn('[pdf] setContent wait timed out, rendering anyway:', e?.message);
+    });
     const pdf = await page.pdf({ format: 'A4', printBackground: true, margin: { top: '0', right: '0', bottom: '0', left: '0' } });
     await browser.close();
 

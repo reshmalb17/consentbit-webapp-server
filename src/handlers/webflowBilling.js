@@ -9,6 +9,7 @@
 //   POST /api/webflow/cancel-subscription     body { siteId } → cancel at period end
 
 import { getPageviewUsageForSite, getScanUsageForSite, getPlanById } from '../services/db.js';
+import { freeFallbackFieldsForSite } from '../services/freeFallback.js';
 
 const TAG = '[webflow-billing]';
 
@@ -100,11 +101,18 @@ export async function handleWebflowBilling(request, env) {
   if (!siteId) return Response.json({ success: false, error: 'siteId required' }, { status: 400 });
 
   const site = await resolveSite(db, siteId);
-  const sub = await resolveSubscription(db, site);
+  let sub = await resolveSubscription(db, site);
   const usage = await resolveUsage(db, site);
+  // Free fallback (services/freeFallback.js, 2026-11-05): a site moved to Free after its
+  // plan ended answers as a Free site (the Framer plugin reads "ended" off this row, so
+  // the dead row must not be returned). A site that stayed blocked carries
+  // `freeBlockedBy` so the plugin can explain why.
+  const ff = site?.id ? await freeFallbackFieldsForSite(db, site.id, site.organizationId ?? site.organizationid ?? null) : null;
+  if (ff?.freeFallback) sub = null;
+  const ffFields = { freeFallback: !!ff?.freeFallback, freeFallbackAt: ff?.freeFallbackAt ?? null, freeBlockedBy: ff?.freeBlockedBy ?? null };
   if (!sub) {
     const limits = await resolveLimits(db, 'free');
-    return Response.json({ success: true, plan: 'free', status: null, invoices: [], stripeSubscriptionId: null, ...usage, ...limits });
+    return Response.json({ success: true, plan: 'free', status: null, invoices: [], stripeSubscriptionId: null, ...usage, ...limits, ...ffFields });
   }
 
   const stripeSubscriptionId = pick(sub, 'stripeSubscriptionId', 'stripesubscriptionid');
@@ -211,6 +219,7 @@ export async function handleWebflowBilling(request, env) {
     invoices,
     ...usage,
     ...limits,
+    ...ffFields,
   });
 }
 

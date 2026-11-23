@@ -52,14 +52,15 @@ async function resolveDistinctId(env, webflowSiteId) {
   //    billing email stamped at checkout. Keyed by Webflow site id, so it is present
   //    from OAuth onward. This also covers paid-but-not-yet-stamped sites, whose Site
   //    row exists with a domain but no platformSiteId for step 1 to match on.
-  try {
-    const raw = await env.WEBFLOW_AUTHENTICATION?.get(webflowSiteId);
-    if (raw) {
-      const entry = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      const kvEmail = entry?.billingEmail || entry?.email;
-      if (kvEmail) return { distinctId: String(kvEmail).trim().toLowerCase(), source: 'oauth_kv' };
-    }
-  } catch { /* non-fatal */ }
+  // KV email lookup — DISABLED 2026-10-16 (D1 only; step 3 below reads the D1 OAuth record).
+  // try {
+  //   const raw = await env.WEBFLOW_AUTHENTICATION?.get(webflowSiteId);
+  //   if (raw) {
+  //     const entry = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  //     const kvEmail = entry?.billingEmail || entry?.email;
+  //     if (kvEmail) return { distinctId: String(kvEmail).trim().toLowerCase(), source: 'oauth_kv' };
+  //   }
+  // } catch { /* non-fatal */ }
 
   // 3. KV miss → the D1 OAuth record: siteId → userKey → the authorizedBy blob.
   try {

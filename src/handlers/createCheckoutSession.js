@@ -14,6 +14,7 @@ import {
   isCouponIdAllowedForEmail,
   PROMO_NOT_ALLOWED_MESSAGE,
 } from '../services/promoRestrictions.js';
+import { defaultPromotionCodeForPlan } from '../services/blackFridayOffer.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -165,9 +166,16 @@ export async function handleCreateCheckoutSession(request, env) {
     : `${rawSuccessUrl}?session_id={CHECKOUT_SESSION_ID}`;
   const cancelUrl = safeReturnUrl(body.cancelUrl, env, `${request.url.replace(/\/api\/.*$/, '')}/pro-plan?canceled=true`, '[CreateCheckout]');
   const stripeCouponId = body.stripeCouponId && body.stripeCouponId.trim() ? body.stripeCouponId.trim() : null;
-  const promotionCodeId = body.promotionCodeId && body.promotionCodeId.trim() ? body.promotionCodeId.trim() : null;
+  const sentPromotionCodeId = body.promotionCodeId && body.promotionCodeId.trim() ? body.promotionCodeId.trim() : null;
   // Customer-facing coupon string (e.g. "MEMORIAL25"). Resolved to a promo_xxx id below.
   const couponCode = body.couponCode && body.couponCode.trim() ? body.couponCode.trim() : null;
+  // Black Friday offer when the request carries no code of any kind (e.g. the onboarding
+  // plan table). Verified against Stripe below like any other code; unlike a code the
+  // customer sent, a rejected default is dropped instead of failing the checkout.
+  const defaultPromotionCodeId = !sentPromotionCodeId && !stripeCouponId && !couponCode && planId
+    ? defaultPromotionCodeForPlan(planId)
+    : null;
+  const promotionCodeId = sentPromotionCodeId || defaultPromotionCodeId;
 
   if (!organizationId) {
     return Response.json({ success: false, error: 'organizationId required' }, { status: 400 });
@@ -373,17 +381,26 @@ export async function handleCreateCheckoutSession(request, env) {
       const verify = await verifyRes.json();
       if (verify.error || !verify.active) {
         console.warn('[CreateCheckout] promotion code rejected', { id: promotionCodeId, err: verify.error?.message });
-        return Response.json({ success: false, error: 'Promotion code is no longer valid' }, { status: 400 });
-      }
-      if (!isCodeAllowedForEmail(verify.code, customerEmail)) {
+        if (sentPromotionCodeId) {
+          return Response.json({ success: false, error: 'Promotion code is no longer valid' }, { status: 400 });
+        }
+        console.warn('[CreateCheckout] default offer unavailable — continuing without discount');
+      } else if (!isCodeAllowedForEmail(verify.code, customerEmail)) {
         console.warn('[CreateCheckout] promo restricted to another account', { code: verify.code, email });
-        return Response.json({ success: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 400 });
+        if (sentPromotionCodeId) {
+          return Response.json({ success: false, error: PROMO_NOT_ALLOWED_MESSAGE }, { status: 400 });
+        }
+        console.warn('[CreateCheckout] default offer restricted — continuing without discount');
+      } else {
+        params.set('discounts[0][promotion_code]', promotionCodeId);
+        if (verify.code) params.set('subscription_data[metadata][promotionCode]', verify.code);
       }
-      params.set('discounts[0][promotion_code]', promotionCodeId);
-      if (verify.code) params.set('subscription_data[metadata][promotionCode]', verify.code);
     } catch (e) {
       console.error('[CreateCheckout] promotion code verify failed', e?.message);
-      return Response.json({ success: false, error: 'Promotion code validation failed' }, { status: 400 });
+      if (sentPromotionCodeId) {
+        return Response.json({ success: false, error: 'Promotion code validation failed' }, { status: 400 });
+      }
+      console.warn('[CreateCheckout] default offer verify failed — continuing without discount');
     }
   }
 

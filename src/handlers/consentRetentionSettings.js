@@ -48,7 +48,7 @@ async function describe(db, env, siteId) {
   // null = plan resolution failed. Show free's range for display, but flag it so
   // the dashboard can refuse to save until the plan is known.
   const planForLimits = planId ?? 'free';
-  const limits = getPlanRetentionLimits(planForLimits);
+  const limits = getPlanRetentionLimits(planForLimits, env);
   const chosenDays = await readSiteRetentionDays(db, siteId);
   return {
     success: true,
@@ -56,9 +56,9 @@ async function describe(db, env, siteId) {
     planId,
     planKnown: planId !== null,
     limits,
-    choices: retentionChoicesForPlan(planForLimits),
+    choices: retentionChoicesForPlan(planForLimits, env),
     chosenDays,
-    effectiveDays: resolveRetentionDays(planForLimits, chosenDays),
+    effectiveDays: resolveRetentionDays(planForLimits, chosenDays, env),
     mode: retentionMode(env),
   };
 }
@@ -110,7 +110,7 @@ export async function handleConsentRetentionSettings(request, env) {
       let days = null;
       if (body.days !== null && body.days !== undefined && body.days !== '') {
         days = Math.round(Number(body.days));
-        const { minDays, maxDays } = getPlanRetentionLimits(planId);
+        const { minDays, maxDays } = getPlanRetentionLimits(planId, env);
         if (!Number.isFinite(days) || days < minDays || days > maxDays) {
           return Response.json(
             {

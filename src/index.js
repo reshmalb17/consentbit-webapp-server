@@ -17,7 +17,10 @@ import { handleScanSite, handleScanSiteConsented } from './handlers/scanSite.js'
 import { handleBannerCustomization, resolveEffectivePlanId } from './handlers/bannerCustomization.js';
 import { handleBannerTemplates } from './handlers/bannerTemplates.js';
 import { handleConsentRetentionSettings } from './handlers/consentRetentionSettings.js';
+import { handleTransparencyPublic, handleTransparencySettings } from './handlers/transparencyPage.js';
+import { handleConsentVisitor } from './handlers/consentVisitor.js';
 import { runConsentRetentionSweep } from './services/consentRetention.js';
+import { runLegacyRetentionSweep } from './services/legacyRetention.js';
 import { handleScheduledScan } from './handlers/scheduledScan.js';
 import { handleConsentLogs } from './handlers/consentLogs.js';
 import { handleValidatePromo } from './handlers/validatePromo.js';
@@ -102,8 +105,13 @@ import { handleAuthLogout } from './handlers/authLogout.js';
 import { handleOnboardingFirstSetup } from './handlers/onboardingFirstSetup.js';
 import { handleCheckDomainAvailability } from './handlers/checkDomainAvailability.js';
 import { handleRenameDomain } from './handlers/renameDomain.js';
+import { handleConsentFamily } from './handlers/consentFamily.js';
+import { handleBannerPages } from './handlers/bannerPages.js';
+import { handleBannerStatus } from './handlers/bannerStatus.js';
 import { handleWebflowFreeRegister } from './handlers/webflowFreeRegister.js';
 import { handleFeedback } from './handlers/feedback.js';
+import { handleDpaRequest } from './handlers/dpaRequest.js';
+import { handleMcpAccess } from './handlers/mcpAccess.js';
 import { handleCustomCheckout, handleValidateCoupon } from './handlers/customeCheeckout.js';
 import { handleSyncPlugin, handleSyncPluginCustomization, handleGetPluginData, handleGetPluginPlan } from './handlers/SyncPlugin.js';
 import { handlePaymentSubscription } from './handlers/paymentSubscription.js';
@@ -111,7 +119,9 @@ import { handleWebflowBilling, handleWebflowCancelSubscription, handleWebflowSwi
 import { handleWebflowBillings, handleWebflowCancelSubscriptions, handleWebflowSwitchIntervals, handleWebflowResumeSubscription } from './handlers/webflowBillingWf.js';
 import { createAdminNotification } from './services/adminNotifications.js';
 import { processSubscriptionEndSweep } from './services/subscriptionEndSweep.js';
-import { requireConsentSession, requireConsentPdfAccess } from './middleware/consentAccess.js';
+import { requireConsentSession, requireConsentCsvAccess, requireConsentPdfAccess, requireSiteSession } from './middleware/consentAccess.js';
+import { getRetentionNotice, runRetentionReminders } from './services/retentionReminders.js';
+import { runCombinedInvoices } from './services/combinedInvoice.js';
 import { handleTeam } from './handlers/team.js';
 import { listSiteAdminRecipients, copyEmailToAdmins } from './services/team.js';
 import { TEAM_GATED_PATHS, requireTeamSiteAccess } from './middleware/teamSiteAccess.js';
@@ -131,6 +141,8 @@ import {
   handleWebflowSwitchIntervalPreview as handleWebflowUpgradeSwitchIntervalPreview,
 } from './handlers/webflowUpgrade.js';
 import { handleFramerTransferOwnershipRequest } from './handlers/authTransferOwnershipFramer.js';
+import { handleFramerSession } from './services/framerAccess.js';
+import { handleFramerPublished } from './handlers/framerPublished.js';
 import { handleWebflowScriptCleanupReport, handleWebflowScriptCleanupRemove } from './handlers/webflowScriptCleanup.js';
 import { handleWebflowOAuthAuthorize, handleWebflowOAuthCallback, handleWebflowOAuthStatus } from './handlers/webflowOAuth.js';
 import { handleWebflowPublish, handleWebflowDomains } from './handlers/webflowPublish.js';
@@ -166,6 +178,8 @@ import {
   claimPaymentFailureEmail,
 } from './services/db.js';
 import { sendScanLimitEmail, sendPaymentFailureEmail } from './services/email.js';
+// New-tracker alerts after scheduled scans. No-op unless NEW_TRACKER_ALERTS is set.
+import { runNewTrackerAlerts, markScheduledScan } from './services/newTrackerAlerts.js';
 
 // ---------------------------------------------------------------------------
 // Endpoint classification sets
@@ -221,6 +235,8 @@ const PUBLIC_PATHS = new Set([
   // complete the transfer (see SECURITY note in authTransferOwnershipFramer.js).
   // The authorize step reuses /api/auth/transfer-ownership/authorize (token-only).
   '/api/framer/transfer-ownership/request',
+  '/api/framer/session', // plugin sign-in check; authenticates itself with the plugin token (services/framerAccess.js)
+  '/api/framer/published', // plugin "banner went live" signal; same plugin-token check (handlers/framerPublished.js)
   // Webflow OAuth (browser redirects) — must skip body-encoding so the 302
   // Location survives, allow any origin, and skip CSRF (GET).
   '/api/webflow/oauth/authorize',
@@ -483,6 +499,16 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleCheckDomainAvailability(request, env); break;
     case '/api/sites/rename-domain':
       response = await handleRenameDomain(request, env); break;
+    // Cross-domain consent (subdomains of one main domain share a choice). Session-
+    // authenticated, not public, so the POST keeps CSRF.
+    case '/api/sites/consent-family':
+      response = await handleConsentFamily(request, env); break;
+    // Disable banner on specific pages (Profile → Advanced settings). Session-authenticated.
+    case '/api/sites/banner-pages':
+      response = await handleBannerPages(request, env); break;
+    // Banner display status: owner switches a site's script off to test/debug. Session-authenticated.
+    case '/api/sites/banner-status':
+      response = await handleBannerStatus(request, env); break;
 
     // — Banner / scan
     case '/api/banner-customization':
@@ -495,6 +521,15 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     // ownership checked in the handler; not in PUBLIC_PATHS, so POST keeps CSRF.
     case '/api/consent-retention':
       response = await handleConsentRetentionSettings(request, env); break;
+    // Hosted cookie transparency page settings. TEST-ONLY (TRANSPARENCY_PAGE). Session +
+    // site checks in the handler; not in PUBLIC_PATHS, so POST keeps CSRF.
+    case '/api/transparency-page':
+      response = await handleTransparencySettings(request, env); break;
+    // One visitor's records: export (GET) / delete (POST), for their access or erasure
+    // request. TEST-ONLY (LAW_FIXES). Session + site checks in the handler; not in
+    // PUBLIC_PATHS, so POST keeps CSRF.
+    case '/api/consent-visitor':
+      response = await handleConsentVisitor(request, env); break;
     case '/api/scheduled-scan':
       response = await handleScheduledScan(request, env); break;
     case '/api/scan-history':
@@ -513,6 +548,15 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       const g = await requireConsentSession(request, env);
       if (!g.ok) { response = Response.json({ success: false, error: g.error }, { status: g.status }); break; }
       response = await handleConsentLogs(request, env); break;
+    }
+
+    // — Retention notice for the dashboard bell (services/retentionReminders.js)
+    case '/api/consent-retention-notice': {
+      const g = await requireSiteSession(request, env);
+      if (!g.ok) { response = Response.json({ success: false, error: g.error }, { status: g.status }); break; }
+      const q = new URL(request.url).searchParams;
+      const notice = await getRetentionNotice(env, q.get('siteId') || q.get('site_id')).catch(() => null);
+      response = Response.json({ success: true, notice }); break;
     }
 
     // — Payment subscription check (Webflow app)
@@ -556,6 +600,14 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleFramerResumeSubscription(request, env); break;
 
     // — Framer account ownership transfer (request step; authorize reuses /api/auth/*)
+    // — Framer plugin sign-in check: owner / web-app team member role for this project
+    case '/api/framer/session':
+      response = await handleFramerSession(request, env); break;
+
+    // — Framer plugin: banner script landed → "you're live" email (once) + PostHog events
+    case '/api/framer/published':
+      response = await handleFramerPublished(request, env, ctx); break;
+
     case '/api/framer/transfer-ownership/request':
       response = await handleFramerTransferOwnershipRequest(request, env, ctx); break;
 
@@ -654,6 +706,16 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
     // — Feedback
     case '/api/feedback':
       response = await handleFeedback(request, env); break;
+
+    // — DPA request (Profile → DPA Request)
+    case '/api/dpa-request':
+      response = await handleDpaRequest(request, env, ctx); break;
+
+    // — MCP access (Profile → MCP access)
+    case '/api/mcp-access':
+    case '/api/mcp-access/disconnect':
+    case '/api/mcp-access/authorize':
+      response = await handleMcpAccess(request, env, ctx); break;
 
     // — Debug (should be disabled in production via env guard inside the handler)
     case '/api/debug/schema':
@@ -771,7 +833,7 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
 
     // — Consent CSV (session-gated: web-app proxy forwards the sid cookie)
     case '/api/consent-csv': {
-      const g = await requireConsentSession(request, env);
+      const g = await requireConsentCsvAccess(request, env);
       if (!g.ok) { response = Response.json({ success: false, error: g.error }, { status: g.status }); break; }
       response = await handleConsentCsv(request, env); break;
     }
@@ -929,7 +991,15 @@ async function executeScheduledScans(env, ctx) {
         // Scan with consent accepted — same mode as the manual "Scan Now" button
         // (/api/scan-site-consented). Otherwise scheduled scans capture only pre-consent
         // cookies and their results diverge from what the user sees on a manual scan.
-        await handleScanSite(scanRequest, env, ctx, { acceptConsent: true });
+        const scanResponse = await handleScanSite(scanRequest, env, ctx, { acceptConsent: true });
+        // Tag the ScanHistory row so the new-tracker pass knows this scan was scheduled,
+        // not a manual "Scan now". Best effort: an error here must not fail the scan.
+        try {
+          const started = await scanResponse.clone().json();
+          if (started?.scanHistoryId) await markScheduledScan(db, started.scanHistoryId);
+        } catch (markErr) {
+          console.warn('[Cron] could not tag scheduled scan:', markErr?.message);
+        }
         executed.push({ id: scheduledScan.id, status: 'completed', deactivated: isOnce });
       } catch (err) {
         console.error(`[Cron] Failed to execute scheduled scan ${scheduledScan.id}:`, err);
@@ -1117,6 +1187,25 @@ export default {
           now: new Date(event?.scheduledTime || Date.now()),
           resolvePlanId: resolveEffectivePlanId,
         }).catch((err) => console.warn('[ConsentRetention] sweep failed:', err?.message)),
+        // Same rule for the pre-D1 stores (Webflow KV, Framer KV, R2 consent-v2/).
+        runLegacyRetentionSweep(env, {
+          now: new Date(event?.scheduledTime || Date.now()),
+        }).catch((err) => console.warn('[LegacyRetention] sweep failed:', err?.message)),
+        // Owner emails before records are hidden (Free, 3 months) or removed by the sweep
+        // (paid, 12 months). No-op unless RETENTION_REMINDERS is set; one worker only.
+        runRetentionReminders(env, ctx, {
+          now: new Date(event?.scheduledTime || Date.now()),
+        }).catch((err) => console.warn('[RetentionReminders] failed:', err?.message)),
+        // One combined invoice a month for per-site billing customers (Platan Hotels).
+        // No-op unless COMBINED_INVOICES is set; production worker only (live Stripe).
+        runCombinedInvoices(env, {
+          now: new Date(event?.scheduledTime || Date.now()),
+        }).catch((err) => console.warn('[CombinedInvoice] failed:', err?.message)),
+        // "A new tracker showed up" emails after scheduled scans. No-op unless
+        // NEW_TRACKER_ALERTS is set ('dry-run' logs, 'on' emails); one worker only.
+        runNewTrackerAlerts(env, ctx, {
+          now: new Date(event?.scheduledTime || Date.now()),
+        }).catch((err) => console.warn('[NewTrackerAlerts] failed:', err?.message)),
       ])
     );
   },
@@ -1152,6 +1241,15 @@ export default {
     // ── ConsentV2 scripts — domain + subscription blocking ────────────────
     if (pathname.startsWith('/consentv2/')) {
       return handleConsentV2Script(request, env, url);
+    }
+
+    // ── Hosted cookie transparency page — /cookie-list/<domain> ──────────
+    // Public HTML, opt-in per site. TEST-ONLY: 404 unless TRANSPARENCY_PAGE = "1".
+    if (pathname.startsWith('/cookie-list/')) {
+      const tpIp = request.headers.get('CF-Connecting-IP') || 'unknown';
+      const tpRl = checkRateLimit(`${tpIp}:tp`, 60);
+      if (!tpRl.ok) return withSecurityHeaders(rateLimitedResponse(tpRl));
+      return handleTransparencyPublic(request, env, url);
     }
 
     // ── Only continue for /api/ routes (or known public aliases) ─────────

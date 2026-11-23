@@ -31,11 +31,13 @@ export const PT_BR_TRANSLATIONS = {
   customise: 'Preferências',
   save: 'Salvar preferências',
   back: 'Voltar',
-  doNotSell: 'Não compartilhar minhas informações pessoais',
+  // CPRA link title (gap A): 'sell' AND 'share'.
+  doNotSell: 'Não vender nem compartilhar minhas informações pessoais',
   cookiePreferences: 'Preferências de cookies',
   managePreferences:
-    'Ao clicar, você concorda em armazenar cookies no seu dispositivo para melhorar a navegação, analisar o uso e apoiar nossas ações de marketing.',
-  essential: 'Estritamente necessários',
+    // Was 'Ao clicar, você concorda…' — clicking is not consent.
+    'Escolha as categorias de cookies que você aceita. Os cookies opcionais ficam desativados até que você os ative. Você pode alterar suas escolhas a qualquer momento.',
+  essential: 'Necessários', // ≤20: the runtime cuts category names at 20
   strictlyNecessary: '',
   analytics: 'Analíticos',
   marketing: 'Marketing',
@@ -58,12 +60,14 @@ export const PT_BR_TRANSLATIONS = {
   ccpaOptOut:
     'Usamos cookies e tecnologias semelhantes para personalizar e aprimorar sua experiência. Algumas dessas tecnologias podem envolver a "venda" ou o "compartilhamento" das suas informações pessoais sob as leis estaduais de privacidade.',
   ccpaOptOutPreferenceIntro:
-    'Usamos cookies de terceiros que nos ajudam a analisar como você usa este site, a armazenar suas preferências e a fornecer os conteúdos e anúncios relevantes para você. Não vendemos suas informações. No entanto, você pode recusar esses cookies marcando "Não compartilhar minhas informações pessoais" e clicando no botão "Salvar preferências".',
+    'Usamos cookies de terceiros que nos ajudam a analisar como você usa este site, a armazenar suas preferências e a fornecer os conteúdos e anúncios relevantes para você. Não vendemos suas informações. No entanto, você pode recusar esses cookies marcando "Não vender nem compartilhar minhas informações pessoais" e clicando no botão "Salvar preferências".',
   limitUse: 'Limitar o uso das minhas informações pessoais sensíveis',
   confirmChoice: 'Confirmar minha escolha',
   cancel: 'Cancelar',
   alwaysOn: 'sempre ativo',
   alwaysActive: 'Sempre ativo',
+  consentIdLabel: 'ID de consentimento',
+  visitorIdLabel: 'ID do visitante',
 
   // LGPD art. 18, VIII — the data subject must be told that consent may be
   // refused and what follows from refusing. No GDPR analogue, so no existing
@@ -75,7 +79,7 @@ export const PT_BR_TRANSLATIONS = {
 
 /** Category labels for SECTION_LABELS, keyed 'pt-BR'. */
 export const PT_BR_SECTION_LABELS = {
-  essential: 'Estritamente necessários',
+  essential: 'Necessários',
   analytics: 'Analíticos',
   marketing: 'Marketing',
   preferences: 'Preferências',

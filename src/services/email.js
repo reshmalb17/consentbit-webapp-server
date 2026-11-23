@@ -222,6 +222,72 @@ ConsentBit Team
 }
 
 // ---------------------------------------------------------------------------
+// 1b. Framer "you're live" email — first publish of a paid Framer site
+//     (handlers/framerPublished.js). Same copy framer.consentbit.com /banner/save-2 sent.
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {object} env
+ * @param {ExecutionContext|null} ctx
+ * @param {{ to: string, name: string }} opts
+ */
+export function sendFramerLiveEmail(env, ctx, { to, name }) {
+  if (skipMuted('sendFramerLiveEmail', to)) return;
+  const displayName = name || 'there';
+  const subject = 'Welcome to ConsentBit 🎉';
+
+  const html = layout(
+    `ConsentBit is installed on your live domain.`,
+    `
+    <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi ${displayName},</p>
+    <p style="margin:0 0 14px;color:#6b7280;font-size:15px;line-height:1.6;">
+      Great news! We noticed you've successfully installed <b>ConsentBit</b> on your live domain.
+    </p>
+    <p style="margin:0 0 20px;color:#6b7280;font-size:15px;line-height:1.6;">
+      Your site is now compliant and has a reliable consent management solution in place.
+    </p>
+
+    ${HR}
+
+    <p style="margin:0 0 12px;color:#111827;font-size:15px;font-weight:600;">Here's how to make the most of your setup:</p>
+    <ul style="margin:0 0 22px;padding-left:18px;color:#374151;font-size:14px;line-height:1.7;">
+      <li><b>Customize your banner</b>: adjust styling, text, and preferences to match your brand.</li>
+      <li><b>Track consent analytics</b>: monitor opt-ins and user preferences for insights.</li>
+      <li><b>Stay compliant</b>: GDPR, CCPA, and other privacy standards are covered.</li>
+    </ul>
+
+    ${HR}
+
+    <p style="margin:0;color:#9ca3af;font-size:13px;line-height:1.6;">
+      Thank you for trusting ConsentBit to keep your website compliant and user-friendly.
+    </p>
+    `
+  );
+
+  const text = `Hi ${displayName},
+
+Great news! We noticed you've successfully installed ConsentBit on your live domain.
+
+Your site is now compliant and has a reliable consent management solution in place.
+
+Here's how to make the most of your setup:
+- Customize your banner: adjust styling, text, and preferences to match your brand.
+- Track consent analytics: monitor opt-ins and user preferences for insights.
+- Stay compliant: GDPR, CCPA, and other privacy standards are covered.
+
+Thank you for trusting ConsentBit to keep your website compliant and user-friendly.
+
+Best regards,
+ConsentBit Team
+`;
+
+  const send = sendBrevoEmail(env, { to, name, subject, html, text })
+    .catch(e => console.error('[Email] sendFramerLiveEmail failed:', e?.message));
+
+  if (ctx?.waitUntil) ctx.waitUntil(send);
+}
+
+// ---------------------------------------------------------------------------
 // 2. Free plan email — sent after first-setup creates the site
 // ---------------------------------------------------------------------------
 
@@ -897,6 +963,201 @@ export function sendTeamActivityEmail(env, ctx, { to, name, event, memberEmail, 
   const send = sendBrevoEmail(env, { to, subject, html, text })
     .catch(e => console.error('[Email] sendTeamActivityEmail failed:', e?.message));
 
+  if (ctx?.waitUntil) ctx.waitUntil(send);
+  return send;
+}
+
+// ---------------------------------------------------------------------------
+// Consent-record retention reminder (services/retentionReminders.js)
+// ---------------------------------------------------------------------------
+
+function formatEmailDate(ymd) {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return String(ymd || '');
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+}
+
+/**
+ * kind 'free': records are about to pass 3 months and be HIDDEN (kept up to 12 months).
+ * kind 'paid': records are about to pass 12 months (CCPA 24) and be REMOVED by the sweep.
+ * Dates are 'YYYY-MM-DD'. Free: date = first day hidden, from/to = createdAt range.
+ * Paid: date = sweep day, cutoff = records collected before this are removed.
+ *
+ * @param {object} env
+ * @param {ExecutionContext|null} ctx
+ * @param {{ to: string, name?: string, domain: string, kind: 'free'|'paid', count: number,
+ *           date: string, from?: string, until?: string, cutoff?: string }} opts
+ */
+export function sendRetentionReminderEmail(env, ctx, { to, name, domain, kind, count, date, from, until, cutoff }) {
+  if (skipMuted('sendRetentionReminderEmail', to)) return;
+  const displayName   = escapeHtml(name || 'there');
+  const displayDomain = escapeHtml(domain || 'your website');
+  const webappUrl     = (env.WEBAPP_PUBLIC_URL || 'https://accounts.consentbit.com').replace(/\/$/, '');
+  const n             = Number(count) || 0;
+  const records       = `${n.toLocaleString('en-US')} consent record${n === 1 ? '' : 's'}`;
+  const onDate        = formatEmailDate(date);
+  const P  = 'margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;';
+  const ST = 'color:#111827;';
+  const downloadHow = 'Dashboard → Consent Logs → choose the month → Download';
+
+  let subject, preheader, bodyHtml, bodyText;
+  if (kind === 'free') {
+    const fromDate = formatEmailDate(from);
+    const toDate   = formatEmailDate(until);
+    subject   = `Consent records for ${domain || 'your website'} will be hidden from ${onDate}`;
+    preheader = `${records} for ${domain || 'your website'} will pass the Free plan's 3-month limit from ${onDate}.`;
+    bodyHtml = `
+    <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi ${displayName},</p>
+    <p style="${P}">
+      Your site <strong style="${ST}">${displayDomain}</strong> is on the ConsentBit Free plan, which shows
+      consent records from the last 3 months.
+    </p>
+    <p style="${P}">
+      From <strong style="${ST}">${onDate}</strong>, <strong style="${ST}">${records}</strong> collected between
+      ${fromDate} and ${toDate} will be older than 3 months and will no longer be visible in your dashboard.
+    </p>
+    <p style="margin:0 0 22px;color:#111827;font-size:15px;line-height:1.6;font-weight:600;">
+      Upgrade to a Pro plan to keep your consent records for 12 months
+      (24 months for US privacy-law records).
+    </p>
+    <a href="${webappUrl}/dashboard" style="${BTN}">Upgrade plan →</a>
+    ${HR}
+    <p style="margin:0;color:#6b7280;font-size:14px;line-height:1.6;">
+      Need a copy? Download these records before ${onDate}: ${downloadHow}.
+    </p>`;
+    bodyText = `Your site ${domain || 'your website'} is on the ConsentBit Free plan, which shows consent records from the last 3 months.
+
+From ${onDate}, ${records} collected between ${fromDate} and ${toDate} will be older than 3 months and will no longer be visible in your dashboard.
+
+Upgrade to a Pro plan to keep your consent records for 12 months (24 months for US privacy-law records).
+
+Upgrade plan: ${webappUrl}/dashboard
+
+Need a copy? Download these records before ${onDate}: ${downloadHow}.`;
+  } else {
+    const cutoffDate = formatEmailDate(cutoff);
+    subject   = `Consent records for ${domain || 'your website'} reach the end of their retention period on ${onDate}`;
+    preheader = `${records} for ${domain || 'your website'} will be removed on ${onDate}. Download a copy before then.`;
+    bodyHtml = `
+    <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi ${displayName},</p>
+    <p style="${P}">
+      ConsentBit keeps consent records for 12 months (24 months for records collected under US privacy laws).
+    </p>
+    <p style="${P}">
+      On <strong style="${ST}">${onDate}</strong>, <strong style="${ST}">${records}</strong> for
+      <strong style="${ST}">${displayDomain}</strong> collected before ${cutoffDate} will be removed from your account.
+    </p>
+    <p style="${P}">
+      If you need them for your own records or for an audit, <strong style="${ST}">download and keep a copy
+      before ${onDate}</strong>: ${downloadHow}.
+    </p>
+    ${HR}
+    <p style="margin:0;color:#6b7280;font-size:14px;line-height:1.6;">
+      After ${onDate}, these records will no longer be available in your dashboard.
+    </p>`;
+    bodyText = `ConsentBit keeps consent records for 12 months (24 months for records collected under US privacy laws).
+
+On ${onDate}, ${records} for ${domain || 'your website'} collected before ${cutoffDate} will be removed from your account.
+
+If you need them for your own records or for an audit, download and keep a copy before ${onDate}: ${downloadHow}.
+
+After ${onDate}, these records will no longer be available in your dashboard.`;
+  }
+
+  const html = layout(preheader, `${bodyHtml}
+    <p style="margin:18px 0 0;color:#6b7280;font-size:14px;line-height:1.6;">Best regards,<br/>ConsentBit Team</p>`);
+  const text = `Hi ${name || 'there'},\n\n${bodyText}\n\nBest regards,\nConsentBit Team\n`;
+
+  const send = sendBrevoEmail(env, { to, name, subject, html, text })
+    .catch(e => console.error('[Email] sendRetentionReminderEmail failed:', e?.message));
+
+  if (ctx?.waitUntil) ctx.waitUntil(send);
+  return send;
+}
+
+
+// ── New-tracker alert (services/newTrackerAlerts.js) ─────────────────────────
+// Sent after a scheduled scan finds cookies or scripts that were not in the previous scan.
+function escHtml(v) {
+  return String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+export function sendNewTrackerEmail(env, ctx, { to, name, domain, alert, dashboardUrl }) {
+  if (skipMuted('sendNewTrackerEmail', to)) return;
+  const displayName = name || 'there';
+  const displayDomain = domain || 'your website';
+  const cookies = alert?.cookies || [];
+  const scripts = alert?.scripts || [];
+  const cookieCount = alert?.cookieCount ?? cookies.length;
+  const scriptCount = alert?.scriptCount ?? scripts.length;
+  const parts = [];
+  if (cookieCount) parts.push(`${cookieCount} new cookie${cookieCount === 1 ? '' : 's'}`);
+  if (scriptCount) parts.push(`${scriptCount} new tracking script${scriptCount === 1 ? '' : 's'}`);
+  const what = parts.join(' and ');
+
+  const subject = `New tracker found on ${displayDomain}`;
+  const cookieRows = cookies
+    .map((c) => `<li><code style="font-size:13px;">${escHtml(c.name)}</code>${c.domain ? ` on ${escHtml(c.domain)}` : ''} — ${escHtml(c.category)}${c.provider ? ` (${escHtml(c.provider)})` : ''}</li>`)
+    .join('');
+  const scriptRows = scripts.map((s) => `<li style="word-break:break-all;">${escHtml(s.url)} — ${escHtml(s.category)}</li>`).join('');
+  const more = (count, shown) => (count > shown ? `<li>…and ${count - shown} more</li>` : '');
+
+  const html = layout(
+    `Our scheduled scan of ${displayDomain} found ${what} that were not there last time.`,
+    `
+    <p style="margin:0 0 14px;color:#111827;font-size:15px;line-height:1.6;">Hi ${escHtml(displayName)},</p>
+    <p style="margin:0 0 18px;color:#6b7280;font-size:15px;line-height:1.6;">
+      Our scheduled scan of <strong style="color:#111827;">${escHtml(displayDomain)}</strong> found ${what} that were not there in the previous scan.
+      New trackers usually come from a plugin, a tag added in Google Tag Manager, or an embed such as a video or chat widget.
+    </p>
+    ${cookieCount ? `<p style="margin:0 0 6px;color:#111827;font-size:14px;font-weight:600;">New cookies</p><ul style="margin:0 0 18px;padding-left:18px;color:#374151;font-size:14px;line-height:1.7;">${cookieRows}${more(cookieCount, cookies.length)}</ul>` : ''}
+    ${scriptCount ? `<p style="margin:0 0 6px;color:#111827;font-size:14px;font-weight:600;">New tracking scripts</p><ul style="margin:0 0 18px;padding-left:18px;color:#374151;font-size:14px;line-height:1.7;">${scriptRows}${more(scriptCount, scripts.length)}</ul>` : ''}
+
+    ${HR}
+
+    <p style="margin:0 0 12px;color:#111827;font-size:14px;font-weight:600;">What to do</p>
+    <ul style="margin:0 0 22px;padding-left:18px;color:#374151;font-size:14px;line-height:1.7;">
+      <li>Open the scan and check the category of each new item. Fix it if the automatic category is wrong.</li>
+      <li>Make sure any new tracking script is blocked until the visitor consents.</li>
+      <li>If you did not add it, find out which tool or plugin did.</li>
+    </ul>
+
+    <a href="${escHtml(dashboardUrl)}" style="${BTN}">Open the scan</a>
+
+    ${HR}
+
+    <p style="margin:0;color:#9ca3af;font-size:13px;line-height:1.6;">
+      You get this email because a scheduled scan is set up for this site. Remove the schedule in the Scan tab to stop these alerts.
+    </p>
+    <p style="margin:18px 0 0;color:#6b7280;font-size:14px;line-height:1.6;">Best regards,<br/>ConsentBit Team</p>
+    `
+  );
+
+  const text = `Hi ${displayName},
+
+Our scheduled scan of ${displayDomain} found ${what} that were not there in the previous scan.
+${cookieCount ? `
+New cookies:
+${cookies.map((c) => `- ${c.name}${c.domain ? ` on ${c.domain}` : ''} (${c.category}${c.provider ? `, ${c.provider}` : ''})`).join('\n')}${cookieCount > cookies.length ? `\n- ...and ${cookieCount - cookies.length} more` : ''}
+` : ''}${scriptCount ? `
+New tracking scripts:
+${scripts.map((s) => `- ${s.url} (${s.category})`).join('\n')}${scriptCount > scripts.length ? `\n- ...and ${scriptCount - scripts.length} more` : ''}
+` : ''}
+What to do:
+- Open the scan and check the category of each new item.
+- Make sure any new tracking script is blocked until the visitor consents.
+- If you did not add it, find out which tool or plugin did.
+
+Open the scan: ${dashboardUrl}
+
+You get this email because a scheduled scan is set up for this site. Remove the schedule in the Scan tab to stop these alerts.
+
+Best regards,
+ConsentBit Team
+`;
+
+  const send = sendBrevoEmail(env, { to, name, subject, html, text })
+    .catch((e) => console.error('[Email] sendNewTrackerEmail failed:', e?.message));
   if (ctx?.waitUntil) ctx.waitUntil(send);
   return send;
 }

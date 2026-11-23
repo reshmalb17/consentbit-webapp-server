@@ -3,6 +3,7 @@ import { getSessionById } from '../services/db.js';
 import { requireActiveSubscriptionForConsentReport } from '../services/subscriptionGate.js';
 import { buildSearchKeys, getConsentRowsFromR2, getConsentRowsFromKV } from './legacyConsentHelpers.js';
 import { createDownloadToken } from '../utils/signedToken.js';
+import { truncateIp } from '../utils/ipTruncate.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -147,7 +148,7 @@ export async function handleLegacyConsentCsv(request, env) {
         ${cell(isCcpa ? 'CCPA' : 'GDPR')}
         ${cell(row.country || '')}
         ${cell(row.region || '')}
-        ${cell(row.ipAddress || '')}
+        ${cell(truncateIp(row.ipAddress) || '')}
         ${cell(row.userAgent || '')}
         ${cell(isCcpa ? '' : 'Yes')}
         ${cell(isCcpa ? '' : (analytics ? 'Yes' : 'No'))}
@@ -205,7 +206,7 @@ export async function handleLegacyConsentCsv(request, env) {
       ${cell(entry.bannerType || entry.lawType || 'GDPR')}
       ${cell(entry.country || meta.country || '')}
       ${cell(entry.state || meta.state || '')}
-      ${cell(meta.ip || p.ip || '')}
+      ${cell(truncateIp(meta.ip || p.ip) || '')}
       ${cell(meta.userAgent || '')}
       ${cell(isCcpa ? '' : (Boolean(p.necessary ?? true) ? 'Yes' : 'No'))}
       ${cell(isCcpa ? '' : (hasAnalytics ? 'Yes' : 'No'))}

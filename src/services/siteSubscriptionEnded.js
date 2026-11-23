@@ -20,6 +20,8 @@
 // It is deliberately left alone here rather than refactored mid-incident; point it at this
 // helper next time that file is touched, so the rule stops living in two places.
 
+import { getSiteFreeFallbackAt } from './freeFallback.js';
+
 /** Stripe statuses a subscription can never come back from. */
 export const TERMINAL_STATUSES = Object.freeze([
   'canceled',
@@ -57,8 +59,18 @@ export async function getSiteSubscriptionEnded(db, siteId) {
     if (!row) return none;
 
     const status = String(row.status ?? row.Status ?? '').trim().toLowerCase();
+    let ended = TERMINAL_STATUSES.includes(status);
+
+    // Free fallback (services/freeFallback.js, 2026-11-05): a site moved to the Free
+    // plan after its paid plan ended is a FREE site, not an ended one — scans run with
+    // Free's limits. Only consulted for a terminal row, so a paid site costs no read.
+    if (ended) {
+      const fallbackAt = await getSiteFreeFallbackAt(db, siteId);
+      if (fallbackAt) ended = false;
+    }
+
     return {
-      ended: TERMINAL_STATUSES.includes(status),
+      ended,
       status: status || null,
       periodEnd: row.currentPeriodEnd ?? row.currentperiodend ?? null,
     };

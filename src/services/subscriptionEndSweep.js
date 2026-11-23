@@ -22,6 +22,15 @@
 
 import { ensureSchema } from './db.js';
 import { checkScriptForSite } from './scriptPresence.js';
+import { moveSiteToFreeIfAllowed } from './freeFallback.js';
+
+/**
+ * How far back a lapse may be for the sweep to apply the Free-fallback rule to it.
+ * The stamp loop below also picks up rows that ended long ago but were never
+ * stamped (first run, or a missed webhook months back); the rule is for plans
+ * ending from its 2026-11-05 introduction on, not a backfill of every old lapse.
+ */
+const FREE_FALLBACK_SWEEP_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Sites fetched per cron tick. The cron runs every minute — this is plenty. */
 const BATCH_SIZE = 5;
@@ -60,10 +69,10 @@ const ENDED_STATUSES = ['canceled', 'cancelled', 'unpaid', 'incomplete_expired']
  *
  * @returns {Promise<number>} how many were stamped
  */
-export async function stampEndedSubscriptions(db) {
+export async function stampEndedSubscriptions(db, env = null) {
   const { results = [] } = await db
     .prepare(
-      `SELECT id, status, cancelAtPeriodEnd, currentPeriodEnd
+      `SELECT id, status, cancelAtPeriodEnd, currentPeriodEnd, siteId, organizationId
          FROM Subscription
         WHERE endedAt IS NULL
           AND currentPeriodEnd IS NOT NULL
@@ -92,6 +101,28 @@ export async function stampEndedSubscriptions(db) {
       stamped++;
     } catch (err) {
       console.error('[endSweep] could not stamp endedAt', row.id, err?.message || err);
+    }
+
+    // The paid period has just run out → apply the Free-fallback rule (move the site to
+    // Free unless a sibling already uses it). The webhook does the same on the
+    // `customer.subscription.deleted` event; this covers a missed or late webhook.
+    // Separate guarded step: it can never fail the stamp above, and the service itself
+    // refuses to touch a site that is still paid or already moved. Recent lapses only —
+    // see FREE_FALLBACK_SWEEP_WINDOW_MS.
+    const siteId = row.siteId ?? row.siteid ?? null;
+    if (siteId && env && now - endMs <= FREE_FALLBACK_SWEEP_WINDOW_MS) {
+      try {
+        const r = await moveSiteToFreeIfAllowed(db, env, {
+          siteId,
+          organizationId: row.organizationId ?? row.organizationid ?? null,
+          trigger: `sweep:period-ended:${String(row.status || '').toLowerCase() || 'scheduled-cancel'}`,
+        });
+        if (r.outcome !== 'off' && r.outcome !== 'entitled' && r.outcome !== 'free' && r.outcome !== 'already') {
+          console.log('[endSweep] free fallback', { siteId, ...r });
+        }
+      } catch (err) {
+        console.warn('[endSweep] free fallback failed (non-fatal)', siteId, err?.message || err);
+      }
     }
   }
 
@@ -209,7 +240,7 @@ export async function processSubscriptionEndSweep(env) {
 
   try {
     await ensureOnce(db);
-    await stampEndedSubscriptions(db);
+    await stampEndedSubscriptions(db, env);
     await runDueScriptChecks(db);
   } catch (err) {
     console.error('[endSweep] sweep failed', err?.message || err);

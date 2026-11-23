@@ -8,6 +8,11 @@
 import { getSessionById } from '../services/db.js';
 import { requireActiveSubscriptionForConsentReport } from '../services/subscriptionGate.js';
 import { transformEntry } from './legacyConsentHelpers.js';
+import { truncateIp } from '../utils/ipTruncate.js';
+import { consentViewCutoff } from '../services/consentRetention.js';
+import { resolveEffectivePlanId } from './bannerCustomization.js';
+import { createDownloadToken } from '../utils/signedToken.js';
+import { csvTokenId } from '../middleware/consentAccess.js';
 
 function getSessionIdFromCookie(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -178,6 +183,10 @@ export async function handleLegacyConsentFramerRaw(request, env) {
   const hasDateFilter = year && month;
   const paddedMonth = hasDateFilter ? String(month).padStart(2, '0') : '';
 
+  // Free plan: only the last 3 months are visible, same as /api/consent-logs (TEST-ONLY via
+  // LAW_FIXES). null = no limit.
+  const viewCutoff = await consentViewCutoff(env, siteId, resolveEffectivePlanId);
+
   let consentRows;
   try {
     const { results } = hasDateFilter
@@ -190,9 +199,10 @@ export async function handleLegacyConsentFramerRaw(request, env) {
              WHERE siteId = ?1
                AND strftime('%Y', createdAt) = ?2
                AND strftime('%m', createdAt) = ?3
+               AND (?6 IS NULL OR createdAt >= ?6)
              ORDER BY createdAt DESC LIMIT ?4 OFFSET ?5`,
           )
-          .bind(siteId, year, paddedMonth, limit, offset)
+          .bind(siteId, year, paddedMonth, limit, offset, viewCutoff)
           .all()
       : await db
           .prepare(
@@ -201,9 +211,10 @@ export async function handleLegacyConsentFramerRaw(request, env) {
                     expiresAt, consent_categories
              FROM Consent
              WHERE siteId = ?1
+               AND (?4 IS NULL OR createdAt >= ?4)
              ORDER BY createdAt DESC LIMIT ?2 OFFSET ?3`,
           )
-          .bind(siteId, limit, offset)
+          .bind(siteId, limit, offset, viewCutoff)
           .all();
     consentRows = results || [];
   } catch (e) {
@@ -219,7 +230,7 @@ export async function handleLegacyConsentFramerRaw(request, env) {
       .prepare(
         `SELECT name, expires as duration, description, provider as toolname, category as dataCategory
          FROM Cookie
-         WHERE siteId = ?1
+         WHERE siteId = ?1 AND name NOT LIKE 'consentbit%'
          ORDER BY category, name`,
       )
       .bind(siteId)
@@ -235,7 +246,18 @@ export async function handleLegacyConsentFramerRaw(request, env) {
     console.warn('[legacyConsentFramerRaw] cookie fetch failed (non-fatal)', e?.message);
   }
 
-  const entries = consentRows.map((row) => {
+  // Signed download tokens for the plugin's PDF / CSV buttons: /api/consent-pdf and
+  // /api/consent-csv need a web-app session the plugin doesn't have. Same token the
+  // webapp's CSV embeds in its PDF links (7-day expiry).
+  const secret = env.JWT_SECRET;
+  const csvToken = secret && hasDateFilter
+    ? await createDownloadToken(secret, siteId, csvTokenId(year, paddedMonth)).catch(() => null)
+    : null;
+  const pdfTokens = secret
+    ? await Promise.all(consentRows.map((row) => createDownloadToken(secret, siteId, row.id || '').catch(() => null)))
+    : [];
+
+  const entries = consentRows.map((row, i) => {
     // Parse stored consent_categories JSON to recover analytics/marketing/personalization/doNotShare.
     let cats = {};
     if (row.consent_categories) {
@@ -285,8 +307,10 @@ export async function handleLegacyConsentFramerRaw(request, env) {
         language: null,
         platform: null,
         timezone: null,
-        ip: row.ipAddress || null,
+        ip: truncateIp(row.ipAddress),
       },
+      pdfToken: pdfTokens[i] || null,
+      csvToken,
     };
   });
 

@@ -43,6 +43,8 @@
 
 import { syncSubscriptionUpdateToLegacy } from '../services/syncLegacy.js';
 import { isPromotionCodeAllowedForEmail } from '../services/promoRestrictions.js';
+import { defaultPromotionCodeForPlan } from '../services/blackFridayOffer.js';
+import { resolveFramerRole, FRAMER_BILLING_ROLES } from '../services/framerAccess.js';
 
 const TAG = '[framer-upgrade]';
 const PLAN_ORDER = { basic: 1, essential: 2, growth: 3 };
@@ -70,7 +72,7 @@ function base64UrlToString(b64url) {
   return new TextDecoder().decode(base64UrlToBytes(b64url));
 }
 
-function extractBearer(request) {
+export function extractBearer(request) {
   const h = request.headers.get('Authorization') || request.headers.get('authorization') || '';
   const m = /^Bearer\s+(.+)$/i.exec(h.trim());
   return m ? m[1].trim() : null;
@@ -78,7 +80,7 @@ function extractBearer(request) {
 
 // Verify an HS256 JWT signed with `secret`. Returns the decoded payload, or null on
 // any failure (bad shape, wrong alg, bad signature, expired).
-async function verifyJwtHS256(token, secret) {
+export async function verifyJwtHS256(token, secret) {
   try {
     const parts = String(token).split('.');
     if (parts.length !== 3) return null;
@@ -119,7 +121,7 @@ async function verifyJwtHS256(token, secret) {
 }
 
 // Pull the user's email out of the token payload, trying the common claim shapes.
-function emailFromPayload(payload) {
+export function emailFromPayload(payload) {
   const candidates = [
     payload?.email,
     payload?.user?.email,
@@ -184,6 +186,31 @@ export async function requireFramerAuth(request, env, site) {
 
   const tokenEmail = emailFromPayload(payload);
   const tokenSiteId = payload?.siteId != null ? String(payload.siteId) : null;
+
+  // 2026-10-24: plan changes need the OWNER or a web-app ADMIN of this site. The token's
+  // siteId claim is not proof of anything — every collaborator who signs in on the Framer
+  // project gets a token carrying that project's id — so a member or an unrelated
+  // collaborator could otherwise upgrade/cancel without the owner. See services/framerAccess.js.
+  if (site) {
+    const role = await resolveFramerRole(env, tokenEmail, site);
+    if (!FRAMER_BILLING_ROLES.includes(role)) {
+      console.warn(`${TAG} role gate — email=${tokenEmail || '-'} site=${site.id} role=${role || 'none'}`);
+      return {
+        ok: false,
+        res: Response.json(
+          {
+            success: false,
+            code: role ? 'ROLE_NOT_ALLOWED' : 'NOT_PROJECT_MEMBER',
+            error: role
+              ? 'Only the account owner or an admin can manage the plan and billing. Ask the owner.'
+              : 'This Framer project is connected to another ConsentBit account.',
+          },
+          { status: 403 },
+        ),
+      };
+    }
+    return { ok: true, email: tokenEmail || null, role };
+  }
 
   // Bind the token to the target site via either signal it carries.
   let bound = false;
@@ -291,7 +318,12 @@ function sumProrationCents(invoiceBody) {
   let total = 0;
   let sawProration = false;
   for (const line of invoiceBody?.lines?.data || []) {
-    if (line.proration === true) { total += line.amount || 0; sawProration = true; }
+    if (line.proration === true) {
+      // Line amounts are before discounts; subtract any promo/coupon applied to this line.
+      const off = (line.discount_amounts || []).reduce((s, d) => s + (d.amount || 0), 0);
+      total += (line.amount || 0) - off;
+      sawProration = true;
+    }
   }
   return sawProration ? total : (invoiceBody?.amount_due ?? invoiceBody?.total ?? null);
 }
@@ -369,7 +401,7 @@ async function prepareChange(request, env) {
   const interval = body.interval === 'yearly' ? 'yearly' : 'monthly';
   const promotionCodeId = body.promotionCodeId && String(body.promotionCodeId).trim()
     ? String(body.promotionCodeId).trim()
-    : null;
+    : defaultPromotionCodeForPlan(planId); // Black Friday offer when no code is sent
   const paymentMethodId = body.paymentMethodId && String(body.paymentMethodId).trim()
     ? String(body.paymentMethodId).trim()
     : null;

@@ -1,4 +1,5 @@
 ﻿// handlers/bannerCustomization.js
+import { carryOverPageLanguages } from '../services/pageLanguages.js';
 import {
   getBannerCustomization,
   saveBannerCustomization,
@@ -7,7 +8,9 @@ import {
   inferTierPlanIdFromStripePriceId,
 } from '../services/db.js';
 import { injectScriptIntoWebflowHead } from './webflowFreeRegister.js';
+import { removeLegacyScriptsForSite } from './webflowScriptCleanup.js';
 import { capturePostHogEvent, identifyPostHogPerson } from '../services/posthog.js';
+import { getSiteFreeFallbackAt } from '../services/freeFallback.js';
 
 const PAID_TIERS = ['basic', 'essential', 'growth'];
 // Running GDPR *and* CCPA on one site (Site.region_mode='both') is an Essential/Growth
@@ -33,6 +36,17 @@ export async function resolveEffectivePlanId(db, env, siteId) {
       const priceId = subscription.stripePriceId ?? subscription.stripepriceid ?? null;
       const inferred = inferTierPlanIdFromStripePriceId(env, priceId);
       if (inferred) planId = inferred;
+    }
+
+    // Free fallback (services/freeFallback.js): a site moved to Free after its own paid
+    // plan ended is Free, full stop — never the account's plan. Without this, a moved site
+    // in an account that still pays for another site resolved to that site's tier here, so
+    // saves could store paid-only settings (hideBranding, region_mode 'both') and Growth-only
+    // endpoints (visitor delete) opened, even though cdnM serves the site as Free.
+    // Reached only when the site has no active/trialing row of its own (a live plan clears
+    // the stamp in saveSubscription anyway), so paid sites pay no extra read.
+    if (!subscription && (await getSiteFreeFallbackAt(db, siteId))) {
+      return 'free';
     }
 
     if (!planId || !PAID_TIERS.includes(planId)) {
@@ -88,7 +102,10 @@ export async function handleBannerCustomization(request, env) {
         const siteRow = await db.prepare('SELECT id FROM Site WHERE platformSiteId = ?1 LIMIT 1').bind(wfSiteId).first();
         if (siteRow) {
           siteId = siteRow.id;
-        } else {
+        }
+        // 2. KV fallback — DISABLED 2026-10-16. D1 is the source of truth: no Site row →
+        //    "not registered" response below → the app shows the default banner.
+        /* else {
           // 2. Fallback: get domain from WEBFLOW_AUTHENTICATION KV → find Site by domain → auto-link
           // Handles new users who paid via checkout (Site created with domain only, no platformSiteId yet)
           const kvRaw = await env.WEBFLOW_AUTHENTICATION?.get(wfSiteId);
@@ -124,13 +141,14 @@ export async function handleBannerCustomization(request, env) {
               }
             }
           }
-        }
+        } */
       } catch (_) { /* non-critical */ }
     }
 
     if (!siteId) {
       // wfSiteId passed but no D1 record found — site not registered yet
       if (wfSiteId) {
+        console.warn(`[KV-OFF] banner-customization GET: no D1 Site with platformSiteId=${wfSiteId} → default banner`);
         return Response.json({ success: true, customization: null, platform: null, isLegacy: 0, isWebappMigrated: false, isWebflowFree: false, isBannerAdded: false, plan: null, webappSiteId: null });
       }
       return Response.json({ success: false, error: 'siteId or wfSiteId is required' }, { status: 400 });
@@ -177,8 +195,16 @@ export async function handleBannerCustomization(request, env) {
         return null; // null = not explicitly set — allow content fallback below
       };
       let compliance = iabActivated ? ['gdpr', 'us'] : regionModeToCompliance(siteFlags.regionMode);
-      let kvPlan = null;
-      let kvWebappSiteId = null;
+      // plan + webappSiteId now come from D1 (were read from the root KV entry until
+      // 2026-10-16). Same contract as before: a paid tier name, or null.
+      // Framer unchanged: it never had a root KV entry here, so it keeps returning null.
+      const isFramerSite = String(siteFlags.platform ?? '').toLowerCase() === 'framer';
+      const d1Plan = isFramerSite ? null : await resolveEffectivePlanId(db, env, siteId);
+      let kvPlan = d1Plan && d1Plan !== 'free' ? d1Plan : null;
+      let kvWebappSiteId = isFramerSite ? null : siteId;
+      // KV Banner-Settings compliance + root plan reads — DISABLED 2026-10-16 (D1 only:
+      // region_mode, then the content-based fallback below, else ['gdpr']).
+      /*
       try {
         const resolvedWfSiteId = siteFlags.platformSiteId ?? wfSiteId ?? null;
         if (resolvedWfSiteId) {
@@ -204,9 +230,12 @@ export async function handleBannerCustomization(request, env) {
                 kvWebappSiteId = rootKvEntry.webappSiteId;
               }
             }
-          } catch (_) { /* non-critical */ }
+          } catch (_) { // non-critical
+          }
         }
-      } catch (_) { /* non-critical */ }
+      } catch (_) { // non-critical
+      }
+      */
 
       // Content-based fallback: if compliance is still null (region_mode was 'gdpr' default and KV
       // had no explicit CCPA), check if CCPA content exists in translations — indicates user selected US.
@@ -248,6 +277,7 @@ export async function handleBannerCustomization(request, env) {
     // that mode the app must NOT auto-inject the script into the head. Legacy/other
     // callers omit the flag and keep the original auto-inject behavior.
     const manualInstall = body?.manualInstall === true;
+    let legacyRemovedCount = 0; // old app-injected scripts removed on this save (Webflow app only)
     // compliance: ['gdpr'], ['us'], ['gdpr','us'] — from Webflow Designer App publish.
     // Reassigned below when a ['gdpr','us'] save is rejected by the plan gate, so the
     // value persisted to KV (and reloaded by the app) matches what we actually stored.
@@ -280,23 +310,24 @@ export async function handleBannerCustomization(request, env) {
       } catch (_) {}
     }
 
-    // Fallback: check WEBFLOW_AUTHENTICATION KV for webappSiteId (set after registerWebflowFree or checkout injection)
-    if (!siteId && wfSiteId) {
-      try {
-        const kvRaw = await env.WEBFLOW_AUTHENTICATION?.get(wfSiteId);
-        if (kvRaw) {
-          const kvEntry = JSON.parse(kvRaw);
-          if (kvEntry.webappSiteId) {
-            const siteExists = await db.prepare('SELECT id FROM Site WHERE id = ?1 LIMIT 1').bind(kvEntry.webappSiteId).first();
-            if (siteExists) {
-              siteId = kvEntry.webappSiteId;
-            }
-          }
-        }
-      } catch (_) {}
-    }
+    // KV webappSiteId fallback — DISABLED 2026-10-16 (D1 only).
+    // if (!siteId && wfSiteId) {
+    //   try {
+    //     const kvRaw = await env.WEBFLOW_AUTHENTICATION?.get(wfSiteId);
+    //     if (kvRaw) {
+    //       const kvEntry = JSON.parse(kvRaw);
+    //       if (kvEntry.webappSiteId) {
+    //         const siteExists = await db.prepare('SELECT id FROM Site WHERE id = ?1 LIMIT 1').bind(kvEntry.webappSiteId).first();
+    //         if (siteExists) {
+    //           siteId = kvEntry.webappSiteId;
+    //         }
+    //       }
+    //     }
+    //   } catch (_) {}
+    // }
 
     if (!siteId) {
+      if (wfSiteId) console.warn(`[KV-OFF] banner-customization POST: no D1 Site with platformSiteId=${wfSiteId} → save rejected`);
       return Response.json({ success: false, error: 'siteId is required' }, { status: 400 });
     }
 
@@ -336,7 +367,11 @@ export async function handleBannerCustomization(request, env) {
         // Note this is stricter than cdnM.js, which still serves a 'canceled' banner until
         // the stored date. Until those rows are reconciled a site can briefly have a live
         // banner it cannot edit — read-only, never a loss of service.
-        if (isTerminal) {
+        // Free fallback (services/freeFallback.js, 2026-11-05): a site moved to the Free
+        // plan after its paid plan ended saves like any Free site. Checked only for a
+        // terminal row, so paid saves cost no extra read.
+        const onFreeFallback = isTerminal ? !!(await getSiteFreeFallbackAt(db, siteId)) : false;
+        if (isTerminal && !onFreeFallback) {
           console.warn('[BannerCustomization][POST] blocked — subscription ended', { siteId, status: ownSub.status, periodEnd: rawEnd });
           return Response.json({
             success: false,
@@ -371,6 +406,9 @@ export async function handleBannerCustomization(request, env) {
         customization.hideBranding = 0;
       }
     }
+
+    // Page languages are webapp-only; keep them when the Webflow app saves (services/pageLanguages.js).
+    await carryOverPageLanguages(db, siteId, customization);
 
     try {
       await saveBannerCustomization(db, siteId, customization);
@@ -541,6 +579,16 @@ export async function handleBannerCustomization(request, env) {
         // installs by manual copy-paste, so the app must not add the script.
         try {
           if (manualInstall) {
+            // Stamp the flag on the main KV entry so checkout / Stripe-webhook
+            // paths also skip auto-injection for sites installed before free-register
+            // started writing it.
+            const mainKvRaw = await env.WEBFLOW_AUTHENTICATION.get(webflowSiteId);
+            if (mainKvRaw) {
+              const mainKvEntry = JSON.parse(mainKvRaw);
+              if (mainKvEntry.manualInstall !== true) {
+                await env.WEBFLOW_AUTHENTICATION.put(webflowSiteId, JSON.stringify({ ...mainKvEntry, manualInstall: true }));
+              }
+            }
           } else {
           const mainKvRaw = await env.WEBFLOW_AUTHENTICATION.get(webflowSiteId);
           if (mainKvRaw) {
@@ -556,6 +604,26 @@ export async function handleBannerCustomization(request, env) {
           }
         } catch (swapErr) {
           console.error('[BannerCustomization] Script inject error (non-fatal):', swapErr?.message || swapErr);
+        }
+
+        // ── Webflow app save (Create component / Update banner): remove legacy scripts ──
+        // The old app auto-injected ConsentBit scripts into "Code added by Apps". The
+        // updated app installs by manual paste, so strip those leftovers on every save.
+        // The current install and the user's manual paste are never touched. Non-fatal.
+        if (manualInstall) {
+          try {
+            const cleanup = await removeLegacyScriptsForSite(env, webflowSiteId);
+            if (cleanup.success) {
+              legacyRemovedCount = cleanup.removed.length;
+              if (legacyRemovedCount > 0) {
+                console.log(`[BannerCustomization] Removed ${legacyRemovedCount} legacy script(s) for ${webflowSiteId}:`, cleanup.removed);
+              }
+            } else {
+              console.warn(`[BannerCustomization] Legacy script cleanup failed for ${webflowSiteId} (non-fatal):`, cleanup.error);
+            }
+          } catch (cleanupErr) {
+            console.warn('[BannerCustomization] Legacy script cleanup error (non-fatal):', cleanupErr?.message || cleanupErr);
+          }
         }
 
         // ── iabActivated flag: reflect site banner_type in main auth KV ──
@@ -603,7 +671,7 @@ export async function handleBannerCustomization(request, env) {
         }
       } catch (_) {}
 
-      return Response.json({ success: true });
+      return Response.json({ success: true, legacyRemovedCount });
     } catch (error) {
       console.error('[BannerCustomization] Error saving:', error);
       return Response.json(
