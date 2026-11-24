@@ -1,6 +1,6 @@
 /**
  * TCF String Manager
- * Exposes a TCF v2.3 __tcfapi bridge and stores consent locally.
+ * Exposes a TCF v2.2-compatible __tcfapi bridge and stores consent locally.
  */
 function mapPreferencesToGoogle(preferences) {
   if (!preferences) return;
@@ -10,21 +10,23 @@ function mapPreferencesToGoogle(preferences) {
     window.dataLayer.push(arguments);
   };
 
-  const categories = preferences.cookieCategories || {};
+  // Signals come from the TCF purposes only, using the same mapping Google applies
+  // when it reads the TC string (enableAdvertiserConsentMode). The banner's cookie
+  // categories are not consulted: on the TCF banner the visitor decides through
+  // purposes and vendors, and gating on categories left every signal denied after
+  // a purpose-level save (Google CMP audit i.3, 2026-11).
+  // Google's published TCF mapping is purpose-based only (no vendor 755 condition):
+  // https://developers.google.com/tag-platform/security/guides/implement-TCF-strings
   const purposes = preferences.purposes || {};
-  const googleVendorAllowed = preferences.vendors?.__755?.consent === true;
-
-  const analyticsEnabled = categories.analytics?.enabled === true;
-  const adsEnabled = categories.advertisement?.enabled === true;
-  const p1 = purposes.purpose1?.consent === true;
-  const p3 = purposes.purpose3?.consent === true;
-  const p4 = purposes.purpose4?.consent === true;
+  const has = (id) => purposes[`purpose${id}`]?.consent === true;
 
   window.gtag('consent', 'update', {
-    analytics_storage: analyticsEnabled && p1 && googleVendorAllowed ? 'granted' : 'denied',
-    ad_storage: adsEnabled && p1 && googleVendorAllowed ? 'granted' : 'denied',
-    ad_user_data: adsEnabled && p3 && googleVendorAllowed ? 'granted' : 'denied',
-    ad_personalization: adsEnabled && p4 && googleVendorAllowed ? 'granted' : 'denied'
+    ad_storage: has(1) ? 'granted' : 'denied',
+    ad_user_data: has(1) && has(7) ? 'granted' : 'denied',
+    ad_personalization: has(3) && has(4) ? 'granted' : 'denied',
+    // TCF has no analytics signal; Google leaves it to the CMP. Storage (1) plus
+    // measurement (8 content performance or 9 audience statistics).
+    analytics_storage: has(1) && (has(8) || has(9)) ? 'granted' : 'denied'
   });
 }
 
@@ -328,9 +330,7 @@ class TCFManager {
           cmpLoaded: this.isInitialized,
           cmpStatus: this.isInitialized ? 'loaded' : 'loading',
           displayStatus: hasStoredConsent ? 'hidden' : 'visible',
-          // CMP API version this bridge implements. TCF v2.3 (policy 5,
-          // Disclosed Vendors segment always written) — was a stale '2.2' label.
-          apiVersion: '2.3',
+          apiVersion: '2.2',
           cmpVersion: this.config.cmpVersion,
           cmpId: this.config.cmpId,
           gvlVersion: this.gvl ? this.gvl.vendorListVersion : undefined,
@@ -626,6 +626,7 @@ class TCFManager {
       gdprApplies: true,
       // Google-defined TCData flag: lets Google tags infer ad_storage, ad_user_data
       // and ad_personalization from the TC string. Not part of the TC string itself.
+      // Required by the Google CMP Partner Program (audit item ii.1).
       enableAdvertiserConsentMode: true,
       cmpStatus: this.isInitialized ? 'loaded' : 'loading',
       eventStatus,

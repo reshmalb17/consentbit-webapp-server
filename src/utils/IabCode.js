@@ -147,23 +147,20 @@ try {
     window.gtag('set', 'ads_data_redaction', true);
 
     // Returning visitor: replay their stored IAB decision straight away, using the
-    // same rule as mapPreferencesToGoogle() (category + purpose + Google vendor 755).
+    // same rule as mapPreferencesToGoogle() (TCF purposes only).
     var stored = null;
     try { stored = JSON.parse(localStorage.getItem('cookieConsentPrefs') || 'null'); } catch (e) {}
     if (stored) {
-      var cats = stored.cookieCategories || {};
       var purposes = stored.purposes || {};
-      var google = !!(stored.vendors && stored.vendors.__755 && stored.vendors.__755.consent === true);
-      var analyticsOn = !!(cats.analytics && cats.analytics.enabled === true);
-      var adsOn = !!(cats.advertisement && cats.advertisement.enabled === true);
-      var p1 = !!(purposes.purpose1 && purposes.purpose1.consent === true);
-      var p3 = !!(purposes.purpose3 && purposes.purpose3.consent === true);
-      var p4 = !!(purposes.purpose4 && purposes.purpose4.consent === true);
+      var has = function (id) {
+        var p = purposes['purpose' + id];
+        return !!(p && p.consent === true);
+      };
       window.gtag('consent', 'update', {
-        analytics_storage: analyticsOn && p1 && google ? 'granted' : 'denied',
-        ad_storage: adsOn && p1 && google ? 'granted' : 'denied',
-        ad_user_data: adsOn && p3 && google ? 'granted' : 'denied',
-        ad_personalization: adsOn && p4 && google ? 'granted' : 'denied'
+        ad_storage: has(1) ? 'granted' : 'denied',
+        ad_user_data: has(1) && has(7) ? 'granted' : 'denied',
+        ad_personalization: has(3) && has(4) ? 'granted' : 'denied',
+        analytics_storage: has(1) && (has(8) || has(9)) ? 'granted' : 'denied'
       });
     }
   } catch (e) {}
@@ -1770,21 +1767,11 @@ function waitForTCF() {
     if (gtmScripts.length > 0) { 
       if (typeof window.gtag === 'function') { 
         try { 
-          window.gtag('event', 'consent_scripts_enabled', { 
-            'event_category': 'consent', 
-            'event_label': 'scripts_re_enabled' 
-          }); 
-           
-          setTimeout(function() { 
-            try { 
-              window.gtag('config', 'GA_MEASUREMENT_ID', { 
-                'page_title': document.title, 
-                'page_location': window.location.href 
-              }); 
-            } catch (e) { 
-            } 
-          }, 500); 
-        } catch (e) { 
+          window.gtag('event', 'consent_scripts_enabled', {
+            'event_category': 'consent',
+            'event_label': 'scripts_re_enabled'
+          });
+        } catch (e) {
         } 
       } 
     } 
