@@ -6,16 +6,21 @@
 //
 // Keywords are matched case-insensitively against each alternative of a provider pattern
 // ('hotjar\\.com|posthog\\.com|app\\.posthog' → the posthog parts are dropped).
+// '*' = no block rules at all for that site (the banner still shows and records choices).
 
 export const NEVER_BLOCK_BY_SITE = {
-  // accounts.consentbit.com — our own dashboard (consentbitwebapp). PostHog is our product
-  // analytics there; the banner is on it only to test cross-domain consent (2026-11-19).
-  'dafe59ee-d1f3-442d-83db-0652bbe3c821': ['posthog'],
+  // accounts.consentbit.com — our own dashboard (consentbitwebapp). The banner is on it ONLY to
+  // test cross-domain consent; blocking there got in the way of that test, so it blocks nothing
+  // (2026-11-23, was: posthog + Google tags). Test script (cdnTest.js) only; no customer site.
+  'dafe59ee-d1f3-442d-83db-0652bbe3c821': ['*'],
 };
+
+const blocksNothing = (keywords) => keywords.some((k) => String(k).trim() === '*');
 
 /** Block providers with the given vendor keywords removed. Providers left empty are dropped. */
 export function stripVendorsFromProviders(providers, keywords) {
   if (!keywords?.length) return providers;
+  if (blocksNothing(keywords)) return [];
   const kws = keywords.map((k) => String(k).toLowerCase());
   const out = [];
   for (const p of providers || []) {
@@ -28,6 +33,7 @@ export function stripVendorsFromProviders(providers, keywords) {
 /** Custom cookie / script rules that do not mention any of the vendor keywords. */
 export function stripVendorsFromRules(rules, keywords) {
   if (!keywords?.length) return rules;
+  if (blocksNothing(keywords)) return [];
   const kws = keywords.map((k) => String(k).toLowerCase());
   return (rules || []).filter((r) => {
     const text = JSON.stringify(r || {}).toLowerCase();

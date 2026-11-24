@@ -88,6 +88,7 @@ import { handleSyncEvent } from './handlers/syncEvent.js';
 import { handleBillingSummary, handleBillingPortal, handleBillingInvoices, handleBillingUsage } from './handlers/billing.js';
 import { handleCustomCookieRules } from './handlers/customCookieRules.js';
 import { handleScanPending } from './handlers/scanPending.js';
+import { handleGcmCheck } from './handlers/gcmCheck.js';
 
 import { handleAuthDashboardInit } from './handlers/authDashboardInit.js';
 import { handleAuthLogin } from './handlers/authLogin.js';
@@ -107,8 +108,7 @@ import { handleCheckDomainAvailability } from './handlers/checkDomainAvailabilit
 import { handleRenameDomain } from './handlers/renameDomain.js';
 import { handleConsentFamily } from './handlers/consentFamily.js';
 import { handleBannerPages } from './handlers/bannerPages.js';
-import { handleBannerStatus } from './handlers/bannerStatus.js';
-import { handleWebflowFreeRegister } from './handlers/webflowFreeRegister.js';
+import { handleBannerStatus } from './handlers/bannerStatus.js';import { handleWebflowFreeRegister } from './handlers/webflowFreeRegister.js';
 import { handleFeedback } from './handlers/feedback.js';
 import { handleDpaRequest } from './handlers/dpaRequest.js';
 import { handleMcpAccess } from './handlers/mcpAccess.js';
@@ -532,6 +532,8 @@ async function dispatchApiRoute(pathname, request, env, ctx) {
       response = await handleConsentVisitor(request, env); break;
     case '/api/scheduled-scan':
       response = await handleScheduledScan(request, env); break;
+    case '/api/gcm-check':
+      response = await handleGcmCheck(request, env); break;
     case '/api/scan-history':
       response = await handleScanHistory(request, env); break;
     case '/api/cookies':

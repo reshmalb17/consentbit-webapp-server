@@ -1193,10 +1193,21 @@ ${getBannerCookieListScript()}
 
   // Cross-domain consent (TEST-ONLY): linked sites on one main domain share one choice via a
   // cookie on that domain. See handlers/consentShareBridge.js. Null when the site is in no family.
-  const consentShare = await consentShareForBanner(db, resolvedSite).catch((e) => {
+  // Growth feature (2026-11-24): a site off Growth gets no sharing code, even if still linked.
+  const isGrowth = effectivePlanId === 'growth';
+  const consentShare = !isGrowth ? null : await consentShareForBanner(db, resolvedSite).catch((e) => {
     console.warn('[ConsentShare] family lookup failed:', e?.message);
     return null;
   });
+  // IAB/TCF banners share too (bridge mode 'iab'); same pick as serveKind below.
+  const shareIab = String(resolvedSite.banner_type || '').toLowerCase() === 'iab' &&
+    (effectivePlanId === 'growth' || effectivePlanId === 'essential');
+  // Cookie categories this site uses (≥1 cookie in its banner cookie list). A shared choice is only
+  // reused if it covered all of them, so a site that starts using a new category asks again.
+  const shareCats = ['analytics', 'marketing', 'preferences'].filter(
+    (k) => Array.isArray(cookieList?.[k]) && cookieList[k].length > 0,
+  );
+  const ownHost = String(resolvedSite.domain || '').replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0].toLowerCase();
   const shareBridge = consentShare
     ? consentShareBridge({
         siteId: String(resolvedSite.id),
@@ -1204,13 +1215,23 @@ ${getBannerCookieListScript()}
         isPrimary: consentShare.isPrimary,
         root: consentShare.root,
         direction: consentShare.direction,
-        bannerType: String(effectiveBannerType || 'gdpr').toLowerCase(),
+        bannerType: shareIab ? 'iab' : String(effectiveBannerType || 'gdpr').toLowerCase(),
         apiBase,
         expiryDays: Number(customization?.cookieExpirationDays) || 30,
+        mode: shareIab ? 'iab' : undefined,
+        cats: shareCats.length ? shareCats : null,
+        xhosts: (consentShare.xhosts || []).filter((h) => h && h !== ownHost),
+        // Section 4 of the dashboard: the switch can turn the line off; listUrl adds a link.
+        notice: consentShare.showList === false ? null : {
+          hosts: consentShare.hosts.filter((h) => h && h !== ownHost),
+          url: consentShare.listUrl || '',
+          lang: String(customization?.resolvedLanguage || customization?.language || 'en'),
+          auto: customization?.autoDetectLanguage === true || customization?.autoDetectLanguage === 1,
+        },
       })
     : '';
   const consentShareSig = consentShare
-    ? `${consentShare.primaryId}.${consentShare.direction}.${consentShare.hosts.length}`
+    ? `${consentShare.primaryId}.${consentShare.direction}.${consentShare.hosts.length}.${(consentShare.xhosts || []).length}.${consentShare.showList === false ? 'n' : 'y'}${consentShare.listUrl ? [...consentShare.listUrl].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 7).toString(36) : ''}.${shareCats.join('')}${shareIab ? '.iab' : ''}`
     : '';
 
   const SCRIPT_VERSION = '2026-11-05-prefs-design';
@@ -1226,7 +1247,7 @@ ${getBannerCookieListScript()}
       return '';
     }
   })();
-  const etag = `"${resolvedSite.id}-${resolvedSite.updatedAt || ''}-${customizationUpdatedAt}-${translationsSig}-${cookieListSig}-${SCRIPT_VERSION}${consentShareSig ? `-cs${consentShareSig}` : ''}${skipPathsSignature(resolvedSite.id, resolvedSite) ? '-' + skipPathsSignature(resolvedSite.id, resolvedSite) : ''}${siteBannerDisabled(resolvedSite) ? '-off' : ''}"`;
+  const etag = `"${resolvedSite.id}-${resolvedSite.updatedAt || ''}-${customizationUpdatedAt}-${translationsSig}-${cookieListSig}-${SCRIPT_VERSION}${consentShareSig ? `-cs${consentShareSig}` : ''}${skipPathsSignature(resolvedSite.id, isGrowth ? resolvedSite : null) ? '-' + skipPathsSignature(resolvedSite.id, isGrowth ? resolvedSite : null) : ''}${siteBannerDisabled(resolvedSite) ? '-off' : ''}"`;
   const ifNoneMatch = request.headers.get('If-None-Match');
   if (ifNoneMatch === etag) {
     return new Response(null, { status: 304 });
@@ -1296,8 +1317,8 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
   // "off" pages stop the script before anything runs (every banner type); "hide" pages only
   // hide the banner + floating button (standard / Webflow banners; IAB uses other elements).
   // Both are '' for sites without such pages, so their script is unchanged.
-  const pageOffGuard = buildSkipPathGuard(resolvedSite.id, resolvedSite);
-  const pageHideGuard = buildHidePathGuard(resolvedSite);
+  const pageOffGuard = buildSkipPathGuard(resolvedSite.id, isGrowth ? resolvedSite : null); // owner pages: Growth only
+  const pageHideGuard = buildHidePathGuard(isGrowth ? resolvedSite : null);
   // Banner display status = Disabled (Profile → Advanced settings, handlers/bannerStatus.js):
   // the owner switched ConsentBit off on this site to test/debug. Serve a no-op — no banner,
   // no blocking — with a console note so it is obvious why nothing shows.
@@ -1306,7 +1327,7 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
     ? '/* ConsentBit is disabled for this site (Banner display status). */\n' +
       'try{console.info("[ConsentBit] Banner display status is Disabled for this site: no banner and no blocking. Turn it back on in ConsentBit → Profile → Advanced settings.");}catch(e){}\n'
     : pageOffGuard +
-    (serveKind === 'iab' ? loaderIab : serveKind === 'iabwebflow' ? loaderIabWebflow : serveKind === 'webflow' ? (pageHideGuard + shareBridge + loaderWebflow) : (pageHideGuard + shareBridge + consentModeBootstrap + loader));
+    (serveKind === 'iab' ? (shareBridge + loaderIab) : serveKind === 'iabwebflow' ? (shareBridge + loaderIabWebflow) : serveKind === 'webflow' ? (pageHideGuard + shareBridge + loaderWebflow) : (pageHideGuard + shareBridge + consentModeBootstrap + loader));
 
 
   return new Response(scriptToServe, {

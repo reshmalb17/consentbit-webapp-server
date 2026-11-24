@@ -1,0 +1,147 @@
+// src/handlers/consentShareBridge.js
+// Cross-domain consent, banner side. Returns a small script that runs BEFORE the banner runtime
+// and the consent-mode bootstrap. The runtime is untouched: the bridge only reads and writes the
+// storage the runtime already uses, plus one shared cookie on the main domain (.example.com)
+// that every linked site can read:
+//   cb_share_<primaryId> = encodeURIComponent(JSON { c: consent, s: status, h: host, t: ms,
+//                                                    m: 'optin'|'optout'|'iab', k?: categories })
+// No personal data in it.
+//
+// Standard banner storage:  consentbit_<siteId> (+ consentbit_prefs_<siteId>)
+// IAB/TCF banner storage:   cookieConsentPrefs (Tcfmanager.js rebuilds the TC string and the
+//                           euconsent-v2 cookie from it on every load). In the shared cookie the
+//                           IAB record travels compactly: vendor consent / LI ids as base64 bitsets.
+//
+// Page load (before the runtime reads its own entry):
+//   own choice made here                 → keep it (one_way: a local override always wins;
+//                                           two_way: the newer of own and shared wins)
+//   own entry came from the shared cookie → follow the shared cookie when it is newer
+//   nothing here, shared cookie present  → copy it in (no banner) and log a consent record on
+//                                           this site: consentMethod "shared", consent.sharedFrom
+//   neither                              → nothing; the runtime shows the banner as usual
+// Visitor makes a choice (runtime writes its storage):
+//   primary, or any site when two_way    → write the shared cookie
+// Safety: an opt-out (US) choice is never reused on an opt-in (GDPR) banner; IAB choices are
+// shared only between IAB banners; GPC is still applied by the runtime after this.
+//
+// Optional (cdnTest.js passes them; cdnM.js does not, so the live script behaves as before):
+//   cfg.mode  = 'iab'                 → IAB/TCF storage instead of the standard banner's
+//   cfg.cats  = ['analytics', …]      → cookie categories this site uses. A shared choice is only
+//                                       reused if it covered all of them; an adopted copy that no
+//                                       longer covers them is dropped, so the banner asks again.
+//   cfg.notice = { hosts, lang, auto } → "Your choice also applies to …" line in the banner.
+
+const NOTICE_TEXT = {
+  en: 'Your choice also applies to {sites}.',
+  nl: 'Uw keuze geldt ook voor {sites}.',
+  fr: "Votre choix s'applique également à {sites}.",
+  de: 'Ihre Auswahl gilt auch für {sites}.',
+  it: 'La tua scelta vale anche per {sites}.',
+  pl: 'Twój wybór dotyczy również: {sites}.',
+  pt: 'A sua escolha também se aplica a {sites}.',
+  es: 'Tu elección también se aplica a {sites}.',
+  sv: 'Ditt val gäller även för {sites}.',
+};
+
+/** @param {{siteId:string, primaryId:string, isPrimary:boolean, root:string, direction:string, bannerType:string, apiBase:string, expiryDays:number, mode?:string, cats?:string[]|null, notice?:{hosts:string[], lang?:string, auto?:boolean}|null}} cfg */
+export function consentShareBridge(cfg) {
+  const conf = { ...cfg };
+  if (conf.notice) conf.notice = { ...conf.notice, text: NOTICE_TEXT };
+  const json = JSON.stringify(conf).replace(/</g, '\\u003c');
+  return `(function(){try{
+if(window.__cbShareInit)return;window.__cbShareInit=1;
+var S=${json};
+var host=String(location.hostname||'').toLowerCase();
+if(host!==S.root&&host.slice(-(S.root.length+1))!=='.'+S.root)return;
+var IAB=S.mode==='iab';
+var L=IAB?'cookieConsentPrefs':'consentbit_'+S.siteId,H='consentbit_prefs_'+S.siteId,CK='cb_share_'+S.primaryId;
+var model=IAB?'iab':((S.bannerType==='gdpr'||S.bannerType==='iab')?'optin':'optout');
+var canWrite=S.isPrimary||S.direction==='two_way';
+var cats=(S.cats&&S.cats.length)?S.cats:null;
+var ls=window.localStorage,proto=window.Storage&&Storage.prototype,origSet=proto&&proto.setItem;
+if(!ls||!origSet)return;
+function now(){return Date.now();}
+function expired(c){var x=c&&c.expiresAt?Date.parse(c.expiresAt):0;return x>0&&x<now();}
+function covers(list){if(!cats||!list)return true;for(var i=0;i<cats.length;i++)if(list.indexOf(cats[i])<0)return false;return true;}
+function compatible(sh){if(IAB)return sh.m==='iab';if(sh.m==='iab')return false;return !(sh.m==='optout'&&model==='optin');}
+/* IAB record <-> compact form */
+function bits(ids){var max=0,i;for(i=0;i<ids.length;i++)if(ids[i]>max)max=ids[i];var b=new Uint8Array(Math.ceil((max+1)/8));for(i=0;i<ids.length;i++)b[ids[i]>>3]|=1<<(ids[i]&7);var s='';for(i=0;i<b.length;i++)s+=String.fromCharCode(b[i]);return btoa(s);}
+function unbits(s){var out=[];if(!s)return out;var r=atob(s);for(var i=0;i<r.length;i++){var v=r.charCodeAt(i);for(var j=0;j<8;j++)if(v&(1<<j))out.push(i*8+j);}return out;}
+function iabPack(p){var o={cc:[],p:[],pl:[],sf:[]},vc=[],vl=[],k;
+for(k in (p.cookieCategories||{}))if(p.cookieCategories[k]&&p.cookieCategories[k].enabled)o.cc.push(k);
+for(k in (p.purposes||{})){var n=+k.replace('purpose','');if(!n)continue;if(p.purposes[k].consent)o.p.push(n);if(p.purposes[k].legitimate)o.pl.push(n);}
+for(k in (p.specialFeatures||{})){var f=+k.replace('special-feature','');if(f&&p.specialFeatures[k].consent)o.sf.push(f);}
+for(k in (p.vendors||{})){var v=+String(k).replace('__','');if(!v)continue;if(p.vendors[k].consent)vc.push(v);if(p.vendors[k].legitimateInterest)vl.push(v);}
+o.vc=bits(vc);o.vl=bits(vl);return o;}
+function iabUnpack(o){var p={cookieCategories:{},purposes:{},vendors:{},specialFeatures:{}},i;
+for(i=0;i<(o.cc||[]).length;i++)p.cookieCategories[o.cc[i]]={enabled:true,alwaysActive:o.cc[i]==='necessary'};
+if(!p.cookieCategories.necessary)p.cookieCategories.necessary={enabled:true,alwaysActive:true};
+var ps={};(o.p||[]).concat(o.pl||[]).forEach(function(n){ps[n]=1;});
+for(var n in ps)p.purposes['purpose'+n]={consent:(o.p||[]).indexOf(+n)>=0,legitimate:(o.pl||[]).indexOf(+n)>=0};
+for(i=0;i<(o.sf||[]).length;i++)p.specialFeatures['special-feature'+o.sf[i]]={consent:true};
+var vc=unbits(o.vc),vl=unbits(o.vl),vs={};vc.concat(vl).forEach(function(v){vs[v]=1;});
+var vcm={},vlm={};vc.forEach(function(v){vcm[v]=1;});vl.forEach(function(v){vlm[v]=1;});
+for(var v in vs)p.vendors['__'+v]={consent:!!vcm[v],legitimateInterest:!!vlm[v]};
+return p;}
+function iabStatus(o){var cc=(o.cc||[]).filter(function(x){return x!=='necessary';});return cc.length>=3?'given':cc.length===0?'rejected':'partial';}
+/* own entry, in one shape: {accepted,timestamp,expiresAt,sharedFrom,sharedAt,sharedCats,raw} */
+function readOwn(){try{var v=JSON.parse(ls.getItem(L)||'null');if(!v)return null;
+if(IAB){if(!v.purposes&&!v.cookieCategories)return null;var t=v.timestamp?Date.parse(v.timestamp):0;var o={accepted:true,timestamp:v.timestamp,expiresAt:t?new Date(t+365*864e5).toISOString():null,sharedFrom:v.__cbSharedFrom,sharedAt:v.__cbSharedAt,sharedCats:v.__cbSharedCats,raw:v};return expired(o)?null:o;}
+if(!v.accepted||expired(v))return null;v.raw=v;return v;}catch(e){return null;}}
+function readShared(){try{var m=document.cookie.match(new RegExp('(?:^|;\\\\s*)'+CK+'=([^;]+)'));if(!m)return null;var v=JSON.parse(decodeURIComponent(m[1]));return v&&v.c&&v.c.accepted&&!expired(v.c)?v:null;}catch(e){return null;}}
+function dropOwn(){try{ls.removeItem(L);ls.removeItem(H);ls.removeItem(L+'_closed');if(IAB){ls.removeItem('TCF_TC_STRING');}}catch(e){}}
+function statusOf(c){if(c.ccpa&&!c.categories)return c.ccpa.doNotSell?'rejected':'given';var k=c.categories||{},n=(k.analytics?1:0)+(k.marketing?1:0)+(k.preferences?1:0);return n===3?'given':n===0?'rejected':'partial';}
+function writeShared(c){try{
+var t=now(),exp=c.expiresAt?Date.parse(c.expiresAt):t+(S.expiryDays||30)*864e5,age=Math.max(60,Math.floor((exp-t)/1e3));
+var keep={accepted:true,timestamp:c.timestamp||new Date(t).toISOString(),expiresAt:c.expiresAt||new Date(exp).toISOString()},st;
+if(IAB){keep.iab=iabPack(c.raw||c);st=iabStatus(keep.iab);}
+else{if(c.categories)keep.categories=c.categories;if(c.ccpa)keep.ccpa=c.ccpa;st=statusOf(c);}
+var rec={c:keep,s:st,h:host,t:t,m:model};if(cats)rec.k=cats;
+var v=encodeURIComponent(JSON.stringify(rec));
+document.cookie=CK+'='+v+'; domain=.'+S.root+'; path=/; max-age='+age+'; SameSite=Lax'+(location.protocol==='https:'?'; Secure':'');
+}catch(e){}}
+function record(c,status){if(!S.apiBase)return;try{fetch(S.apiBase+'/api/consent',{method:'POST',keepalive:true,headers:{'Content-Type':'application/json'},body:JSON.stringify({siteId:S.siteId,regulation:model==='optout'?'ccpa':'gdpr',bannerType:IAB?'iab':S.bannerType,consentMethod:'shared',status:status,expiresAt:c.expiresAt,consent:c,consentModel:model==='optout'?'optout':'optin'})}).catch(function(){});}catch(e){}}
+function adopt(sh){
+var meta={sharedFrom:sh.h,sharedAt:sh.t};if(sh.k)meta.sharedCats=sh.k;
+if(IAB){var p=iabUnpack(sh.c.iab||{});p.timestamp=sh.c.timestamp||new Date(sh.t).toISOString();p.__cbSharedFrom=sh.h;p.__cbSharedAt=sh.t;if(sh.k)p.__cbSharedCats=sh.k;
+origSet.call(ls,L,JSON.stringify(p));try{ls.removeItem('TCF_TC_STRING');}catch(e){}
+window.__cbSharedConsent={from:sh.h,at:sh.t};
+record({cookieCategories:(sh.c.iab&&sh.c.iab.cc)||[],sharedFrom:sh.h,sharedAt:sh.t,expiresAt:sh.c.expiresAt},sh.s||iabStatus(sh.c.iab||{}));return;}
+var c={accepted:true,timestamp:sh.c.timestamp||new Date(sh.t).toISOString(),expiresAt:sh.c.expiresAt,sharedFrom:sh.h,sharedAt:sh.t};
+if(sh.k)c.sharedCats=sh.k;
+if(sh.c.categories)c.categories=sh.c.categories;
+if(sh.c.ccpa)c.ccpa=sh.c.ccpa;
+else if(model==='optout'&&sh.c.categories)c.ccpa={doNotSell:!sh.c.categories.marketing};
+origSet.call(ls,L,JSON.stringify(c));
+try{ls.removeItem(L+'_closed');}catch(e){}
+if(c.categories){var k=c.categories;origSet.call(ls,H,btoa(JSON.stringify({analytics:!!k.analytics,preferences:!!k.preferences,marketing:!!k.marketing})));}
+window.__cbSharedConsent={from:sh.h,at:sh.t};
+record(c,sh.s||statusOf(c));
+}
+var own=readOwn(),sh=readShared();
+/* An adopted copy that no longer covers this site's cookie categories is dropped: ask again. */
+if(own&&own.sharedFrom&&cats&&own.sharedCats&&!covers(own.sharedCats)){dropOwn();own=null;}
+if(sh&&compatible(sh)&&covers(sh.k)){
+var take=false;
+if(!own)take=true;
+else if(own.sharedFrom)take=sh.t>(own.sharedAt||0);
+else if(S.direction==='two_way')take=sh.t>(Date.parse(own.timestamp||0)||0);
+if(take)adopt(sh);
+}else if(own&&!own.sharedFrom&&canWrite&&!sh){writeShared(own);}
+proto.setItem=function(k,v){var r=origSet.apply(this,arguments);try{if(this===ls&&k===L&&canWrite){var c=JSON.parse(v);
+if(IAB){if(c&&!c.__cbSharedFrom&&(c.purposes||c.cookieCategories)){var t=c.timestamp?Date.parse(c.timestamp):now();writeShared({accepted:true,timestamp:c.timestamp,expiresAt:new Date(t+365*864e5).toISOString(),raw:c});}}
+else if(c&&c.accepted&&!c.sharedFrom)writeShared(c);}}catch(e){}return r;};
+/* "Your choice also applies to …" — only where the choice really is shared (primary, or two-way). */
+var N=S.notice;
+if(N&&canWrite&&N.hosts&&N.hosts.length){
+var lang=String(N.lang||'en').toLowerCase().split('-')[0];
+if(N.auto){try{var nl=String(navigator.language||'').toLowerCase().split('-')[0];if(N.text[nl])lang=nl;}catch(e){}}
+var txt=(N.text[lang]||N.text.en).replace('{sites}',N.hosts.join(', '));
+var sel=IAB?'#consentBitBanner .consentBit-notice-des':'#cb-initial-banner .cb-banner-body';
+var put=function(){try{var box=document.querySelector(sel);if(!box||box.querySelector('.cb-shared-note'))return;var p=document.createElement('p');p.className='cb-shared-note';p.textContent=txt;p.style.cssText='margin:8px 0 0;font-size:12px;line-height:1.4;opacity:.85;';box.appendChild(p);}catch(e){}};
+var watch=function(){put();try{new MutationObserver(function(ms){for(var i=0;i<ms.length;i++)if(ms[i].addedNodes&&ms[i].addedNodes.length){put();return;}}).observe(document.body,{childList:true,subtree:true});}catch(e){}};
+if(document.body)watch();else document.addEventListener('DOMContentLoaded',watch);
+}
+}catch(e){}})();
+`;
+}

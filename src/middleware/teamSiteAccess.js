@@ -31,6 +31,7 @@ export const TEAM_GATED_PATHS = new Set([
   '/api/scan-site-consented',
   '/api/scheduled-scan',
   '/api/scan-history',
+  '/api/gcm-check',
   '/api/cookies',
   '/api/custom-cookie-rules',
   '/api/mark-verified',

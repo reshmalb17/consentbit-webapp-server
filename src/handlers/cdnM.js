@@ -14,6 +14,8 @@ import { getWebflowSetupScript } from '../utils/webflowSetup.js';
 import { getDebugModeScript } from '../utils/debugMode.js';
 import { shortHash, recordNoticeVersions } from '../utils/noticeVersion.js';
 import { buildSkipPathGuard, skipPathsSignature } from '../data/skipPaths.js';
+import { consentShareForBanner } from './consentFamily.js';
+import { consentShareBridge } from './consentShareBridge.js';
 
 export async function handleCDNScript(request, env, url) {
   try {
@@ -531,6 +533,20 @@ async function _handleCDNScript(request, env, url) {
     if (_rl && typeof _rl === 'object') regionalLanguages = { quebec: _rl.quebec === true, brazil: _rl.brazil === true };
   } catch (_) { /* invalid JSON → off */ }
   const regionalActive = lawFixes && !!regionalLanguages && planAllowsPaidRegions && !siteWantsIab;
+
+  // Google Consent Mode debug toggle (webapp banner editor → "Google Consent Mode" card),
+  // stored as translations.config.gcmDebug = "1". OFF by default: a missing or any other
+  // value is off. When on, every visitor's console gets the debug report (no on-page
+  // panel). Gated on GCM_TOOLS because test and production share the D1 row.
+  let gcmDebugConsole = false;
+  if (env.GCM_TOOLS === '1') {
+    try {
+      const _gTr = customization && customization.translations
+        ? (typeof customization.translations === 'string' ? JSON.parse(customization.translations) : customization.translations)
+        : null;
+      gcmDebugConsole = !!(_gTr && _gTr.config && String(_gTr.config.gcmDebug) === '1');
+    } catch (_) { /* invalid JSON → off */ }
+  }
 
   // ---------------------------------------------------------------------------
   // US state privacy law resolution
@@ -1644,6 +1660,31 @@ ${inlineConfig}
 ${getBannerCookieListScript()}
 `;
 
+  // Cross-domain consent (Profile → Advanced settings, handlers/consentFamily.js): linked sites
+  // on one main domain share one choice through a cookie on that domain. The bridge
+  // (handlers/consentShareBridge.js) runs before the runtime and only reads/writes the
+  // runtime's own localStorage entries. '' for every site in no family → script unchanged.
+  // Ported from cdnTest.js 2026-11-24.
+  const consentShare = await consentShareForBanner(db, resolvedSite).catch((e) => {
+    console.warn('[ConsentShare] family lookup failed:', e?.message);
+    return null;
+  });
+  const shareBridge = consentShare
+    ? consentShareBridge({
+        siteId: String(resolvedSite.id),
+        primaryId: consentShare.primaryId,
+        isPrimary: consentShare.isPrimary,
+        root: consentShare.root,
+        direction: consentShare.direction,
+        bannerType: String(effectiveBannerType || 'gdpr').toLowerCase(),
+        apiBase,
+        expiryDays: Number(customization?.cookieExpirationDays) || 30,
+      })
+    : '';
+  const consentShareSig = consentShare
+    ? `${consentShare.primaryId}.${consentShare.direction}.${consentShare.hosts.length}`
+    : '';
+
   const SCRIPT_VERSION = '2026-11-05-prefs-design';
   const customizationUpdatedAt = customization?.updatedAt || customization?.updated_at || '';
   const translationsSig = await (async () => {
@@ -1657,7 +1698,7 @@ ${getBannerCookieListScript()}
       return '';
     }
   })();
-  const etag = `"${resolvedSite.id}-${resolvedSite.updatedAt || ''}-${customizationUpdatedAt}-${translationsSig}-${cookieListSig}-${SCRIPT_VERSION}${skipPathsSignature(resolvedSite.id) ? '-' + skipPathsSignature(resolvedSite.id) : ''}"`;
+  const etag = `"${resolvedSite.id}-${resolvedSite.updatedAt || ''}-${customizationUpdatedAt}-${translationsSig}-${cookieListSig}-${SCRIPT_VERSION}${skipPathsSignature(resolvedSite.id) ? '-' + skipPathsSignature(resolvedSite.id) : ''}${consentShareSig ? `-cs${consentShareSig}` : ''}"`;
   const ifNoneMatch = request.headers.get('If-None-Match');
   if (ifNoneMatch === etag) {
     return new Response(null, { status: 304 });
@@ -1761,8 +1802,8 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
 
   const scriptToServe =
     buildSkipPathGuard(resolvedSite.id) +
-    getDebugModeScript() +
-    (serveKind === 'iab' ? loaderIab : serveKind === 'iabwebflow' ? loaderIabWebflow : serveKind === 'webflow' ? loaderWebflow : (consentModeBootstrap + loader));
+    getDebugModeScript({ consoleOnly: gcmDebugConsole }) +
+    (serveKind === 'iab' ? loaderIab : serveKind === 'iabwebflow' ? loaderIabWebflow : serveKind === 'webflow' ? (shareBridge + loaderWebflow) : (shareBridge + consentModeBootstrap + loader));
 
 
   return new Response(scriptToServe, {

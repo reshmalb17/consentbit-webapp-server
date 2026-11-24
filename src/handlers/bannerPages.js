@@ -17,8 +17,10 @@
 
 import { ensureSchema, getSessionById, getUserById, getSiteById } from '../services/db.js';
 import { getSiteRole } from '../services/team.js';
+import { resolveEffectivePlanId } from './bannerCustomization.js';
 
 export const BANNER_PAGE_MODES = new Set(['hide', 'off']);
+export const BANNER_PAGES_PLANS = ['growth'];
 const MAX_PATHS = 50;
 const MAX_PATH_LEN = 200;
 const MAX_IDS = 200;
@@ -123,7 +125,11 @@ export async function handleBannerPages(request, env) {
     return json({ success: false, error: 'Only the account owner or a site Admin can change this.', code: 'NOT_ADMIN' }, 403);
   }
 
-  if (request.method === 'GET') return json({ success: true, siteId, ...bannerPagesOf(site) });
+  // Growth feature (decided 2026-11-24). Clearing the list is allowed on any plan.
+  const plan = (await resolveEffectivePlanId(db, env, siteId).catch(() => null)) || 'free';
+  const planOk = BANNER_PAGES_PLANS.includes(plan);
+
+  if (request.method === 'GET') return json({ success: true, siteId, ...bannerPagesOf(site), plan, planOk, requiredPlan: 'growth' });
 
   // ── POST: save ────────────────────────────────────────────────────────────
   if (!body) return json({ success: false, error: 'Invalid JSON body' }, 400);
@@ -149,6 +155,14 @@ export async function handleBannerPages(request, env) {
       problems: bad,
     }, 400);
   }
+  if (paths.length && !planOk) {
+    return json({
+      success: false,
+      code: 'PLAN_REQUIRED',
+      requiredPlan: 'growth',
+      error: `Disabling the banner on specific pages is available on the Growth plan. This site is on ${plan}.`,
+    }, 403);
+  }
   if (paths.length > MAX_PATHS) {
     return json({ success: false, code: 'TOO_MANY', error: `You can add up to ${MAX_PATHS} pages.` }, 400);
   }
@@ -158,5 +172,5 @@ export async function handleBannerPages(request, env) {
     .bind(siteId, paths.length ? JSON.stringify(paths) : null, paths.length ? mode : null)
     .run();
   console.log('[BannerPages] saved', { siteId, mode, paths: paths.length, by: user.id });
-  return json({ success: true, siteId, ...bannerPagesOf(await getSiteById(db, siteId)) });
+  return json({ success: true, siteId, ...bannerPagesOf(await getSiteById(db, siteId)), plan, planOk, requiredPlan: 'growth' });
 }

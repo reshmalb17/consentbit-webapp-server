@@ -59,6 +59,11 @@ try{q=/[?&]consentbit_debug=([01])/.exec(location.search);}catch(_){}
 try{if(q){if(q[1]==='1')sessionStorage.setItem('consentbit_debug','1');else sessionStorage.removeItem('consentbit_debug');}on=sessionStorage.getItem('consentbit_debug')==='1';}catch(_){}
 if(!on&&q&&q[1]==='1')on=true;
 if(!on&&CS&&CS.getAttribute&&CS.getAttribute('data-debug')==='true')on=true;
+/* Dashboard "Enable debug mode" (off by default): every visitor gets the console
+   report only, never the on-page panel. The URL / data-debug switches above still
+   open the panel for whoever uses them. */
+var consoleOnly=false;
+if(!on&&__CB_DEBUG_CONSOLE__){on=true;consoleOnly=true;}
 if(!on)return;
 
 /* ---- Part B: watch when the TCF API and Google's library appear ---- */
@@ -193,7 +198,7 @@ function render(R){
   try{console.groupCollapsed('%cConsentBit debug%c  '+summary,'font-weight:600','color:'+(issues?C.warn:C.pass));
     for(var c=0;c<R.length;c++){var r0=R[c];(r0.s==='warn'?console.warn:console.log)('%c'+LABEL[r0.s]+'%c '+r0.title+' — '+r0.detail+(r0.code?'  ['+r0.code+']':'')+(r0.fix?'  Fix: '+DOCS.fix:''),'color:'+C[r0.s]+';font-weight:600','');}
     console.groupEnd();}catch(_){}
-  if(closed)return;if(!host)panel();
+  if(closed||consoleOnly)return;if(!host)panel();
   status.textContent='';status.appendChild(el('span','width:6px;height:6px;border-radius:50%;background:'+(issues?C.warn:C.pass)));
   status.appendChild(D.createTextNode(summary));
   while(list.firstChild)list.removeChild(list.firstChild);
@@ -214,7 +219,13 @@ if(D.readyState==='complete')start();else W.addEventListener('load',start);
 }catch(_){}})();
 `;
 
-/** Browser script for the debug snapshot + panel. Prepend it to every served script. */
-export function getDebugModeScript() {
-  return DEBUG_BODY.replace('__CB_DEBUG_DOCS__', JSON.stringify(DEBUG_DOCS)) + '\n';
+/**
+ * Browser script for the debug snapshot + panel. Prepend it to every served script.
+ * `consoleOnly` = the site's dashboard debug toggle (off by default): checks run for
+ * every visitor and print to the console, without the on-page panel.
+ */
+export function getDebugModeScript({ consoleOnly = false } = {}) {
+  return DEBUG_BODY
+    .replace('__CB_DEBUG_DOCS__', JSON.stringify(DEBUG_DOCS))
+    .replace('__CB_DEBUG_CONSOLE__', consoleOnly ? 'true' : 'false') + '\n';
 }

@@ -84,6 +84,10 @@ LAW_FIXES = "1"
 # Page-language banner (services/pageLanguages.js, 2026-11-18): banner follows <html lang>
 # for the languages the owner enabled. TEST WORKER ONLY; "0" in [env.production.vars].
 PAGE_LANGUAGES = "1"
+# Google Consent Mode tools (2026-11-24): /api/gcm-check ("Check now") + the dashboard
+# debug toggle (translations.config.gcmDebug, off by default). TEST WORKER ONLY;
+# "0" in [env.production.vars].
+GCM_TOOLS = "1"
 # Where banners served by THIS worker post consents (cdnM.js apiBase). Unset, it falls
 # back to https://manager.consentbit.com — the PRODUCTION worker — so test sites' consents
 # were saved by prod code and law work (lawNames.js) never reached them. TEST WORKER ONLY;
@@ -228,6 +232,8 @@ CB_FLOW_LOG = "0"
 LAW_FIXES = "1"
 # Page-language banner — OFF in production until tested on the test worker.
 PAGE_LANGUAGES = "0"
+# Google Consent Mode tools — OFF in production until tested on the test worker.
+GCM_TOOLS = "0"
 # Empty = banners post consents to https://manager.consentbit.com (cdnM.js fallback).
 API_BASE_URL = ""
 # Hosted cookie transparency page — OFF in production until verified on Test.

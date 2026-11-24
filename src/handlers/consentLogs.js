@@ -110,10 +110,14 @@ export async function handleConsentLogs(request, env) {
 
     const logs = (consents || []).map((row) => {
       let categories = null;
+      // Cross-domain consent: host the choice was copied from (consentMethod "shared"). Kept as
+      // its own field because `categories` below is narrowed to the inner category flags.
+      let sharedFrom = null;
       if (row.consent_categories) {
         try {
           const parsed = typeof row.consent_categories === 'string' ? JSON.parse(row.consent_categories) : row.consent_categories;
           categories = parsed && typeof parsed.categories === 'object' ? parsed.categories : parsed;
+          if (parsed && typeof parsed.sharedFrom === 'string') sharedFrom = parsed.sharedFrom.slice(0, 253);
         } catch (_) {
           categories = null;
         }
@@ -136,6 +140,7 @@ export async function handleConsentLogs(request, env) {
         expiresAt: row.expiresAt,
         domain: row.domain,
         categories,
+        sharedFrom,
       };
     });
 

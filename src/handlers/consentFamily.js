@@ -11,8 +11,10 @@
 // the main domain (.example.com); the direction decides who may write it:
 //   one_way — only the primary writes; linked sites read it and keep their own overrides
 //   two_way — any linked site writes; the newest choice applies everywhere
-// Only subdomains of one main domain can share: browsers never let different sites
-// (example.com / example.org) read each other's cookies.
+// Subdomains of one main domain share one cookie on it. Sites on a DIFFERENT main domain
+// (example.com / example-store.com) can be linked too (2026-11-24): browsers never let them
+// read each other's cookies, so the banner hands the choice over on links between them
+// (consentShareBridge.js xhosts; cdnTest only).
 //
 // Who can link: a site joins only if it belongs to the same account as the primary
 // (its organisation shares an owner with the primary's) AND the caller is owner or site
@@ -32,8 +34,13 @@ import {
   normalizeDomain,
 } from '../services/db.js';
 import { getSiteRole } from '../services/team.js';
+import { resolveEffectivePlanId } from './bannerCustomization.js';
 
 const DIRECTIONS = new Set(['one_way', 'two_way']);
+// Cross-domain consent is a Growth feature (decided 2026-11-24). Every site in a group must be on
+// Growth: each one's own script carries the sharing code. Stopping sharing is allowed on any plan.
+export const CROSS_DOMAIN_PLANS = ['growth'];
+const planOk = (planId) => CROSS_DOMAIN_PLANS.includes(String(planId || '').toLowerCase());
 const MAX_LINKED = 10;
 const MAX_BADGE_IDS = 200;
 
@@ -107,7 +114,8 @@ function getSessionIdFromCookie(request) {
 let columnsReady = false;
 async function ensureShareColumns(db) {
   if (columnsReady) return;
-  for (const col of ['consentSharePrimaryId', 'consentShareRoot', 'consentShareDirection']) {
+  // consentShareNotice ('0' = off; anything else = on) and consentShareListUrl live on the primary.
+  for (const col of ['consentSharePrimaryId', 'consentShareRoot', 'consentShareDirection', 'consentShareNotice', 'consentShareListUrl']) {
     try {
       await db.prepare(`ALTER TABLE Site ADD COLUMN ${col} TEXT`).run();
     } catch (_) { /* column already exists */ }
@@ -121,6 +129,11 @@ const directionOf = (s) => {
   return DIRECTIONS.has(d) ? d : 'one_way';
 };
 const isAdminRole = (r) => r === 'owner' || r === 'admin';
+const noticeOf = (s) => String(s?.consentShareNotice ?? s?.consentsharenotice ?? '') !== '0';
+const listUrlOf = (s) => {
+  const u = String(s?.consentShareListUrl ?? s?.consentsharelisturl ?? '').trim();
+  return /^https:\/\/[^\s"<>]+\.[^\s"<>]+$/i.test(u) && u.length <= 500 ? u : '';
+};
 
 /**
  * Every site in the same account as `site`: sites whose organisation shares an owner
@@ -154,20 +167,45 @@ async function primaryIdsIn(db, ids) {
   return new Set(results.map((r) => String(r.p ?? r.P ?? '')));
 }
 
+/**
+ * "Last sync" for a linked site: when a visitor's choice was last carried over to it (the bridge
+ * logs those as consentMethod 'shared'). Looks only at the site's newest 5000 records so a busy
+ * site never scans its whole history (uses idx_consent_site_created). Null when none / on error.
+ */
+async function lastSharedAt(db, siteId) {
+  try {
+    const row = await db
+      .prepare(
+        `SELECT MAX(createdAt) AS t FROM (
+           SELECT createdAt, consentMethod FROM Consent WHERE siteId = ?1 ORDER BY createdAt DESC LIMIT 5000
+         ) WHERE consentMethod = 'shared'`,
+      )
+      .bind(siteId)
+      .first();
+    return row?.t ?? null;
+  } catch (_) {
+    return null;
+  }
+}
+
 /** Dialog state for the site the dialog is opened on. */
-async function buildState(db, userId, site) {
+async function buildState(db, userId, site, env) {
   const { host, root, reason, platform } = mainDomainOf(site.domain);
   const siteId = String(site.id);
   const myPrimary = primaryOf(site);
+  const sitePlan = (await resolveEffectivePlanId(db, env, siteId).catch(() => null)) || 'free';
   const base = {
     success: true,
-    site: { id: siteId, domain: site.domain, host },
+    requiredPlan: 'growth',
+    site: { id: siteId, domain: site.domain, host, plan: sitePlan, planOk: planOk(sitePlan) },
     mainDomain: root,
     supported: !!root,
     reason: root ? null : reason,
     platform: platform || null,
     memberOf: null,
     direction: myPrimary === siteId ? directionOf(site) : null,
+    showList: noticeOf(site),
+    listUrl: listUrlOf(site),
     candidates: [],
   };
 
@@ -179,9 +217,11 @@ async function buildState(db, userId, site) {
   }
   if (!root) return base;
 
+  // Subdomains (same main domain: share one cookie) AND other domains (different main domain:
+  // consent travels with the visitor on links between them, see consentShareBridge.js xhosts).
   const same = (await accountSites(db, site)).filter((s) => {
     const m = mainDomainOf(s.domain);
-    return m.root === root && m.host !== host;
+    return !!m.root && m.host !== host;
   });
   const primaries = await primaryIdsIn(db, same.map((s) => String(s.id)));
   const byId = new Map(same.map((s) => [String(s.id), s]));
@@ -191,6 +231,8 @@ async function buildState(db, userId, site) {
     const id = String(s.id);
     const p = primaryOf(s);
     const role = await getSiteRole(db, userId, id).catch(() => null);
+    const plan = (await resolveEffectivePlanId(db, env, id).catch(() => null)) || 'free';
+    const m = mainDomainOf(s.domain);
     let linkedElsewhere = null;
     if (p && p !== siteId) {
       linkedElsewhere = p === id ? 'primary' : byId.get(p)?.domain || 'another site';
@@ -202,12 +244,17 @@ async function buildState(db, userId, site) {
       domain: s.domain,
       name: s.name || null,
       host: normalizeDomain(s.domain),
+      root: m.root,
+      sameRoot: m.root === root,
       linked: p === siteId,
       linkedElsewhere, // 'primary' = it has its own family; a domain = linked to that site
       canAdmin: isAdminRole(role),
+      plan,
+      planOk: planOk(plan),
+      lastSharedAt: p === siteId ? await lastSharedAt(db, id) : null,
     });
   }
-  candidates.sort((a, b) => a.host.localeCompare(b.host));
+  candidates.sort((a, b) => (a.sameRoot === b.sameRoot ? a.host.localeCompare(b.host) : a.sameRoot ? -1 : 1));
   base.candidates = candidates;
   return base;
 }
@@ -222,17 +269,26 @@ export async function consentShareForBanner(db, site) {
   const root = site?.consentShareRoot ?? site?.consentshareroot;
   if (!p || !root) return null;
   const { results = [] } = await db
-    .prepare(`SELECT id, domain, consentSharePrimaryId, consentShareDirection FROM Site WHERE consentSharePrimaryId = ?1`)
+    .prepare(`SELECT * FROM Site WHERE consentSharePrimaryId = ?1`) // * : notice columns may not exist yet
     .bind(p)
     .all();
   const primary = results.find((r) => String(r.id) === p);
   if (!primary || results.length < 2) return null; // half-written or emptied family
+  const myRoot = String(root).toLowerCase();
   return {
     primaryId: p,
     isPrimary: String(site.id) === p,
-    root: String(root).toLowerCase(),
+    root: myRoot,
     direction: directionOf(primary),
+    showList: noticeOf(primary),
+    listUrl: listUrlOf(primary),
     hosts: results.map((r) => normalizeDomain(r.domain)).filter(Boolean),
+    // Family members on a DIFFERENT main domain: no shared cookie reaches them, so the bridge
+    // hands the choice over on links to these hosts (cdnTest only).
+    xhosts: results
+      .filter((r) => String(r.consentShareRoot ?? r.consentshareroot ?? '').toLowerCase() !== myRoot)
+      .map((r) => normalizeDomain(r.domain))
+      .filter(Boolean),
   };
 }
 
@@ -311,7 +367,7 @@ export async function handleConsentFamily(request, env) {
     return json({ success: false, error: 'Only the account owner or a site Admin can change cross-domain consent.', code: 'NOT_ADMIN' }, 403);
   }
 
-  if (request.method === 'GET') return json(await buildState(db, user.id, site));
+  if (request.method === 'GET') return json(await buildState(db, user.id, site, env));
 
   // ── POST: save or stop sharing (siteId is the primary) ────────────────────
   if (!body) return json({ success: false, error: 'Invalid JSON body' }, 400);
@@ -319,6 +375,18 @@ export async function handleConsentFamily(request, env) {
   if (!DIRECTIONS.has(direction)) {
     return json({ success: false, error: 'direction must be one_way or two_way', code: 'BAD_DIRECTION' }, 400);
   }
+  // Section 4 settings (optional in the body; omitted = keep what is stored).
+  if (body.listUrl != null && String(body.listUrl).trim() && !listUrlOf({ consentShareListUrl: body.listUrl })) {
+    return json({ success: false, code: 'BAD_LIST_URL', error: 'Enter a full link starting with https://' }, 400);
+  }
+  const noticeUpd = [];
+  if (typeof body.showList === 'boolean') noticeUpd.push(['consentShareNotice', body.showList ? '1' : '0']);
+  if (body.listUrl != null) noticeUpd.push(['consentShareListUrl', listUrlOf({ consentShareListUrl: body.listUrl }) || null]);
+  const saveNotice = noticeUpd.length
+    ? db
+        .prepare(`UPDATE Site SET ${noticeUpd.map(([c], i) => `${c} = ?${i + 2}`).join(', ')} WHERE id = ?1`)
+        .bind(siteId, ...noticeUpd.map(([, v]) => v))
+    : null;
   const wanted = [...new Set((Array.isArray(body.siteIds) ? body.siteIds : []).map((s) => String(s || '').trim()).filter(Boolean))];
 
   const myPrimary = primaryOf(site);
@@ -332,14 +400,15 @@ export async function handleConsentFamily(request, env) {
 
   if (!wanted.length) {
     await clearOthers.run();
+    if (saveNotice) await saveNotice.run();
     console.log('[ConsentShare] stopped', { siteId, by: user.id });
-    return json(await buildState(db, user.id, await getSiteById(db, siteId)));
+    return json(await buildState(db, user.id, await getSiteById(db, siteId), env));
   }
   if (wanted.length > MAX_LINKED) {
     return json({ success: false, code: 'TOO_MANY', error: `You can link up to ${MAX_LINKED} domains.` }, 400);
   }
 
-  const state = await buildState(db, user.id, site);
+  const state = await buildState(db, user.id, site, env);
   if (!state.supported) {
     return json({
       success: false,
@@ -349,25 +418,41 @@ export async function handleConsentFamily(request, env) {
         : 'This site’s address cannot share consent.',
     }, 400);
   }
+  if (!state.site.planOk) {
+    return json({
+      success: false,
+      code: 'PLAN_REQUIRED',
+      requiredPlan: 'growth',
+      error: `Cross-domain consent is available on the Growth plan. ${state.site.host} is on ${state.site.plan}.`,
+    }, 403);
+  }
   const cand = new Map(state.candidates.map((c) => [c.id, c]));
   const problems = [];
   for (const id of wanted) {
     const c = cand.get(id);
-    if (!c) problems.push({ id, message: `is not a site in this account on ${state.mainDomain}` });
+    if (!c) problems.push({ id, message: `${id} is not a site in this account` });
     else if (c.linkedElsewhere === 'primary') problems.push({ id, message: `${c.host} has its own linked domains` });
     else if (c.linkedElsewhere) problems.push({ id, message: `${c.host} is already linked to ${c.linkedElsewhere}` });
     else if (!c.canAdmin) problems.push({ id, message: `you are not an Admin of ${c.host}` });
+    else if (!c.planOk) problems.push({ id, message: `${c.host} needs the Growth plan (it is on ${c.plan})` });
   }
   if (problems.length) {
     return json({ success: false, code: 'INVALID_SITES', error: problems.map((p) => p.message).join('. ') + '.', problems }, 400);
   }
 
-  const setRow = (id) =>
+  // consentShareRoot = each member's OWN main domain (the cookie lives there); for a subdomain
+  // that is the primary's, for an "other domain" its own.
+  const setRow = (id, rowRoot) =>
     db
       .prepare(`UPDATE Site SET consentSharePrimaryId = ?2, consentShareRoot = ?3, consentShareDirection = ?4 WHERE id = ?1`)
-      .bind(id, siteId, state.mainDomain, direction);
-  await db.batch([clearOthers, setRow(siteId), ...wanted.map(setRow)]);
+      .bind(id, siteId, rowRoot, direction);
+  await db.batch([
+    clearOthers,
+    ...(saveNotice ? [saveNotice] : []),
+    setRow(siteId, state.mainDomain),
+    ...wanted.map((id) => setRow(id, cand.get(id).root || state.mainDomain)),
+  ]);
 
   console.log('[ConsentShare] saved', { siteId, root: state.mainDomain, direction, linked: wanted.length, by: user.id });
-  return json(await buildState(db, user.id, await getSiteById(db, siteId)));
+  return json(await buildState(db, user.id, await getSiteById(db, siteId), env));
 }
