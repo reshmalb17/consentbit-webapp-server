@@ -513,6 +513,100 @@ async function _handleCDNScript(request, env, url) {
   }
 
   // ---------------------------------------------------------------------------
+  // Banner region (all plans; added 2026-11-24 for Google CMP audit i.7, per banner type
+  // since 2026-11-25, modelled on CookieYes "Geo-target banner")
+  // ---------------------------------------------------------------------------
+  // The banner TYPE (GDPR / CCPA / GDPR + CCPA) is unchanged and routed as above. The
+  // banner REGION decides where that banner is shown. translations.config.bannerRegion,
+  // set in the webapp banner editor (General tab, BannerRegionCard.tsx):
+  //   { gdpr: 'worldwide' | 'europe' | 'countries', gdprCountries: ['IN', ...],
+  //     ccpa: 'worldwide' | 'us'     | 'countries', ccpaCountries: ['US', 'CA-QC', ...] }
+  //   'europe' (string, first version) = { gdpr: 'europe' }. Missing / junk = worldwide.
+  //   'countries' with an empty list = worldwide. Country codes are ISO alpha-2, or
+  //   country-region ('CA-QC' = Quebec) matched against Cloudflare's regionCode.
+  //   europe = EU + EEA + UK + Switzerland.
+  // GDPR-only and CCPA-only sites: the served banner's region must contain the visitor.
+  // GDPR + CCPA sites:
+  //   1. An explicit region (not worldwide; the CCPA default counts as 'us') that contains
+  //      the visitor claims them for that banner. Claimed by both → the routing above
+  //      decides (US → CCPA, else GDPR).
+  //   2. Claimed by neither → the routed banner if its region is worldwide; else the GDPR
+  //      banner if the GDPR region is worldwide (the GDPR "all other countries" catch-all;
+  //      CCPA worldwide only ever means the routed US visitors); else no banner.
+  // No banner = the existing opt-out path (bannerType 'ccpa') with bannerEnabled=false: the
+  // runtime shows no banner and no floating button, blocks nothing, and signals granted
+  // (denied only for a GPC opt-out). IAB sites are not affected. An unknown country (no
+  // Cloudflare geo, Tor 'T1', 'XX') keeps whatever banner it had.
+  const BANNER_REGION_EUROPE_EXTRA = new Set([
+    'NO', 'IS', 'LI',                         // EEA, not EU (isEU is Cloudflare's EU-27 flag)
+    'GB', 'CH',                               // UK, Switzerland
+    'GF', 'GP', 'MQ', 'RE', 'YT', 'MF', 'AX', // EU outermost regions / Åland
+  ]);
+  const bannerRegionCfg = { gdpr: 'worldwide', gdprCountries: [], ccpa: 'worldwide', ccpaCountries: [] };
+  try {
+    const _brTr = customization && customization.translations
+      ? (typeof customization.translations === 'string' ? JSON.parse(customization.translations) : customization.translations)
+      : null;
+    const _br = _brTr && _brTr.config ? _brTr.config.bannerRegion : null;
+    const _brList = (a) => (Array.isArray(a) ? a : [])
+      .map((c) => String(c).toUpperCase())
+      .filter((c) => /^[A-Z]{2}(-[A-Z0-9]{1,3})?$/.test(c))
+      .slice(0, 400);
+    if (_br === 'europe') {
+      bannerRegionCfg.gdpr = 'europe';
+    } else if (_br && typeof _br === 'object') {
+      const _g = String(_br.gdpr || ''), _c = String(_br.ccpa || '');
+      const _gl = _brList(_br.gdprCountries), _cl = _brList(_br.ccpaCountries);
+      if (_g === 'europe') bannerRegionCfg.gdpr = 'europe';
+      else if (_g === 'countries' && _gl.length) { bannerRegionCfg.gdpr = 'countries'; bannerRegionCfg.gdprCountries = _gl; }
+      if (_c === 'us') bannerRegionCfg.ccpa = 'us';
+      else if (_c === 'countries' && _cl.length) { bannerRegionCfg.ccpa = 'countries'; bannerRegionCfg.ccpaCountries = _cl; }
+    }
+  } catch (_) { /* invalid JSON → worldwide */ }
+  const _brServed = String(effectiveBannerType || '').toLowerCase();
+  // storedBannerType, not siteWantsIab: an IAB site on a plan without IAB is served the
+  // GDPR banner, but the region card is hidden for IAB sites, so leave those alone too.
+  const bannerRegionActive = (bannerRegionCfg.gdpr !== 'worldwide' || bannerRegionCfg.ccpa !== 'worldwide') &&
+    String(storedBannerType || '').toLowerCase() !== 'iab' &&
+    !!country && country !== 'XX' && country !== 'T1' &&
+    (_brServed === 'gdpr' || _brServed === 'ccpa');
+  let outsideBannerRegion = false;
+  if (bannerRegionActive) {
+    const _brIn = (mode, list) => {
+      if (mode === 'europe') return isEU || BANNER_REGION_EUROPE_EXTRA.has(country);
+      if (mode === 'us') return country === 'US';
+      if (mode === 'countries') return list.includes(country) || (!!regionCode && list.includes(`${country}-${regionCode}`));
+      return true; // worldwide
+    };
+    let _brPick;
+    if (regionMode === 'both') {
+      const claimG = bannerRegionCfg.gdpr !== 'worldwide' && _brIn(bannerRegionCfg.gdpr, bannerRegionCfg.gdprCountries);
+      // The CCPA default on a GDPR + CCPA site is the US (the dashboard labels it so), so it
+      // claims US visitors like an explicit 'us' would.
+      const claimC = _brIn(bannerRegionCfg.ccpa === 'worldwide' ? 'us' : bannerRegionCfg.ccpa, bannerRegionCfg.ccpaCountries);
+      if (claimG && claimC) _brPick = _brServed;
+      else if (claimG) _brPick = 'gdpr';
+      else if (claimC) _brPick = 'ccpa';
+      else if (bannerRegionCfg[_brServed] === 'worldwide') _brPick = _brServed;
+      else if (bannerRegionCfg.gdpr === 'worldwide') _brPick = 'gdpr';
+      else _brPick = null;
+    } else {
+      _brPick = _brServed === 'ccpa'
+        ? (_brIn(bannerRegionCfg.ccpa, bannerRegionCfg.ccpaCountries) ? 'ccpa' : null)
+        : (_brIn(bannerRegionCfg.gdpr, bannerRegionCfg.gdprCountries) ? 'gdpr' : null);
+    }
+    if (!_brPick) {
+      outsideBannerRegion = true;
+      effectiveBannerType = 'ccpa';
+      bannerEnabled = false;
+    } else if (_brPick !== _brServed) {
+      // GDPR + CCPA only: the region moved this visitor to the other banner.
+      effectiveBannerType = _brPick;
+      if (_brPick === 'ccpa' && country !== 'US' && quebecCcpaOff) quebecDefaultOff = true;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Regional requirements (Essential / Growth; TEST-ONLY via lawFixes, 2026-10-14)
   // ---------------------------------------------------------------------------
   // translations.config.regionalLanguages, set in the webapp banner editor (General tab):
@@ -1698,7 +1792,7 @@ ${getBannerCookieListScript()}
       return '';
     }
   })();
-  const etag = `"${resolvedSite.id}-${resolvedSite.updatedAt || ''}-${customizationUpdatedAt}-${translationsSig}-${cookieListSig}-${SCRIPT_VERSION}${skipPathsSignature(resolvedSite.id) ? '-' + skipPathsSignature(resolvedSite.id) : ''}${consentShareSig ? `-cs${consentShareSig}` : ''}"`;
+  const etag = `"${resolvedSite.id}-${resolvedSite.updatedAt || ''}-${customizationUpdatedAt}-${translationsSig}-${cookieListSig}-${SCRIPT_VERSION}${skipPathsSignature(resolvedSite.id) ? '-' + skipPathsSignature(resolvedSite.id) : ''}${consentShareSig ? `-cs${consentShareSig}` : ''}${bannerRegionActive ? `-r${outsideBannerRegion ? 'none' : effectiveBannerType}` : ''}"`;
   const ifNoneMatch = request.headers.get('If-None-Match');
   if (ifNoneMatch === etag) {
     return new Response(null, { status: 304 });
@@ -1798,7 +1892,7 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
   // Webflow's built-in Google Analytics integration queues gtag('js') + gtag('config') ABOVE our
   // tag, so without it config ran with no consent state: _ga, _gcl_au, Ads remarketing and Xandr
   // fired before any choice (Monitaur, 2026-09-17, measured in a real browser).
-  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? 'true' : 'false'};var d=null,e=false,hasStored=false,sg=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(v.gpc)sg=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!(hasStored&&sg)){e=true;}}catch(_){}${quebecDefaultOff ? "if(c&&!hasStored){e=true;}" : ""}${clarityBootstrap}${uetBootstrap}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);window.gtag('set','developer_id.dN2Q3Yj',true);var g=window.__cbConsentDefaultSet===true;if(!c){if(!g){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});}if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else if(!g){window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}try{var L=window.dataLayer;if(L&&L.push===Array.prototype.push){var h=[],r=[];for(var k=0;k<L.length;k++){var it=L[k];(it&&it[0]==='consent'?h:r).push(it);}if(h.length&&r.length&&L[0]!==h[0]){L.length=0;Array.prototype.push.apply(L,h.concat(r));}}}catch(_){}window.__cbConsentDefaultSet=true;}catch(_){}})();\n`;
+  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? 'true' : 'false'};var d=null,e=false,hasStored=false,sg=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(v.gpc)sg=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!(hasStored&&sg)){e=true;}}catch(_){}${quebecDefaultOff ? "if(c&&!hasStored){e=true;}" : ""}${clarityBootstrap}${uetBootstrap}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);window.gtag('set','developer_id.dN2Q3Yj',true);var g=window.__cbConsentDefaultSet===true;if(!c){if(!g){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});}if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else if(!g){window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}${outsideBannerRegion ? "if(!e){window.gtag('consent','update',{ad_storage:'granted',analytics_storage:'granted',ad_user_data:'granted',ad_personalization:'granted',functionality_storage:'granted',personalization_storage:'granted'});}" : ''}try{var L=window.dataLayer;if(L&&L.push===Array.prototype.push){var h=[],r=[];for(var k=0;k<L.length;k++){var it=L[k];(it&&it[0]==='consent'?h:r).push(it);}if(h.length&&r.length&&L[0]!==h[0]){L.length=0;Array.prototype.push.apply(L,h.concat(r));}}}catch(_){}window.__cbConsentDefaultSet=true;}catch(_){}})();\n`;
 
   const scriptToServe =
     buildSkipPathGuard(resolvedSite.id) +
@@ -1823,7 +1917,7 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
       'X-ConsentBit-RegionalLang': (regionalActive || (lawFixes && regionalLanguages && planAllowsPaidRegions && iabBundleServed))
         ? `qc=${regionalLanguages.quebec ? 1 : 0} br=${regionalLanguages.brazil ? 1 : 0} lang=${langOverride || iabLangOverride || '-'}${iabBundleServed ? ' iab' : ''}`
         : 'off',
-      'X-ConsentBit-Banner': `${effectiveBannerType} enabled=${bannerEnabled ? 1 : 0}`,
+      'X-ConsentBit-Banner': `${effectiveBannerType} enabled=${bannerEnabled ? 1 : 0}${bannerRegionActive ? (outsideBannerRegion ? ' region=outside' : ' region=shown') : ''}`,
       // Page languages: off | plan | iab | regional | none | <codes shipped>
       'X-ConsentBit-PageLangs': pageLangStatus,
     },

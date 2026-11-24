@@ -117,23 +117,33 @@ export function buildPageLanguageSets(pageLanguages, enText, textSetSwitches) {
  * the whole translations blob and don't know the key, so before a save that leaves
  * config.pageLanguages out, copy the saved value across. A webapp save always sends the
  * key (empty list = off), so it can still clear it. Mutates `customization`; never throws.
+ *
+ * The same applies to config.bannerRegion (where the GDPR / CCPA banner is shown; an object
+ * since 2026-11-25, see cdnM.js "Banner region"; carried over whole):
+ * also webapp-only, also always sent by a webapp save. Each key is carried independently.
  */
+const WEBAPP_ONLY_CONFIG_KEYS = ['pageLanguages', 'bannerRegion'];
+
 export async function carryOverPageLanguages(db, siteId, customization) {
   try {
     if (!db || !siteId || !customization) return;
     let inTr = customization.translations;
     if (typeof inTr === 'string') { try { inTr = JSON.parse(inTr); } catch (_) { return; } }
     if (!inTr || typeof inTr !== 'object') return;
-    if (inTr.config && typeof inTr.config === 'object' && 'pageLanguages' in inTr.config) return;
+    const inCfg = inTr.config && typeof inTr.config === 'object' ? inTr.config : null;
+    const missing = WEBAPP_ONLY_CONFIG_KEYS.filter((k) => !(inCfg && k in inCfg));
+    if (!missing.length) return;
     const prevRow = await db
       .prepare('SELECT translations FROM BannerCustomization WHERE siteId = ?1 LIMIT 1')
       .bind(siteId)
       .first();
     if (!prevRow || !prevRow.translations) return;
     const prevTr = typeof prevRow.translations === 'string' ? JSON.parse(prevRow.translations) : prevRow.translations;
-    const prevPl = prevTr && prevTr.config && prevTr.config.pageLanguages;
-    if (!prevPl) return;
-    inTr.config = { ...(inTr.config || {}), pageLanguages: prevPl };
+    const prevCfg = prevTr && prevTr.config;
+    const carried = {};
+    for (const k of missing) if (prevCfg && prevCfg[k]) carried[k] = prevCfg[k];
+    if (!Object.keys(carried).length) return;
+    inTr.config = { ...(inTr.config || {}), ...carried };
     customization.translations = inTr;
   } catch (e) {
     console.warn('[pageLanguages] carry-over failed (non-fatal)', e && e.message);
