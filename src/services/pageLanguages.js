@@ -121,8 +121,11 @@ export function buildPageLanguageSets(pageLanguages, enText, textSetSwitches) {
  * The same applies to config.bannerRegion (where the GDPR / CCPA banner is shown; an object
  * since 2026-11-25, see cdnM.js "Banner region"; carried over whole):
  * also webapp-only, also always sent by a webapp save. Each key is carried independently.
+ * So are config.gcmSupport / config.gcmTagsBeforeConsent (Google Consent Mode Advanced /
+ * Basic / Off, 2026-11-25, see cdnM.js "gcmMode"): a plugin save must never silently put
+ * a Basic or Off site back on Advanced.
  */
-const WEBAPP_ONLY_CONFIG_KEYS = ['pageLanguages', 'bannerRegion'];
+const WEBAPP_ONLY_CONFIG_KEYS = ['pageLanguages', 'bannerRegion', 'gcmSupport', 'gcmTagsBeforeConsent'];
 
 export async function carryOverPageLanguages(db, siteId, customization) {
   try {

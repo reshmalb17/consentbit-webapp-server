@@ -320,6 +320,21 @@ async function _handleCDNScript(request, env, url) {
     }
   }
 
+  // Google Consent Mode: Advanced / Basic / Off (all plans; 2026-11-25, Google CMP audit
+  // iii.5). Mirrors cdnM.js "Google Consent Mode: Advanced / Basic / Off", which documents
+  // the three modes. translations.config.gcmSupport "0" = Off; gcmTagsBeforeConsent "0" =
+  // Basic; anything else = Advanced (unchanged). Never applied to IAB sites.
+  let gcmMode = 'advanced';
+  try {
+    const _gmTr = customization && customization.translations
+      ? (typeof customization.translations === 'string' ? JSON.parse(customization.translations) : customization.translations)
+      : null;
+    const _gmCfg = _gmTr && _gmTr.config;
+    if (_gmCfg && String(_gmCfg.gcmSupport) === '0') gcmMode = 'off';
+    else if (_gmCfg && String(_gmCfg.gcmTagsBeforeConsent) === '0') gcmMode = 'basic';
+  } catch (_) { /* invalid JSON → advanced */ }
+  if (siteWantsIab) gcmMode = 'advanced';
+
   // ---------------------------------------------------------------------------
   // US state privacy law resolution
   // ---------------------------------------------------------------------------
@@ -1154,6 +1169,8 @@ async function _handleCDNScript(request, env, url) {
     //     Consent Initialisation, no cookieless pings, and nothing for Tag Assistant to
     //     attach to. This flag closes that gap; it does not widen what the runtime allows.
     gtmConsentMode: resolvedSite.gtmConsentMode !== 0 && resolvedSite.gtmConsentMode !== false,
+    // Google Consent Mode Basic / Off (see gcmMode above). Absent = Advanced.
+    ...(gcmMode !== 'advanced' ? { gcmMode } : {}),
     platform: resolvedSite.platform || null,
     // customStyles is only built when the site has a BannerCustomization row; the
     // preferences-popup design CSS must reach the page either way (it is already
@@ -1286,6 +1303,10 @@ ${inlineConfig}
     var bannerEnabled = false !== SITE.bannerEnabled;
     var apiBase = SITE.apiBase;
     var gaMeasurementId = SITE.gaId || null;
+    // Google Consent Mode mode (worker: gcmMode): "advanced" (default) | "basic" | "off".
+    // A page whose script was loaded by our GTM template keeps Advanced: the template
+    // publishes its own Consent Mode defaults inside GTM.
+    var gcmMode = window.__cbGtmInstall ? "advanced" : SITE.gcmMode || "advanced";
     var clarityConsentEnabled = false !== SITE.clarityConsentMode;
     var clarityCmpId = SITE.clarityCmpId || 165;
     var uetConsentEnabled = false !== SITE.uetConsentMode;
@@ -2018,7 +2039,8 @@ ${inlineConfig}
 
   /** True when a consent signal — not the script blocker — governs this script. */
   function isConsentSignalGoverned(category, src) {
-    if ("analytics" === category && isGoogleAnalyticsUrl(src)) return true;
+    // Google tags are signal-governed only in Advanced; Basic / Off block them by category.
+    if ("analytics" === category && isGoogleAnalyticsUrl(src) && "advanced" === gcmMode) return true;
     if (clarityConsentEnabled && isClarityTagUrl(src)) return true;
     return uetConsentEnabled && isUetTagUrl(src)
   }
@@ -2129,7 +2151,51 @@ ${inlineConfig}
 
   /** Categories that require consent. Anything else ("essential", "uncategorized") is never blocked. */
   function isBlockableCategory(category) {
-    return "analytics" === category || "marketing" === category || "behavioral" === category || "advertisement" === category || "functional" === category || "performance" === category
+    return "cbgoogle" === category || "analytics" === category || "marketing" === category || "behavioral" === category || "advertisement" === category || "functional" === category || "performance" === category
+  }
+
+  /**
+   * Basic / Off: the consent categories a Google tag (gtag.js, gtm.js, google-analytics.com)
+   * is blocked by. Basic uses the pseudo-category "cbgoogle" (allowed once the visitor accepts
+   * Analytics OR Marketing, the moment Consent Mode is started for them). Off sends no signal,
+   * so GTM needs BOTH categories (nothing inside the container can read consent), Google Ads /
+   * Floodlight (AW- / DC-) needs Marketing, and everything else Analytics.
+   */
+  function googleTagCategories(src) {
+    var lower = String(src).toLowerCase();
+    if ("basic" === gcmMode) return ["cbgoogle"];
+    return -1 !== lower.indexOf("gtm.js") ? ["analytics", "marketing"] : /[?&]id=(aw|dc)-/.test(lower) ? ["marketing"] : ["analytics"]
+  }
+
+  /**
+   * Basic: start Consent Mode when the visitor first accepts Analytics or Marketing. The
+   * consent DEFAULT carries the chosen states, and our consent / set commands are hoisted
+   * ahead of anything the page queued (gtag('js'/'config'), the gtm.js event) while no Google
+   * tag has consumed the queue yet, so the released tags see consent first.
+   */
+  function startConsentModeBasic(states) {
+    var g = ensureGtag();
+    setConsentModeFlags();
+    g("set", "developer_id.dN2Q3Yj", true);
+    var initial = {};
+    for (var key in states) initial[key] = states[key];
+    initial.security_storage = "granted";
+    g("consent", "default", initial);
+    try {
+      var queue = window.dataLayer;
+      if (queue && queue.push === Array.prototype.push) {
+        var ours = [], rest = [];
+        for (var i = 0; i < queue.length; i++) {
+          var item = queue[i];
+          (item && ("consent" === item[0] || "set" === item[0]) ? ours : rest).push(item)
+        }
+        if (ours.length && rest.length && queue[0] !== ours[0]) {
+          queue.length = 0;
+          Array.prototype.push.apply(queue, ours.concat(rest))
+        }
+      }
+    } catch (err) {}
+    window.__cbConsentDefaultSet = true
   }
 
   function isGoogleAnalyticsUrl(src) {
@@ -2152,6 +2218,7 @@ ${inlineConfig}
     }
     if (!consentState || !consentState.accepted) return false;
     var categories = consentState.categories || {};
+    if ("cbgoogle" === normalized) return !!(categories.analytics || categories.marketing);
     return "analytics" === normalized ? !!categories.analytics : "marketing" === normalized || "advertisement" === normalized ? !!categories.marketing : "preferences" !== normalized && "functional" !== normalized && "performance" !== normalized || !!categories.preferences
   }
 
@@ -2210,6 +2277,10 @@ ${inlineConfig}
       var cookieYes = mapToKnownCategories(scriptEl.getAttribute("data-cookieyes"));
       if (cookieYes) return cookieYes
     }
+
+    // Basic / Off: Google tags are blocked by the fixed categories above (explicit markup on
+    // the element, checked first, still wins).
+    if (src && "advanced" !== gcmMode && isGoogleAnalyticsUrl(src)) return googleTagCategories(src);
 
     if (src && scriptBlockProviders.length)
       for (var p = 0; p < scriptBlockProviders.length; p++) {
@@ -2712,7 +2783,7 @@ ${inlineConfig}
           var categories = resolveScriptCategories(src, script);
           var category = categories.length > 0 ? categories[0] : "uncategorized";
           if (isBlockableCategory(category))
-            if ("analytics" === category && gaMeasurementId && isGoogleAnalyticsUrl(src)) {
+            if ("analytics" === category && gaMeasurementId && isGoogleAnalyticsUrl(src) && "advanced" === gcmMode) {
               // We manage this GA tag through Consent Mode — leave it loading.
             } else if (clarityConsentEnabled && isClarityTagUrl(src)) {
               // Microsoft Clarity is gated by Consent API v2, not by blocking: it must
@@ -2769,12 +2840,18 @@ ${inlineConfig}
    */
   function bootstrapGoogleAnalytics() {
     if (gaMeasurementId) {
+      // Basic / Off: load the dashboard GA tag once, and only when its consent is given.
+      if ("advanced" !== gcmMode) {
+        if (window.__cbGaBooted || !isCategoryAllowed("basic" === gcmMode ? "cbgoogle" : "analytics")) return;
+        window.__cbGaBooted = true
+      }
       isInjectingScript = true;
       try {
         var alreadyPresent = false;
         var scripts = document.scripts;
         for (var i = 0; i < scripts.length; i++) {
-          var src = scripts[i].src || "";
+          // Basic / Off: a copy the blocker parked still counts as present.
+          var src = scripts[i].src || "advanced" !== gcmMode && scripts[i].getAttribute("data-cb-blocked-src") || "";
           if (-1 !== src.indexOf("googletagmanager.com/gtag/js") || -1 !== src.indexOf("googletagmanager.com/gtm.js") || -1 !== src.indexOf("google-analytics.com")) {
             alreadyPresent = true;
             break
@@ -2792,17 +2869,20 @@ ${inlineConfig}
           dataLayer.push(arguments)
         }
         window.gtag = gtag;
-        setConsentModeFlags();
-        gtag("consent", "default", {
+        // Basic publishes its default in startConsentModeBasic(); Off publishes none.
+        if ("advanced" === gcmMode) {
+          setConsentModeFlags();
+          gtag("consent", "default", {
           analytics_storage: "denied",
-          ad_storage: "denied",
-          ad_user_data: "denied",
-          ad_personalization: "denied",
-          functionality_storage: "denied",
-          personalization_storage: "denied",
-          security_storage: "granted",
-          wait_for_update: 500
-        });
+            ad_storage: "denied",
+            ad_user_data: "denied",
+            ad_personalization: "denied",
+            functionality_storage: "denied",
+            personalization_storage: "denied",
+            security_storage: "granted",
+            wait_for_update: 500
+          })
+        }
         gtag("js", new Date);
         gtag("config", gaMeasurementId, {
           anonymize_ip: true
@@ -2832,10 +2912,18 @@ ${inlineConfig}
     };
     // Always signal — never gate on tag detection. A tag that loads later replays the
     // queued dataLayer commands, so an early push is correct and a skipped push is not.
-    ensureGtag()("consent", "update", consentUpdate);
+    // Basic: nothing until the first acceptance of Analytics or Marketing, which starts
+    // Consent Mode (default = the chosen states). Off: never.
+    if ("advanced" === gcmMode) ensureGtag()("consent", "update", consentUpdate);
+    else if ("basic" === gcmMode) {
+      if (window.__cbConsentDefaultSet) ensureGtag()("consent", "update", consentUpdate);
+      else if (categories.analytics || categories.marketing) startConsentModeBasic(consentUpdate)
+    }
     updateClarityConsent(categories);
     updateUetConsent(categories);
-    pushConsentDataLayerEvent(categories, source)
+    pushConsentDataLayerEvent(categories, source);
+    // Basic / Off: the dashboard GA tag waits for consent (no-op until it is allowed).
+    "advanced" !== gcmMode && gaMeasurementId && bootstrapGoogleAnalytics()
   }
 
   // CCPA consent mode: opt-out model — storage is granted unless the user opted out
@@ -2863,7 +2951,7 @@ ${inlineConfig}
       functionality_storage: outPreferences ? "denied" : "granted",
       personalization_storage: outPreferences ? "denied" : "granted"
     };
-    ensureGtag()("consent", "update", consentUpdate);
+    "off" !== gcmMode && ensureGtag()("consent", "update", consentUpdate);
     // CCPA has no per-category model — project the single opt-out onto the same
     // category keys so one GTM trigger works for both regulations, and expose the
     // raw flag as well for containers that need to branch on it.
@@ -3930,7 +4018,8 @@ ${inlineConfig}
       blockExistingScripts();
       // consentModeBootstrap (served ahead of this script on the standard path) may
       // already have pushed the default — do not overwrite it with a stale one.
-      if (!window.__cbConsentDefaultSet) {
+      // Basic / Off: no pre-consent default (Basic starts Consent Mode on acceptance).
+      if ("advanced" === gcmMode && !window.__cbConsentDefaultSet) {
         setConsentModeFlags();
         ensureGtag()("consent", "default", {
           analytics_storage: "denied",
@@ -3957,7 +4046,8 @@ ${inlineConfig}
       // CCPA is an opt-out regime: storage defaults to granted unless the user opted
       // out. We still push an all-denied default first (consent-mode best practice),
       // load GA when we manage it, then immediately update to the actual opt-out state.
-      if (!window.__cbConsentDefaultSet) {
+      // Off: no Consent Mode commands at all (Basic behaves as Advanced for opt-out visitors).
+      if ("off" !== gcmMode && !window.__cbConsentDefaultSet) {
         setConsentModeFlags();
         ensureGtag()("consent", "default", {
           analytics_storage: "denied",
@@ -4269,7 +4359,20 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
   // Webflow's built-in Google Analytics integration queues gtag('js') + gtag('config') ABOVE our
   // tag, so without it config ran with no consent state: _ga, _gcl_au, Ads remarketing and Xandr
   // fired before any choice (Monitaur, 2026-09-17, measured in a real browser).
-  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? 'true' : 'false'};var d=null,e=false,hasStored=false,sg=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(v.gpc)sg=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!(hasStored&&sg)){e=true;}}catch(_){}${clarityBootstrap}${uetBootstrap}window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);window.gtag('set','developer_id.dN2Q3Yj',true);var g=window.__cbConsentDefaultSet===true;if(!c){if(!g){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});}if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else if(!g){window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}${outsideBannerRegion ? "if(!e){window.gtag('consent','update',{ad_storage:'granted',analytics_storage:'granted',ad_user_data:'granted',ad_personalization:'granted',functionality_storage:'granted',personalization_storage:'granted'});}" : ''}try{var L=window.dataLayer;if(L&&L.push===Array.prototype.push){var h=[],r=[];for(var k=0;k<L.length;k++){var it=L[k];(it&&it[0]==='consent'?h:r).push(it);}if(h.length&&r.length&&L[0]!==h[0]){L.length=0;Array.prototype.push.apply(L,h.concat(r));}}}catch(_){}window.__cbConsentDefaultSet=true;}catch(_){}})();\n`;
+  // Google part of the bootstrap. Advanced (default) = exactly the previous bootstrap. Basic
+  // and Off (gcmMode, see above) send nothing to Google before consent; the GTM-template
+  // install (window.__cbGtmInstall) keeps Advanced because the template sets its own defaults.
+  const gcmBootAdvanced = `window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);window.gtag('set','developer_id.dN2Q3Yj',true);var g=window.__cbConsentDefaultSet===true;if(!c){if(!g){window.gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});}if(d){window.gtag('consent','update',{analytics_storage:d.analytics?'granted':'denied',ad_storage:d.marketing?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied'});}}else if(!g){window.gtag('consent','default',{ad_storage:e?'denied':'granted',analytics_storage:e?'denied':'granted',ad_user_data:e?'denied':'granted',ad_personalization:e?'denied':'granted',functionality_storage:e?'denied':'granted',personalization_storage:e?'denied':'granted',security_storage:'granted'});}${outsideBannerRegion ? "if(!e){window.gtag('consent','update',{ad_storage:'granted',analytics_storage:'granted',ad_user_data:'granted',ad_personalization:'granted',functionality_storage:'granted',personalization_storage:'granted'});}" : ''}try{var L=window.dataLayer;if(L&&L.push===Array.prototype.push){var h=[],r=[];for(var k=0;k<L.length;k++){var it=L[k];(it&&it[0]==='consent'?h:r).push(it);}if(h.length&&r.length&&L[0]!==h[0]){L.length=0;Array.prototype.push.apply(L,h.concat(r));}}}catch(_){}window.__cbConsentDefaultSet=true;`;
+  // Basic, returning visitor who accepted Analytics or Marketing: publish the stored choice
+  // as the consent default (before the released Google tags run), then hoist it. Opt-out
+  // (CCPA) visitors have nothing to accept first, so they get the Advanced block.
+  const gcmBootBasicGdpr = `window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){dataLayer.push(arguments);};window.gtag('set','ads_data_redaction',true);window.gtag('set','url_passthrough',true);window.gtag('set','developer_id.dN2Q3Yj',true);if(window.__cbConsentDefaultSet!==true){window.gtag('consent','default',{ad_storage:d.marketing?'granted':'denied',analytics_storage:d.analytics?'granted':'denied',ad_user_data:d.marketing?'granted':'denied',ad_personalization:d.marketing?'granted':'denied',functionality_storage:d.preferences?'granted':'denied',personalization_storage:d.preferences?'granted':'denied',security_storage:'granted'});}try{var L=window.dataLayer;if(L&&L.push===Array.prototype.push){var h=[],r=[];for(var k=0;k<L.length;k++){var it=L[k];(it&&it[0]==='consent'?h:r).push(it);}if(h.length&&r.length&&L[0]!==h[0]){L.length=0;Array.prototype.push.apply(L,h.concat(r));}}}catch(_){}window.__cbConsentDefaultSet=true;`;
+  const gcmBoot = gcmMode === 'off'
+    ? `if(window.__cbGtmInstall){${gcmBootAdvanced}}`
+    : gcmMode === 'basic'
+      ? `if(window.__cbGtmInstall||c){${gcmBootAdvanced}}else if(hasStored&&d&&(d.analytics||d.marketing)){${gcmBootBasicGdpr}}`
+      : gcmBootAdvanced;
+  const consentModeBootstrap = `(function(){try{var c=${bannerIsCcpa ? 'true' : 'false'};var d=null,e=false,hasStored=false,sg=false;try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_prefs_')===0){try{var x=localStorage.getItem(w);if(x){d=JSON.parse(atob(x));break;}}catch(_){}}}}catch(_){}try{for(var i=0;i<localStorage.length;i++){var w=localStorage.key(i);if(w&&w.indexOf('consentbit_')===0&&w.indexOf('consentbit_prefs_')!==0){try{var v=JSON.parse(localStorage.getItem(w));if(v&&v.accepted){hasStored=true;if(v.gpc)sg=true;if(!d&&v.categories)d=v.categories;if(v.ccpa&&v.ccpa.doNotSell)e=true;break;}}catch(_){}}}}catch(_){}try{if(navigator.globalPrivacyControl===true&&c&&!(hasStored&&sg)){e=true;}}catch(_){}${clarityBootstrap}${uetBootstrap}${gcmBoot}}catch(_){}})();\n`;
 
   const scriptToServe =
     getDebugModeScript() +
