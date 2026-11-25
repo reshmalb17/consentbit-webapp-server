@@ -1,0 +1,112 @@
+// Per-site pages where the ConsentBit script must NOT run (no banner, no blocking).
+//
+// Keyed by Site.id. Each entry is a URL path: an exact page ("/holiday"; a trailing
+// slash and letter case are ignored) or a prefix ending in "*" ("/landing/*" covers
+// "/landing" and everything under it).
+//
+// The server cannot do this check itself: cross-site script requests carry only the
+// page's ORIGIN in Referer, never its path. So we ship a one-line guard at the very
+// top of the served script. Sites not listed here get a byte-identical script.
+//
+// Trade-off the customer accepts: on a skipped page nothing is blocked, so every
+// tracker on that page runs without consent.
+export const SKIP_PATHS_BY_SITE = {
+  // seattlenewmedia.com — the /holiday form page (requested 2026-11-19)
+  'c068847a-e7e1-43f1-96d1-d6b9eedcf321': ['/holiday'],
+};
+
+function normalise(p) {
+  let s = String(p || '').trim().toLowerCase();
+  if (!s.startsWith('/')) s = '/' + s;
+  if (s.length > 1) s = s.replace(/\/+$/, '');
+  return s;
+}
+
+// Owner-set pages (Profile → Advanced settings → Disable banner on specific pages), stored on
+// the Site row by handlers/bannerPages.js. Pass the Site row to include them; callers that pass
+// only a siteId (cdnM.js today) get exactly the hard-coded list, as before.
+function sitePages(site, mode) {
+  if (!site) return [];
+  // Paused (the section's switch turned off): pages are kept but not applied.
+  if (String(site.bannerHiddenPaused ?? site.bannerhiddenpaused ?? '') === '1') return [];
+  const m = site.bannerHiddenMode ?? site.bannerhiddenmode ?? 'hide';
+  if ((m === 'off' ? 'off' : 'hide') !== mode) return [];
+  try {
+    const v = JSON.parse(site.bannerHiddenPaths ?? site.bannerhiddenpaths ?? 'null');
+    return Array.isArray(v) ? v.map(normalise).filter((p) => p && p !== '/*') : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+/** Pages where the script must not run at all ("off"): hard-coded list + owner's "off" pages. */
+export function getSkipPaths(siteId, site) {
+  const list = SKIP_PATHS_BY_SITE[siteId];
+  const fixed = Array.isArray(list) && list.length ? list.map(normalise) : [];
+  return [...new Set([...fixed, ...sitePages(site, 'off')])];
+}
+
+/** Pages where only the banner is hidden ("hide"); blocking still runs. */
+export function getHidePaths(site) {
+  return [...new Set(sitePages(site, 'hide'))];
+}
+
+// Shared path test (exact page, or "/x/*" = /x and everything under it), sets `flag` on window.
+function pathMatchJs(paths, flag) {
+  return (
+    'var p=(location.pathname||"/").toLowerCase();if(p.length>1)p=p.replace(/\\/+$/,"");' +
+    `var L=${JSON.stringify(paths)};` +
+    'for(var i=0;i<L.length;i++){var r=L[i];' +
+    'var hit=r.charAt(r.length-1)==="*"?(function(b){b=b.replace(/\\/+$/,"");return p===b||p.indexOf(b+"/")===0;})(r.slice(0,-1)):p===r;' +
+    `if(hit){window.${flag}=p;break;}}`
+  );
+}
+
+// "hide" pages: banner + floating button hidden by CSS; the runtime still runs, so blocking
+// and a saved choice keep working, and a "change cookie settings" link still opens the
+// preferences popup. A centred banner also locks page scroll when it is inserted
+// (body.style.overflow="hidden"); undo that once, right after the hidden banner appears.
+export function buildHidePathGuard(site) {
+  const paths = getHidePaths(site);
+  if (!paths.length) return '';
+  return (
+    '(function(){try{' + pathMatchJs(paths, '__cbHiddenPath') +
+    'if(!window.__cbHiddenPath)return;' +
+    'var st=document.createElement("style");st.id="cb-hide-on-page";' +
+    'st.textContent="#cb-initial-banner,#cb-floating-trigger{display:none!important;visibility:hidden!important}";' +
+    '(document.head||document.documentElement).appendChild(st);' +
+    'function unlock(){try{var pb=document.getElementById("cb-preferences-banner");var open=pb&&getComputedStyle(pb).display!=="none"&&getComputedStyle(pb).visibility!=="hidden";if(!open&&document.body&&document.body.style.overflow==="hidden")document.body.style.overflow="";}catch(e){}}' +
+    'function watch(){try{new MutationObserver(function(ms){for(var i=0;i<ms.length;i++){var a=ms[i].addedNodes;for(var j=0;j<a.length;j++){var n=a[j];if(n&&n.nodeType===1&&(n.id==="cb-initial-banner"||(n.querySelector&&n.querySelector("#cb-initial-banner")))){unlock();return;}}}}).observe(document.body,{childList:true});}catch(e){}}' +
+    'if(document.body)watch();else document.addEventListener("DOMContentLoaded",watch);' +
+    '}catch(_){}})();\n'
+  );
+}
+
+// Returns '' for sites with no skip paths. Otherwise a guard that, on a matching path,
+// throws a private sentinel error to abort the rest of this classic script. A capturing
+// 'error' listener calls preventDefault() on that sentinel only, so the console stays
+// clean. Throwing (rather than wrapping the bundle in a function or if-block) leaves
+// the script's top-level scope exactly as it is on every non-skipped page.
+export function buildSkipPathGuard(siteId, site) {
+  const paths = getSkipPaths(siteId, site);
+  if (!paths.length) return '';
+  return (
+    '(function(){try{' + pathMatchJs(paths, '__cbSkippedPath') +
+    '}catch(_){}})();' +
+    'if(window.__cbSkippedPath){' +
+    'var __cbSkipErr=new Error("ConsentBit: not loaded on this page");' +
+    // The script is cross-origin, so the browser hands the page a sanitised "Script error."
+    // with e.error === null; matching on the error object never fires. The error event is
+    // dispatched synchronously by the throw on the next line, so the FIRST one is ours.
+    'window.addEventListener("error",function h(e){window.removeEventListener("error",h,true);if(e&&(e.error===__cbSkipErr||e.message==="Script error."||String(e.message||"").indexOf("ConsentBit: not loaded")!==-1))e.preventDefault();},true);' +
+    'throw __cbSkipErr;}\n'
+  );
+}
+
+// Folded into the ETag so a change to the list invalidates cached copies.
+export function skipPathsSignature(siteId, site) {
+  const off = getSkipPaths(siteId, site);
+  const hide = getHidePaths(site);
+  return (off.length ? 'skip' + encodeURIComponent(off.join(',')) : '') +
+    (hide.length ? 'hide' + encodeURIComponent(hide.join(',')) : '');
+}

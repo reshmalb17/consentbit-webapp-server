@@ -1195,10 +1195,40 @@ ${getBannerCookieListScript()}
   // cookie on that domain. See handlers/consentShareBridge.js. Null when the site is in no family.
   // Growth feature (2026-11-24): a site off Growth gets no sharing code, even if still linked.
   const isGrowth = effectivePlanId === 'growth';
-  const consentShare = !isGrowth ? null : await consentShareForBanner(db, resolvedSite).catch((e) => {
+  // Plan rule (2026-11-25): the MAIN domain must be on Growth; a linked site may be on any plan
+  // for one-way. Under two-way a linked site off Growth only receives (served as one-way).
+  // consentShareForBanner is a no-query null for sites in no family, so non-Growth sites pay
+  // nothing extra; linked members pay one plan lookup for their main domain.
+  let consentShare = await consentShareForBanner(db, resolvedSite).catch((e) => {
     console.warn('[ConsentShare] family lookup failed:', e?.message);
     return null;
   });
+  if (consentShare) {
+    let primaryGrowth = isGrowth;
+    if (!consentShare.isPrimary) {
+      primaryGrowth = false;
+      try {
+        const ENDED = ['canceled', 'cancelled', 'unpaid', 'incomplete_expired'];
+        const sub = await getSubscriptionBySiteId(db, consentShare.primaryId);
+        if (sub && !ENDED.includes(String(sub.status || '').toLowerCase())) {
+          let pp = String(sub.planId ?? sub.planid ?? '').toLowerCase();
+          if (pp !== 'growth' && env) pp = inferTierPlanIdFromStripePriceId(env, sub.stripePriceId ?? sub.stripepriceid ?? null) || pp;
+          primaryGrowth = pp === 'growth';
+        }
+        if (!primaryGrowth) {
+          // Same fallback the main domain's own script uses: the organisation's effective plan.
+          const porg = consentShare.primary?.organizationId ?? consentShare.primary?.organizationid ?? null;
+          if (porg) primaryGrowth = String((await getEffectivePlanForOrganization(db, porg, env))?.planId || '').toLowerCase() === 'growth';
+        }
+      } catch (e) {
+        console.warn('[ConsentShare] main-domain plan lookup failed:', e?.message);
+      }
+    }
+    if (!primaryGrowth) consentShare = null;
+    else if (!consentShare.isPrimary && !isGrowth && consentShare.direction === 'two_way') {
+      consentShare = { ...consentShare, direction: 'one_way' };
+    }
+  }
   // IAB/TCF banners share too (bridge mode 'iab'); same pick as serveKind below.
   const shareIab = String(resolvedSite.banner_type || '').toLowerCase() === 'iab' &&
     (effectivePlanId === 'growth' || effectivePlanId === 'essential');
@@ -1315,10 +1345,11 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
 
   // "Disable banner on specific pages" (data/skipPaths.js, set in Profile → Advanced settings):
   // "off" pages stop the script before anything runs (every banner type); "hide" pages only
-  // hide the banner + floating button (standard / Webflow banners; IAB uses other elements).
+  // hide the banner + floating button (all banner types; IAB gets its own element list).
   // Both are '' for sites without such pages, so their script is unchanged.
   const pageOffGuard = buildSkipPathGuard(resolvedSite.id, isGrowth ? resolvedSite : null); // owner pages: Growth only
   const pageHideGuard = buildHidePathGuard(isGrowth ? resolvedSite : null);
+  const pageHideGuardIab = buildHidePathGuard(isGrowth ? resolvedSite : null, { iab: true });
   // Banner display status = Disabled (Profile → Advanced settings, handlers/bannerStatus.js):
   // the owner switched ConsentBit off on this site to test/debug. Serve a no-op — no banner,
   // no blocking — with a console note so it is obvious why nothing shows.
@@ -1327,7 +1358,7 @@ ${getLoaderIabScript(customization, { rawPos: customization?.position || 'bottom
     ? '/* ConsentBit is disabled for this site (Banner display status). */\n' +
       'try{console.info("[ConsentBit] Banner display status is Disabled for this site: no banner and no blocking. Turn it back on in ConsentBit → Profile → Advanced settings.");}catch(e){}\n'
     : pageOffGuard +
-    (serveKind === 'iab' ? (shareBridge + loaderIab) : serveKind === 'iabwebflow' ? (shareBridge + loaderIabWebflow) : serveKind === 'webflow' ? (pageHideGuard + shareBridge + loaderWebflow) : (pageHideGuard + shareBridge + consentModeBootstrap + loader));
+    (serveKind === 'iab' ? (pageHideGuardIab + shareBridge + loaderIab) : serveKind === 'iabwebflow' ? (pageHideGuardIab + shareBridge + loaderIabWebflow) : serveKind === 'webflow' ? (pageHideGuard + shareBridge + loaderWebflow) : (pageHideGuard + shareBridge + consentModeBootstrap + loader));
 
 
   return new Response(scriptToServe, {
