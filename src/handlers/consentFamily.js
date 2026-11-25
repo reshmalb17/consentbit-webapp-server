@@ -37,8 +37,12 @@ import { getSiteRole } from '../services/team.js';
 import { resolveEffectivePlanId } from './bannerCustomization.js';
 
 const DIRECTIONS = new Set(['one_way', 'two_way']);
-// Cross-domain consent is a Growth feature (decided 2026-11-24). Every site in a group must be on
-// Growth: each one's own script carries the sharing code. Stopping sharing is allowed on any plan.
+// Cross-domain consent is a Growth feature (decided 2026-11-24, refined 2026-11-25):
+//   one-way: the main domain must be on Growth; linked sites may be on any plan.
+//   two-way: the main domain and every linked site must be on Growth.
+//   main domain leaves Growth → sharing stops for the whole group (cdnTest serves no bridge).
+//   a linked site leaves Growth under two-way → that site falls back to one-way (receive only).
+// Stopping sharing is allowed on any plan.
 export const CROSS_DOMAIN_PLANS = ['growth'];
 const planOk = (planId) => CROSS_DOMAIN_PLANS.includes(String(planId || '').toLowerCase());
 const MAX_LINKED = 10;
@@ -277,6 +281,7 @@ export async function consentShareForBanner(db, site) {
   const myRoot = String(root).toLowerCase();
   return {
     primaryId: p,
+    primary, // row, so cdnTest can check the main domain's plan for linked sites
     isPrimary: String(site.id) === p,
     root: myRoot,
     direction: directionOf(primary),
@@ -434,7 +439,9 @@ export async function handleConsentFamily(request, env) {
     else if (c.linkedElsewhere === 'primary') problems.push({ id, message: `${c.host} has its own linked domains` });
     else if (c.linkedElsewhere) problems.push({ id, message: `${c.host} is already linked to ${c.linkedElsewhere}` });
     else if (!c.canAdmin) problems.push({ id, message: `you are not an Admin of ${c.host}` });
-    else if (!c.planOk) problems.push({ id, message: `${c.host} needs the Growth plan (it is on ${c.plan})` });
+    // Plan rule (2026-11-25): one-way → only the main domain needs Growth, linked sites any plan;
+    // two-way → every linked site needs Growth too (it writes the shared choice).
+    else if (direction === 'two_way' && !c.planOk) problems.push({ id, message: `${c.host} needs the Growth plan for two-way sharing (it is on ${c.plan})` });
   }
   if (problems.length) {
     return json({ success: false, code: 'INVALID_SITES', error: problems.map((p) => p.message).join('. ') + '.', problems }, 400);

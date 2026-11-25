@@ -12,8 +12,10 @@
 // The server cannot see the page path (cross-site script requests send only the origin), so
 // the served script carries a small guard that checks location.pathname — data/skipPaths.js.
 //
-// Stored as two optional Site columns (added here on first use; nothing existing changes):
-//   bannerHiddenPaths (JSON array), bannerHiddenMode ('hide' | 'off')
+// Stored as optional Site columns (added here on first use; nothing existing changes):
+//   bannerHiddenPaths (JSON array), bannerHiddenMode ('hide' | 'off'),
+//   bannerHiddenPaused ('1' = switched off: pages kept but not applied; data/skipPaths.js)
+// POST may carry `paused: true|false`; leaving it out keeps the current value.
 
 import { ensureSchema, getSessionById, getUserById, getSiteById } from '../services/db.js';
 import { getSiteRole } from '../services/team.js';
@@ -28,7 +30,7 @@ const MAX_IDS = 200;
 let columnsReady = false;
 export async function ensureBannerPageColumns(db) {
   if (columnsReady) return;
-  for (const col of ['bannerHiddenPaths', 'bannerHiddenMode']) {
+  for (const col of ['bannerHiddenPaths', 'bannerHiddenMode', 'bannerHiddenPaused']) {
     try {
       await db.prepare(`ALTER TABLE Site ADD COLUMN ${col} TEXT`).run();
     } catch (_) { /* column already exists */ }
@@ -66,7 +68,8 @@ export function bannerPagesOf(site) {
     if (Array.isArray(v)) paths = [...new Set(v.map((p) => cleanBannerPath(p).path).filter(Boolean))].slice(0, MAX_PATHS);
   } catch (_) { /* bad JSON → none */ }
   const m = site?.bannerHiddenMode ?? site?.bannerhiddenmode;
-  return { paths, mode: BANNER_PAGE_MODES.has(m) ? m : 'hide' };
+  const paused = paths.length > 0 && String(site?.bannerHiddenPaused ?? site?.bannerhiddenpaused ?? '') === '1';
+  return { paths, mode: BANNER_PAGE_MODES.has(m) ? m : 'hide', paused };
 }
 
 function getSessionIdFromCookie(request) {
@@ -103,7 +106,7 @@ export async function handleBannerPages(request, env) {
     if (ids.length) {
       const marks = ids.map((_, i) => `?${i + 1}`).join(',');
       const { results = [] } = await db
-        .prepare(`SELECT id, bannerHiddenPaths, bannerHiddenMode FROM Site WHERE id IN (${marks}) AND bannerHiddenPaths IS NOT NULL`)
+        .prepare(`SELECT id, bannerHiddenPaths, bannerHiddenMode, bannerHiddenPaused FROM Site WHERE id IN (${marks}) AND bannerHiddenPaths IS NOT NULL`)
         .bind(...ids)
         .all();
       for (const r of results) {
@@ -155,7 +158,10 @@ export async function handleBannerPages(request, env) {
       problems: bad,
     }, 400);
   }
-  if (paths.length && !planOk) {
+  // paused: true/false sets it; absent keeps what is stored. No pages → nothing to pause.
+  const paused = paths.length > 0 && (typeof body.paused === 'boolean' ? body.paused : bannerPagesOf(site).paused);
+  // Pausing (switching the section off) is allowed on any plan, like clearing.
+  if (paths.length && !paused && !planOk) {
     return json({
       success: false,
       code: 'PLAN_REQUIRED',
@@ -168,9 +174,9 @@ export async function handleBannerPages(request, env) {
   }
 
   await db
-    .prepare(`UPDATE Site SET bannerHiddenPaths = ?2, bannerHiddenMode = ?3 WHERE id = ?1`)
-    .bind(siteId, paths.length ? JSON.stringify(paths) : null, paths.length ? mode : null)
+    .prepare(`UPDATE Site SET bannerHiddenPaths = ?2, bannerHiddenMode = ?3, bannerHiddenPaused = ?4 WHERE id = ?1`)
+    .bind(siteId, paths.length ? JSON.stringify(paths) : null, paths.length ? mode : null, paused ? '1' : null)
     .run();
-  console.log('[BannerPages] saved', { siteId, mode, paths: paths.length, by: user.id });
+  console.log('[BannerPages] saved', { siteId, mode, paused, paths: paths.length, by: user.id });
   return json({ success: true, siteId, ...bannerPagesOf(await getSiteById(db, siteId)), plan, planOk, requiredPlan: 'growth' });
 }

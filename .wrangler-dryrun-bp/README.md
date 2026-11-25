@@ -1,0 +1,1 @@
+This folder contains the built output assets for the worker "consent-webapp-manager" generated at 2026-11-24T21:12:03.431Z.

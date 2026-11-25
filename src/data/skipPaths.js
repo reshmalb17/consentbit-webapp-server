@@ -27,6 +27,8 @@ function normalise(p) {
 // only a siteId (cdnM.js today) get exactly the hard-coded list, as before.
 function sitePages(site, mode) {
   if (!site) return [];
+  // Paused (the section's switch turned off): pages are kept but not applied.
+  if (String(site.bannerHiddenPaused ?? site.bannerhiddenpaused ?? '') === '1') return [];
   const m = site.bannerHiddenMode ?? site.bannerhiddenmode ?? 'hide';
   if ((m === 'off' ? 'off' : 'hide') !== mode) return [];
   try {
@@ -64,9 +66,23 @@ function pathMatchJs(paths, flag) {
 // and a saved choice keep working, and a "change cookie settings" link still opens the
 // preferences popup. A centred banner also locks page scroll when it is inserted
 // (body.style.overflow="hidden"); undo that once, right after the hidden banner appears.
-export function buildHidePathGuard(site) {
+// opts.iab: the IAB/TCF banner uses other elements (#consentBitBanner, its popup overlay) and
+// never locks page scroll, so it gets its own selector list and no scroll unlock. The
+// preference modal (#cbPreferenceModal) stays usable so a site's preferences link still works.
+// Without opts the output is unchanged (standard / Webflow banners).
+export function buildHidePathGuard(site, opts) {
   const paths = getHidePaths(site);
   if (!paths.length) return '';
+  if (opts && opts.iab) {
+    return (
+      '(function(){try{' + pathMatchJs(paths, '__cbHiddenPath') +
+      'if(!window.__cbHiddenPath)return;' +
+      'var st=document.createElement("style");st.id="cb-hide-on-page";' +
+      'st.textContent="#consentBitBanner,#consentBitPopupOverlay,#cb-floating-trigger{display:none!important;visibility:hidden!important}";' +
+      '(document.head||document.documentElement).appendChild(st);' +
+      '}catch(_){}})();\n'
+    );
+  }
   return (
     '(function(){try{' + pathMatchJs(paths, '__cbHiddenPath') +
     'if(!window.__cbHiddenPath)return;' +
