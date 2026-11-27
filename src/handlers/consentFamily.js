@@ -27,6 +27,9 @@
 // The banner settings are served with Cache-Control: no-store, so there is no cache to clear.
 
 import {
+  getSubscriptionBySiteId,
+  inferTierPlanIdFromStripePriceId,
+  getEffectivePlanForOrganization,
   ensureSchema,
   getSessionById,
   getUserById,
@@ -147,7 +150,7 @@ const listUrlOf = (s) => {
 async function accountSites(db, site) {
   const { results = [] } = await db
     .prepare(
-      `SELECT s.id, s.domain, s.name, s.consentSharePrimaryId, s.consentShareDirection
+      `SELECT s.id, s.domain, s.name, s.consentSharePrimaryId, s.consentShareDirection, s.verified, s.scriptStatus
          FROM Site s
         WHERE s.organizationId IN (
                 SELECT om2.organizationId FROM OrganizationMember om2
@@ -230,12 +233,17 @@ async function buildState(db, userId, site, env) {
   const primaries = await primaryIdsIn(db, same.map((s) => String(s.id)));
   const byId = new Map(same.map((s) => [String(s.id), s]));
 
-  const candidates = [];
-  for (const s of same) {
+  // Per-site lookups run in parallel (2026-11-27): one-by-one awaits made the Settings tab
+  // slow to open and save (~5 D1 round trips per account site, twice per save).
+  const candidates = await Promise.all(same.map(async (s) => {
     const id = String(s.id);
     const p = primaryOf(s);
-    const role = await getSiteRole(db, userId, id).catch(() => null);
-    const plan = (await resolveEffectivePlanId(db, env, id).catch(() => null)) || 'free';
+    const [role, planRaw, shared] = await Promise.all([
+      getSiteRole(db, userId, id).catch(() => null),
+      resolveEffectivePlanId(db, env, id).catch(() => null),
+      p === siteId ? lastSharedAt(db, id) : Promise.resolve(null),
+    ]);
+    const plan = planRaw || 'free';
     const m = mainDomainOf(s.domain);
     let linkedElsewhere = null;
     if (p && p !== siteId) {
@@ -243,7 +251,7 @@ async function buildState(db, userId, site, env) {
     } else if (!p && primaries.has(id)) {
       linkedElsewhere = 'primary';
     }
-    candidates.push({
+    return {
       id,
       domain: s.domain,
       name: s.name || null,
@@ -255,9 +263,14 @@ async function buildState(db, userId, site, env) {
       canAdmin: isAdminRole(role),
       plan,
       planOk: planOk(plan),
-      lastSharedAt: p === siteId ? await lastSharedAt(db, id) : null,
-    });
-  }
+      lastSharedAt: shared,
+      // Script status for the dialog (2026-11-27). `verified` is set once and never cleared, so a
+      // site that later removed the script still looked installed. Same rule as the admin
+      // dashboard's bannerLive: the banner sweep's scriptStatus wins over the old verified flag.
+      scriptLive: String(s.scriptStatus ?? s.scriptstatus ?? '') === 'present' ||
+        ((Number(s.verified) === 1 || s.verified === true) && String(s.scriptStatus ?? s.scriptstatus ?? '') !== 'removed'),
+    };
+  }));
   candidates.sort((a, b) => (a.sameRoot === b.sameRoot ? a.host.localeCompare(b.host) : a.sameRoot ? -1 : 1));
   base.candidates = candidates;
   return base;
@@ -295,6 +308,52 @@ export async function consentShareForBanner(db, site) {
       .map((r) => normalizeDomain(r.domain))
       .filter(Boolean),
   };
+}
+
+/**
+ * True when `site` (the family's main domain) would be served as Growth by its OWN banner script
+ * (cdnM.js rules, 2026-11-27). Used by the linked sites' scripts to decide whether sharing is on:
+ *   - active/trialing subscription → its plan
+ *   - cancelled but still inside the paid period → its plan until the period ends
+ *   - any other own subscription (ended, deleted, past_due, unpaid…) → NOT Growth, and never
+ *     rescued by another site's subscription in the same account (that was the gap: a cancelled
+ *     main domain kept sharing on while a sibling site paid for Growth)
+ *   - no subscription row at all → the organisation's plan (org / bulk-licensed sites)
+ * Free fallback is never Growth. Errors → false (sharing off, fail closed).
+ */
+export async function siteServesGrowth(db, env, site) {
+  if (!site?.id) return false;
+  const siteId = String(site.id);
+  const planOf = (sub) => {
+    let p = String(sub?.planId ?? sub?.planid ?? '').toLowerCase();
+    if (!['basic', 'essential', 'growth'].includes(p) && env) {
+      p = inferTierPlanIdFromStripePriceId(env, sub?.stripePriceId ?? sub?.stripepriceid ?? null) || p;
+    }
+    return p;
+  };
+  const endMsOf = (sub) => {
+    const raw = sub?.currentPeriodEnd ?? sub?.currentperiodend ?? null;
+    return raw ? Date.parse(String(raw).replace(' ', 'T')) : NaN;
+  };
+  try {
+    const live = await getSubscriptionBySiteId(db, siteId); // active / trialing only
+    if (live) return planOf(live) === 'growth';
+    const { results: own = [] } = await db
+      .prepare(`SELECT * FROM Subscription WHERE siteId = ?1 ORDER BY datetime(COALESCE(updatedAt, createdAt)) DESC`)
+      .bind(siteId)
+      .all();
+    if (own.length) {
+      const now = Date.now();
+      const inPeriod = own.find((s) => ['canceled', 'cancelled'].includes(String(s.status || '').toLowerCase()) && endMsOf(s) > now);
+      return !!inPeriod && planOf(inPeriod) === 'growth';
+    }
+    const orgId = site.organizationId ?? site.organizationid ?? null;
+    if (!orgId) return false;
+    return String((await getEffectivePlanForOrganization(db, orgId, env))?.planId || '').toLowerCase() === 'growth';
+  } catch (e) {
+    console.warn('[ConsentShare] main-domain plan lookup failed:', e?.message);
+    return false;
+  }
 }
 
 /** Badges for the site list: { [siteId]: { role, primaryId, primaryDomain, direction, linkedCount } }. */

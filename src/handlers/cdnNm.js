@@ -1496,7 +1496,7 @@ ${inlineConfig}
     var lang = getActiveLanguage();
     var bundle = TRANSLATIONS[lang] || TRANSLATIONS.en;
     var value = null != bundle[key] ? bundle[key] : null != TRANSLATIONS.en[key] ? TRANSLATIONS.en[key] : "";
-    return "" === value && "title" === key ? "We value your privacy" : "" === value && "description" === key ? "We use cookies to provide you with the best possible experience. They also allow us to analyze user behavior in order to constantly improve the website for you." : value
+    return "" === value && "title" === key ? "We value your privacy" : "" === value && "description" === key ? "We use cookies to enhance your browsing experience, serve personalised ads or content, and analyse our traffic. By clicking \\"Accept\\", you consent to our use of cookies." : value
   }
 
   /** Translate a button label. Anything over 80 chars is not a real label — fall back to English. */

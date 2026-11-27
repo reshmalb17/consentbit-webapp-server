@@ -24,7 +24,11 @@ export const DEFAULT_TRANSLATIONS = {
   en: {
     languageSelected: 'en',
     title: 'We value your privacy',
-    description: 'We use cookies to provide you with the best possible experience. They also allow us to analyze user behavior in order to constantly improve the website for you.',
+    // GDPR initial-banner text. Must equal the webapp default (consentbitwebapp translations.ts
+    // TRANSLATIONS.en.description), which is what every site that saved from the webapp shows
+    // (e.g. consentbit.com). The old value here was the CCPA notice text (see ccpaDescription),
+    // so sites with no BannerCustomization row showed different copy. Changed 2026-11-26.
+    description: 'We use cookies to enhance your browsing experience, serve personalised ads or content, and analyse our traffic. By clicking "Accept", you consent to our use of cookies.',
     privacyPolicy: 'Privacy Policy',
     acceptAll: 'Accept',
     rejectAll: 'Reject',
@@ -43,9 +47,10 @@ export const DEFAULT_TRANSLATIONS = {
     advertisement: 'Advertisement',
     preferences: 'Preferences',
     essentialDescription: "Essential cookies enable core site functions like security and accessibility. They don't store personal data and can't be disabled.",
-    analyticsDescription: 'These cookies collect anonymous data to help us improve website functionality and enhance user experience.',
-    marketingDescription: 'These cookies track users across websites to deliver relevant ads and may process personal data, requiring explicit consent.',
-    preferencesDescription: 'These cookies remember settings like language or region and store display preferences to offer a more personalized, seamless experience.',
+    // Category descriptions = webapp translations.ts defaults (changed 2026-11-26, same reason as description).
+    analyticsDescription: 'Analytics cookies help us understand how visitors interact with the website by collecting anonymous usage data.',
+    marketingDescription: 'Marketing cookies track visitors across websites to display relevant, engaging advertisements.',
+    preferencesDescription: 'Preference cookies let the website remember your settings and choices for a more personal experience.',
     saveMyPreferences: 'Save Preference',
     optOutPreference: 'Opt-out Preference',
     ccpaDescription: 'We use cookies to provide you with the best possible experience. They also allow us to analyze user behavior in order to constantly improve the website for you.',

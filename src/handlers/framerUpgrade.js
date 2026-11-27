@@ -401,7 +401,7 @@ async function prepareChange(request, env) {
   const interval = body.interval === 'yearly' ? 'yearly' : 'monthly';
   const promotionCodeId = body.promotionCodeId && String(body.promotionCodeId).trim()
     ? String(body.promotionCodeId).trim()
-    : defaultPromotionCodeForPlan(planId); // Black Friday offer when no code is sent
+    : defaultPromotionCodeForPlan(planId, undefined, env); // Black Friday offer when no code is sent
   const paymentMethodId = body.paymentMethodId && String(body.paymentMethodId).trim()
     ? String(body.paymentMethodId).trim()
     : null;

@@ -91,7 +91,7 @@ async function prepareChange(request, env) {
   const interval = body.interval === 'yearly' ? 'yearly' : 'monthly';
   const promotionCodeId = body.promotionCodeId && String(body.promotionCodeId).trim()
     ? String(body.promotionCodeId).trim()
-    : defaultPromotionCodeForPlan(planId); // Black Friday offer when no code is sent
+    : defaultPromotionCodeForPlan(planId, undefined, env); // Black Friday offer when no code is sent
   // Option 3: a new card tokenized on the client (Stripe PaymentMethod id). When present,
   // the prorated amount is charged to THIS card and it becomes the subscription default.
   const paymentMethodId = body.paymentMethodId && String(body.paymentMethodId).trim()

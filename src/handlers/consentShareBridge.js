@@ -137,7 +137,10 @@ var ref='';try{ref=document.referrer?new URL(document.referrer).hostname:'';}cat
 var xr=null;try{xr=dec(xv);}catch(e){}
 if(xr&&xr.p===S.primaryId&&isX(ref)&&xr.c&&xr.c.accepted&&!expired(xr.c)&&xr.t){delete xr.p;var cur=readShared();if(!cur||xr.t>(cur.t||0))setCk(xr);}}
 }catch(e){}}
-function record(c,status){if(!S.apiBase)return;try{fetch(S.apiBase+'/api/consent',{method:'POST',keepalive:true,headers:{'Content-Type':'application/json'},body:JSON.stringify({siteId:S.siteId,regulation:model==='optout'?'ccpa':'gdpr',bannerType:IAB?'iab':S.bannerType,consentMethod:'shared',status:status,expiresAt:c.expiresAt,consent:c,consentModel:model==='optout'?'optout':'optin'})}).catch(function(){});}catch(e){}}
+/* Consent ID (Consent.deviceId) for a shared record — same id + cookie the runtime's cbGetId uses,
+   so the row gets a Consent ID and the visitor keeps one id when they later choose here (2026-11-27). */
+function cid(){try{var m=document.cookie.match(/(?:^|; *)consentbit-consentid=([0-9a-fA-F-]{36})(?:;|$)/);if(m)return m[1];var k='cb_consent_id_'+S.siteId,v=null;try{v=ls.getItem(k);}catch(e){}var w=window.crypto;if(!(v&&v.length===36&&/^[0-9a-f-]+$/i.test(v))){v=w&&w.randomUUID?w.randomUUID():'10000000-1000-4000-8000-100000000000'.replace(/[018]/g,function(n){var b=w&&w.getRandomValues?w.getRandomValues(new Uint8Array(1))[0]:Math.floor(256*Math.random());return(+n^b&15>>+n/4).toString(16);});}document.cookie='consentbit-consentid='+v+'; path=/; max-age=31536000; SameSite=Lax'+(location.protocol==='https:'?'; Secure':'');return v;}catch(e){return null;}}
+function record(c,status){if(!S.apiBase)return;try{fetch(S.apiBase+'/api/consent',{method:'POST',keepalive:true,headers:{'Content-Type':'application/json'},body:JSON.stringify({siteId:S.siteId,deviceId:cid()||undefined,regulation:model==='optout'?'ccpa':'gdpr',bannerType:IAB?'iab':S.bannerType,consentMethod:'shared',status:status,expiresAt:c.expiresAt,consent:c,consentModel:model==='optout'?'optout':'optin'})}).catch(function(){});}catch(e){}}
 function adopt(sh){
 var meta={sharedFrom:sh.h,sharedAt:sh.t};if(sh.k)meta.sharedCats=sh.k;
 if(IAB){var p=iabUnpack(sh.c.iab||{});p.timestamp=sh.c.timestamp||new Date(sh.t).toISOString();p.__cbSharedFrom=sh.h;p.__cbSharedAt=sh.t;if(sh.k)p.__cbSharedCats=sh.k;
@@ -173,7 +176,12 @@ var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(!a)return;
 var u=new URL(a.href,location.href);if((u.protocol!=='https:'&&u.protocol!=='http:')||!isX(u.hostname))return;
 var r=readShared();if(!r&&canWrite){var o=readOwn();if(o&&!o.sharedFrom)r=buildRec(o);}
 if(!r||!compatible(r))return;var out={};for(var k in r)out[k]=r[k];out.p=S.primaryId;
-u.searchParams.set(XP,enc(out));a.href=u.toString();}catch(e){}};
+u.searchParams.set(XP,enc(out));a.href=u.toString();
+/* The receiver only accepts cb_xc with a linked-host referrer. rel="noreferrer" (Webflow adds it to
+   target=_blank links) or a no-referrer page policy would hide it, so on THIS link only: drop
+   noreferrer (noopener stays) and send just the origin (2026-11-27, consentbit.com footer link). */
+try{if(a.relList&&a.relList.contains('noreferrer'))a.relList.remove('noreferrer');a.referrerPolicy='strict-origin-when-cross-origin';}catch(e){}
+}catch(e){}};
 document.addEventListener('mousedown',deco,true);document.addEventListener('click',deco,true);
 document.addEventListener('keydown',function(e){if(e.key==='Enter')deco(e);},true);}
 /* "Your choice also applies to …" — only where the choice really is shared (primary, or two-way). */

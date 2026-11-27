@@ -173,7 +173,7 @@ export async function handleCreateCheckoutSession(request, env) {
   // plan table). Verified against Stripe below like any other code; unlike a code the
   // customer sent, a rejected default is dropped instead of failing the checkout.
   const defaultPromotionCodeId = !sentPromotionCodeId && !stripeCouponId && !couponCode && planId
-    ? defaultPromotionCodeForPlan(planId)
+    ? defaultPromotionCodeForPlan(planId, undefined, env)
     : null;
   const promotionCodeId = sentPromotionCodeId || defaultPromotionCodeId;
 
